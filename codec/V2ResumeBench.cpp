@@ -12,6 +12,8 @@
 
 namespace {
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+
 static const uint32_t kOverheadPackets = 8u;
 static const unsigned kSamples = 20u;
 
@@ -315,10 +317,29 @@ bool BenchmarkCase(uint32_t K, uint32_t block_bytes)
     return true;
 }
 
+#endif
+
 } // namespace
 
 int main()
 {
+#if !defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    // The cold arm does not request a checkpoint, while the warm arm does.
+    // Production's adaptive policy may therefore select different residual
+    // representations at this benchmark's 1280-byte width.  Without the
+    // test-only override this would silently stop measuring resume cost alone.
+    std::fprintf(stderr,
+        "resume benchmark requires WIREHAIR_V2_ENABLE_TEST_HOOKS\n");
+    return 2;
+#else
+    // This benchmark isolates checkpoint construction/resume from residual
+    // representation.  Production may choose packed for a no-resume solve and
+    // byte for a narrow retained checkpoint, so pin both comparison arms to
+    // the same byte basis rather than charging that separate policy choice to
+    // the resume initial-time gate.
+    if (!wirehair_v2::SetCertifiedPackedResidualModeForTesting(-1)) {
+        return 1;
+    }
     const int cpu = PinToFirstAvailableCpu();
     if (cpu >= 0) {
         std::printf("resume benchmark pinned_cpu=%d\n", cpu);
@@ -328,9 +349,11 @@ int main()
     }
     const bool k1000 = BenchmarkCase(1000u, 1280u);
     const bool k10000 = BenchmarkCase(10000u, 1280u);
+    (void)wirehair_v2::SetCertifiedPackedResidualModeForTesting(0);
     if (!k1000 || !k10000) {
         return 1;
     }
     std::printf("resume benchmark acceptance: PASS\n");
     return 0;
+#endif
 }

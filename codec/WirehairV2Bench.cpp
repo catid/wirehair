@@ -4550,6 +4550,12 @@ bool SameNonTimingSolveStats(
         a.ResidualCoeffByteOps == b.ResidualCoeffByteOps &&
         a.TinyMixedFastPathAcceptances ==
             b.TinyMixedFastPathAcceptances &&
+        a.CertifiedPackedResidualUses ==
+            b.CertifiedPackedResidualUses &&
+        a.ResidualCoefficientStorageBytes ==
+            b.ResidualCoefficientStorageBytes &&
+        a.CertifiedPackedResumeMaterializations ==
+            b.CertifiedPackedResumeMaterializations &&
         a.MixedJointSourceXors == b.MixedJointSourceXors &&
         a.MixedJointMarginalXors == b.MixedJointMarginalXors &&
         a.MixedJointMarginalCopies == b.MixedJointMarginalCopies &&
@@ -17957,6 +17963,7 @@ struct PrecodeSweepRun
 
     // Thread-local codec knobs.  Only the GF(256) row count is a sweep axis.
     int TinyFastPathMode = 0;
+    int CertifiedPackedResidualMode = 0;
     wirehair_v2::MixedCoefficientGeometry Geometry =
         wirehair_v2::MixedCoefficientGeometry::FrozenPowerX;
     uint32_t GF16Rows = wirehair_v2::kMixedGF16Rows;
@@ -18098,7 +18105,9 @@ struct PrecodeSweepRun
         else {
             wirehair_v2::ClearStaircaseDegreeScaleForTesting();
         }
-        if (!wirehair_v2::SetTinyMixedFastPathModeForTesting(
+        if (!wirehair_v2::SetCertifiedPackedResidualModeForTesting(
+                CertifiedPackedResidualMode) ||
+            !wirehair_v2::SetTinyMixedFastPathModeForTesting(
                 TinyFastPathMode) ||
             // Canonical bridge.  Setting H8 first is always legal because
             // every valid state has P >= old_H8 + old_H16 >= 1 + old_H16.
@@ -19697,6 +19706,33 @@ int CmdPrecodeCost(int argc, char** argv)
                 return 1;
             }
         }
+        else if (!std::strcmp(
+                     argv[i], "--certified-packed-residual"))
+        {
+            if (!TakeArg(
+                    "precodecost", "--certified-packed-residual",
+                    argc, argv, i, value))
+            {
+                return 1;
+            }
+            if (!std::strcmp(value, "byte")) {
+                run.CertifiedPackedResidualMode = -1;
+            }
+            else if (!std::strcmp(value, "auto")) {
+                run.CertifiedPackedResidualMode = 0;
+            }
+            else if (!std::strcmp(value, "packed")) {
+                run.CertifiedPackedResidualMode = 1;
+            }
+            else
+            {
+                std::fprintf(stderr,
+                    "precodecost unknown --certified-packed-residual "
+                    "token %s (expected byte, auto or packed)\n",
+                    value);
+                return 1;
+            }
+        }
         else if (!std::strcmp(argv[i], "--config-file")) {
             if (!TakeArg(
                     "precodecost", "--config-file", argc, argv, i, value) ||
@@ -19843,6 +19879,14 @@ int CmdPrecodeCost(int argc, char** argv)
             run.TimingBlockBytes);
         return 1;
     }
+    if (run.Completion != PrecodeFailCompletion::Certified &&
+        run.CertifiedPackedResidualMode != 0)
+    {
+        std::fprintf(stderr,
+            "precodecost --certified-packed-residual byte/packed requires "
+            "--completion certified\n");
+        return 1;
+    }
     if (reps == 0u || reps > 999u || warmup > 999u) {
         std::fprintf(stderr,
             "precodecost --reps must be in [1,999] and --warmup in "
@@ -19913,7 +19957,7 @@ int CmdPrecodeCost(int argc, char** argv)
         "seed_base=%llu,cells=[%u,%u),configs=%u,reps=%u,warmup=%u,threads=%u,"
         "pool_blocks=%llu,completion=%s,schedule=%s,geometry=%s,period=%u,"
         "gf16_rows=%u,gf256_rows_default=%u,band_tracking_x=%s,"
-        "degree_scale_default=%.2f\n",
+        "degree_scale_default=%.2f,certified_packed_residual=%s\n",
         run.BlockCount, run.TimingBlockBytes, run.Overhead, run.MixCount,
         run.Loss, (unsigned long long)run.SeedBase, cell_begin, cell_end,
         (uint32_t)configs.size(), reps, warmup, cost_threads,
@@ -19924,7 +19968,9 @@ int CmdPrecodeCost(int argc, char** argv)
             "frozen" : "shared-x",
         run.Period, run.GF16Rows, run.MixedGF256Rows,
         band_tracking ? band_tracking : "unset",
-        DegreeScaleDegrees(run.DegreeScaleCenti));
+        DegreeScaleDegrees(run.DegreeScaleCenti),
+        run.CertifiedPackedResidualMode < 0 ? "byte" :
+            (run.CertifiedPackedResidualMode > 0 ? "packed" : "auto"));
     // The leading tuple is the config in ES coordinate order and is still
     // FOUR columns wide -- N1 left, the degree scale took its slot -- because
     // paired-timing harnesses read total_ns positionally at column 27 and

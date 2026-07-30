@@ -188,7 +188,13 @@ bool SamePathIndependentStats(
         a.ProjectionWordXors == b.ProjectionWordXors &&
         a.ResidualCoeffWordXors == b.ResidualCoeffWordXors &&
         a.ResidualCoeffByteOps == b.ResidualCoeffByteOps &&
-        a.PacketSeedAttempt == b.PacketSeedAttempt;
+        a.PacketSeedAttempt == b.PacketSeedAttempt &&
+        a.CertifiedPackedResidualUses ==
+            b.CertifiedPackedResidualUses &&
+        a.ResidualCoefficientStorageBytes ==
+            b.ResidualCoefficientStorageBytes &&
+        a.CertifiedPackedResumeMaterializations ==
+            b.CertifiedPackedResumeMaterializations;
 }
 
 bool CompareOutcomes(

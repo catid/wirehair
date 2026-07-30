@@ -188,12 +188,34 @@ three flags affect only the benchmark's cached-precode arm(s), `v2_cached`
 and/or `v2_mixed_cached`: they do not alter packet bytes or serialized
 profiles, and the installed public C API remains default-off pending a
 versioned options surface.
-`wirehair_v2_resume_bench` pins itself to the first available CPU and runs 20
-alternating cold/warm samples at K=1000 and K=10000.  Its fixed deficient
-K-packet stream becomes full rank across exactly eight appended equations; the
-executable fails unless cumulative resume time saves at least 50%, initial
-K-packet time stays within 5%, and checkpoint memory stays within 25% of the
-replaced receive payload/id buffers.
+In a test-hook build, `wirehair_v2_resume_bench` pins itself to the first
+available CPU and runs 20 alternating cold/warm samples at K=1000 and K=10000.
+Its fixed deficient K-packet stream becomes full rank across exactly eight
+appended equations; the executable fails unless cumulative resume time saves
+at least 50%, initial K-packet time stays within 5%, and checkpoint memory
+stays within 25% of the replaced receive payload/id buffers.  Both arms force
+the same legacy byte residual basis so this gate measures checkpoint/resume
+cost rather than the decoder's separate packed-residual dispatch policy.
+Without test hooks the executable exits with a diagnostic instead of silently
+comparing different adaptive representations.
+
+For that policy, the test-hook decoder binary provides a public-facade ABBA
+receipt:
+
+```bash
+wirehair_v2_precode_decode_test --resume-bench K block_bytes repetitions \
+    [collision_pairs]
+```
+
+The default one exact repair-row collision creates a one-rank `q=H+1` tail;
+larger collision-pair counts are explicit stress cases.  Each repetition
+compares forced byte/packed with incremental resume both disabled and enabled,
+times the deficient Kth packet separately from the completion tail, labels the
+tail as an actual resume or cold re-solve, and reports checkpoint disposition,
+bytes, ranks, packed engagement, and materialization.  Fixture allocation is
+capped at a 64 MiB message and 64 collision pairs.  Pin the process externally
+for timing comparisons and treat repetition zero as warmup; the executable
+hard-checks algebra/path parity, not noisy nanosecond ratios.
 
 Dense-seed checks are handled by the benchmark's `densecheck` and `densetune`
 modes, which run real encode/decode trials with candidate dense seeds and

@@ -122,6 +122,13 @@ if (BUILD_TESTS)
     add_test(NAME wirehair_v2_precode_decode_test
         COMMAND ${_wirehair_v2_clean_test_command}
             $<TARGET_FILE:wirehair_v2_precode_decode_test>)
+    add_test(NAME wirehair_v2_precode_decode_resume_bench_smoke
+        COMMAND ${_wirehair_v2_clean_test_command}
+            $<TARGET_FILE:wirehair_v2_precode_decode_test>
+            --resume-bench 64 1 1 1)
+    set_tests_properties(
+        wirehair_v2_precode_decode_resume_bench_smoke
+        PROPERTIES LABELS "benchmark;v2" TIMEOUT 30)
 
     add_executable(wirehair_v2_precode_solve_test
         PrecodeSolveTest.cpp

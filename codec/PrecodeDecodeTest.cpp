@@ -1,10 +1,15 @@
 #include "WirehairV2Codec.h"
 
 #include <algorithm>
+#include <cerrno>
+#include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <map>
 #include <new>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -257,6 +262,12 @@ bool SameStats(
         a.PacketSeedAttempt == b.PacketSeedAttempt &&
         a.TinyMixedFastPathAcceptances ==
             b.TinyMixedFastPathAcceptances &&
+        a.CertifiedPackedResidualUses ==
+            b.CertifiedPackedResidualUses &&
+        a.ResidualCoefficientStorageBytes ==
+            b.ResidualCoefficientStorageBytes &&
+        a.CertifiedPackedResumeMaterializations ==
+            b.CertifiedPackedResumeMaterializations &&
         a.MixedJointSourceXors == b.MixedJointSourceXors &&
         a.MixedJointMarginalXors == b.MixedJointMarginalXors &&
         a.MixedJointMarginalCopies == b.MixedJointMarginalCopies &&
@@ -300,7 +311,8 @@ bool EncodePacket(
 bool FindRepairRowCollisions(
     const wirehair_v2::PrecodeSystem& system,
     const wirehair_v2::PacketRowConfig& config,
-    std::vector<uint32_t>& collision_ids)
+    std::vector<uint32_t>& collision_ids,
+    size_t required_pairs = 2u)
 {
     struct SeenRow
     {
@@ -312,7 +324,9 @@ bool FindRepairRowCollisions(
         system.Params.DenseRows + system.Params.HeavyRows;
     std::map<std::vector<uint32_t>, SeenRow> seen;
     collision_ids.clear();
-    std::vector<uint32_t> first_collision_row;
+    if (required_pairs == 0u) {
+        return true;
+    }
     const uint32_t search_limit = K + 1000000u;
     for (uint32_t id = K; id < search_limit; ++id)
     {
@@ -329,19 +343,10 @@ bool FindRepairRowCollisions(
             if (found.first->second.Included) {
                 continue;
             }
-            if (collision_ids.empty())
-            {
-                collision_ids.push_back(found.first->second.First);
-                collision_ids.push_back(id);
-                found.first->second.Included = true;
-                first_collision_row = row;
-                continue;
-            }
-            if (row != first_collision_row)
-            {
-                collision_ids.push_back(found.first->second.First);
-                collision_ids.push_back(id);
-                found.first->second.Included = true;
+            collision_ids.push_back(found.first->second.First);
+            collision_ids.push_back(id);
+            found.first->second.Included = true;
+            if (collision_ids.size() / 2u >= required_pairs) {
                 return true;
             }
         }
@@ -543,6 +548,11 @@ bool CheckIncrementalDecoderParity()
             main_pair.Warm.HasIncrementalResumeStateForTesting() &&
                 !main_pair.Cold.HasIncrementalResumeStateForTesting(),
             "warm decoder did not retain the incremental checkpoint") ||
+        !Check(
+            main_pair.Warm.SolveStats().CertifiedPackedResidualUses == 0u &&
+                main_pair.Warm.SolveStats().
+                    CertifiedPackedResumeMaterializations == 0u,
+            "narrow retained checkpoint did not use the byte basis") ||
         !Check(
             cold_receive_bytes != 0u &&
                 warm_resume_bytes <=
@@ -892,8 +902,12 @@ bool CheckIncrementalDecoderParity()
             small_collisions) ||
         !Check(
             !fallback_pair.Warm.HasIncrementalResumeStateForTesting() &&
-                fallback_pair.Warm.ColdReceiveCapacityBytesForTesting() != 0u,
-            "oversized checkpoint did not retain the cold fallback"))
+                fallback_pair.Warm.ColdReceiveCapacityBytesForTesting() != 0u &&
+                fallback_pair.Warm.SolveStats().
+                    CertifiedPackedResidualUses == 1u &&
+                fallback_pair.Warm.SolveStats().
+                    CertifiedPackedResumeMaterializations == 0u,
+            "oversized checkpoint did not skip packed materialization"))
     {
         return false;
     }
@@ -1892,16 +1906,452 @@ bool CheckFacadeModeTransitions()
     return true;
 }
 
+bool ParseResumeBenchUint(
+    const char* text,
+    uint32_t minimum,
+    uint32_t maximum,
+    uint32_t& value)
+{
+    if (text == nullptr || *text == '\0') {
+        return false;
+    }
+    for (const char* digit = text; *digit != '\0'; ++digit)
+    {
+        if (*digit < '0' || *digit > '9') {
+            return false;
+        }
+    }
+    errno = 0;
+    char* end = nullptr;
+    const unsigned long long parsed = std::strtoull(text, &end, 10);
+    if (errno != 0 || end == text || *end != '\0' ||
+        parsed < minimum || parsed > maximum)
+    {
+        return false;
+    }
+    value = (uint32_t)parsed;
+    return true;
+}
+
+bool RunCertifiedResumeBenchmark(
+    uint32_t K,
+    uint32_t block_bytes,
+    uint32_t repetitions,
+    uint32_t collision_pair_count)
+{
+#if !defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    (void)K;
+    (void)block_bytes;
+    (void)repetitions;
+    (void)collision_pair_count;
+    std::fprintf(stderr,
+        "certified resume benchmark requires test hooks\n");
+    return false;
+#else
+    // Distinct duplicate-row pairs retain valid, distinct packet ids and
+    // authentic payloads while forcing an exactly reproducible deficient
+    // prefix through the public decoder.  One pair models the common
+    // one-rank tail; thirteen drive a deliberately extreme q>H tail beyond
+    // the certified H=12 completion budget.
+    const size_t collision_packet_count =
+        (size_t)collision_pair_count * 2u;
+    if (K < 32u || collision_pair_count == 0u ||
+        collision_pair_count > 64u ||
+        collision_packet_count >= K ||
+        block_bytes == 0u || repetitions == 0u)
+    {
+        std::fprintf(stderr,
+            "resume benchmark requires K>=32, block_bytes>0, reps>0, "
+            "and at most 64 collision pairs\n");
+        return false;
+    }
+    const uint64_t message_bytes_wide = (uint64_t)K * block_bytes;
+    static const uint64_t kMaxResumeBenchMessageBytes =
+        UINT64_C(64) * 1024u * 1024u;
+    if (message_bytes_wide > std::numeric_limits<size_t>::max() ||
+        message_bytes_wide > kMaxResumeBenchMessageBytes)
+    {
+        std::fprintf(stderr,
+            "resume benchmark message exceeds the 64 MiB fixture cap\n");
+        return false;
+    }
+    const size_t message_bytes = (size_t)message_bytes_wide;
+    const std::vector<uint8_t> message = MakeMessage(message_bytes);
+    wirehair_v2::MessagePrecodeEncoderOptions options;
+    options.Completion = wirehair_v2::CompletionField::GF256;
+    wirehair_v2::MessagePrecodeEncoder encoder;
+    if (encoder.InitializeResult(
+            message.data(), message_bytes_wide, block_bytes,
+            nullptr, &options) != Wirehair_Success)
+    {
+        std::fprintf(stderr, "resume benchmark encoder init failed\n");
+        return false;
+    }
+
+    wirehair_v2::PacketRowConfig config;
+    config.PeelSeed = encoder.Profile().V2PacketPeelSeed;
+    config.MixCount = encoder.Profile().V2RecoveryMixCount;
+    std::vector<uint32_t> collision_ids;
+    if (!FindRepairRowCollisions(
+            encoder.BlockEncoder().System(),
+            config,
+            collision_ids,
+            (size_t)collision_pair_count))
+    {
+        std::fprintf(stderr,
+            "resume benchmark could not find %zu collision pairs\n",
+            (size_t)collision_pair_count);
+        return false;
+    }
+
+    std::vector<PacketFixture> initial_packets;
+    initial_packets.reserve(K);
+    PacketFixture packet;
+    const uint32_t systematic_prefix =
+        K - (uint32_t)collision_packet_count;
+    for (uint32_t id = 0u; id < systematic_prefix; ++id)
+    {
+        if (!EncodePacket(encoder, block_bytes, id, packet)) {
+            return false;
+        }
+        initial_packets.push_back(packet);
+    }
+    for (uint32_t id : collision_ids)
+    {
+        if (!EncodePacket(encoder, block_bytes, id, packet)) {
+            return false;
+        }
+        initial_packets.push_back(packet);
+    }
+    if (initial_packets.size() != K) {
+        return false;
+    }
+
+    std::vector<PacketFixture> missing_packets;
+    missing_packets.reserve(collision_packet_count);
+    for (uint32_t id = systematic_prefix; id < K; ++id)
+    {
+        if (!EncodePacket(encoder, block_bytes, id, packet)) {
+            return false;
+        }
+        missing_packets.push_back(packet);
+    }
+
+    struct ModeReset
+    {
+        ~ModeReset()
+        {
+            (void)wirehair_v2::
+                SetCertifiedPackedResidualModeForTesting(0);
+            wirehair_v2::
+                SetDecoderIncrementalResumeEnabledForTesting(true);
+        }
+    } reset;
+    (void)reset;
+
+    std::printf(
+        "# certified_resume_bench,K=%u,bb=%u,pairs=%zu,reps=%u\n"
+        "rep,policy_lane,lane,mode,resume_requested,cold_ns,tail_ns,"
+        "tail_packets,retained,tail_path,"
+        "resume_bytes,cold_bytes,total_solve_attempts,inactivated,"
+        "binary_rank,residual_rank,quotient_deficiency,packed_uses,"
+        "materializations,result\n",
+        K, block_bytes, (size_t)collision_pair_count, repetitions);
+
+    const int modes[4] = {-1, 1, 1, -1};
+    const char* mode_names[4] = {"byte", "packed", "packed", "byte"};
+    typedef std::chrono::steady_clock BenchClock;
+    for (uint32_t rep = 0u; rep < repetitions; ++rep)
+    {
+        for (uint32_t policy_order = 0u;
+             policy_order < 2u;
+             ++policy_order)
+        {
+            const uint32_t policy_lane = (rep & 1u) == 0u ?
+                policy_order : 1u - policy_order;
+            const bool resume_requested = policy_lane != 0u;
+            bool reference_set = false;
+            bool reference_retained = false;
+            uint32_t reference_tail_packets = 0u;
+            uint32_t reference_inactivated = 0u;
+            uint32_t reference_binary_rank = 0u;
+            uint32_t reference_residual_rank = 0u;
+            size_t reference_resume_bytes = 0u;
+            size_t reference_cold_bytes = 0u;
+            for (uint32_t lane = 0u; lane < 4u; ++lane)
+            {
+                if (!wirehair_v2::SetCertifiedPackedResidualModeForTesting(
+                        modes[lane]))
+                {
+                    return false;
+                }
+                wirehair_v2::
+                    SetDecoderIncrementalResumeEnabledForTesting(
+                        resume_requested);
+                wirehair_v2::MessagePrecodeDecoder decoder;
+                if (decoder.InitializeResult(
+                        message_bytes_wide,
+                        block_bytes,
+                        &encoder.Profile(),
+                        &options) != Wirehair_Success)
+                {
+                    std::fprintf(stderr,
+                        "resume benchmark decoder init failed "
+                        "rep=%u policy=%u lane=%u\n",
+                        rep, policy_lane, lane);
+                    return false;
+                }
+                for (size_t i = 0u;
+                     i + 1u < initial_packets.size();
+                     ++i)
+                {
+                    const PacketFixture& initial = initial_packets[i];
+                    if (decoder.DecodeResult(
+                            initial.Id,
+                            initial.Data.data(),
+                            initial.Bytes) != Wirehair_NeedMore)
+                    {
+                        std::fprintf(stderr,
+                            "resume benchmark early packet failed "
+                            "rep=%u policy=%u lane=%u index=%zu\n",
+                            rep, policy_lane, lane, i);
+                        return false;
+                    }
+                }
+
+                const PacketFixture& last = initial_packets.back();
+                const BenchClock::time_point cold_begin =
+                    BenchClock::now();
+                WirehairResult result = decoder.DecodeResult(
+                    last.Id, last.Data.data(), last.Bytes);
+                const BenchClock::time_point cold_end =
+                    BenchClock::now();
+                if (result != Wirehair_NeedMore)
+                {
+                    std::fprintf(stderr,
+                        "resume benchmark hard prefix was not deficient "
+                        "rep=%u policy=%u lane=%u result=%d\n",
+                        rep, policy_lane, lane, (int)result);
+                    return false;
+                }
+                const wirehair_v2::PrecodeSolveStats cold_stats =
+                    decoder.SolveStats();
+                const bool retained =
+                    decoder.HasIncrementalResumeStateForTesting();
+                const size_t resume_bytes =
+                    decoder.IncrementalResumeBytesForTesting();
+                const size_t cold_bytes =
+                    decoder.ColdReceiveCapacityBytesForTesting();
+
+                uint32_t tail_packets = 0u;
+                const BenchClock::time_point tail_begin =
+                    BenchClock::now();
+                for (const PacketFixture& missing : missing_packets)
+                {
+                    result = decoder.DecodeResult(
+                        missing.Id, missing.Data.data(), missing.Bytes);
+                    ++tail_packets;
+                    if (result != Wirehair_NeedMore) {
+                        break;
+                    }
+                }
+                const BenchClock::time_point tail_end =
+                    BenchClock::now();
+                const uint64_t cold_ns = (uint64_t)
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        cold_end - cold_begin).count();
+                const uint64_t tail_ns = (uint64_t)
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        tail_end - tail_begin).count();
+                const uint32_t quotient_deficiency =
+                    cold_stats.InactivatedColumns >=
+                            cold_stats.BinaryResidualRank ?
+                        cold_stats.InactivatedColumns -
+                        cold_stats.BinaryResidualRank :
+                        UINT32_MAX;
+
+                const bool packed_mode = modes[lane] > 0;
+                const bool engagement_ok =
+                    cold_stats.CertifiedPackedResidualUses ==
+                        (packed_mode ? 1u : 0u);
+                const bool policy_state_ok = resume_requested ?
+                    (retained ?
+                        resume_bytes != 0u && cold_bytes == 0u :
+                        resume_bytes == 0u && cold_bytes != 0u) :
+                    !retained && resume_bytes == 0u && cold_bytes != 0u;
+                const uint64_t materializations =
+                    cold_stats.CertifiedPackedResumeMaterializations;
+                const bool materialization_ok = !packed_mode ?
+                    materializations == 0u :
+                    (retained ?
+                        materializations == 1u :
+                        (resume_requested ?
+                            materializations <= 1u :
+                            materializations == 0u));
+                const bool shape_ok =
+                    quotient_deficiency >
+                        encoder.BlockEncoder().System().Params.HeavyRows &&
+                    tail_packets == collision_pair_count &&
+                    decoder.SolveAttemptCount() == 1u + tail_packets;
+                if (!engagement_ok || !policy_state_ok ||
+                    !materialization_ok || !shape_ok)
+                {
+                    std::fprintf(stderr,
+                        "resume benchmark lane contract failed "
+                        "rep=%u policy=%u lane=%u packed=%llu mat=%llu "
+                        "retained=%u q=%u tail=%u attempts=%u\n",
+                        rep,
+                        policy_lane,
+                        lane,
+                        (unsigned long long)
+                            cold_stats.CertifiedPackedResidualUses,
+                        (unsigned long long)
+                            cold_stats.
+                                CertifiedPackedResumeMaterializations,
+                        retained ? 1u : 0u,
+                        quotient_deficiency,
+                        tail_packets,
+                        decoder.SolveAttemptCount());
+                    return false;
+                }
+                if (!reference_set)
+                {
+                    reference_set = true;
+                    reference_retained = retained;
+                    reference_tail_packets = tail_packets;
+                    reference_inactivated =
+                        cold_stats.InactivatedColumns;
+                    reference_binary_rank =
+                        cold_stats.BinaryResidualRank;
+                    reference_residual_rank =
+                        cold_stats.ResidualRank;
+                    reference_resume_bytes = resume_bytes;
+                    reference_cold_bytes = cold_bytes;
+                }
+                else if (retained != reference_retained ||
+                    tail_packets != reference_tail_packets ||
+                    cold_stats.InactivatedColumns !=
+                        reference_inactivated ||
+                    cold_stats.BinaryResidualRank !=
+                        reference_binary_rank ||
+                    cold_stats.ResidualRank !=
+                        reference_residual_rank ||
+                    resume_bytes != reference_resume_bytes ||
+                    cold_bytes != reference_cold_bytes)
+                {
+                    std::fprintf(stderr,
+                        "resume benchmark byte/packed lane mismatch "
+                        "rep=%u policy=%u lane=%u\n",
+                        rep, policy_lane, lane);
+                    return false;
+                }
+
+                std::printf(
+                    "%u,%u,%u,%s,%u,%llu,%llu,%u,%u,%s,%zu,%zu,%u,"
+                    "%u,%u,%u,%u,%llu,%llu,%d\n",
+                    rep,
+                    policy_lane,
+                    lane,
+                    mode_names[lane],
+                    resume_requested ? 1u : 0u,
+                    (unsigned long long)cold_ns,
+                    (unsigned long long)tail_ns,
+                    tail_packets,
+                    retained ? 1u : 0u,
+                    retained ? "resume" : "cold",
+                    resume_bytes,
+                    cold_bytes,
+                    decoder.SolveAttemptCount(),
+                    cold_stats.InactivatedColumns,
+                    cold_stats.BinaryResidualRank,
+                    cold_stats.ResidualRank,
+                    quotient_deficiency,
+                    (unsigned long long)
+                        cold_stats.CertifiedPackedResidualUses,
+                    (unsigned long long)
+                        cold_stats.CertifiedPackedResumeMaterializations,
+                    (int)result);
+
+                if (result != Wirehair_Success)
+                {
+                    std::fprintf(stderr,
+                        "resume benchmark tail did not recover "
+                        "rep=%u policy=%u lane=%u result=%d\n",
+                        rep, policy_lane, lane, (int)result);
+                    return false;
+                }
+                std::vector<uint8_t> recovered(message_bytes, 0u);
+                if (decoder.RecoverResult(
+                        recovered.data(), message_bytes_wide) !=
+                        Wirehair_Success ||
+                    recovered != message)
+                {
+                    std::fprintf(stderr,
+                        "resume benchmark recovery mismatch "
+                        "rep=%u policy=%u lane=%u\n",
+                        rep, policy_lane, lane);
+                    return false;
+                }
+            }
+        }
+    }
+    return std::fflush(stdout) == 0;
+#endif
+}
+
 } // namespace
 
 int main(int argc, char** argv)
 {
+    if ((argc == 5 || argc == 6) &&
+        std::string(argv[1]) == "--resume-bench")
+    {
+        uint32_t K = 0u;
+        uint32_t block_bytes = 0u;
+        uint32_t repetitions = 0u;
+        uint32_t collision_pairs = 1u;
+        if (!ParseResumeBenchUint(argv[2], 32u, 64000u, K) ||
+            !ParseResumeBenchUint(
+                argv[3], 1u, UINT32_C(0x7fffffff), block_bytes) ||
+            !ParseResumeBenchUint(argv[4], 1u, 999u, repetitions) ||
+            (argc == 6 &&
+             !ParseResumeBenchUint(
+                 argv[5],
+                 1u,
+                 std::min<uint32_t>(64u, (K - 1u) / 2u),
+                 collision_pairs)))
+        {
+            std::fprintf(stderr,
+                "usage: %s --resume-bench K block_bytes repetitions "
+                "[collision_pairs]\n",
+                argv[0]);
+            return 2;
+        }
+        try {
+            return RunCertifiedResumeBenchmark(
+                K, block_bytes, repetitions, collision_pairs) ? 0 : 1;
+        }
+        catch (const std::bad_alloc&) {
+            std::fprintf(stderr,
+                "resume benchmark fixture allocation failed\n");
+            return 1;
+        }
+        catch (const std::length_error&) {
+            std::fprintf(stderr,
+                "resume benchmark fixture size overflowed\n");
+            return 1;
+        }
+    }
     const bool large = argc == 2 && std::string(argv[1]) == "--large";
     const bool large_recovery =
         argc == 2 && std::string(argv[1]) == "--large-recovery";
     if (argc > 2 || (argc == 2 && !large && !large_recovery)) {
         std::fprintf(
-            stderr, "usage: %s [--large|--large-recovery]\n", argv[0]);
+            stderr,
+            "usage: %s [--large|--large-recovery]\n"
+            "       %s --resume-bench K block_bytes repetitions "
+            "[collision_pairs]\n",
+            argv[0], argv[0]);
         return 2;
     }
     if (!CheckPacketSlotTable() ||

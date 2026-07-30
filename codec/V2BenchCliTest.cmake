@@ -4230,6 +4230,64 @@ expect_success("completion=certified" precodecost --N 200 --bb 0
 expect_failure("unknown --completion" precodecost --N 200 --bb 0
     --completion bogus --cells 0:2 --configs "3,7,1,-1.00" --loss 0.15
     --reps 1 --warmup 0)
+foreach(residual_mode byte auto packed)
+    run_bench(residual_result residual_out residual_err precodecost
+        --N 200 --bb 2048 --completion certified
+        --certified-packed-residual ${residual_mode}
+        --cells 0:1 --configs "3,7,1,-1.00" --loss 0.15
+        --reps 1 --warmup 0)
+    if(NOT residual_result MATCHES "^-?[0-9]+$" OR
+       NOT residual_result EQUAL 0 OR
+       NOT residual_out MATCHES
+           "certified_packed_residual=${residual_mode}")
+        message(FATAL_ERROR
+            "certified residual mode failed: ${residual_mode}\n"
+            "stdout=${residual_out}\nstderr=${residual_err}")
+    endif()
+    string(REGEX MATCH "\n3,7,1,-1\\.00,[^\r\n]*"
+        residual_row "\n${residual_out}")
+    if(NOT residual_row)
+        message(FATAL_ERROR
+            "certified residual mode omitted its data row: "
+            "${residual_mode}\n${residual_out}")
+    endif()
+    string(REGEX REPLACE "^\n" "" residual_row "${residual_row}")
+    string(REPLACE "," ";" residual_fields "${residual_row}")
+    list(LENGTH residual_fields residual_field_count)
+    if(residual_field_count LESS 23)
+        message(FATAL_ERROR
+            "certified residual row is truncated: "
+            "${residual_mode}\n${residual_row}")
+    endif()
+    list(GET residual_fields 21 residual_word_xors)
+    list(GET residual_fields 22 residual_byte_ops)
+    set(${residual_mode}_word_xors "${residual_word_xors}")
+    set(${residual_mode}_byte_ops "${residual_byte_ops}")
+    reject_sanitizer(
+        "${residual_out}${residual_err}"
+        "certified residual mode: ${residual_mode}")
+endforeach()
+if(NOT byte_word_xors EQUAL 0 OR
+   NOT packed_word_xors GREATER 0 OR
+   NOT auto_word_xors EQUAL packed_word_xors OR
+   NOT byte_byte_ops GREATER packed_byte_ops OR
+   NOT auto_byte_ops EQUAL packed_byte_ops)
+    message(FATAL_ERROR
+        "certified residual mode did not change deterministic dispatch "
+        "counters: byte=${byte_word_xors}/${byte_byte_ops} "
+        "auto=${auto_word_xors}/${auto_byte_ops} "
+        "packed=${packed_word_xors}/${packed_byte_ops}")
+endif()
+expect_failure("unknown --certified-packed-residual" precodecost
+    --N 200 --bb 2048 --completion certified
+    --certified-packed-residual bogus
+    --cells 0:1 --configs "3,7,1,-1.00" --loss 0.15
+    --reps 1 --warmup 0)
+expect_failure("requires --completion certified" precodecost
+    --N 200 --bb 2048 --completion mixed
+    --certified-packed-residual packed
+    --cells 0:1 --configs "3,7,1,-1.00" --loss 0.15
+    --reps 1 --warmup 0)
 
 # A config that passes the cheap prefilter can still fail construction in a
 # particular task.  Its deterministic `unusable` diagnostic must not be paired

@@ -20,6 +20,106 @@
 
 namespace {
 
+class CertifiedPackedResidualModeScope
+{
+public:
+    explicit CertifiedPackedResidualModeScope(int mode)
+        : Previous(wirehair_v2::CertifiedPackedResidualModeForTesting())
+        , Valid(wirehair_v2::SetCertifiedPackedResidualModeForTesting(mode))
+    {
+    }
+
+    ~CertifiedPackedResidualModeScope()
+    {
+        (void)wirehair_v2::SetCertifiedPackedResidualModeForTesting(Previous);
+    }
+
+    bool IsValid() const { return Valid; }
+
+private:
+    int Previous;
+    bool Valid;
+};
+
+bool SameExactSolveStats(
+    const wirehair_v2::PrecodeSolveStats& a,
+    const wirehair_v2::PrecodeSolveStats& b)
+{
+    return a.PacketRows == b.PacketRows &&
+        a.PeeledColumns == b.PeeledColumns &&
+        a.InactivatedColumns == b.InactivatedColumns &&
+        a.ResidualRows == b.ResidualRows &&
+        a.ResidualRank == b.ResidualRank &&
+        a.BinaryResidualRank == b.BinaryResidualRank &&
+        a.BinaryRowReferences == b.BinaryRowReferences &&
+        a.BinaryRowStorageBytes == b.BinaryRowStorageBytes &&
+        a.BinaryAdjacencyStorageBytes == b.BinaryAdjacencyStorageBytes &&
+        a.BinaryRowStorageAllocations == b.BinaryRowStorageAllocations &&
+        a.BinaryAdjacencyStorageAllocations ==
+            b.BinaryAdjacencyStorageAllocations &&
+        a.BlockXors == b.BlockXors &&
+        a.BlockMulAdds == b.BlockMulAdds &&
+        a.BlockCopies == b.BlockCopies &&
+        a.BlockZeroFills == b.BlockZeroFills &&
+        a.BlockAddSets == b.BlockAddSets &&
+        a.BlockAddSetSources == b.BlockAddSetSources &&
+        a.PeelAdjacencyVisits == b.PeelAdjacencyVisits &&
+        a.PeelRowScanSteps == b.PeelRowScanSteps &&
+        a.PeelHeapOperations == b.PeelHeapOperations &&
+        a.ProjectionWordXors == b.ProjectionWordXors &&
+        a.ResidualCoeffWordXors == b.ResidualCoeffWordXors &&
+        a.ResidualCoeffByteOps == b.ResidualCoeffByteOps &&
+        a.BuildNanoseconds == b.BuildNanoseconds &&
+        a.PeelNanoseconds == b.PeelNanoseconds &&
+        a.ProjectNanoseconds == b.ProjectNanoseconds &&
+        a.ResidualNanoseconds == b.ResidualNanoseconds &&
+        a.BackSubNanoseconds == b.BackSubNanoseconds &&
+        a.PacketSeedAttempt == b.PacketSeedAttempt &&
+        a.TinyMixedFastPathAcceptances ==
+            b.TinyMixedFastPathAcceptances &&
+        a.CertifiedPackedResidualUses ==
+            b.CertifiedPackedResidualUses &&
+        a.ResidualCoefficientStorageBytes ==
+            b.ResidualCoefficientStorageBytes &&
+        a.CertifiedPackedResumeMaterializations ==
+            b.CertifiedPackedResumeMaterializations &&
+        a.MixedJointSourceXors == b.MixedJointSourceXors &&
+        a.MixedJointMarginalXors == b.MixedJointMarginalXors &&
+        a.MixedJointMarginalCopies == b.MixedJointMarginalCopies &&
+        a.MixedJointScratchBytes == b.MixedJointScratchBytes &&
+        a.MixedJointActiveDeltas == b.MixedJointActiveDeltas &&
+        a.MixedDualSourceColumns == b.MixedDualSourceColumns;
+}
+
+bool SameResumeState(
+    const wirehair_v2::PrecodeSolveResumeState& a,
+    const wirehair_v2::PrecodeSolveResumeState& b,
+    bool compare_stats)
+{
+    return a.SourceCount == b.SourceCount &&
+        a.PrecodeCount == b.PrecodeCount &&
+        a.ColumnCount == b.ColumnCount &&
+        a.BlockBytes == b.BlockBytes &&
+        a.InactiveCount == b.InactiveCount &&
+        a.ProjectionWords == b.ProjectionWords &&
+        a.Rank == b.Rank &&
+        a.Config.PeelSeed == b.Config.PeelSeed &&
+        a.Config.MixCount == b.Config.MixCount &&
+        a.Runtime.SourcePrime() == b.Runtime.SourcePrime() &&
+        a.Runtime.PrecodePrime() == b.Runtime.PrecodePrime() &&
+        (!compare_stats || SameExactSolveStats(a.Stats, b.Stats)) &&
+        a.InactiveIndex == b.InactiveIndex &&
+        a.InactiveColumns == b.InactiveColumns &&
+        a.Projection == b.Projection &&
+        a.Values == b.Values &&
+        a.PivotCoefficients == b.PivotCoefficients &&
+        a.PivotRhs == b.PivotRhs &&
+        a.HavePivot == b.HavePivot &&
+        a.CoefficientScratch == b.CoefficientScratch &&
+        a.RhsScratch == b.RhsScratch &&
+        a.Active == b.Active;
+}
+
 class MixedProjectionOracleScope
 {
 public:
@@ -1494,7 +1594,7 @@ bool CheckHeavyCoefficientBoundaryOracle()
     return true;
 }
 
-bool CheckBinaryQuotientBoundary()
+bool CheckCertifiedPackedResidualDispatch()
 {
     const uint32_t K = 2u;
     wirehair_v2::PrecodeParams params =
@@ -1512,12 +1612,19 @@ bool CheckBinaryQuotientBoundary()
         return false;
     }
 
-    uint64_t muladds[2] = {};
-    const uint32_t block_sizes[2] = {
-        wirehair_v2::kBinaryQuotientMinBlockBytes - 1u,
-        wirehair_v2::kBinaryQuotientMinBlockBytes
+    const uint32_t block_sizes[] = {
+        0u,
+        1u,
+        wirehair_v2::kLegacyByteQuotientMinBlockBytes - 1u,
+        wirehair_v2::kLegacyByteQuotientMinBlockBytes,
+        4095u,
+        4096u
     };
-    for (uint32_t case_i = 0; case_i < 2u; ++case_i)
+    const uint32_t expected_packed_uses[] = {1u, 1u, 1u, 1u, 1u, 1u};
+    static const uint8_t zero_payload = 0u;
+    for (uint32_t case_i = 0;
+         case_i < sizeof(block_sizes) / sizeof(block_sizes[0]);
+         ++case_i)
     {
         const uint32_t block_bytes = block_sizes[case_i];
         std::vector<uint8_t> message((size_t)K * block_bytes);
@@ -1527,7 +1634,8 @@ bool CheckBinaryQuotientBoundary()
         std::vector<wirehair_v2::SolvePacket> packets(K);
         for (uint32_t id = 0; id < K; ++id) {
             packets[id].BlockId = id;
-            packets[id].Data =
+            packets[id].Data = block_bytes == 0u ?
+                &zero_payload :
                 message.data() + (size_t)id * block_bytes;
         }
         std::vector<uint8_t> solved;
@@ -1541,30 +1649,38 @@ bool CheckBinaryQuotientBoundary()
             return false;
         }
         std::vector<uint8_t> oracle;
-        if (wirehair_v2::test::SolvePrecodeSystemTinyDenseOracle(
-                system, config, packets, block_bytes, oracle) !=
-                Wirehair_Success ||
-            oracle != solved)
+        if ((block_bytes == 0u && !solved.empty()) ||
+            (block_bytes != 0u &&
+             (wirehair_v2::test::SolvePrecodeSystemTinyDenseOracle(
+                  system, config, packets, block_bytes, oracle) !=
+                  Wirehair_Success ||
+              oracle != solved)))
         {
             std::fprintf(stderr,
                 "solve: quotient boundary oracle mismatch bb=%u\n",
                 block_bytes);
             return false;
         }
-        muladds[case_i] = stats.BlockMulAdds;
+        if (stats.CertifiedPackedResidualUses !=
+            expected_packed_uses[case_i])
+        {
+            std::fprintf(stderr,
+                "solve: certified packed crossover mismatch bb=%u "
+                "actual=%u expected=%u\n",
+                block_bytes, stats.CertifiedPackedResidualUses,
+                expected_packed_uses[case_i]);
+            return false;
+        }
     }
     std::printf(
-        "binary quotient threshold: legacy_muladds=%llu "
-        "quotient_muladds=%llu: PASS\n",
-        (unsigned long long)muladds[0],
-        (unsigned long long)muladds[1]);
+        "certified packed residual no-resume all-width dispatch: PASS\n");
 
     // Exercise the quotient on a nontrivial full-rank systematic system and
     // compare both successful and inconsistent RHS behavior to an independent
     // bounded dense GF(256) oracle.
     const uint32_t oracle_K = 64u;
     const uint32_t oracle_block_bytes =
-        wirehair_v2::kBinaryQuotientMinBlockBytes;
+        wirehair_v2::kLegacyByteQuotientMinBlockBytes;
     wirehair_v2::PrecodeParams oracle_params =
         wirehair_v2::MakeCertifiedParams(
             oracle_K, UINT64_C(0x4b363451554f5449));
@@ -1602,6 +1718,147 @@ bool CheckBinaryQuotientBoundary()
         return false;
     }
 
+    std::vector<uint8_t> byte_result;
+    std::vector<uint8_t> packed_result;
+    wirehair_v2::PrecodeSolveStats byte_stats;
+    wirehair_v2::PrecodeSolveStats packed_stats;
+    {
+        CertifiedPackedResidualModeScope scope(-1);
+        if (!scope.IsValid() ||
+            wirehair_v2::SolvePrecodeSystem(
+                oracle_system, oracle_config, oracle_packets,
+                oracle_block_bytes, byte_result, &byte_stats) !=
+                Wirehair_Success)
+        {
+            std::fprintf(stderr,
+                "solve: forced byte certified quotient failed\n");
+            return false;
+        }
+    }
+    {
+        CertifiedPackedResidualModeScope scope(1);
+        if (!scope.IsValid() ||
+            wirehair_v2::SolvePrecodeSystem(
+                oracle_system, oracle_config, oracle_packets,
+                oracle_block_bytes, packed_result, &packed_stats) !=
+                Wirehair_Success)
+        {
+            std::fprintf(stderr,
+                "solve: forced packed certified quotient failed\n");
+            return false;
+        }
+    }
+    const uint64_t byte_storage =
+        (uint64_t)byte_stats.InactivatedColumns *
+        byte_stats.InactivatedColumns;
+    const uint64_t packed_storage =
+        (uint64_t)packed_stats.InactivatedColumns *
+        ((packed_stats.InactivatedColumns + 63u) / 64u) *
+        sizeof(uint64_t);
+    if (byte_result != packed_result ||
+        byte_result != dense ||
+        byte_stats.ResidualRows != packed_stats.ResidualRows ||
+        byte_stats.BinaryResidualRank !=
+            packed_stats.BinaryResidualRank ||
+        byte_stats.ResidualRank != packed_stats.ResidualRank ||
+        byte_stats.BlockXors != packed_stats.BlockXors ||
+        byte_stats.BlockMulAdds != packed_stats.BlockMulAdds ||
+        byte_stats.BlockCopies != packed_stats.BlockCopies ||
+        byte_stats.CertifiedPackedResidualUses != 0u ||
+        packed_stats.CertifiedPackedResidualUses != 1u ||
+        byte_stats.ResidualCoefficientStorageBytes != byte_storage ||
+        packed_stats.ResidualCoefficientStorageBytes != packed_storage ||
+        byte_stats.CertifiedPackedResumeMaterializations != 0u ||
+        packed_stats.CertifiedPackedResumeMaterializations != 0u)
+    {
+        std::fprintf(stderr,
+            "solve: forced byte/packed certified success mismatch\n");
+        return false;
+    }
+
+    wirehair_v2::PrecodeSolveResumeState success_resume;
+    success_resume.Active = true;
+    success_resume.SourceCount = UINT32_C(0x5a17c0de);
+    success_resume.CoefficientScratch.assign(3u, 0x5au);
+    std::vector<uint8_t> success_resume_result;
+    {
+        CertifiedPackedResidualModeScope scope(1);
+        if (!scope.IsValid() ||
+            wirehair_v2::SolvePrecodeSystem(
+                oracle_system, oracle_config, oracle_packets,
+                oracle_block_bytes, success_resume_result, &packed_stats,
+                &success_resume) != Wirehair_Success)
+        {
+            std::fprintf(stderr,
+                "solve: forced packed success-with-resume failed\n");
+            return false;
+        }
+    }
+    if (success_resume_result != dense ||
+        !success_resume.Active ||
+        success_resume.SourceCount != UINT32_C(0x5a17c0de) ||
+        success_resume.CoefficientScratch !=
+            std::vector<uint8_t>(3u, 0x5au) ||
+        packed_stats.CertifiedPackedResumeMaterializations != 0u)
+    {
+        std::fprintf(stderr,
+            "solve: packed success changed caller resume/materialized\n");
+        return false;
+    }
+
+    std::vector<uint8_t> repair_data(
+        (size_t)oracle_K * oracle_block_bytes);
+    std::vector<wirehair_v2::SolvePacket> overdetermined = oracle_packets;
+    overdetermined.reserve(oracle_K * 2u);
+    for (uint32_t i = 0u; i < oracle_K; ++i)
+    {
+        const uint32_t id = oracle_K + i;
+        uint8_t* repair =
+            repair_data.data() + (size_t)i * oracle_block_bytes;
+        if (!wirehair_v2::EvaluatePacketBlock(
+                oracle_system, oracle_config, production.data(),
+                oracle_block_bytes, id, repair))
+        {
+            std::fprintf(stderr,
+                "solve: certified q=0 repair evaluation failed id=%u\n", id);
+            return false;
+        }
+        wirehair_v2::SolvePacket packet;
+        packet.BlockId = id;
+        packet.Data = repair;
+        overdetermined.push_back(packet);
+    }
+    std::vector<uint8_t> q0_result;
+    wirehair_v2::PrecodeSolveStats q0_stats;
+    {
+        CertifiedPackedResidualModeScope scope(1);
+        if (!scope.IsValid() ||
+            wirehair_v2::SolvePrecodeSystem(
+                oracle_system, oracle_config, overdetermined,
+                oracle_block_bytes, q0_result, &q0_stats) !=
+                Wirehair_Success)
+        {
+            std::fprintf(stderr,
+                "solve: packed certified q=0 solve failed\n");
+            return false;
+        }
+    }
+    if (q0_result != production ||
+        q0_stats.BinaryResidualRank != q0_stats.InactivatedColumns ||
+        q0_stats.ResidualRank != q0_stats.InactivatedColumns ||
+        q0_stats.ResidualRows <= q0_stats.BinaryResidualRank ||
+        q0_stats.CertifiedPackedResidualUses != 1u)
+    {
+        std::fprintf(stderr,
+            "solve: packed certified q=0 classification mismatch "
+            "R=%u binary=%u rank=%u rows=%u\n",
+            q0_stats.InactivatedColumns,
+            q0_stats.BinaryResidualRank,
+            q0_stats.ResidualRank,
+            q0_stats.ResidualRows);
+        return false;
+    }
+
     std::vector<uint8_t> conflicting(
         oracle_message.begin(),
         oracle_message.begin() + oracle_block_bytes);
@@ -1624,6 +1881,506 @@ bool CheckBinaryQuotientBoundary()
     {
         std::fprintf(stderr,
             "solve: K64 quotient conflicting RHS acceptance/no-write mismatch\n");
+        return false;
+    }
+
+    std::vector<wirehair_v2::SolvePacket> deficient(oracle_K);
+    for (wirehair_v2::SolvePacket& packet : deficient) {
+        packet.BlockId = 0u;
+        packet.Data = oracle_message.data();
+    }
+    std::vector<uint8_t> no_resume_output(9u, 0x5au);
+    const std::vector<uint8_t> no_resume_before = no_resume_output;
+    wirehair_v2::PrecodeSolveStats no_resume_stats;
+    {
+        CertifiedPackedResidualModeScope scope(1);
+        if (!scope.IsValid() ||
+            wirehair_v2::SolvePrecodeSystem(
+                oracle_system, oracle_config, deficient,
+                oracle_block_bytes, no_resume_output,
+                &no_resume_stats) != Wirehair_NeedMore)
+        {
+            std::fprintf(stderr,
+                "solve: forced packed no-resume deficiency failed\n");
+            return false;
+        }
+    }
+    if (no_resume_output != no_resume_before ||
+        no_resume_stats.CertifiedPackedResidualUses != 1u ||
+        no_resume_stats.CertifiedPackedResumeMaterializations != 0u ||
+        no_resume_stats.InactivatedColumns -
+            no_resume_stats.BinaryResidualRank <=
+                oracle_system.Params.HeavyRows)
+    {
+        std::fprintf(stderr,
+            "solve: packed q>H no-resume/materialization contract failed\n");
+        return false;
+    }
+
+    wirehair_v2::PrecodeSolveResumeState byte_resume;
+    wirehair_v2::PrecodeSolveResumeState packed_resume;
+    std::vector<uint8_t> byte_resume_output(11u, 0xa5u);
+    std::vector<uint8_t> packed_resume_output = byte_resume_output;
+    const std::vector<uint8_t> resume_before = byte_resume_output;
+    {
+        CertifiedPackedResidualModeScope scope(-1);
+        if (!scope.IsValid() ||
+            wirehair_v2::SolvePrecodeSystem(
+                oracle_system, oracle_config, deficient,
+                oracle_block_bytes, byte_resume_output,
+                &byte_stats, &byte_resume) != Wirehair_NeedMore)
+        {
+            std::fprintf(stderr,
+                "solve: forced byte resumable deficiency failed\n");
+            return false;
+        }
+    }
+    {
+        CertifiedPackedResidualModeScope scope(1);
+        if (!scope.IsValid() ||
+            wirehair_v2::SolvePrecodeSystem(
+                oracle_system, oracle_config, deficient,
+                oracle_block_bytes, packed_resume_output,
+                &packed_stats, &packed_resume) != Wirehair_NeedMore)
+        {
+            std::fprintf(stderr,
+                "solve: forced packed resumable deficiency failed\n");
+            return false;
+        }
+    }
+    if (byte_resume_output != resume_before ||
+        packed_resume_output != resume_before ||
+        !byte_resume.Active || !packed_resume.Active ||
+        byte_resume.Rank != packed_resume.Rank ||
+        byte_resume.InactiveCount != packed_resume.InactiveCount ||
+        byte_resume.PivotCoefficients !=
+            packed_resume.PivotCoefficients ||
+        byte_resume.PivotRhs != packed_resume.PivotRhs ||
+        byte_resume.HavePivot != packed_resume.HavePivot ||
+        byte_resume.InactiveIndex != packed_resume.InactiveIndex ||
+        byte_resume.InactiveColumns != packed_resume.InactiveColumns ||
+        byte_resume.Projection != packed_resume.Projection ||
+        byte_resume.Values != packed_resume.Values ||
+        byte_resume.CoefficientScratch !=
+            packed_resume.CoefficientScratch ||
+        byte_resume.RhsScratch != packed_resume.RhsScratch ||
+        packed_resume.PivotCoefficients.size() !=
+            (size_t)packed_resume.InactiveCount *
+                packed_resume.InactiveCount ||
+        byte_stats.BlockXors != packed_stats.BlockXors ||
+        byte_stats.BlockMulAdds != packed_stats.BlockMulAdds ||
+        packed_stats.CertifiedPackedResidualUses != 1u ||
+        packed_stats.CertifiedPackedResumeMaterializations != 1u)
+    {
+        std::fprintf(stderr,
+            "solve: packed cold resume materialization mismatch\n");
+        return false;
+    }
+
+    wirehair_v2::PrecodeParams no_heavy_params = oracle_params;
+    no_heavy_params.HeavyRows = 0u;
+    wirehair_v2::PrecodeSystem no_heavy_system;
+    wirehair_v2::PacketRowConfig no_heavy_config;
+    if (wirehair_v2::SelectSystematicConfiguration(
+            no_heavy_params, base_config,
+            no_heavy_system, no_heavy_config) != Wirehair_Success)
+    {
+        std::fprintf(stderr,
+            "solve: H0 packed checkpoint configuration failed\n");
+        return false;
+    }
+    wirehair_v2::PrecodeSolveResumeState no_heavy_byte_resume;
+    wirehair_v2::PrecodeSolveResumeState no_heavy_packed_resume;
+    std::vector<uint8_t> no_heavy_byte_output(5u, 0x69u);
+    std::vector<uint8_t> no_heavy_packed_output = no_heavy_byte_output;
+    {
+        CertifiedPackedResidualModeScope scope(-1);
+        if (!scope.IsValid() ||
+            wirehair_v2::SolvePrecodeSystem(
+                no_heavy_system, no_heavy_config, deficient,
+                oracle_block_bytes, no_heavy_byte_output, nullptr,
+                &no_heavy_byte_resume) != Wirehair_NeedMore)
+        {
+            std::fprintf(stderr,
+                "solve: H0 forced byte checkpoint failed\n");
+            return false;
+        }
+    }
+    {
+        CertifiedPackedResidualModeScope scope(1);
+        if (!scope.IsValid() ||
+            wirehair_v2::SolvePrecodeSystem(
+                no_heavy_system, no_heavy_config, deficient,
+                oracle_block_bytes, no_heavy_packed_output, nullptr,
+                &no_heavy_packed_resume) != Wirehair_NeedMore)
+        {
+            std::fprintf(stderr,
+                "solve: H0 forced packed checkpoint failed\n");
+            return false;
+        }
+    }
+    if (no_heavy_byte_output != no_heavy_packed_output ||
+        !no_heavy_byte_resume.Active || !no_heavy_packed_resume.Active ||
+        no_heavy_byte_resume.Rank != no_heavy_packed_resume.Rank ||
+        no_heavy_byte_resume.InactiveCount !=
+            no_heavy_packed_resume.InactiveCount ||
+        no_heavy_byte_resume.PivotCoefficients !=
+            no_heavy_packed_resume.PivotCoefficients ||
+        no_heavy_byte_resume.PivotRhs !=
+            no_heavy_packed_resume.PivotRhs ||
+        no_heavy_byte_resume.HavePivot !=
+            no_heavy_packed_resume.HavePivot ||
+        no_heavy_byte_resume.CoefficientScratch !=
+            no_heavy_packed_resume.CoefficientScratch ||
+        no_heavy_byte_resume.RhsScratch !=
+            no_heavy_packed_resume.RhsScratch)
+    {
+        std::fprintf(stderr,
+            "solve: H0 packed checkpoint byte identity failed\n");
+        return false;
+    }
+
+    // This fixed attempt is a certified q=H rank-deficient cell: the binary
+    // residual leaves exactly all H free variables, and the heavy quotient
+    // supplies rank H-1.  It exercises materialization after a nonempty
+    // quotient rather than only the deliberately extreme q>H duplicate case.
+    wirehair_v2::PrecodeParams qh_base_params =
+        wirehair_v2::MakeCertifiedParams(
+            oracle_K, UINT64_C(0x7150425a00000000));
+    wirehair_v2::PacketRowConfig qh_base_config;
+    qh_base_config.PeelSeed = UINT32_C(0x51a7e000);
+    qh_base_config.MixCount = wirehair_v2::kCertifiedPacketMixCount;
+    static const uint32_t qh_attempt = 109u;
+    wirehair_v2::PrecodeSystem qh_system;
+    if (!wirehair_v2::BuildPrecodeSystem(
+            wirehair_v2::PrecodeParamsForAttempt(
+                qh_base_params, qh_attempt),
+            qh_system))
+    {
+        std::fprintf(stderr,
+            "solve: q=H packed checkpoint configuration failed\n");
+        return false;
+    }
+    const wirehair_v2::PacketRowConfig qh_config =
+        wirehair_v2::PacketConfigForAttempt(qh_base_config, qh_attempt);
+    std::vector<uint8_t> qh_zero_block(oracle_block_bytes, 0u);
+    std::vector<wirehair_v2::SolvePacket> qh_packets(oracle_K);
+    for (uint32_t id = 0u; id < oracle_K; ++id) {
+        qh_packets[id].BlockId = id;
+        qh_packets[id].Data = qh_zero_block.data();
+    }
+    wirehair_v2::PrecodeSolveResumeState qh_byte_resume;
+    wirehair_v2::PrecodeSolveResumeState qh_packed_resume;
+    wirehair_v2::PrecodeSolveStats qh_byte_stats;
+    wirehair_v2::PrecodeSolveStats qh_packed_stats;
+    std::vector<uint8_t> qh_byte_output(7u, 0x96u);
+    std::vector<uint8_t> qh_packed_output = qh_byte_output;
+    const std::vector<uint8_t> qh_output_before = qh_byte_output;
+    {
+        CertifiedPackedResidualModeScope scope(-1);
+        if (!scope.IsValid() ||
+            wirehair_v2::SolvePrecodeSystem(
+                qh_system, qh_config, qh_packets, oracle_block_bytes,
+                qh_byte_output, &qh_byte_stats, &qh_byte_resume) !=
+                Wirehair_NeedMore)
+        {
+            std::fprintf(stderr,
+                "solve: q=H forced byte checkpoint failed\n");
+            return false;
+        }
+    }
+    {
+        CertifiedPackedResidualModeScope scope(1);
+        if (!scope.IsValid() ||
+            wirehair_v2::SolvePrecodeSystem(
+                qh_system, qh_config, qh_packets, oracle_block_bytes,
+                qh_packed_output, &qh_packed_stats, &qh_packed_resume) !=
+                Wirehair_NeedMore)
+        {
+            std::fprintf(stderr,
+                "solve: q=H forced packed checkpoint failed\n");
+            return false;
+        }
+    }
+    if (qh_byte_output != qh_output_before ||
+        qh_packed_output != qh_output_before ||
+        !qh_byte_resume.Active || !qh_packed_resume.Active ||
+        qh_packed_stats.InactivatedColumns -
+            qh_packed_stats.BinaryResidualRank !=
+                qh_system.Params.HeavyRows ||
+        qh_packed_stats.ResidualRank + 1u !=
+            qh_packed_stats.InactivatedColumns ||
+        qh_byte_stats.BinaryResidualRank !=
+            qh_packed_stats.BinaryResidualRank ||
+        qh_byte_stats.ResidualRank != qh_packed_stats.ResidualRank ||
+        qh_byte_stats.BlockXors != qh_packed_stats.BlockXors ||
+        qh_byte_stats.BlockMulAdds != qh_packed_stats.BlockMulAdds ||
+        qh_byte_stats.BlockCopies != qh_packed_stats.BlockCopies ||
+        qh_packed_stats.CertifiedPackedResumeMaterializations != 1u ||
+        qh_byte_resume.SourceCount != qh_packed_resume.SourceCount ||
+        qh_byte_resume.PrecodeCount != qh_packed_resume.PrecodeCount ||
+        qh_byte_resume.ColumnCount != qh_packed_resume.ColumnCount ||
+        qh_byte_resume.BlockBytes != qh_packed_resume.BlockBytes ||
+        qh_byte_resume.InactiveCount != qh_packed_resume.InactiveCount ||
+        qh_byte_resume.ProjectionWords != qh_packed_resume.ProjectionWords ||
+        qh_byte_resume.Rank != qh_packed_resume.Rank ||
+        qh_byte_resume.Config.PeelSeed != qh_packed_resume.Config.PeelSeed ||
+        qh_byte_resume.Config.MixCount != qh_packed_resume.Config.MixCount ||
+        qh_byte_resume.Runtime.SourcePrime() !=
+            qh_packed_resume.Runtime.SourcePrime() ||
+        qh_byte_resume.Runtime.PrecodePrime() !=
+            qh_packed_resume.Runtime.PrecodePrime() ||
+        qh_byte_resume.InactiveIndex != qh_packed_resume.InactiveIndex ||
+        qh_byte_resume.InactiveColumns != qh_packed_resume.InactiveColumns ||
+        qh_byte_resume.Projection != qh_packed_resume.Projection ||
+        qh_byte_resume.Values != qh_packed_resume.Values ||
+        qh_byte_resume.PivotCoefficients !=
+            qh_packed_resume.PivotCoefficients ||
+        qh_byte_resume.PivotRhs != qh_packed_resume.PivotRhs ||
+        qh_byte_resume.HavePivot != qh_packed_resume.HavePivot ||
+        qh_byte_resume.CoefficientScratch !=
+            qh_packed_resume.CoefficientScratch ||
+        qh_byte_resume.RhsScratch != qh_packed_resume.RhsScratch)
+    {
+        std::fprintf(stderr,
+            "solve: q=H packed checkpoint byte identity failed\n");
+        return false;
+    }
+
+    // A finite decoder budget that cannot hold even the minimum legacy
+    // checkpoint must suppress packed materialization transactionally.  The
+    // allocation-failure hook remains armed, proving neither conceptual
+    // materialization allocation was reached; an immediate unlimited retry
+    // must therefore consume it and fail once.
+    wirehair_v2::PacketRowRuntime qh_runtime;
+    const uint32_t qh_precode_count =
+        qh_system.Params.Staircase +
+        qh_system.Params.DenseRows +
+        qh_system.Params.HeavyRows;
+    if (!qh_runtime.Initialize(
+            oracle_K, qh_precode_count, qh_config.MixCount))
+    {
+        std::fprintf(stderr,
+            "solve: q=H budget runtime initialization failed\n");
+        return false;
+    }
+    wirehair_v2::PrecodeSolveResumeState budget_resume;
+    budget_resume.Active = true;
+    budget_resume.SourceCount = UINT32_C(0x51a7b0d6);
+    budget_resume.CoefficientScratch.assign(3u, 0x6du);
+    const wirehair_v2::PrecodeSolveResumeState budget_resume_before =
+        budget_resume;
+    std::vector<uint8_t> budget_output(9u, 0xa5u);
+    const std::vector<uint8_t> budget_output_before = budget_output;
+    wirehair_v2::PrecodeSolveStats budget_stats;
+    WirehairResult budget_result = Wirehair_Error;
+    wirehair_v2::PrecodeSolveResumeState armed_resume;
+    std::vector<uint8_t> armed_output(11u, 0x3cu);
+    const std::vector<uint8_t> armed_output_before = armed_output;
+    wirehair_v2::PrecodeSolveStats armed_stats;
+    armed_stats.BlockCopies = UINT64_C(0x0123456789abcdef);
+    const wirehair_v2::PrecodeSolveStats armed_stats_before = armed_stats;
+    WirehairResult armed_result = Wirehair_Error;
+    {
+        CertifiedPackedResidualModeScope scope(1);
+        wirehair_v2::
+            SetCertifiedPackedResumeAllocationFailureCountdownForTesting(0);
+        budget_result =
+            wirehair_v2::SolvePrecodeSystemForValidatedSystemWithRuntime(
+                qh_system, qh_config, qh_runtime, qh_packets,
+                oracle_block_bytes, budget_output, &budget_stats,
+                &budget_resume, 0u);
+        armed_result =
+            wirehair_v2::SolvePrecodeSystemForValidatedSystemWithRuntime(
+                qh_system, qh_config, qh_runtime, qh_packets,
+                oracle_block_bytes, armed_output, &armed_stats,
+                &armed_resume, SIZE_MAX);
+        wirehair_v2::
+            SetCertifiedPackedResumeAllocationFailureCountdownForTesting(-1);
+        if (!scope.IsValid())
+        {
+            std::fprintf(stderr,
+                "solve: q=H budget hook scope failed\n");
+            return false;
+        }
+    }
+    if (budget_result != Wirehair_NeedMore ||
+        budget_output != budget_output_before ||
+        !SameResumeState(budget_resume, budget_resume_before, true) ||
+        budget_stats.CertifiedPackedResidualUses != 1u ||
+        budget_stats.CertifiedPackedResumeMaterializations != 0u ||
+        budget_stats.BinaryResidualRank !=
+            qh_packed_stats.BinaryResidualRank ||
+        budget_stats.ResidualRank != qh_packed_stats.ResidualRank ||
+        armed_result != Wirehair_OOM ||
+        armed_output != armed_output_before ||
+        armed_resume.Active ||
+        !SameExactSolveStats(armed_stats, armed_stats_before))
+    {
+        std::fprintf(stderr,
+            "solve: q=H budget did not skip packed materialization "
+            "transactionally\n");
+        return false;
+    }
+
+    if (wirehair_v2::ResumePrecodeSystem(
+            qh_system, qh_config, oracle_K, qh_zero_block.data(),
+            oracle_block_bytes, qh_byte_resume, qh_byte_output) !=
+            Wirehair_Success ||
+        wirehair_v2::ResumePrecodeSystem(
+            qh_system, qh_config, oracle_K, qh_zero_block.data(),
+            oracle_block_bytes, qh_packed_resume, qh_packed_output) !=
+            Wirehair_Success ||
+        qh_byte_resume.Active || qh_packed_resume.Active ||
+        qh_byte_output != qh_packed_output ||
+        !std::all_of(
+            qh_packed_output.begin(), qh_packed_output.end(),
+            [](uint8_t value) { return value == 0u; }))
+    {
+        std::fprintf(stderr,
+            "solve: q=H packed checkpoint resume completion failed\n");
+        return false;
+    }
+
+    for (int64_t failure = 0; failure < 2; ++failure)
+    {
+        wirehair_v2::PrecodeSolveResumeState oom_resume;
+        oom_resume.Active = true;
+        oom_resume.SourceCount = UINT32_C(0x0badcafe);
+        oom_resume.PrecodeCount = 91u;
+        oom_resume.ColumnCount = 117u;
+        oom_resume.BlockBytes = 37u;
+        oom_resume.InactiveCount = 11u;
+        oom_resume.ProjectionWords = 2u;
+        oom_resume.Rank = 7u;
+        oom_resume.Config.PeelSeed = UINT32_C(0x13579bdf);
+        oom_resume.Config.MixCount = 2u;
+        oom_resume.Stats.BlockXors = UINT64_C(0xfedcba9876543210);
+        oom_resume.InactiveIndex.assign(2u, 0x11223344u);
+        oom_resume.InactiveColumns.assign(3u, 0x55667788u);
+        oom_resume.Projection.assign(
+            2u, UINT64_C(0x0123456789abcdef));
+        oom_resume.Values.assign(4u, 0x3cu);
+        oom_resume.PivotCoefficients.assign(5u, 0x6du);
+        oom_resume.PivotRhs.assign(6u, 0x96u);
+        oom_resume.HavePivot.assign(2u, 1u);
+        oom_resume.CoefficientScratch.assign(7u, 0xa5u);
+        oom_resume.RhsScratch.assign(8u, 0x5au);
+        const wirehair_v2::PrecodeSolveResumeState oom_resume_before =
+            oom_resume;
+        std::vector<uint8_t> oom_output(13u, 0x3cu);
+        const std::vector<uint8_t> oom_before = oom_output;
+        wirehair_v2::PrecodeSolveStats oom_stats;
+        oom_stats.BlockCopies = UINT64_C(0x123456789abcdef0);
+        oom_stats.ResidualCoeffByteOps =
+            UINT64_C(0x0f1e2d3c4b5a6978);
+        const wirehair_v2::PrecodeSolveStats oom_stats_before = oom_stats;
+        {
+            CertifiedPackedResidualModeScope scope(1);
+            wirehair_v2::
+                SetCertifiedPackedResumeAllocationFailureCountdownForTesting(
+                    failure);
+            const WirehairResult oom_result =
+                wirehair_v2::SolvePrecodeSystem(
+                    oracle_system, oracle_config, deficient,
+                    oracle_block_bytes, oom_output, &oom_stats, &oom_resume);
+            wirehair_v2::
+                SetCertifiedPackedResumeAllocationFailureCountdownForTesting(
+                    -1);
+            if (!scope.IsValid() || oom_result != Wirehair_OOM)
+            {
+                std::fprintf(stderr,
+                    "solve: packed materialization OOM classification "
+                    "failed at %lld result=%d\n",
+                    (long long)failure, (int)oom_result);
+                return false;
+            }
+        }
+        if (oom_output != oom_before ||
+            !SameResumeState(oom_resume, oom_resume_before, true) ||
+            !SameExactSolveStats(oom_stats, oom_stats_before))
+        {
+            std::fprintf(stderr,
+                "solve: packed materialization OOM rollback failed at %lld\n",
+                (long long)failure);
+            return false;
+        }
+    }
+
+    // A zero countdown denotes one transient allocation failure, not a
+    // persistent poisoned thread.  Retry without resetting the hook so this
+    // contract cannot silently degrade into "fail every later solve".
+    wirehair_v2::PrecodeSolveResumeState one_shot_resume;
+    wirehair_v2::PrecodeSolveStats one_shot_stats;
+    std::vector<uint8_t> one_shot_output = resume_before;
+    WirehairResult one_shot_oom = Wirehair_Error;
+    WirehairResult one_shot_retry = Wirehair_Error;
+    {
+        CertifiedPackedResidualModeScope scope(1);
+        wirehair_v2::
+            SetCertifiedPackedResumeAllocationFailureCountdownForTesting(0);
+        one_shot_oom = wirehair_v2::SolvePrecodeSystem(
+            oracle_system, oracle_config, deficient,
+            oracle_block_bytes, one_shot_output,
+            &one_shot_stats, &one_shot_resume);
+        one_shot_retry = wirehair_v2::SolvePrecodeSystem(
+            oracle_system, oracle_config, deficient,
+            oracle_block_bytes, one_shot_output,
+            &one_shot_stats, &one_shot_resume);
+        wirehair_v2::
+            SetCertifiedPackedResumeAllocationFailureCountdownForTesting(-1);
+        if (!scope.IsValid())
+        {
+            std::fprintf(stderr,
+                "solve: packed one-shot OOM hook scope failed\n");
+            return false;
+        }
+    }
+    if (one_shot_oom != Wirehair_OOM ||
+        one_shot_retry != Wirehair_NeedMore ||
+        one_shot_output != resume_before ||
+        !one_shot_resume.Active ||
+        one_shot_stats.CertifiedPackedResumeMaterializations != 1u)
+    {
+        std::fprintf(stderr,
+            "solve: packed materialization OOM hook was not one-shot\n");
+        return false;
+    }
+
+    wirehair_v2::PrecodeSolveResumeState exhausted_resume;
+    wirehair_v2::PrecodeSolveStats exhausted_stats;
+    std::vector<uint8_t> exhausted_output = resume_before;
+    WirehairResult exhausted_result = Wirehair_Error;
+    {
+        CertifiedPackedResidualModeScope scope(1);
+        wirehair_v2::
+            SetCertifiedPackedResumeAllocationFailureCountdownForTesting(2);
+        exhausted_result = wirehair_v2::SolvePrecodeSystem(
+            oracle_system, oracle_config, deficient,
+            oracle_block_bytes, exhausted_output,
+            &exhausted_stats, &exhausted_resume);
+        wirehair_v2::
+            SetCertifiedPackedResumeAllocationFailureCountdownForTesting(-1);
+        if (!scope.IsValid())
+        {
+            std::fprintf(stderr,
+                "solve: packed materialization hook scope failed\n");
+            return false;
+        }
+    }
+    if (exhausted_result != Wirehair_NeedMore ||
+        exhausted_output != resume_before ||
+        !SameResumeState(exhausted_resume, packed_resume, false) ||
+        exhausted_stats.BinaryResidualRank !=
+            packed_stats.BinaryResidualRank ||
+        exhausted_stats.ResidualRank != packed_stats.ResidualRank ||
+        exhausted_stats.BlockXors != packed_stats.BlockXors ||
+        exhausted_stats.BlockMulAdds != packed_stats.BlockMulAdds ||
+        exhausted_stats.BlockCopies != packed_stats.BlockCopies ||
+        exhausted_stats.CertifiedPackedResumeMaterializations != 1u)
+    {
+        std::fprintf(stderr,
+            "solve: packed materialization allocation sweep incomplete\n");
         return false;
     }
     std::printf("K64 binary quotient dense oracle/conflict: PASS\n");
@@ -1764,7 +2521,7 @@ bool CheckIncrementalResume()
 {
     return CheckIncrementalResumeCase(17u) &&
         CheckIncrementalResumeCase(
-            wirehair_v2::kBinaryQuotientMinBlockBytes);
+            wirehair_v2::kLegacyByteQuotientMinBlockBytes);
 }
 
 bool CheckMixedProjectionResidueBucketsOracleForPeriod(
@@ -4244,7 +5001,7 @@ int main(int argc, char** argv)
     ok = CheckPacketRuntimeBoundaries() && ok;
     ok = CheckTinyDenseOracle() && ok;
     ok = CheckHeavyCoefficientBoundaryOracle() && ok;
-    ok = CheckBinaryQuotientBoundary() && ok;
+    ok = CheckCertifiedPackedResidualDispatch() && ok;
     ok = CheckConcurrentCoefficientCaches() && ok;
     ok = CheckIncrementalResume() && ok;
     ok = CheckMixedProjectionResidueBucketsOracle() && ok;
@@ -4264,7 +5021,7 @@ int main(int argc, char** argv)
         64u, 17u, 7u,
         wirehair_v2::HeavyCoefficientFamily::HashedNonzero) && ok;
     ok = RunCase(
-        64u, wirehair_v2::kBinaryQuotientMinBlockBytes, 7u,
+        64u, wirehair_v2::kLegacyByteQuotientMinBlockBytes, 7u,
         wirehair_v2::HeavyCoefficientFamily::HashedNonzero) && ok;
     ok = RunCase(320u, 37u, 11u) && ok;
     return ok ? 0 : 1;

@@ -47,7 +47,13 @@ static const uint32_t kMaxPacketSeedAttempts = 256u;
 static const uint32_t kMaxInactiveColumns = 4096u;
 static const uint32_t kMinPacketPrecodeCount = 2u;
 static const uint32_t kMaxPacketPrecodeCount = 65521u;
-static const uint32_t kBinaryQuotientMinBlockBytes = 2048u;
+// Certified production keeps packed residuals at and above this width even
+// when a legacy resume checkpoint may fit.  Below it, a narrow resumable solve
+// retains the byte basis to avoid a packed-to-byte conversion on NeedMore.
+static const uint32_t kCertifiedPackedResumeMinBlockBytes = 2048u;
+// The test-only forced byte reference retains the same historical quotient
+// crossover so wide byte-vs-packed differentials compare identical algebra.
+static const uint32_t kLegacyByteQuotientMinBlockBytes = 2048u;
 
 /**
     Tiny-K mixed completion fast-path gate.
@@ -105,6 +111,26 @@ uint32_t TinyMixedFastPathMaxProductBytes();
 */
 bool SetTinyMixedFastPathModeForTesting(int mode);
 int TinyMixedFastPathModeForTesting();
+
+/**
+    Override the certified residual-basis representation on the calling
+    thread: -1 forces the legacy byte matrix, +1 forces the packed GF(2)
+    matrix, and 0 restores production's adaptive selection: packed without a
+    checkpoint, at wide payloads, or when the decoder proves a legacy
+    checkpoint cannot fit; byte at narrow widths where resumability is useful.
+    This changes representation and timing only; the GF(256) quotient and
+    public equations are identical.
+*/
+bool SetCertifiedPackedResidualModeForTesting(int mode);
+int CertifiedPackedResidualModeForTesting();
+
+/**
+    Fail one of the cold certified packed-resume materialization allocations
+    on this thread.  Zero fails the next allocation, positive values count
+    down, and -1 disables injection.
+*/
+void SetCertifiedPackedResumeAllocationFailureCountdownForTesting(
+    int64_t countdown);
 
 /**
     Exhaustively verify the tiny fast path's scalar GF(2^16) helpers: the
@@ -221,9 +247,12 @@ struct PrecodeSolveStats
         ProjectionWordXors  64-bit words XORed while accumulating the affine
                          projection of a peeled column onto inactive columns.
         ResidualCoeffWordXors  64-bit words XORed by packed GF(2) residual
-                         elimination (mixed completion).
+                         elimination (mixed or certified completion).
         ResidualCoeffByteOps  coefficient bytes touched by GF(256) residual
-                         elimination (certified completion).
+                         or quotient elimination, including each q-byte packed
+                         certified quotient relation scan.  Representation
+                         changes may move work between these two coefficient
+                         counters while preserving the payload-block counters.
     */
     uint64_t BlockCopies = 0;
     uint64_t BlockZeroFills = 0;
@@ -253,6 +282,10 @@ struct PrecodeSolveStats
     // Forced-path tests use this to distinguish real engagement from a
     // byte-identical fallthrough to the general solver.
     uint32_t TinyMixedFastPathAcceptances = 0;
+    // Representation diagnostics, not wire or deterministic-work contracts.
+    uint32_t CertifiedPackedResidualUses = 0;
+    uint64_t ResidualCoefficientStorageBytes = 0;
+    uint32_t CertifiedPackedResumeMaterializations = 0;
     uint64_t MixedJointSourceXors = 0;
     uint64_t MixedJointMarginalXors = 0;
     uint64_t MixedJointMarginalCopies = 0;
@@ -633,17 +666,20 @@ bool EvaluatePacketBlockForValidatedSystemWithRuntime(
 
     Binary staircase/dense constraints and packet equations are peeled first.
     Unused binary rows are projected onto the inactivated columns.  The
-    generic path expands them into a GF(256) residual before inserting its
-    Cauchy heavy equations; the mixed path keeps that residual packed in
-    GF(2), then solves only its remaining quotient over GF(2^16).  On success
+    Mixed completion and the certified fast path keep the binary residual
+    packed in GF(2), then solve only its remaining quotient over GF(2^16) or
+    GF(256), respectively.  A narrow certified solve that can retain a legacy
+    resume checkpoint keeps its byte basis to avoid conversion; test hooks
+    force either representation for differential checks.  On success
     `intermediate_blocks_out` contains all
     K+S+D2+H block values.  The exact residual solve is bounded to
     kMaxInactiveColumns to contain adversarial memory use.  NeedMore means the
     supplied equations were rank deficient or exceeded that bound; additional
     independent packets can reduce the residual.  Output remains unchanged on
     every failure.  When resume_state is non-null, a rank-deficient residual
-    within the cap atomically replaces it with an active affine/pivot
-    checkpoint; cap failures leave it unchanged and require a cold retry.
+    within the cap and persistent-byte budget atomically replaces it with an
+    active affine/pivot checkpoint; cap/budget failures leave it unchanged and
+    require a cold retry.
     Mixed GF(256)/GF(2^16) solves do not publish resume checkpoints and leave
     any caller-provided resume state unchanged on NeedMore.
     `stats` is diagnostic rather than transactional output: completed algebraic
@@ -676,6 +712,11 @@ WirehairResult SolvePrecodeSystemWithRuntime(
     Internal cold solve for an immutable system validated by construction.
     The caller must retain exclusive ownership of that trust boundary: unlike
     SolvePrecodeSystemWithRuntime(), this does not inspect the stored row graph.
+
+    resume_persistent_byte_limit is a conservative checkpoint budget.  A
+    deficient solve may return NeedMore without publishing a resume state when
+    the minimum legacy checkpoint shape already exceeds it.  The maximum
+    size_t value preserves the ordinary unbounded solver contract.
 */
 WirehairResult SolvePrecodeSystemForValidatedSystemWithRuntime(
     const PrecodeSystem& system,
@@ -685,7 +726,8 @@ WirehairResult SolvePrecodeSystemForValidatedSystemWithRuntime(
     uint32_t block_bytes,
     std::vector<uint8_t>& intermediate_blocks_out,
     PrecodeSolveStats* stats = nullptr,
-    PrecodeSolveResumeState* resume_state = nullptr);
+    PrecodeSolveResumeState* resume_state = nullptr,
+    size_t resume_persistent_byte_limit = (size_t)-1);
 
 /**
     Append one packet equation to a rank-deficient solve checkpoint.

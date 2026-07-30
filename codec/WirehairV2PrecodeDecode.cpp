@@ -72,14 +72,14 @@ uint32_t PacketDataBytes(
     return remaining < block_bytes ? (uint32_t)remaining : block_bytes;
 }
 
-bool ResumeFitsMemoryPolicy(
-    const PrecodeSolveResumeState& state,
+bool ResumePersistentByteLimit(
     size_t receive_block_capacity,
     size_t receive_id_capacity,
-    size_t pending_block_capacity)
+    size_t pending_block_capacity,
+    size_t& persistent_byte_limit)
 {
-    if (!state.Active ||
-        receive_id_capacity >
+    persistent_byte_limit = 0u;
+    if (receive_id_capacity >
             std::numeric_limits<size_t>::max() / sizeof(uint32_t))
     {
         return false;
@@ -92,15 +92,32 @@ bool ResumeFitsMemoryPolicy(
     }
     const size_t released_bytes = receive_block_capacity + id_bytes;
     const size_t allowed_extra = released_bytes / 4u;
-    const size_t checkpoint_bytes = state.PersistentBytes();
-    if (checkpoint_bytes >
-        std::numeric_limits<size_t>::max() - pending_block_capacity)
-    {
+    const size_t retained_limit =
+        allowed_extra >
+                std::numeric_limits<size_t>::max() - released_bytes ?
+            std::numeric_limits<size_t>::max() :
+            released_bytes + allowed_extra;
+    if (pending_block_capacity > retained_limit) {
         return false;
     }
-    const size_t retained_bytes = checkpoint_bytes + pending_block_capacity;
-    return retained_bytes <= released_bytes ||
-        retained_bytes - released_bytes <= allowed_extra;
+    persistent_byte_limit = retained_limit - pending_block_capacity;
+    return true;
+}
+
+bool ResumeFitsMemoryPolicy(
+    const PrecodeSolveResumeState& state,
+    size_t receive_block_capacity,
+    size_t receive_id_capacity,
+    size_t pending_block_capacity)
+{
+    size_t persistent_byte_limit = 0u;
+    return state.Active &&
+        ResumePersistentByteLimit(
+            receive_block_capacity,
+            receive_id_capacity,
+            pending_block_capacity,
+            persistent_byte_limit) &&
+        state.PersistentBytes() <= persistent_byte_limit;
 }
 
 bool MemoryRangesOverlap(
@@ -729,6 +746,18 @@ WirehairResult MessagePrecodeDecoder::AttemptSolve()
         // Keep the deterministic failure point at the solve boundary so the
         // test hook models a transient solver OOM (and counts as an attempt).
         GuardedDecoderAllocation();
+        const bool incremental_resume = IncrementalResumeEnabled();
+        size_t resume_persistent_byte_limit = 0u;
+        PrecodeSolveResumeState* resume_state_out = nullptr;
+        if (incremental_resume &&
+            ResumePersistentByteLimit(
+                ReceivedBlockStorage.capacity(),
+                ReceivedBlockIds.capacity(),
+                BlockBytesValue,
+                resume_persistent_byte_limit))
+        {
+            resume_state_out = &resume_state;
+        }
         const WirehairResult result =
             SolvePrecodeSystemForValidatedSystemWithRuntime(
             SystemValue,
@@ -738,7 +767,8 @@ WirehairResult MessagePrecodeDecoder::AttemptSolve()
             BlockBytesValue,
             intermediate,
             &solve_stats,
-            IncrementalResumeEnabled() ? &resume_state : nullptr);
+            resume_state_out,
+            resume_persistent_byte_limit);
         solve_stats.PacketSeedAttempt = PacketSeedAttemptValue;
         SolveStatsValue = solve_stats;
         if (result == Wirehair_Success)
