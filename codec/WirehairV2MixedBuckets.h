@@ -11,6 +11,22 @@
 
 namespace wirehair_v2 {
 
+struct MixedJointResidueBuckets
+{
+    std::unique_ptr<uint8_t[]> Subfield;
+    std::unique_ptr<uint8_t[]> Extension;
+    uint64_t SourceXors = 0u;
+    uint64_t MarginalXors = 0u;
+    uint64_t MarginalCopies = 0u;
+    uint64_t BlockAddSets = 0u;
+    uint64_t BlockAddSetSources = 0u;
+    uint64_t BlockZeroFills = 0u;
+    // Bytes in the three P*block_bytes data planes.  This intentionally does
+    // not claim allocator-exact accounting for the small scheduling vectors.
+    uint64_t ScratchBytes = 0u;
+    uint32_t ActiveDeltas = 0u;
+};
+
 // Initializes a block from its first source without a separate memset/read
 // pass.  Later sources are XORed in batches.
 class MixedBatchedBlockXorInitializer
@@ -20,9 +36,11 @@ public:
         uint8_t* destination,
         uint32_t block_bytes,
         const uint8_t* first_source,
+        MixedJointResidueBuckets& receipts,
         bool destination_initially_zero = false)
         : Destination(destination)
         , BlockBytes(block_bytes)
+        , Receipts(&receipts)
         , DestinationInitiallyZero(destination_initially_zero)
         , BatchCapacity(kFusedBatchSize)
     {
@@ -46,12 +64,15 @@ public:
             if (PendingCount == 0u) {
                 if (!DestinationInitiallyZero) {
                     std::memset(Destination, 0, BlockBytes);
+                    ++Receipts->BlockZeroFills;
                 }
             }
             else {
                 gf256_addset_multi_mem(
                     Destination, PendingSources, (int)PendingCount,
                     (int)BlockBytes);
+                ++Receipts->BlockAddSets;
+                Receipts->BlockAddSetSources += PendingCount;
             }
             Initialized = true;
             BatchCapacity = kRegularBatchSize;
@@ -70,24 +91,12 @@ private:
     static const uint32_t kFusedBatchSize = 16u;
     uint8_t* Destination;
     uint32_t BlockBytes;
+    MixedJointResidueBuckets* Receipts;
     bool DestinationInitiallyZero;
     const void* PendingSources[kFusedBatchSize];
     uint32_t PendingCount = 0u;
     uint32_t BatchCapacity;
     bool Initialized = false;
-};
-
-struct MixedJointResidueBuckets
-{
-    std::unique_ptr<uint8_t[]> Subfield;
-    std::unique_ptr<uint8_t[]> Extension;
-    uint64_t SourceXors = 0u;
-    uint64_t MarginalXors = 0u;
-    uint64_t MarginalCopies = 0u;
-    // Bytes in the three P*block_bytes data planes.  This intentionally does
-    // not claim allocator-exact accounting for the small scheduling vectors.
-    uint64_t ScratchBytes = 0u;
-    uint32_t ActiveDeltas = 0u;
 };
 
 // Accumulate the two independently rotated P-bucket marginals through one
@@ -169,6 +178,7 @@ bool AccumulateMixedJointResidueBucketsWithShifts(
     {
         std::memset(output.Subfield.get(), 0, plane_bytes);
         std::memset(output.Extension.get(), 0, plane_bytes);
+        output.BlockZeroFills = (uint64_t)2u * coefficient_period;
         return true;
     }
     bool marginals_initialized = false;
@@ -199,7 +209,7 @@ bool AccumulateMixedJointResidueBucketsWithShifts(
             {
                 accumulators.emplace_back(
                     temporary.get() + (size_t)a * block_bytes,
-                    block_bytes, nullptr);
+                    block_bytes, nullptr, output);
             }
         }
         else {
@@ -234,7 +244,7 @@ bool AccumulateMixedJointResidueBucketsWithShifts(
                     if (!initialized[a])
                     {
                         MixedBatchedBlockXorInitializer initialize(
-                            destination, block_bytes, source);
+                            destination, block_bytes, source, output);
                         initialize.Flush();
                         initialized[a] = 1u;
                     }
@@ -259,6 +269,7 @@ bool AccumulateMixedJointResidueBucketsWithShifts(
                     std::memset(
                         temporary.get() + (size_t)a * block_bytes,
                         0, block_bytes);
+                    ++output.BlockZeroFills;
                 }
             }
         }

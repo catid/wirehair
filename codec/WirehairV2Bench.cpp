@@ -23930,6 +23930,8 @@ bool HarvestParityCounters(
         total_out.BlockMulAdds += stats.BlockMulAdds;
         total_out.BlockCopies += stats.BlockCopies;
         total_out.BlockZeroFills += stats.BlockZeroFills;
+        total_out.BlockAddSets += stats.BlockAddSets;
+        total_out.BlockAddSetSources += stats.BlockAddSetSources;
         total_out.MixedJointSourceXors += stats.MixedJointSourceXors;
         total_out.MixedJointMarginalXors += stats.MixedJointMarginalXors;
         total_out.MixedJointMarginalCopies += stats.MixedJointMarginalCopies;
@@ -25489,12 +25491,16 @@ int CmdSelfTest()
             if (narrow.BlockXors != wide.BlockXors ||
                 narrow.BlockMulAdds != wide.BlockMulAdds ||
                 narrow.BlockCopies != wide.BlockCopies ||
-                narrow.BlockZeroFills != wide.BlockZeroFills)
+                narrow.BlockZeroFills != wide.BlockZeroFills ||
+                narrow.BlockAddSets != wide.BlockAddSets ||
+                narrow.BlockAddSetSources != wide.BlockAddSetSources)
             {
                 std::fprintf(stderr,
                     "zero-width parity BROKEN for %s\n"
-                    "  width 0     xors=%llu muladds=%llu copies=%llu zerofills=%llu\n"
-                    "  width 1280  xors=%llu muladds=%llu copies=%llu zerofills=%llu\n"
+                    "  width 0     xors=%llu muladds=%llu copies=%llu "
+                    "zerofills=%llu addsets=%llu addset_sources=%llu\n"
+                    "  width 1280  xors=%llu muladds=%llu copies=%llu "
+                    "zerofills=%llu addsets=%llu addset_sources=%llu\n"
                     "The count-only mode is describing a different algorithm "
                     "than the one that ships; every cost-model number derived "
                     "from it is invalid until this matches.\n",
@@ -25503,10 +25509,14 @@ int CmdSelfTest()
                     (unsigned long long)narrow.BlockMulAdds,
                     (unsigned long long)narrow.BlockCopies,
                     (unsigned long long)narrow.BlockZeroFills,
+                    (unsigned long long)narrow.BlockAddSets,
+                    (unsigned long long)narrow.BlockAddSetSources,
                     (unsigned long long)wide.BlockXors,
                     (unsigned long long)wide.BlockMulAdds,
                     (unsigned long long)wide.BlockCopies,
-                    (unsigned long long)wide.BlockZeroFills);
+                    (unsigned long long)wide.BlockZeroFills,
+                    (unsigned long long)wide.BlockAddSets,
+                    (unsigned long long)wide.BlockAddSetSources);
                 return 1;
             }
         }
@@ -25544,6 +25554,8 @@ int CmdSelfTest()
             narrow.BlockMulAdds == wide.BlockMulAdds &&
             narrow.BlockCopies == wide.BlockCopies &&
             narrow.BlockZeroFills == wide.BlockZeroFills &&
+            narrow.BlockAddSets == wide.BlockAddSets &&
+            narrow.BlockAddSetSources == wide.BlockAddSetSources &&
             narrow.MixedJointSourceXors == wide.MixedJointSourceXors &&
             narrow.MixedJointMarginalXors == wide.MixedJointMarginalXors &&
             narrow.MixedJointMarginalCopies ==
@@ -25560,10 +25572,12 @@ int CmdSelfTest()
         {
             std::fprintf(stderr,
                 "zero-width joint-delta parity BROKEN for %s\n"
-                "  width 0     xors=%llu muladds=%llu copies=%llu zerofills=%llu "
+                "  width 0     xors=%llu muladds=%llu copies=%llu "
+                "zerofills=%llu addsets=%llu addset_sources=%llu "
                 "joint_source=%llu joint_marginal=%llu joint_copies=%llu "
                 "joint_deltas=%u joint_scratch=%llu dual_source=%llu\n"
-                "  width 1280  xors=%llu muladds=%llu copies=%llu zerofills=%llu "
+                "  width 1280  xors=%llu muladds=%llu copies=%llu "
+                "zerofills=%llu addsets=%llu addset_sources=%llu "
                 "joint_source=%llu joint_marginal=%llu joint_copies=%llu "
                 "joint_deltas=%u joint_scratch=%llu dual_source=%llu\n",
                 kConfig,
@@ -25571,6 +25585,8 @@ int CmdSelfTest()
                 (unsigned long long)narrow.BlockMulAdds,
                 (unsigned long long)narrow.BlockCopies,
                 (unsigned long long)narrow.BlockZeroFills,
+                (unsigned long long)narrow.BlockAddSets,
+                (unsigned long long)narrow.BlockAddSetSources,
                 (unsigned long long)narrow.MixedJointSourceXors,
                 (unsigned long long)narrow.MixedJointMarginalXors,
                 (unsigned long long)narrow.MixedJointMarginalCopies,
@@ -25581,6 +25597,8 @@ int CmdSelfTest()
                 (unsigned long long)wide.BlockMulAdds,
                 (unsigned long long)wide.BlockCopies,
                 (unsigned long long)wide.BlockZeroFills,
+                (unsigned long long)wide.BlockAddSets,
+                (unsigned long long)wide.BlockAddSetSources,
                 (unsigned long long)wide.MixedJointSourceXors,
                 (unsigned long long)wide.MixedJointMarginalXors,
                 (unsigned long long)wide.MixedJointMarginalCopies,

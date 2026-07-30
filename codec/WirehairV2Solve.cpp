@@ -1069,9 +1069,11 @@ public:
         uint8_t* destination,
         uint32_t block_bytes,
         const uint8_t* first_source,
+        PrecodeSolveStats& stats,
         bool destination_initially_zero = false)
         : Destination(destination)
         , BlockBytes(block_bytes)
+        , Stats(stats)
         , DestinationInitiallyZero(destination_initially_zero)
         , BatchCapacity(kFusedBatchSize)
     {
@@ -1095,12 +1097,14 @@ public:
             if (PendingCount == 0u) {
                 if (!DestinationInitiallyZero) {
                     std::memset(Destination, 0, BlockBytes);
+                    ++Stats.BlockZeroFills;
                 }
-            }
-            else {
+            } else {
                 gf256_addset_multi_mem(
                     Destination, PendingSources, (int)PendingCount,
                     (int)BlockBytes);
+                ++Stats.BlockAddSets;
+                Stats.BlockAddSetSources += PendingCount;
             }
             Initialized = true;
             BatchCapacity = kRegularBatchSize;
@@ -1119,6 +1123,7 @@ private:
     static const uint32_t kFusedBatchSize = 16u;
     uint8_t* Destination;
     uint32_t BlockBytes;
+    PrecodeSolveStats& Stats;
     bool DestinationInitiallyZero;
     const void* PendingSources[kFusedBatchSize];
     uint32_t PendingCount = 0u;
@@ -1144,7 +1149,7 @@ void InitializeMixedBinaryPivotValue(
     PrecodeSolveStats& stats)
 {
     BatchedBlockXorInitializer value_xor(
-        value, block_bytes, pivot_rhs);
+        value, block_bytes, pivot_rhs, stats);
     for (uint32_t free_column : free_columns)
     {
         if ((relation[free_column >> 6] &
@@ -2438,6 +2443,9 @@ static WH2_MIXED_NOINLINE bool AccumulateJointMixedCompletionRhs(
         return false;
     }
     stats.BlockXors += buckets.SourceXors + buckets.MarginalXors;
+    stats.BlockAddSets += buckets.BlockAddSets;
+    stats.BlockAddSetSources += buckets.BlockAddSetSources;
+    stats.BlockZeroFills += buckets.BlockZeroFills;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     stats.MixedJointSourceXors = buckets.SourceXors;
     stats.MixedJointMarginalXors = buckets.MarginalXors;
@@ -2769,6 +2777,9 @@ static WH2_MIXED_NOINLINE bool AccumulateJointGroupedMixedCompletionRhs(
     }
     stats.BlockXors +=
         buckets.SourceXors + buckets.MarginalXors + tail_xors;
+    stats.BlockAddSets += buckets.BlockAddSets;
+    stats.BlockAddSetSources += buckets.BlockAddSetSources;
+    stats.BlockZeroFills += buckets.BlockZeroFills;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     stats.MixedJointSourceXors = buckets.SourceXors + tail_xors;
     stats.MixedJointMarginalXors = buckets.MarginalXors;
@@ -6657,7 +6668,7 @@ static WirehairResult SolvePrecodeSystemImpl(
                 initialization_sources <= 16u)
             {
                 BatchedBlockXorInitializer constant_xor(
-                    constant, block_bytes, equation.Data, true);
+                    constant, block_bytes, equation.Data, st, true);
                 // The payload is consumed as the initializer's first
                 // source instead of being copied in.  It is the same
                 // logical block copy the unfused branch below counts, and
@@ -6717,7 +6728,7 @@ static WirehairResult SolvePrecodeSystemImpl(
                     ++st.BlockZeroFills;
                 }
                 BatchedBlockXorInitializer rhs_xor(
-                    rhs.data(), block_bytes, rows[r].Data);
+                    rhs.data(), block_bytes, rows[r].Data, st);
                 if (rows[r].Data) {
                     ++st.BlockCopies;
                 }
@@ -6874,7 +6885,7 @@ static WirehairResult SolvePrecodeSystemImpl(
             std::fill(
                 accumulator.begin(), accumulator.end(), uint64_t{0});
             BatchedBlockXorInitializer rhs_xor(
-                rhs.data(), block_bytes, rows[r].Data);
+                rhs.data(), block_bytes, rows[r].Data, st);
             BatchedProjectionXorAccumulator projection_xor(
                 accumulator.data(), projection.data(), words);
             for (uint32_t column : rows[r].Columns)
@@ -7673,15 +7684,14 @@ static WirehairResult SolvePrecodeSystemImpl(
                 initialization_sources <= 16u)
             {
                 BatchedBlockXorInitializer value_xor(
-                    value, block_bytes, equation.Data);
-                // Same logical initialization the unfused branch below
-                // counts: the payload is a block copy, and its absence a
-                // block zero fill.  Neither is ever Add()ed.
+                    value, block_bytes, equation.Data, st);
+                // The payload is the same logical block copy the unfused
+                // branch below performs and is never Add()ed.  With no
+                // payload, the initializer's set-form kernel overwrites the
+                // destination from dependency sources; only an actually empty
+                // source set executes and records a whole-block zero fill.
                 if (equation.Data) {
                     ++st.BlockCopies;
-                }
-                else {
-                    ++st.BlockZeroFills;
                 }
                 for (uint32_t other : equation.Columns)
                 {
@@ -10144,8 +10154,11 @@ WH2_TEST_NOINLINE bool CheckMixedRhsFusionOracleForTesting()
     {
         // Include scalar tails and both sides of the major SIMD/fusion policy
         // boundaries.  The primitive is byte-oriented even though production
-        // mixed completion admits only even payload widths.
+        // mixed completion admits only even payload widths.  Zero preserves
+        // the operation-only solve contract; MakeBlockStorage below keeps all
+        // zero-length kernel base pointers non-null.
         const uint32_t block_sizes[] = {
+            0u,
             1u, 2u, 3u,
             15u, 16u, 17u,
             31u, 32u, 33u,
@@ -10173,9 +10186,10 @@ WH2_TEST_NOINLINE bool CheckMixedRhsFusionOracleForTesting()
             // extension and the 16-source set-form/additive spill boundary.
             for (uint32_t q = 0u; q <= 16u; ++q)
             {
-                std::vector<uint8_t> pivot_rhs(block_bytes);
+                std::vector<uint8_t> pivot_rhs =
+                    MakeBlockStorage(block_bytes);
                 std::vector<uint8_t> values(
-                    (size_t)(q + 1u) * block_bytes);
+                    MakeBlockStorage((size_t)(q + 1u) * block_bytes));
                 for (uint8_t& byte : pivot_rhs) {
                     byte = (uint8_t)next_random();
                 }
@@ -10199,10 +10213,14 @@ WH2_TEST_NOINLINE bool CheckMixedRhsFusionOracleForTesting()
                 };
                 for (uint64_t relation_word : patterns)
                 {
-                    std::vector<uint8_t> expected = pivot_rhs;
+                    std::vector<uint8_t> expected =
+                        MakeBlockStorage(block_bytes);
+                    std::memcpy(
+                        expected.data(), pivot_rhs.data(), block_bytes);
                     PrecodeSolveStats expected_stats = {};
                     expected_stats.BlockXors = 19u;
                     expected_stats.BlockMulAdds = 23u;
+                    uint32_t selected_sources = 1u;
                     for (uint32_t free_column : free_columns)
                     {
                         if ((relation_word &
@@ -10217,9 +10235,17 @@ WH2_TEST_NOINLINE bool CheckMixedRhsFusionOracleForTesting()
                                     block_bytes,
                             (int)block_bytes);
                         ++expected_stats.BlockXors;
+                        ++selected_sources;
                     }
+                    expected_stats.BlockAddSets = 1u;
+                    expected_stats.BlockAddSetSources =
+                        std::min<uint32_t>(16u, selected_sources);
 
-                    std::vector<uint8_t> actual_values = values;
+                    std::vector<uint8_t> actual_values =
+                        MakeBlockStorage((size_t)(q + 1u) * block_bytes);
+                    std::memcpy(
+                        actual_values.data(), values.data(),
+                        (size_t)(q + 1u) * block_bytes);
                     std::memset(
                         actual_values.data() + (size_t)q * block_bytes,
                         0xa5, block_bytes);
@@ -10238,7 +10264,11 @@ WH2_TEST_NOINLINE bool CheckMixedRhsFusionOracleForTesting()
                         actual_stats.BlockXors !=
                             expected_stats.BlockXors ||
                         actual_stats.BlockMulAdds !=
-                            expected_stats.BlockMulAdds)
+                            expected_stats.BlockMulAdds ||
+                        actual_stats.BlockAddSets !=
+                            expected_stats.BlockAddSets ||
+                        actual_stats.BlockAddSetSources !=
+                            expected_stats.BlockAddSetSources)
                     {
                         return false;
                     }
@@ -10246,8 +10276,10 @@ WH2_TEST_NOINLINE bool CheckMixedRhsFusionOracleForTesting()
 
                 // Exercise packet-data and null-data initialization with the
                 // same number of logical known-constant XORs as production.
-                std::vector<uint8_t> packet_data(block_bytes);
-                std::vector<uint8_t> sources((size_t)q * block_bytes);
+                std::vector<uint8_t> packet_data =
+                    MakeBlockStorage(block_bytes);
+                std::vector<uint8_t> sources =
+                    MakeBlockStorage((size_t)q * block_bytes);
                 for (uint8_t& byte : packet_data) {
                     byte = (uint8_t)next_random();
                 }
@@ -10258,7 +10290,8 @@ WH2_TEST_NOINLINE bool CheckMixedRhsFusionOracleForTesting()
                 {
                     const uint8_t* data = data_mode != 0u ?
                         packet_data.data() : nullptr;
-                    std::vector<uint8_t> expected(block_bytes, 0u);
+                    std::vector<uint8_t> expected =
+                        MakeBlockStorage(block_bytes);
                     if (data) {
                         std::memcpy(expected.data(), data, block_bytes);
                     }
@@ -10270,24 +10303,55 @@ WH2_TEST_NOINLINE bool CheckMixedRhsFusionOracleForTesting()
                     }
                     expected_xor.Flush();
 
-                    std::vector<uint8_t> actual(block_bytes, 0xa5u);
+                    std::vector<uint8_t> actual =
+                        MakeBlockStorage(block_bytes);
+                    std::fill(actual.begin(), actual.end(), uint8_t{0xa5});
+                    PrecodeSolveStats actual_stats;
                     BatchedBlockXorInitializer actual_xor(
-                        actual.data(), block_bytes, data);
+                        actual.data(), block_bytes, data, actual_stats);
                     for (uint32_t i = 0u; i < q; ++i) {
                         actual_xor.Add(
                             sources.data() + (size_t)i * block_bytes);
                     }
                     actual_xor.Flush();
-                    if (actual != expected) return false;
+                    const uint32_t initializer_sources =
+                        q + (data ? 1u : 0u);
+                    if (actual != expected ||
+                        actual_stats.BlockAddSets !=
+                            (initializer_sources != 0u ? 1u : 0u) ||
+                        actual_stats.BlockAddSetSources !=
+                            std::min<uint32_t>(16u, initializer_sources) ||
+                        actual_stats.BlockZeroFills !=
+                            (initializer_sources == 0u ? 1u : 0u))
+                    {
+                        return false;
+                    }
+                }
+
+                // An explicitly known-zero destination needs no physical
+                // initialization when the source set is empty.
+                std::vector<uint8_t> already_zero =
+                    MakeBlockStorage(block_bytes);
+                PrecodeSolveStats already_zero_stats;
+                BatchedBlockXorInitializer already_zero_xor(
+                    already_zero.data(), block_bytes, nullptr,
+                    already_zero_stats, true);
+                already_zero_xor.Flush();
+                if (already_zero_stats.BlockAddSets != 0u ||
+                    already_zero_stats.BlockAddSetSources != 0u ||
+                    already_zero_stats.BlockZeroFills != 0u)
+                {
+                    return false;
                 }
             }
 
             // The first set-form batch also has to transition correctly to
             // additive batches for unusually dense unused equations.
             const uint32_t source_count = 33u;
-            std::vector<uint8_t> sources(
-                (size_t)source_count * block_bytes);
-            std::vector<uint8_t> data(block_bytes);
+            std::vector<uint8_t> sources =
+                MakeBlockStorage((size_t)source_count * block_bytes);
+            std::vector<uint8_t> data =
+                MakeBlockStorage(block_bytes);
             for (uint8_t& byte : sources) {
                 byte = (uint8_t)next_random();
             }
@@ -10298,15 +10362,19 @@ WH2_TEST_NOINLINE bool CheckMixedRhsFusionOracleForTesting()
             {
                 const uint8_t* first = data_mode != 0u ?
                     data.data() : nullptr;
-                std::vector<uint8_t> expected(block_bytes, 0u);
+                std::vector<uint8_t> expected =
+                    MakeBlockStorage(block_bytes);
                 if (first) {
                     std::memcpy(expected.data(), first, block_bytes);
                 }
                 BatchedBlockXorAccumulator expected_xor(
                     expected.data(), block_bytes);
-                std::vector<uint8_t> actual(block_bytes, 0x5au);
+                std::vector<uint8_t> actual =
+                    MakeBlockStorage(block_bytes);
+                std::fill(actual.begin(), actual.end(), uint8_t{0x5a});
+                PrecodeSolveStats actual_stats;
                 BatchedBlockXorInitializer actual_xor(
-                    actual.data(), block_bytes, first);
+                    actual.data(), block_bytes, first, actual_stats);
                 for (uint32_t i = 0u; i < source_count; ++i)
                 {
                     const uint8_t* source =
@@ -10316,7 +10384,175 @@ WH2_TEST_NOINLINE bool CheckMixedRhsFusionOracleForTesting()
                 }
                 expected_xor.Flush();
                 actual_xor.Flush();
-                if (actual != expected) return false;
+                if (actual != expected ||
+                    actual_stats.BlockAddSets != 1u ||
+                    actual_stats.BlockAddSetSources != 16u ||
+                    actual_stats.BlockZeroFills != 0u)
+                {
+                    return false;
+                }
+            }
+        }
+
+        // The joint mixed-bucket implementation has a separate initializer
+        // because it is shared with the encoder.  Pin its receipts directly:
+        // block 0 populates all four temporary buckets at delta 0, while only
+        // two buckets are populated by block 1 at delta 1.
+        for (uint32_t block_bytes : {0u, 17u})
+        {
+            static const uint32_t kPeriod = 4u;
+            static const uint32_t kColumnCount = 8u;
+            std::vector<uint8_t> sources =
+                MakeBlockStorage((size_t)kColumnCount * block_bytes);
+            for (uint8_t& byte : sources) {
+                byte = (uint8_t)next_random();
+            }
+            for (uint32_t batch_mode = 0u; batch_mode < 2u; ++batch_mode)
+            {
+                MixedJointResidueBuckets buckets;
+                if (!AccumulateMixedJointResidueBucketsWithShifts(
+                        kColumnCount, kPeriod, block_bytes,
+                        [](uint32_t) { return 0u; },
+                        [](uint32_t block) { return block; },
+                        [&](uint32_t column) {
+                            return sources.data() +
+                                (size_t)column * block_bytes;
+                        },
+                        [](uint32_t column) { return column < 6u; },
+                        batch_mode != 0u, buckets, true) ||
+                    buckets.SourceXors != 6u ||
+                    buckets.MarginalXors != 8u ||
+                    buckets.MarginalCopies != 8u ||
+                    buckets.BlockAddSets != 6u ||
+                    buckets.BlockAddSetSources != 6u ||
+                    buckets.BlockZeroFills != 2u ||
+                    buckets.ActiveDeltas != 2u ||
+                    buckets.ScratchBytes !=
+                        (uint64_t)3u * kPeriod * block_bytes)
+                {
+                    return false;
+                }
+
+                std::vector<uint8_t> expected_subfield =
+                    MakeBlockStorage((size_t)kPeriod * block_bytes);
+                std::vector<uint8_t> expected_extension =
+                    MakeBlockStorage((size_t)kPeriod * block_bytes);
+                for (uint32_t residue = 0u;
+                     residue < kPeriod;
+                     ++residue)
+                {
+                    std::memcpy(
+                        expected_subfield.data() +
+                            (size_t)residue * block_bytes,
+                        sources.data() + (size_t)residue * block_bytes,
+                        block_bytes);
+                    std::memcpy(
+                        expected_extension.data() +
+                            (size_t)residue * block_bytes,
+                        sources.data() + (size_t)residue * block_bytes,
+                        block_bytes);
+                }
+                gf256_add_mem(
+                    expected_subfield.data(),
+                    sources.data() + (size_t)4u * block_bytes,
+                    (int)block_bytes);
+                gf256_add_mem(
+                    expected_subfield.data() + block_bytes,
+                    sources.data() + (size_t)5u * block_bytes,
+                    (int)block_bytes);
+                gf256_add_mem(
+                    expected_extension.data() + block_bytes,
+                    sources.data() + (size_t)4u * block_bytes,
+                    (int)block_bytes);
+                gf256_add_mem(
+                    expected_extension.data() +
+                        (size_t)2u * block_bytes,
+                    sources.data() + (size_t)5u * block_bytes,
+                    (int)block_bytes);
+                if (std::memcmp(
+                        buckets.Subfield.get(),
+                        expected_subfield.data(),
+                        (size_t)kPeriod * block_bytes) != 0 ||
+                    std::memcmp(
+                        buckets.Extension.get(),
+                        expected_extension.data(),
+                        (size_t)kPeriod * block_bytes) != 0)
+                {
+                    return false;
+                }
+            }
+
+            // When both coefficient blocks share one delta, each occupied
+            // bucket receives two sources.  Batched mode consumes both in one
+            // set-form call; scalar encoder mode initializes from the first
+            // and adds the second separately.
+            for (uint32_t batch_mode = 0u; batch_mode < 2u; ++batch_mode)
+            {
+                MixedJointResidueBuckets same_delta;
+                if (!AccumulateMixedJointResidueBucketsWithShifts(
+                        kColumnCount, kPeriod, block_bytes,
+                        [](uint32_t) { return 0u; },
+                        [](uint32_t) { return 0u; },
+                        [&](uint32_t column) {
+                            return sources.data() +
+                                (size_t)column * block_bytes;
+                        },
+                        [](uint32_t) { return true; },
+                        batch_mode != 0u, same_delta, true) ||
+                    same_delta.SourceXors != 8u ||
+                    same_delta.MarginalXors != 0u ||
+                    same_delta.MarginalCopies != 8u ||
+                    same_delta.BlockAddSets != 4u ||
+                    same_delta.BlockAddSetSources !=
+                        (batch_mode != 0u ? 8u : 4u) ||
+                    same_delta.BlockZeroFills != 0u ||
+                    same_delta.ActiveDeltas != 1u)
+                {
+                    return false;
+                }
+                for (uint32_t residue = 0u;
+                     residue < kPeriod;
+                     ++residue)
+                {
+                    std::vector<uint8_t> expected =
+                        MakeBlockStorage(block_bytes);
+                    std::memcpy(
+                        expected.data(),
+                        sources.data() + (size_t)residue * block_bytes,
+                        block_bytes);
+                    gf256_add_mem(
+                        expected.data(),
+                        sources.data() +
+                            (size_t)(residue + kPeriod) * block_bytes,
+                        (int)block_bytes);
+                    if (std::memcmp(
+                            same_delta.Subfield.get() +
+                                (size_t)residue * block_bytes,
+                            expected.data(), block_bytes) != 0 ||
+                        std::memcmp(
+                            same_delta.Extension.get() +
+                                (size_t)residue * block_bytes,
+                            expected.data(), block_bytes) != 0)
+                    {
+                        return false;
+                    }
+                }
+            }
+
+            MixedJointResidueBuckets empty_buckets;
+            if (!AccumulateMixedJointResidueBucketsWithShifts(
+                    0u, kPeriod, block_bytes,
+                    [](uint32_t) { return 0u; },
+                    [](uint32_t) { return 0u; },
+                    [&](uint32_t) { return sources.data(); },
+                    [](uint32_t) { return false; },
+                    true, empty_buckets, true) ||
+                empty_buckets.BlockAddSets != 0u ||
+                empty_buckets.BlockAddSetSources != 0u ||
+                empty_buckets.BlockZeroFills != 2u * kPeriod ||
+                empty_buckets.ActiveDeltas != 0u)
+            {
+                return false;
             }
         }
 
@@ -10359,6 +10595,7 @@ WH2_TEST_NOINLINE bool CheckMixedRhsFusionOracleForTesting()
             std::vector<uint8_t> expected = pivot_rhs;
             PrecodeSolveStats expected_stats = {};
             expected_stats.BlockXors = 11u;
+            uint32_t selected_sources = 1u;
             for (uint32_t free_column : free_columns)
             {
                 if ((relation[free_column >> 6] &
@@ -10372,7 +10609,10 @@ WH2_TEST_NOINLINE bool CheckMixedRhsFusionOracleForTesting()
                         (size_t)inactive_columns[free_column] * block_bytes,
                     (int)block_bytes);
                 ++expected_stats.BlockXors;
+                ++selected_sources;
             }
+            expected_stats.BlockAddSets = 1u;
+            expected_stats.BlockAddSetSources = selected_sources;
             std::vector<uint8_t> actual_values = values;
             std::memset(
                 actual_values.data() +
@@ -10392,7 +10632,11 @@ WH2_TEST_NOINLINE bool CheckMixedRhsFusionOracleForTesting()
                         (size_t)destination_index * block_bytes,
                     block_bytes) != 0 ||
                 actual_stats.BlockXors != expected_stats.BlockXors ||
-                actual_stats.BlockMulAdds != expected_stats.BlockMulAdds)
+                actual_stats.BlockMulAdds != expected_stats.BlockMulAdds ||
+                actual_stats.BlockAddSets !=
+                    expected_stats.BlockAddSets ||
+                actual_stats.BlockAddSetSources !=
+                    expected_stats.BlockAddSetSources)
             {
                 return false;
             }
@@ -10424,11 +10668,20 @@ WH2_TEST_NOINLINE bool CheckMixedRhsFusionOracleForTesting()
             legacy_xor.Add(source.data());
             legacy_xor.Flush();
             std::vector<uint8_t> fused_rhs(block_bytes, 0xa5u);
+            PrecodeSolveStats fused_initializer_stats;
             BatchedBlockXorInitializer fused_xor(
-                fused_rhs.data(), block_bytes, first);
+                fused_rhs.data(), block_bytes, first,
+                fused_initializer_stats);
             fused_xor.Add(source.data());
             fused_xor.Flush();
-            if (legacy_rhs != fused_rhs) return false;
+            if (legacy_rhs != fused_rhs ||
+                fused_initializer_stats.BlockAddSets != 1u ||
+                fused_initializer_stats.BlockAddSetSources !=
+                    (first ? 2u : 1u) ||
+                fused_initializer_stats.BlockZeroFills != 0u)
+            {
+                return false;
+            }
 
             std::vector<uint64_t> legacy_pivots((size_t)R * words, 0u);
             std::vector<uint64_t> fused_pivots((size_t)R * words, 0u);
@@ -10667,6 +10920,11 @@ WirehairResult ResumePrecodeSystem(
             return insertion == ResidualInsertResult::Dependent ?
                 Wirehair_NeedMore : Wirehair_Error;
         }
+        // Every accepted appended packet was copied into the checkpoint's RHS
+        // scratch above, including a new row that proves algebraically
+        // dependent or inconsistent.  Duplicate validation uses local scratch
+        // and returns through the non-mutating branch above.
+        ++state.Stats.BlockCopies;
         state.Rank = checked_rank;
         ++state.Stats.PacketRows;
         state.Stats.BinaryRowReferences += columns.size();
@@ -10707,6 +10965,7 @@ WirehairResult ResumePrecodeSystem(
                     (size_t)state.InactiveColumns[i] * block_bytes,
                 state.PivotRhs.data() + (size_t)i * block_bytes,
                 block_bytes);
+            ++state.Stats.BlockCopies;
         }
         for (uint32_t column = 0; column < state.ColumnCount; ++column)
         {
