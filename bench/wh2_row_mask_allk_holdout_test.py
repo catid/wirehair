@@ -17,6 +17,7 @@ import sys
 import tempfile
 import time
 import unittest
+from contextlib import ExitStack
 from unittest import mock
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -30,6 +31,10 @@ import wh2_row_mask_allk_holdout as subject
 
 
 MOMENT = datetime(2026, 7, 21, 0, 0, 0, tzinfo=timezone.utc)
+PIDFD_RUNTIME_AVAILABLE = (
+    hasattr(os, "pidfd_open") and
+    hasattr(subject.signal, "pidfd_send_signal")
+)
 
 
 class CanonicalJsonTest(unittest.TestCase):
@@ -263,6 +268,19 @@ class BenchmarkCsvTest(unittest.TestCase):
             subject.parse_benchmark_csv(
                 self.payload(values + ["unexpected"]), self.task)
 
+    def test_parser_and_huge_numeric_errors_are_normalized(self):
+        for field, value in (
+                ("seed_attempt", "9" * 5000),
+                ("failure_trials",
+                 "x" * (subject.csv.field_size_limit() + 1))):
+            row = dict(self.row)
+            row[field] = value
+            values = [row[name] for name in subject.CSV_FIELDS]
+            with self.subTest(field=field), \
+                    self.assertRaises(subject.CampaignError):
+                subject.parse_benchmark_csv(
+                    self.payload(values), self.task)
+
     def test_reduction_metrics_are_validated_before_publication(self):
         for field, value in (
                 ("N", "0257"),
@@ -489,6 +507,14 @@ class ReducerTest(unittest.TestCase):
             {"candidate": 0, "comparator": 1})
         self.assertTrue(
             p48["acceptance"]["gate_actual_recovery_improved"])
+        self.assertTrue(
+            p48["acceptance"]["gate_genuine_field_shortfall_improved"])
+        self.assertEqual(
+            p48["acceptance"]["genuine_field_shortfall_repairs"], 1)
+        self.assertEqual(
+            p48["acceptance"]["net_genuine_field_shortfall_repairs"], 1)
+        self.assertEqual(
+            p48["acceptance"]["field_shortfall_relabels_to_q_gt_h"], 0)
         self.assertTrue(p48["acceptance"]["accepted"])
         self.assertTrue(p32["acceptance"]["accepted"])
         # h1 is selection material, while q1 independently proves a headline
@@ -497,6 +523,16 @@ class ReducerTest(unittest.TestCase):
         self.assertEqual(p48["headline_repairs"], 1)
         self.assertEqual(p48["introductions_vs_comparator"], 0)
         self.assertEqual(p32["repairs_vs_comparator"], 3)
+        raw_transitions = p48["raw_cause_transitions_vs_comparator"]
+        headline_transitions = \
+            p48["headline_cause_transitions_vs_comparator"]
+        self.assertEqual(sum(raw_transitions.values()), 108)
+        self.assertEqual(sum(headline_transitions.values()), 104)
+        self.assertEqual(raw_transitions["field_shortfall->success"], 1)
+        self.assertEqual(
+            raw_transitions["field_shortfall->field_shortfall"], 1)
+        self.assertEqual(raw_transitions["q>H->success"], 1)
+        self.assertEqual(headline_transitions["q>H->success"], 1)
         self.assertEqual(p48["headline_common_success"], 103)
         self.assertEqual(p48["acceptance"]["common_success_xor_ratio"], "1")
         self.assertEqual(p48["acceptance"]["common_success_muladd_ratio"], "1")
@@ -584,6 +620,15 @@ class ReducerTest(unittest.TestCase):
             p48["acceptance"]["gate_field_shortfall_improved"])
         self.assertFalse(
             p48["acceptance"]["gate_actual_recovery_improved"])
+        self.assertFalse(
+            p48["acceptance"]["gate_genuine_field_shortfall_improved"])
+        self.assertEqual(
+            p48["raw_cause_transitions_vs_comparator"]
+            ["field_shortfall->q>H"], 2)
+        self.assertEqual(
+            p48["acceptance"]["field_shortfall_relabels_to_q_gt_h"], 2)
+        self.assertEqual(
+            p48["acceptance"]["genuine_field_shortfall_repairs"], 0)
         self.assertEqual(p48["repairs_vs_comparator"], 0)
 
     def test_reject_hard_relabel_even_with_independent_recovery(self):
@@ -606,11 +651,59 @@ class ReducerTest(unittest.TestCase):
         self.assertTrue(
             p48["acceptance"]["gate_actual_recovery_improved"])
         self.assertFalse(
+            p48["acceptance"]["gate_genuine_field_shortfall_improved"])
+        self.assertEqual(
+            p48["raw_cause_transitions_vs_comparator"]
+            ["field_shortfall->q>H"], 2)
+        self.assertFalse(
             p48["acceptance"]["gate_dev_fix_confirmed"])
         self.assertEqual(
             p48["acceptance"]["panel_source_failures_fixed"], 0)
         self.assertEqual(
             p48["fix_confirmation"]["panel_source_failures_fixed"], 0)
+
+    def test_genuine_repair_remains_visible_beside_cause_relabel(self):
+        outcomes = dict(self.outcomes)
+        relabeled = (5, 1, "adversarial")
+        outcomes[("p48_r3_pfx007", "control", *relabeled)] = \
+            subject.synth_cell("q>H")
+        outcomes[("p48_r3_pfx007", "hard", *relabeled)] = \
+            subject.synth_cell("q>H")
+        reduction = self.reduce(outcomes)
+        p48 = reduction["candidates"]["p48_r3_pfx007"]
+        self.assertTrue(p48["acceptance"]["accepted"])
+        self.assertEqual(
+            p48["acceptance"]["genuine_field_shortfall_repairs"], 1)
+        self.assertEqual(
+            p48["acceptance"]["field_shortfall_relabels_to_q_gt_h"], 1)
+        self.assertEqual(
+            p48["acceptance"]["net_genuine_field_shortfall_repairs"], 1)
+
+    def test_hard_field_shortfall_introduction_erases_net_genuine_gain(self):
+        outcomes = dict(self.outcomes)
+        relabeled = (5, 1, "adversarial")
+        introduced = (7, 2, "repair-only")
+        outcomes[("p48_r3_pfx007", "control", *relabeled)] = \
+            subject.synth_cell("q>H")
+        outcomes[("p48_r3_pfx007", "hard", *relabeled)] = \
+            subject.synth_cell("q>H")
+        outcomes[("p48_r3_pfx007", "control", *introduced)] = \
+            subject.synth_cell("field_shortfall")
+        outcomes[("p48_r3_pfx007", "hard", *introduced)] = \
+            subject.synth_cell("field_shortfall")
+        reduction = self.reduce(outcomes)
+        p48 = reduction["candidates"]["p48_r3_pfx007"]
+        self.assertFalse(p48["acceptance"]["accepted"])
+        self.assertTrue(
+            p48["acceptance"]["gate_field_shortfall_improved"])
+        self.assertTrue(
+            p48["acceptance"]["gate_raw_total_recovery_improved"])
+        self.assertTrue(
+            p48["acceptance"]["gate_actual_recovery_improved"])
+        self.assertEqual(
+            p48["acceptance"]["net_genuine_field_shortfall_repairs"], 0)
+        self.assertFalse(
+            p48["acceptance"]["gate_genuine_field_shortfall_improved"])
 
     def test_reject_dev_union_introductions_that_erase_raw_gain(self):
         outcomes = dict(self.outcomes)
@@ -692,10 +785,162 @@ class ReducerTest(unittest.TestCase):
             "cells": 1, "candidate_minus_comparator_sum": 4, "max_abs": 4})
         self.assertEqual(deltas["binary_deficit"]["cells"], 0)
 
+    def test_infrastructure_history_is_reported_but_not_promotional_error(self):
+        history = [{
+            "segment": 0, "stage": "hard", "failure_index": 0,
+            "classification": "infrastructure",
+            "failure": {
+                "status": "sampler_returncode", "returncode": 1},
+        }]
+        reduction = subject.reduce_outcomes(
+            self.outcomes, self.hard, self.source_records,
+            k_lo=2, k_hi=13, historical_failures=history)
+        self.assertTrue(reduction["accepted"])
+        self.assertEqual(reduction["codec_errors"], 0)
+        self.assertEqual(
+            reduction["historical_infrastructure_failure_count"], 1)
+        self.assertTrue(all(
+            block["acceptance"]["gate_zero_historical_codec_failures"]
+            for block in reduction["candidates"].values()))
+
+    def test_reject_noncanonical_historical_failure_ledger(self):
+        entry = {
+            "segment": 1, "stage": "hard", "failure_index": 0,
+            "classification": "codec",
+            "failure": {
+                "job": 0, "status": "validation_error", "detail": "bad"},
+        }
+        for history in (
+                [entry, dict(entry)],
+                [{**entry, "classification": "unknown"}],
+                [{**entry, "extra": 1}],
+                [{**entry, "classification": "infrastructure"}],
+                [{**entry, "classification": "indeterminate",
+                  "failure": {
+                      "job": 0, "status": "validation_error",
+                      "detail": "bad",
+                  }}],
+                [{**entry, "classification": "codec",
+                  "failure": {
+                      "status": "launcher_exception", "detail": "bad",
+                  }}],
+                [{**entry, "classification": "indeterminate",
+                  "failure": {
+                      "job": 0,
+                      "status": "terminal_evidence_incomplete",
+                      "observed_suffixes": ["pid", "stderr"],
+                  }}],
+                [{**entry, "failure": {
+                    "job": 0, "status": False, "detail": "bad",
+                }}],
+                [{**entry, "failure_index": 999}],
+                [{**entry, "failure": {
+                    "job": 0, "status": "validation_error",
+                }}],
+                [{**entry, "failure": {
+                    "job": 100000, "status": "validation_error",
+                    "detail": "bad",
+                }}],
+                [{
+                    "segment": 0, "stage": "hard", "failure_index": 0,
+                    "classification": "infrastructure",
+                    "failure": {
+                        "status": "sampler_returncode",
+                    },
+                }],
+                [{
+                    "segment": 0, "stage": "hard", "failure_index": 0,
+                    "classification": "infrastructure",
+                    "failure": {
+                        "status": "concurrent_i2c_reader",
+                        "readers": {
+                            "not-a-pid": ["arbitrary-device"],
+                        },
+                    },
+                }]):
+            with self.subTest(history=history), \
+                    self.assertRaises(subject.CampaignError):
+                subject.reduce_outcomes(
+                    self.outcomes, self.hard, self.source_records,
+                    k_lo=2, k_hi=13, historical_failures=history)
+
 
 class ThermalGateTest(unittest.TestCase):
     def validate(self, root, design, tasks):
         return subject.validate_thermal(root, design, tasks)
+
+    def append_successful_retry(self, root):
+        """Clone fixture segment 0 as the successful stage-atomic retry."""
+        intent0 = subject.load_json(
+            subject.segment_path(root, 0, "intent"))
+        ready0 = subject.load_json(
+            subject.segment_path(root, 0, "ready"))
+        final0_path = subject.segment_path(root, 0, "final")
+        final0 = subject.load_json(final0_path)
+
+        intent1 = dict(intent0)
+        intent1["segment"] = 1
+        subject.write_once(
+            subject.segment_path(root, 1, "intent"),
+            subject.canonical_json(intent1))
+        ready1 = dict(ready0)
+        ready1["segment"] = 1
+        ready1["intent_sha256"] = subject.sha256_file(
+            subject.segment_path(root, 1, "intent"))
+        subject.write_once(
+            subject.segment_path(root, 1, "ready"),
+            subject.canonical_json(ready1))
+        shutil.copytree(
+            root / "attempts" / "segment000",
+            root / "attempts" / "segment001")
+        manifest_sha256, file_count = subject.seal_attempt_manifest(
+            root, 1, {0}, require_complete=True)
+        csv_path = root / "thermal" / "segment000.csv"
+        stderr_path = root / "thermal" / "segment000.stderr"
+        retry_csv = root / "thermal" / "segment001.csv"
+        retry_stderr = root / "thermal" / "segment001.stderr"
+        retry_csv.write_bytes(csv_path.read_bytes())
+        retry_stderr.write_bytes(stderr_path.read_bytes())
+        receipt_path = subject.job_receipt_path(root, 0)
+        receipt = subject.load_json(receipt_path)
+        receipt["segment"] = 1
+        receipt_path.write_bytes(subject.canonical_json(receipt))
+        final1 = dict(final0)
+        final1.update({
+            "segment": 1,
+            "intent_sha256": subject.sha256_file(
+                subject.segment_path(root, 1, "intent")),
+            "ready_sha256": subject.sha256_file(
+                subject.segment_path(root, 1, "ready")),
+            "thermal_csv": retry_csv.name,
+            "thermal_csv_sha256":
+                subject.bounded_thermal_sha256(retry_csv),
+            "thermal_stderr": retry_stderr.name,
+            "thermal_stderr_sha256":
+                subject.bounded_thermal_stderr_sha256(retry_stderr),
+            "attempt_manifest": "segment001.attempts.sha256",
+            "attempt_manifest_sha256": manifest_sha256,
+            "attempt_file_count": file_count,
+        })
+        subject.write_once(
+            subject.segment_path(root, 1, "final"),
+            subject.canonical_json(final1))
+        return final0_path, final0, csv_path, stderr_path
+
+    def reseal_attempt_manifest(self, root, segment, final):
+        directory = root / "attempts" / "segment{:03d}".format(segment)
+        files = sorted(directory.iterdir())
+        data = b"".join(
+            "{}  {}\n".format(
+                subject.sha256_file(path),
+                path.relative_to(root)).encode("ascii")
+            for path in files
+        )
+        manifest = root / "segments" / \
+            "segment{:03d}.attempts.sha256".format(segment)
+        manifest.write_bytes(data)
+        final["attempt_manifest_sha256"] = subject.sha256_bytes(data)
+        final["attempt_file_count"] = len(files)
 
     def test_live_thermal_snapshot_retries_only_incomplete_tail(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -940,6 +1185,377 @@ class ThermalGateTest(unittest.TestCase):
             with self.assertRaises(subject.CampaignError):
                 subject.validate_thermal_rows([], segment=0)
 
+    def test_authenticated_evidence_snapshot_rejects_late_mutation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = Path(temporary) / "fixture"
+            fixture.mkdir()
+            subject.make_success_fixture(fixture)
+
+            for mutation in (
+                    "late_attempt", "segment_final", "job_receipt",
+                    "thermal_csv", "raw_output", "extra_output"):
+                with self.subTest(mutation=mutation):
+                    root = Path(temporary) / mutation
+                    shutil.copytree(fixture, root)
+                    tasks = [{
+                        "job": 0, "stage": "hard",
+                        "output_name": "job.csv", "argv": ["/bin/true"],
+                        "period": 48, "rows": 3, "mask": 0x007,
+                        "seed_index": 0, "schedule": "burst",
+                        "Ks": [2],
+                    }]
+                    attempt_hashes = {}
+                    runtime_hashes = {}
+                    output_hashes = {}
+                    subject.validate_thermal(
+                        root, {"worker_count": 1}, tasks,
+                        attempt_hash_sink=attempt_hashes,
+                        runtime_hash_sink=runtime_hashes,
+                        output_hash_sink=output_hashes)
+                    subject.authenticated_runtime_snapshot(
+                        root, runtime_hashes, attempt_hashes)
+                    subject.verify_published_output_snapshot(
+                        root, output_hashes)
+
+                    if mutation == "late_attempt":
+                        (root / "attempts" / "segment000" /
+                         "late.unexpected").write_bytes(b"late\n")
+                    elif mutation == "segment_final":
+                        subject.segment_path(
+                            root, 0, "final").write_bytes(
+                                subject.canonical_json({}))
+                    elif mutation == "job_receipt":
+                        subject.job_receipt_path(
+                            root, 0).write_bytes(subject.canonical_json({}))
+                    elif mutation == "thermal_csv":
+                        with (root / "thermal" /
+                              "segment000.csv").open("ab") as stream:
+                            stream.write(b"late\n")
+                    elif mutation == "raw_output":
+                        (root / "raw" / "job.csv").write_bytes(
+                            b"replacement\n")
+                    else:
+                        (root / "raw" / "late.csv").write_bytes(b"late\n")
+
+                    if mutation in ("raw_output", "extra_output"):
+                        verifier = lambda: \
+                            subject.verify_published_output_snapshot(
+                                root, output_hashes)
+                    else:
+                        verifier = lambda: \
+                            subject.authenticated_runtime_snapshot(
+                                root, runtime_hashes, attempt_hashes)
+                    with self.assertRaises(subject.CampaignError):
+                        verifier()
+
+    def test_authenticated_snapshots_reject_redirected_directories(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = Path(temporary) / "fixture"
+            fixture.mkdir()
+            subject.make_success_fixture(fixture)
+            for directory_name in (
+                    "segments", "thermal", "job_receipts", "attempts",
+                    "raw", "stderr", "exit"):
+                with self.subTest(directory=directory_name):
+                    root = Path(temporary) / ("redirect-" + directory_name)
+                    shutil.copytree(fixture, root)
+                    tasks = [{
+                        "job": 0, "stage": "hard",
+                        "output_name": "job.csv", "argv": ["/bin/true"],
+                        "period": 48, "rows": 3, "mask": 0x007,
+                        "seed_index": 0, "schedule": "burst", "Ks": [2],
+                    }]
+                    attempt_hashes = {}
+                    runtime_hashes = {}
+                    output_hashes = {}
+                    subject.validate_thermal(
+                        root, {"worker_count": 1}, tasks,
+                        attempt_hash_sink=attempt_hashes,
+                        runtime_hash_sink=runtime_hashes,
+                        output_hash_sink=output_hashes)
+                    outside = Path(temporary) / (
+                        "outside-" + directory_name)
+                    shutil.copytree(root / directory_name, outside)
+                    shutil.rmtree(root / directory_name)
+                    (root / directory_name).symlink_to(
+                        outside, target_is_directory=True)
+                    if directory_name in ("raw", "stderr", "exit"):
+                        verifier = lambda: \
+                            subject.verify_published_output_snapshot(
+                                root, output_hashes)
+                    else:
+                        verifier = lambda: \
+                            subject.authenticated_runtime_snapshot(
+                                root, runtime_hashes, attempt_hashes)
+                    with self.assertRaises(subject.CampaignError):
+                        verifier()
+
+    def test_authenticated_snapshots_reject_inventory_change_during_list(self):
+        for directory_name in ("segments", "raw"):
+            with self.subTest(directory=directory_name), \
+                    tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary) / "fixture"
+                root.mkdir()
+                tasks, _ = subject.make_success_fixture(root)
+                attempt_hashes = {}
+                runtime_hashes = {}
+                output_hashes = {}
+                subject.validate_thermal(
+                    root, {"worker_count": 1}, tasks,
+                    attempt_hash_sink=attempt_hashes,
+                    runtime_hash_sink=runtime_hashes,
+                    output_hash_sink=output_hashes)
+                target = (root / directory_name).resolve()
+                real_listdir = os.listdir
+                mutated = False
+
+                def list_then_add(descriptor):
+                    nonlocal mutated
+                    names = real_listdir(descriptor)
+                    if not mutated and isinstance(descriptor, int) and \
+                            Path("/proc/self/fd/{}".format(
+                                descriptor)).resolve() == target:
+                        mutated = True
+                        (target / "late.unexpected").write_bytes(b"late\n")
+                    return names
+
+                with mock.patch.object(
+                        subject.os, "listdir", side_effect=list_then_add), \
+                        self.assertRaises(subject.CampaignError):
+                    if directory_name == "raw":
+                        subject.verify_published_output_snapshot(
+                            root, output_hashes)
+                    else:
+                        subject.authenticated_runtime_snapshot(
+                            root, runtime_hashes, attempt_hashes)
+                self.assertTrue(mutated)
+
+    def test_authenticated_snapshots_hold_prior_sibling_directories(self):
+        for trigger_name, mutate_name, output_inventory in (
+                ("thermal", "segments", False),
+                ("stderr", "raw", True)):
+            with self.subTest(
+                    trigger=trigger_name, mutate=mutate_name), \
+                    tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary) / "fixture"
+                root.mkdir()
+                tasks, _ = subject.make_success_fixture(root)
+                attempt_hashes = {}
+                runtime_hashes = {}
+                output_hashes = {}
+                subject.validate_thermal(
+                    root, {"worker_count": 1}, tasks,
+                    attempt_hash_sink=attempt_hashes,
+                    runtime_hash_sink=runtime_hashes,
+                    output_hash_sink=output_hashes)
+                trigger = (root / trigger_name).resolve()
+                mutate = (root / mutate_name).resolve()
+                real_listdir = os.listdir
+                changed = False
+
+                def list_then_change_prior(descriptor):
+                    nonlocal changed
+                    names = real_listdir(descriptor)
+                    if not changed and isinstance(descriptor, int) and \
+                            Path("/proc/self/fd/{}".format(
+                                descriptor)).resolve() == trigger:
+                        changed = True
+                        (mutate / "late.unexpected").write_bytes(b"late\n")
+                    return names
+
+                with mock.patch.object(
+                        subject.os, "listdir",
+                        side_effect=list_then_change_prior), \
+                        self.assertRaises(subject.CampaignError):
+                    if output_inventory:
+                        subject.verify_published_output_snapshot(
+                            root, output_hashes)
+                    else:
+                        subject.authenticated_runtime_snapshot(
+                            root, runtime_hashes, attempt_hashes)
+                self.assertTrue(changed)
+
+    def test_authenticated_snapshots_recheck_prior_sibling_leaves(self):
+        for trigger_name, target_relative, output_inventory in (
+                (
+                    "thermal",
+                    Path("segments") / "segment000.final.json",
+                    False,
+                ),
+                ("stderr", Path("raw") / "job.csv", True)):
+            with self.subTest(
+                    trigger=trigger_name, target=str(target_relative)), \
+                    tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary) / "fixture"
+                root.mkdir()
+                tasks, _ = subject.make_success_fixture(root)
+                attempt_hashes = {}
+                runtime_hashes = {}
+                output_hashes = {}
+                subject.validate_thermal(
+                    root, {"worker_count": 1}, tasks,
+                    attempt_hash_sink=attempt_hashes,
+                    runtime_hash_sink=runtime_hashes,
+                    output_hash_sink=output_hashes)
+                trigger = (root / trigger_name).resolve()
+                target = root / target_relative
+                original = target.read_bytes()
+                real_listdir = os.listdir
+                changed = False
+
+                def list_then_rewrite_prior(descriptor):
+                    nonlocal changed
+                    names = real_listdir(descriptor)
+                    if not changed and isinstance(descriptor, int) and \
+                            Path("/proc/self/fd/{}".format(
+                                descriptor)).resolve() == trigger:
+                        changed = True
+                        with target.open("r+b") as stream:
+                            stream.write(b"X" * len(original))
+                            stream.flush()
+                            os.fsync(stream.fileno())
+                    return names
+
+                with mock.patch.object(
+                        subject.os, "listdir",
+                        side_effect=list_then_rewrite_prior), \
+                        self.assertRaises(subject.CampaignError):
+                    if output_inventory:
+                        subject.verify_published_output_snapshot(
+                            root, output_hashes)
+                    else:
+                        subject.authenticated_runtime_snapshot(
+                            root, runtime_hashes, attempt_hashes)
+                self.assertTrue(changed)
+
+    def test_bounded_snapshot_rejects_same_inode_rewrite_during_read(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "fixture"
+            root.mkdir()
+            tasks, _ = subject.make_success_fixture(root)
+            attempt_hashes = {}
+            runtime_hashes = {}
+            output_hashes = {}
+            subject.validate_thermal(
+                root, {"worker_count": 1}, tasks,
+                attempt_hash_sink=attempt_hashes,
+                runtime_hash_sink=runtime_hashes,
+                output_hash_sink=output_hashes)
+            target = root / "raw" / "job.csv"
+            original = target.read_bytes()
+            real_read = os.read
+            mutated = False
+
+            def read_then_rewrite(descriptor, size):
+                nonlocal mutated
+                chunk = real_read(descriptor, size)
+                if chunk and not mutated and \
+                        Path("/proc/self/fd/{}".format(
+                            descriptor)).resolve() == target:
+                    mutated = True
+                    with target.open("r+b") as stream:
+                        stream.write(b"X" * len(original))
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                return chunk
+
+            with mock.patch.object(
+                    subject.os, "read", side_effect=read_then_rewrite), \
+                    self.assertRaises(subject.CampaignError):
+                subject.verify_published_output_snapshot(
+                    root, output_hashes)
+            self.assertTrue(mutated)
+
+    def test_attempt_artifact_size_policy_applies_at_every_gate(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "fixture"
+            root.mkdir()
+            tasks, _ = subject.make_success_fixture(root)
+            attempt_hashes = {}
+            runtime_hashes = {}
+            output_hashes = {}
+            subject.validate_thermal(
+                root, {"worker_count": 1}, tasks,
+                attempt_hash_sink=attempt_hashes,
+                runtime_hash_sink=runtime_hashes,
+                output_hash_sink=output_hashes)
+            final = subject.load_json(
+                subject.segment_path(root, 0, "final"))
+            stdout = root / "attempts" / "segment000" / "job00000.stdout"
+            stdout.write_bytes(b"X" * 33)
+            with mock.patch.object(
+                    subject, "MAX_BENCHMARK_RESULT_BYTES", 32):
+                with self.assertRaises(subject.CampaignError):
+                    subject.validated_attempt_bytes(
+                        root, 0, 0, "stdout")
+                with self.assertRaises(subject.CampaignError):
+                    subject.validate_attempt_manifest(
+                        root, 0, final, {0}, require_complete=True)
+                with self.assertRaises(subject.CampaignError):
+                    subject.seal_attempt_manifest(
+                        root, 0, {0}, require_complete=True)
+                attempt_hashes[(0, 0, "stdout")] = \
+                    subject.sha256_file(stdout)
+                with self.assertRaises(subject.CampaignError):
+                    subject.authenticated_runtime_snapshot(
+                        root, runtime_hashes, attempt_hashes)
+
+    def test_validate_thermal_checks_authenticated_job_receipt_identity(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "fixture"
+            root.mkdir()
+            tasks, design = subject.make_success_fixture(root)
+            receipt_path = subject.job_receipt_path(root, 0)
+            receipt = subject.load_json(receipt_path)
+            receipt.update({
+                "schema": "wrong.schema",
+                "job": 999,
+                "stage": "control",
+                "output_name": "wrong.csv",
+                "returncode": 77,
+                "extra": "must reject",
+            })
+            receipt_path.write_bytes(subject.canonical_json(receipt))
+            with mock.patch.object(
+                    subject, "completed_jobs", return_value={0}), \
+                    self.assertRaises(subject.CampaignError):
+                subject.validate_thermal(root, design, tasks)
+
+    def test_segment_receipt_timestamps_and_chronology_are_strict(self):
+        mutations = (
+            ("intent_utc", lambda intent, _ready, _final:
+             intent.__setitem__("created_utc", "not-a-timestamp")),
+            ("ready_utc", lambda _intent, ready, _final:
+             ready.__setitem__("ready_utc", "not-a-timestamp")),
+            ("final_utc", lambda _intent, _ready, final:
+             final.__setitem__("ended_utc", "not-a-timestamp")),
+            ("intent_after_ready", lambda intent, _ready, _final:
+             intent.__setitem__("created_monotonic_s", 999.0)),
+            ("final_before_ready", lambda _intent, _ready, final:
+             final.__setitem__("jobs_ended_monotonic_s", 100.0)),
+        )
+        for name, mutate in mutations:
+            with self.subTest(name=name), \
+                    tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary) / name
+                root.mkdir()
+                tasks, design = subject.make_success_fixture(root)
+                intent_path = subject.segment_path(root, 0, "intent")
+                ready_path = subject.segment_path(root, 0, "ready")
+                final_path = subject.segment_path(root, 0, "final")
+                intent = subject.load_json(intent_path)
+                ready = subject.load_json(ready_path)
+                final = subject.load_json(final_path)
+                mutate(intent, ready, final)
+                intent_path.write_bytes(subject.canonical_json(intent))
+                ready["intent_sha256"] = subject.sha256_file(intent_path)
+                ready_path.write_bytes(subject.canonical_json(ready))
+                final["intent_sha256"] = subject.sha256_file(intent_path)
+                final["ready_sha256"] = subject.sha256_file(ready_path)
+                final_path.write_bytes(subject.canonical_json(final))
+                with self.assertRaises(subject.CampaignError):
+                    subject.validate_thermal(root, design, tasks)
+
     def test_failed_ready_segment_preserves_bounded_diagnostic_evidence(self):
         for diagnostic in ("torn_csv", "stderr"):
             with self.subTest(diagnostic=diagnostic), \
@@ -947,63 +1563,8 @@ class ThermalGateTest(unittest.TestCase):
                 root = Path(temporary) / diagnostic
                 root.mkdir()
                 tasks, design = subject.make_success_fixture(root)
-                intent0 = subject.load_json(
-                    subject.segment_path(root, 0, "intent"))
-                ready0 = subject.load_json(
-                    subject.segment_path(root, 0, "ready"))
-                final0_path = subject.segment_path(root, 0, "final")
-                final0 = subject.load_json(final0_path)
-
-                intent1 = dict(intent0)
-                intent1["segment"] = 1
-                subject.write_once(
-                    subject.segment_path(root, 1, "intent"),
-                    subject.canonical_json(intent1))
-                ready1 = dict(ready0)
-                ready1["segment"] = 1
-                ready1["intent_sha256"] = subject.sha256_file(
-                    subject.segment_path(root, 1, "intent"))
-                subject.write_once(
-                    subject.segment_path(root, 1, "ready"),
-                    subject.canonical_json(ready1))
-                shutil.copytree(
-                    root / "attempts" / "segment000",
-                    root / "attempts" / "segment001")
-                manifest_sha256, file_count = \
-                    subject.seal_attempt_manifest(
-                        root, 1, {0}, require_complete=True)
-                csv_path = root / "thermal" / "segment000.csv"
-                stderr_path = root / "thermal" / "segment000.stderr"
-                retry_csv = root / "thermal" / "segment001.csv"
-                retry_stderr = root / "thermal" / "segment001.stderr"
-                retry_csv.write_bytes(csv_path.read_bytes())
-                retry_stderr.write_bytes(stderr_path.read_bytes())
-                receipt_path = subject.job_receipt_path(root, 0)
-                receipt = subject.load_json(receipt_path)
-                receipt["segment"] = 1
-                receipt_path.write_bytes(subject.canonical_json(receipt))
-                final1 = dict(final0)
-                final1.update({
-                    "segment": 1,
-                    "intent_sha256": subject.sha256_file(
-                        subject.segment_path(root, 1, "intent")),
-                    "ready_sha256": subject.sha256_file(
-                        subject.segment_path(root, 1, "ready")),
-                    "thermal_csv": retry_csv.name,
-                    "thermal_csv_sha256":
-                        subject.bounded_thermal_sha256(retry_csv),
-                    "thermal_stderr": retry_stderr.name,
-                    "thermal_stderr_sha256":
-                        subject.bounded_thermal_stderr_sha256(
-                            retry_stderr),
-                    "attempt_manifest":
-                        "segment001.attempts.sha256",
-                    "attempt_manifest_sha256": manifest_sha256,
-                    "attempt_file_count": file_count,
-                })
-                subject.write_once(
-                    subject.segment_path(root, 1, "final"),
-                    subject.canonical_json(final1))
+                final0_path, final0, csv_path, stderr_path = \
+                    self.append_successful_retry(root)
 
                 if diagnostic == "torn_csv":
                     with csv_path.open("ab") as stream:
@@ -1012,7 +1573,8 @@ class ThermalGateTest(unittest.TestCase):
                     stderr_path.write_bytes(b"sampler traceback\n")
                 final0.update({
                     "state": "failed",
-                    "failures": [{"status": "sampler_failed"}],
+                    "failures": [{
+                        "status": "sampler_returncode", "returncode": 1}],
                     "rolled_back_jobs": [0],
                     "published_jobs": [],
                     "sampler_returncode": 1,
@@ -1026,6 +1588,560 @@ class ThermalGateTest(unittest.TestCase):
                 self.assertEqual(receipt["failed_segments"], 1)
                 self.assertEqual(receipt["successful_segments"], 1)
                 self.assertEqual(receipt["samples"], 3)
+                self.assertEqual(
+                    receipt["historical_codec_failure_count"], 0)
+                self.assertEqual(
+                    receipt["historical_infrastructure_failure_count"], 1)
+
+    def test_failed_ready_segment_requires_bound_thermal_stop_action(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "missing-ready-stop"
+            root.mkdir()
+            tasks, design = subject.make_success_fixture(root)
+            final_path, final, _, _ = self.append_successful_retry(root)
+            final.update({
+                "state": "failed",
+                "failures": [{
+                    "status": "sampler_returncode", "returncode": 1,
+                }],
+                "rolled_back_jobs": [0],
+                "published_jobs": [],
+                "process_actions": [],
+                "sampler_returncode": 1,
+            })
+            final_path.write_bytes(subject.canonical_json(final))
+            with self.assertRaises(subject.CampaignError):
+                self.validate(root, design, tasks)
+
+    def test_historical_codec_failure_survives_successful_retry(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "codec-failure"
+            root.mkdir()
+            tasks, design = subject.make_success_fixture(root)
+            final_path, final, _, _ = self.append_successful_retry(root)
+            (root / "attempts" / "segment000" /
+             "job00000.stdout").write_bytes(b"malformed benchmark CSV\n")
+            self.reseal_attempt_manifest(root, 0, final)
+            final.update({
+                "state": "failed",
+                "failures": [{
+                    "job": 0, "status": "validation_error",
+                    "detail": "malformed benchmark CSV",
+                }],
+                "rolled_back_jobs": [0],
+                "published_jobs": [],
+                "sampler_returncode": 0,
+            })
+            final_path.write_bytes(subject.canonical_json(final))
+            thermal = self.validate(root, design, tasks)
+            self.assertEqual(thermal["historical_codec_failure_count"], 1)
+            self.assertEqual(
+                thermal["historical_codec_failures"][0]["failure"]["status"],
+                "validation_error")
+            outcomes, hard, source_records = \
+                subject.synthetic_reduction_fixture()
+            reduction = subject.reduce_outcomes(
+                outcomes, hard, source_records, k_lo=2, k_hi=13,
+                historical_failures=thermal["historical_failures"])
+            self.assertEqual(reduction["codec_errors"], 1)
+            self.assertFalse(reduction["accepted"])
+            self.assertTrue(all(
+                not block["acceptance"]["accepted"]
+                for block in reduction["candidates"].values()))
+
+    def test_pid_only_worker_exception_survives_successful_retry(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "pid-only-worker-exception"
+            root.mkdir()
+            tasks, design = subject.make_success_fixture(root)
+            final_path, final, _, _ = self.append_successful_retry(root)
+            attempt = root / "attempts" / "segment000"
+            for suffix in ("stdout", "stderr", "exit"):
+                (attempt / ("job00000." + suffix)).unlink()
+            self.reseal_attempt_manifest(root, 0, final)
+            final.update({
+                "state": "failed",
+                "failures": [{
+                    "job": 0, "status": "worker_exception",
+                    "detail": "atomic output publication failed",
+                }],
+                "rolled_back_jobs": [0],
+                "published_jobs": [],
+                "sampler_returncode": 0,
+            })
+            final_path.write_bytes(subject.canonical_json(final))
+            thermal = self.validate(root, design, tasks)
+            self.assertEqual(
+                thermal["historical_infrastructure_failure_count"], 1)
+            self.assertEqual(
+                thermal["historical_indeterminate_failure_count"], 1)
+            self.assertEqual(
+                thermal["historical_indeterminate_failures"][0]["failure"],
+                {
+                    "job": 0,
+                    "status": "terminal_evidence_incomplete",
+                    "observed_suffixes": ["pid"],
+                })
+            outcomes, hard, source_records = \
+                subject.synthetic_reduction_fixture()
+            reduction = subject.reduce_outcomes(
+                outcomes, hard, source_records, k_lo=2, k_hi=13,
+                historical_failures=thermal["historical_failures"])
+            self.assertFalse(reduction["accepted"])
+
+    def test_complete_codec_exit_cannot_hide_behind_launcher_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "omitted-codec-exit"
+            root.mkdir()
+            tasks, design = subject.make_success_fixture(root)
+            final_path, final, _, _ = self.append_successful_retry(root)
+            (root / "attempts" / "segment000" /
+             "job00000.exit").write_bytes(b"3\n")
+            self.reseal_attempt_manifest(root, 0, final)
+            final.update({
+                "state": "failed",
+                "failures": [{
+                    "status": "launcher_exception",
+                    "detail": "coordinator failed before harvesting futures",
+                }],
+                "rolled_back_jobs": [0],
+                "published_jobs": [],
+                "sampler_returncode": 0,
+            })
+            final_path.write_bytes(subject.canonical_json(final))
+            thermal = self.validate(root, design, tasks)
+            self.assertEqual(thermal["historical_failure_count"], 2)
+            self.assertEqual(thermal["historical_codec_failure_count"], 1)
+            self.assertEqual(
+                thermal["historical_codec_failures"][0]["failure"],
+                {"job": 0, "status": "exit", "returncode": 3})
+
+    def test_failed_segment_failure_schema_and_exit_classification(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            attempt = root / "attempts" / "segment002"
+            attempt.mkdir(parents=True)
+            (attempt / "job00007.pid").write_bytes(
+                subject.canonical_json({
+                    "pid": 99999999, "start_ticks": 1}))
+            (attempt / "job00007.stdout").write_bytes(b"invalid CSV\n")
+            (attempt / "job00007.stderr").write_bytes(b"")
+            jobs = {7}
+            codec_failures = (
+                ({
+                    "job": 7, "status": "timeout",
+                    "timeout_seconds": subject.JOB_TIMEOUT_SECONDS,
+                }, -15),
+                ({"job": 7, "status": "exit", "returncode": 3}, 3),
+                ({
+                    "job": 7, "status": "validation_error",
+                    "detail": "bad CSV",
+                }, 0),
+            )
+            for failure, returncode in codec_failures:
+                with self.subTest(status=failure["status"]):
+                    (attempt / "job00007.exit").write_text(
+                        "{}\n".format(returncode), encoding="ascii")
+                    entries = subject.validate_failed_segment_failures(
+                        root, [failure], [], jobs,
+                        segment=2, stage="control")
+                    self.assertEqual(
+                        entries[0]["classification"], "codec")
+            cleanup = [{
+                "kind": "benchmark", "job": 7, "pid": 99999999,
+                "action": "terminated",
+            }]
+            (attempt / "job00007.exit").write_bytes(b"-15\n")
+            entries = subject.validate_failed_segment_failures(
+                root, [{"job": 7, "status": "exit", "returncode": -15}],
+                cleanup, jobs, segment=2, stage="control")
+            self.assertEqual(
+                entries[0]["classification"], "infrastructure")
+            for malformed in (
+                    [{"status": "unknown"}],
+                    [{"job": 7, "status": "exit", "returncode": 3,
+                      "unexpected": True}],
+                    [{"job": 7, "status": "exit", "returncode": True}],
+                    [{
+                        "status": "concurrent_i2c_reader",
+                        "readers": {
+                            "9" * 5000: [str(subject.DIMM_I2C_DEVICES[0])],
+                        },
+                    }]):
+                with self.subTest(malformed=malformed), \
+                        self.assertRaises(subject.CampaignError):
+                    subject.validate_failed_segment_failures(
+                        root, malformed, [], jobs,
+                        segment=2, stage="control")
+
+    def test_cleanup_action_cannot_mask_unrelated_codec_exit(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            attempt = root / "attempts" / "segment002"
+            attempt.mkdir(parents=True)
+            (attempt / "job00007.pid").write_bytes(
+                subject.canonical_json({"pid": 1234, "start_ticks": 1}))
+            (attempt / "job00007.stdout").write_bytes(b"invalid CSV\n")
+            (attempt / "job00007.stderr").write_bytes(b"")
+            (attempt / "job00007.exit").write_bytes(b"3\n")
+            failure = {"job": 7, "status": "exit", "returncode": 3}
+            unrelated = [{
+                "kind": "benchmark", "job": 7, "pid": 99999999,
+                "action": "terminated",
+            }]
+            with self.assertRaises(subject.CampaignError):
+                subject.validate_failed_segment_failures(
+                    root, [failure], unrelated, {7},
+                    segment=2, stage="control")
+            exact_but_noncausal = [{
+                "kind": "benchmark", "job": 7, "pid": 1234,
+                "action": "terminated",
+            }]
+            entries = subject.validate_failed_segment_failures(
+                root, [failure], exact_but_noncausal, {7},
+                segment=2, stage="control")
+            self.assertEqual(entries[0]["classification"], "codec")
+            duplicate = [
+                {
+                    "kind": "benchmark", "job": 7, "pid": 1234,
+                    "action": "already_exited",
+                },
+                {
+                    "kind": "benchmark_emergency", "job": 7, "pid": 1234,
+                    "action": "killed",
+                },
+            ]
+            with self.assertRaises(subject.CampaignError):
+                subject.validate_failed_segment_failures(
+                    root, [failure], duplicate, {7},
+                    segment=2, stage="control")
+
+    def test_live_process_action_schema_is_strict(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            attempt = root / "attempts" / "segment002"
+            attempt.mkdir(parents=True)
+            (attempt / "job00007.pid").write_bytes(
+                subject.canonical_json({"pid": 1234, "start_ticks": 1}))
+            valid = [{
+                "kind": "benchmark", "job": 7, "pid": 1234,
+                "action": "terminated",
+            }, {
+                "kind": "thermal", "pid": 5678,
+                "action": "already_exited",
+            }]
+            actions = subject.validate_failed_segment_actions(
+                root, valid, {7}, segment=2)
+            self.assertEqual(actions[7]["pid"], 1234)
+            for malformed in (
+                    [{**valid[0], "action": False}],
+                    [{
+                        "kind": "benchmark", "job": 7, "pid": 9999,
+                        "action": "terminated",
+                    }],
+                    [{
+                        "kind": "benchmark_emergency", "job": 7,
+                        "pid": 1234, "action": "terminated",
+                    }],
+                    [valid[1], dict(valid[1])],
+                    [{"kind": "thermal", "pid": True,
+                      "action": "terminated"}],
+                    [{"kind": "unknown", "pid": 5678,
+                      "action": "terminated"}]):
+                with self.subTest(malformed=malformed), \
+                        self.assertRaises(subject.CampaignError):
+                    subject.validate_failed_segment_actions(
+                        root, malformed, {7}, segment=2)
+
+    def test_success_process_actions_are_bound_to_ready_sampler(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = Path(temporary) / "fixture"
+            fixture.mkdir()
+            tasks, design = subject.make_success_fixture(fixture)
+            self.validate(fixture, design, tasks)
+            mutations = (
+                [],
+                [{
+                    "kind": "thermal", "pid": 99999998,
+                    "action": "terminated",
+                }],
+                [{
+                    "kind": "benchmark", "job": 0, "pid": 99999999,
+                    "action": "already_exited",
+                }, {
+                    "kind": "thermal", "pid": 99999999,
+                    "action": "terminated",
+                }],
+                [{
+                    "kind": "thermal", "pid": 99999999,
+                    "action": "terminated",
+                }, {
+                    "kind": "thermal", "pid": 99999999,
+                    "action": "already_exited",
+                }],
+            )
+            for index, process_actions in enumerate(mutations):
+                target = Path(temporary) / "mutation-{}".format(index)
+                shutil.copytree(fixture, target)
+                final_path = subject.segment_path(target, 0, "final")
+                final = subject.load_json(final_path)
+                final["process_actions"] = process_actions
+                final_path.write_bytes(subject.canonical_json(final))
+                with self.subTest(process_actions=process_actions), \
+                        self.assertRaises(subject.CampaignError):
+                    self.validate(target, design, tasks)
+
+    def test_interrupted_process_actions_are_canonical_and_bound(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            attempt = root / "attempts" / "segment002"
+            attempt.mkdir(parents=True)
+            pid_path = attempt / "job00007.pid"
+            pid_path.write_bytes(subject.canonical_json({
+                "pid": 1234, "start_ticks": 1,
+            }))
+            hashes = {(7, "pid"): subject.sha256_file(pid_path)}
+            old_boot = "00000000-0000-0000-0000-000000000000"
+            new_boot = "11111111-1111-1111-1111-111111111111"
+            for valid in (
+                    [],
+                    [{
+                        "kind": "segment", "action": "boot_changed",
+                        "from_boot_id": old_boot, "to_boot_id": new_boot,
+                    }],
+                    [{
+                        "kind": "benchmark", "job": 7, "pid": 1234,
+                        "action": "stale_reused_pid",
+                    }],
+                    [{
+                        "kind": "benchmark_job_7", "pid": 4321,
+                        "action": "identity_reused",
+                    }],
+                    [{
+                        "kind": "thermal", "pid": 5678,
+                        "action": "identity_reused",
+                    }],
+                    [{
+                        "kind": "benchmark_job_7", "pid": 4321,
+                        "action": "terminated",
+                    }, {
+                        "kind": "benchmark", "job": 7, "pid": 1234,
+                        "action": "stale_reused_pid",
+                    }]):
+                subject.validate_interrupted_segment_actions(
+                    root, valid, {7}, segment=2,
+                    intent_boot_id=old_boot, attempt_hashes=hashes)
+            malformed = (
+                [{
+                    "kind": "benchmark", "job": 7, "pid": 4321,
+                    "action": "terminated",
+                }],
+                [{
+                    "kind": "benchmark_job_0007", "pid": 4321,
+                    "action": "terminated",
+                }],
+                [{
+                    "kind": "benchmark_job_" + "9" * 5000,
+                    "pid": 4321, "action": "terminated",
+                }],
+                [{
+                    "kind": "segment", "action": "boot_changed",
+                    "from_boot_id": new_boot, "to_boot_id": old_boot,
+                }],
+                [{
+                    "kind": "segment", "action": "boot_changed",
+                    "from_boot_id": old_boot, "to_boot_id": new_boot,
+                }, {
+                    "kind": "thermal", "pid": 5678,
+                    "action": "terminated",
+                }],
+                [{
+                    "kind": "benchmark", "job": 7, "pid": 1234,
+                    "action": False,
+                }],
+                [{
+                    "kind": "benchmark", "job": 7, "pid": 1234,
+                    "action": "terminated",
+                }, {
+                    "kind": "benchmark", "job": 7, "pid": 4321,
+                    "action": "terminated",
+                }],
+            )
+            for actions in malformed:
+                with self.subTest(actions=actions), \
+                        self.assertRaises(subject.CampaignError):
+                    subject.validate_interrupted_segment_actions(
+                        root, actions, {7}, segment=2,
+                        intent_boot_id=old_boot, attempt_hashes=hashes)
+
+    def test_interrupted_action_validation_is_wired_into_campaign_audit(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "interrupted-retry"
+            root.mkdir()
+            tasks, design = subject.make_success_fixture(root)
+            final_path, final, _, _ = self.append_successful_retry(root)
+            final.update({
+                "state": "interrupted",
+                "failures": [],
+                "rolled_back_jobs": [0],
+                "published_jobs": [],
+                "process_actions": [],
+                "sampler_returncode": None,
+                "jobs_ended_monotonic_s": None,
+            })
+            final_path.write_bytes(subject.canonical_json(final))
+            receipt = self.validate(root, design, tasks)
+            self.assertEqual(receipt["interrupted_segments"], 1)
+
+            for field, value in (
+                    ("sampler_returncode", "garbage"),
+                    ("jobs_ended_monotonic_s", 101.5)):
+                malformed = dict(final)
+                malformed[field] = value
+                final_path.write_bytes(subject.canonical_json(malformed))
+                with self.subTest(field=field), \
+                        self.assertRaises(subject.CampaignError):
+                    self.validate(root, design, tasks)
+
+            final["process_actions"] = [{
+                "kind": "invented", "pid": 1234,
+                "action": "terminated",
+            }]
+            final_path.write_bytes(subject.canonical_json(final))
+            with self.assertRaises(subject.CampaignError):
+                self.validate(root, design, tasks)
+
+    def test_pre_receipt_cleanup_action_remains_infrastructure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "attempts" / "segment002").mkdir(parents=True)
+            failure = {
+                "job": 7, "status": "worker_exception",
+                "detail": "pidfd binding failed",
+            }
+            action = [{
+                "kind": "benchmark", "job": 7, "pid": 1234,
+                "action": "terminated",
+            }]
+            entries = subject.validate_failed_segment_failures(
+                root, [failure], action, {7},
+                segment=2, stage="control")
+            self.assertEqual(
+                entries[0]["classification"], "infrastructure")
+
+    def test_pid_only_worker_exception_blocks_promotion(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            attempt = root / "attempts" / "segment002"
+            attempt.mkdir(parents=True)
+            (attempt / "job00007.pid").write_bytes(
+                subject.canonical_json({
+                    "pid": 1234, "start_ticks": 1,
+                }))
+            task = {
+                "job": 7, "stage": "control",
+                "output_name": "job.csv", "argv": ["/bin/true"],
+                "period": 48, "rows": 3, "mask": 0x007,
+                "seed_index": 0, "schedule": "burst", "Ks": [2],
+            }
+            failure = {
+                "job": 7, "status": "worker_exception",
+                "detail": "publication failed",
+            }
+            explicit = subject.validate_failed_segment_failures(
+                root, [failure], [], {7},
+                segment=2, stage="control")
+            recovered = subject.classify_complete_attempt_codec_failures(
+                root, 2, [7], {7: task}, stage="control",
+                explicit_failures=[failure])
+            self.assertEqual(explicit[0]["classification"], "infrastructure")
+            self.assertEqual(recovered, [{
+                "segment": 2,
+                "stage": "control",
+                "failure_index": 1,
+                "classification": "indeterminate",
+                "failure": {
+                    "job": 7,
+                    "status": "terminal_evidence_incomplete",
+                    "observed_suffixes": ["pid"],
+                },
+            }])
+            outcomes, hard, source_records = \
+                subject.synthetic_reduction_fixture()
+            reduction = subject.reduce_outcomes(
+                outcomes, hard, source_records, k_lo=2, k_hi=13,
+                historical_failures=explicit + recovered)
+            self.assertFalse(reduction["accepted"])
+            self.assertEqual(
+                reduction["historical_blocking_failure_count"], 1)
+
+    def test_interrupted_attempt_preserves_definite_codec_failures(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            attempt = root / "attempts" / "segment002"
+            attempt.mkdir(parents=True)
+            task = {
+                "job": 7, "stage": "control",
+                "output_name": "job.csv", "argv": ["/bin/true"],
+                "period": 48, "rows": 3, "mask": 0x007,
+                "seed_index": 0, "schedule": "burst", "Ks": [2],
+            }
+            for suffix, data in (
+                    ("pid", subject.canonical_json({
+                        "pid": 1234, "start_ticks": 1,
+                    })),
+                    ("stdout", b"not benchmark CSV\n"),
+                    ("stderr", b""),
+                    ("exit", b"3\n")):
+                (attempt / "job00007.{}".format(suffix)).write_bytes(data)
+            failures = subject.classify_interrupted_attempt_failures(
+                root, 2, [7], {7: task}, stage="control")
+            self.assertEqual(len(failures), 2)
+            self.assertEqual(
+                failures[0]["failure"], {"status": "segment_interrupted"})
+            self.assertEqual(
+                failures[0]["classification"], "indeterminate")
+            self.assertEqual(
+                failures[1]["failure"],
+                {"job": 7, "status": "exit", "returncode": 3})
+            self.assertEqual(
+                failures[1]["classification"], "indeterminate")
+            outcomes, hard, source_records = \
+                subject.synthetic_reduction_fixture()
+            reduction = subject.reduce_outcomes(
+                outcomes, hard, source_records, k_lo=2, k_hi=13,
+                historical_failures=failures)
+            self.assertEqual(reduction["codec_errors"], 0)
+            self.assertEqual(
+                reduction["historical_blocking_failure_count"], 2)
+            self.assertFalse(reduction["accepted"])
+            self.assertTrue(all(
+                not block["acceptance"][
+                    "gate_zero_historical_blocking_failures"]
+                for block in reduction["candidates"].values()))
+            (attempt / "job00007.exit").write_bytes(b"0\n")
+            failures = subject.classify_interrupted_attempt_failures(
+                root, 2, [7], {7: task}, stage="control")
+            self.assertEqual(len(failures), 2)
+            self.assertEqual(
+                failures[1]["failure"]["status"], "validation_error")
+            self.assertEqual(failures[1]["classification"], "codec")
+            (attempt / "job00007.exit").unlink()
+            failures = subject.classify_interrupted_attempt_failures(
+                root, 2, [7], {7: task}, stage="control")
+            self.assertEqual(len(failures), 2)
+            self.assertEqual(failures[1]["classification"], "indeterminate")
+            self.assertEqual(failures[1]["failure"], {
+                "job": 7,
+                "status": "terminal_evidence_incomplete",
+                "observed_suffixes": ["pid", "stderr", "stdout"],
+            })
+            (attempt / "job00007.stderr").unlink()
+            failures = subject.classify_interrupted_attempt_failures(
+                root, 2, [7], {7: task}, stage="control")
+            self.assertEqual(
+                failures[1]["failure"]["observed_suffixes"],
+                ["pid", "stdout"])
 
     def test_interrupted_segment_reconciliation(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1052,7 +2168,8 @@ class ThermalGateTest(unittest.TestCase):
             (root / "raw" / "retry.csv").write_bytes(b"failed output\n")
             (root / "stderr" / "retry.csv.stderr").write_bytes(b"failure\n")
             (root / "exit" / "retry.csv.exit").write_bytes(b"1\n")
-            reconciled = subject.reconcile_incomplete_segments(root, [task])
+            reconciled = subject.reconcile_incomplete_segments(
+                root, [task], sampler_inventory_probe=lambda: [])
             self.assertEqual(len(reconciled), 1)
             self.assertEqual(reconciled[0]["state"], "interrupted")
             self.assertEqual(subject.completed_jobs(root, [task]), set())
@@ -1061,7 +2178,8 @@ class ThermalGateTest(unittest.TestCase):
                     ("exit", "retry.csv.exit")):
                 self.assertFalse((root / directory / name).exists())
             self.assertEqual(
-                subject.reconcile_incomplete_segments(root, [task]), [])
+                subject.reconcile_incomplete_segments(
+                    root, [task], sampler_inventory_probe=lambda: []), [])
 
     def test_interrupted_attempt_accepts_atomic_output_prefix_after_pid(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1111,7 +2229,7 @@ class ThermalGateTest(unittest.TestCase):
         invalid_signal = "{}\n".format(-subject.signal.NSIG).encode("ascii")
         for payload in (
                 b"+1\n", b"01\n", b" 1\n", b"1", b"256\n",
-                invalid_signal):
+                invalid_signal, b"9" * 5000 + b"\n"):
             with self.subTest(payload=payload), \
                     tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary) / "bad-exit"
@@ -1125,6 +2243,11 @@ class ThermalGateTest(unittest.TestCase):
                 (attempt / "job00000.stdout").write_bytes(b"failed output\n")
                 (attempt / "job00000.stderr").write_bytes(b"failure\n")
                 (attempt / "job00000.exit").write_bytes(payload)
+                if len(payload) > subject.MAX_ATTEMPT_EXIT_BYTES:
+                    with self.assertRaises(subject.CampaignError):
+                        subject.seal_attempt_manifest(
+                            root, 0, {0}, require_complete=False)
+                    continue
                 manifest_sha256, file_count = subject.seal_attempt_manifest(
                     root, 0, {0}, require_complete=False)
                 final = {
@@ -1526,8 +2649,24 @@ class OwnerMarkerTest(unittest.TestCase):
             (root / "raw" / "job.csv").write_bytes(b"synthetic csv\n")
             (root / "stderr" / "job.csv.stderr").write_bytes(b"")
             (root / "exit" / "job.csv.exit").write_bytes(b"0\n")
+            hard_path = root / "hard_keys.jsonl"
+            hard_path.write_bytes(b"")
+            source_path = root / "frozen" / subject.SOURCE_SUMMARY_NAME
+            source_path.write_bytes(subject.canonical_json({}))
+            prelaunch_path = root / "prelaunch_receipts.json"
+            prelaunch_path.write_bytes(subject.canonical_json({
+                "artifacts": {
+                    "hard_keys": {
+                        "sha256": subject.sha256_file(hard_path),
+                    },
+                    "source_summary": {
+                        "sha256": subject.sha256_file(source_path),
+                    },
+                },
+            }))
             args = subject.argparse.Namespace(
-                root=str(root), expected_receipts_sha256="0" * 64)
+                root=str(root),
+                expected_receipts_sha256=subject.sha256_file(prelaunch_path))
             owner_lookup = mock.Mock(return_value={
                 "campaign_root": str(root), "phase": "executing",
                 "protected": [{
@@ -1536,13 +2675,40 @@ class OwnerMarkerTest(unittest.TestCase):
                 }],
             })
             owner_mutation = mock.Mock()
+
+            def verified_root(
+                    _root, _expected, *,
+                    static_snapshot_sink=None, **_kwargs):
+                assert static_snapshot_sink is not None
+                for path in (prelaunch_path, hard_path, source_path):
+                    raw = path.read_bytes()
+                    static_snapshot_sink[path] = (
+                        raw, subject.sha256_bytes(raw))
+                return {"total_cells": 1}, [task]
+
+            def validated_evidence(
+                    _root, _design, _tasks, *,
+                    attempt_hash_sink=None, runtime_hash_sink=None,
+                    output_hash_sink=None):
+                self.assertEqual(attempt_hash_sink, {})
+                self.assertEqual(runtime_hash_sink, {})
+                assert output_hash_sink is not None
+                for path in (
+                        root / "raw" / "job.csv",
+                        root / "stderr" / "job.csv.stderr",
+                        root / "exit" / "job.csv.exit"):
+                    output_hash_sink[str(path.relative_to(root))] = \
+                        subject.sha256_file(path)
+                return {"historical_failures": []}
+
             with mock.patch.object(
                     subject, "verify_root",
-                    return_value=({"total_cells": 1}, [task])), \
+                    side_effect=verified_root), \
                     mock.patch.object(
                         subject, "completed_jobs", return_value={0}), \
                     mock.patch.object(
-                        subject, "validate_thermal", return_value={}), \
+                        subject, "validate_thermal",
+                        side_effect=validated_evidence), \
                     mock.patch.object(
                         subject, "parse_benchmark_csv",
                         return_value=[{
@@ -1571,6 +2737,59 @@ class OwnerMarkerTest(unittest.TestCase):
 
 
 class ProcessGuardTest(unittest.TestCase):
+    def test_pidfd_runtime_capability_probe_is_fail_closed(self):
+        with mock.patch.object(
+                subject.os, "pidfd_open", None, create=True), \
+                self.assertRaises(subject.CampaignError):
+            subject.require_pidfd_runtime()
+        with mock.patch.object(
+                subject.os, "pidfd_open", return_value=99,
+                create=True) as opened, \
+                mock.patch.object(
+                    subject.signal, "pidfd_send_signal",
+                    create=True) as sent, \
+                mock.patch.object(subject.os, "close") as closed:
+            subject.require_pidfd_runtime()
+        opened.assert_called_once_with(os.getpid(), 0)
+        sent.assert_called_once_with(99, 0, None, 0)
+        closed.assert_called_once_with(99)
+
+    def test_pinned_cli_runtime_reexec_failure_is_explicit(self):
+        with mock.patch.object(
+                subject.os.path, "samefile", return_value=False), \
+                mock.patch.object(
+                    subject.os, "execv",
+                    side_effect=OSError("injected")) as execute, \
+                self.assertRaises(subject.CampaignError):
+            subject.ensure_pinned_cli_runtime()
+        argv = execute.call_args.args[1]
+        self.assertEqual(execute.call_args.args[0], str(subject.PYTHON_PATH))
+        self.assertEqual(argv[:2], [str(subject.PYTHON_PATH), "-I"])
+        self.assertEqual(Path(argv[2]).resolve(), Path(subject.__file__).resolve())
+
+    def test_pinned_cli_runtime_reexecs_same_interpreter_when_not_isolated(self):
+        with mock.patch.object(
+                subject.os.path, "samefile", return_value=True), \
+                mock.patch.object(
+                    subject.sys, "flags", mock.Mock(isolated=0)), \
+                mock.patch.object(subject.os, "execv") as execute:
+            subject.ensure_pinned_cli_runtime()
+        argv = execute.call_args.args[1]
+        self.assertEqual(execute.call_args.args[0], str(subject.PYTHON_PATH))
+        self.assertEqual(argv[:2], [str(subject.PYTHON_PATH), "-I"])
+        self.assertEqual(Path(argv[2]).resolve(), Path(subject.__file__).resolve())
+
+    def test_nonexecuting_cli_runtime_does_not_require_pidfds(self):
+        with mock.patch.object(
+                subject.os.path, "samefile", return_value=True), \
+                mock.patch.object(
+                    subject.sys, "flags", mock.Mock(isolated=1)), \
+                mock.patch.object(subject, "require_pidfd_runtime") as probe, \
+                mock.patch.object(subject.os, "execv") as execute:
+            subject.ensure_pinned_cli_runtime()
+        probe.assert_not_called()
+        execute.assert_not_called()
+
     def test_resume_finalizes_owner_after_last_segment_crash_window(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "campaign"
@@ -1892,6 +3111,8 @@ class ProcessGuardTest(unittest.TestCase):
             subject.bind_benchmark_exec_or_terminal(
                 process, 9, wrapper, benchmark, subject.threading.Event())
 
+    @unittest.skipUnless(
+        PIDFD_RUNTIME_AVAILABLE, "current Python lacks pidfd APIs")
     def test_real_fast_benchmark_binding_stress(self):
         parent_start = subject.process_start_ticks(os.getpid())
         self.assertIsNotNone(parent_start)
@@ -2021,7 +3242,8 @@ class ProcessGuardTest(unittest.TestCase):
                 mock.patch.object(
                     subject, "process_tokens", side_effect=tokens),
                 mock.patch.object(
-                    subject.os, "pidfd_open", return_value=pidfd),
+                    subject.os, "pidfd_open", return_value=pidfd,
+                    create=True),
                 mock.patch.object(
                     subject, "pidfd_has_exited", return_value=True),
                 mock.patch.object(
@@ -2047,15 +3269,14 @@ class ProcessGuardTest(unittest.TestCase):
                     subject, "stop_launched_sampler",
                     return_value=(0, [])),
             )
-            for patcher in patches:
-                patcher.start()
             try:
-                final = subject.run_segment(
-                    root, {"worker_count": 1, "owner_ttl_hours": 1},
-                    [task], "hard", 0, False)
+                with ExitStack() as stack:
+                    for patcher in patches:
+                        stack.enter_context(patcher)
+                    final = subject.run_segment(
+                        root, {"worker_count": 1, "owner_ttl_hours": 1},
+                        [task], "hard", 0, False)
             finally:
-                for patcher in reversed(patches):
-                    patcher.stop()
                 try:
                     os.close(pidfd)
                 except OSError:
@@ -2157,7 +3378,8 @@ class ProcessGuardTest(unittest.TestCase):
                 mock.patch.object(
                     subject, "process_tokens", side_effect=tokens),
                 mock.patch.object(
-                    subject.os, "pidfd_open", return_value=pidfd),
+                    subject.os, "pidfd_open", return_value=pidfd,
+                    create=True),
                 mock.patch.object(
                     subject, "pidfd_has_exited", return_value=False),
                 mock.patch.object(
@@ -2181,26 +3403,25 @@ class ProcessGuardTest(unittest.TestCase):
                     subject, "stop_launched_sampler",
                     return_value=(0, [])),
             )
-            for patcher in patches:
-                patcher.start()
             try:
-                try:
-                    final = subject.run_segment(
-                        root, design, [task], "hard", 0, False)
-                    outcome = "returned:" + str(final["state"])
-                except BaseException as exc:
-                    outcome = "raised:" + repr(exc)
-                result = {
-                    "outcome": outcome,
-                    "benchmark_poll": benchmark.poll(),
-                    "termination_calls": len(calls),
-                    "receipt_injection_hit": receipt_injection["hit"],
-                    "final_exists": subject.segment_path(
-                        root, 0, "final").exists(),
-                }
+                with ExitStack() as stack:
+                    for patcher in patches:
+                        stack.enter_context(patcher)
+                    try:
+                        final = subject.run_segment(
+                            root, design, [task], "hard", 0, False)
+                        outcome = "returned:" + str(final["state"])
+                    except BaseException as exc:
+                        outcome = "raised:" + repr(exc)
+                    result = {
+                        "outcome": outcome,
+                        "benchmark_poll": benchmark.poll(),
+                        "termination_calls": len(calls),
+                        "receipt_injection_hit": receipt_injection["hit"],
+                        "final_exists": subject.segment_path(
+                            root, 0, "final").exists(),
+                    }
             finally:
-                for patcher in reversed(patches):
-                    patcher.stop()
                 try:
                     os.close(pidfd)
                 except OSError:
@@ -2322,15 +3543,12 @@ class ProcessGuardTest(unittest.TestCase):
                         subject, "stop_launched_sampler",
                         side_effect=stop_and_corrupt),
                 )
-                for patcher in patches:
-                    patcher.start()
-                try:
+                with ExitStack() as stack:
+                    for patcher in patches:
+                        stack.enter_context(patcher)
                     final = subject.run_segment(
                         root, {"worker_count": 1, "owner_ttl_hours": 1},
                         [], "hard", 0, False)
-                finally:
-                    for patcher in reversed(patches):
-                        patcher.stop()
                 self.assertEqual(final["state"], "failed")
                 self.assertEqual(
                     [failure["status"] for failure in final["failures"]],
@@ -2468,7 +3686,8 @@ class ProcessGuardTest(unittest.TestCase):
                         ["sampler-wrapper"] if pid == 700 else
                         list(task["argv"])),
                 mock.patch.object(
-                    subject.os, "pidfd_open", side_effect=pidfd_open),
+                    subject.os, "pidfd_open", side_effect=pidfd_open,
+                    create=True),
                 mock.patch.object(
                     subject, "pidfd_has_exited", return_value=False),
                 mock.patch.object(
@@ -2490,16 +3709,15 @@ class ProcessGuardTest(unittest.TestCase):
                     subject, "stop_launched_sampler",
                     return_value=(0, [])),
             )
-            for patcher in patches:
-                patcher.start()
             try:
-                with self.assertRaises(subject.CampaignError):
-                    subject.run_segment(
-                        root, {"worker_count": 2, "owner_ttl_hours": 1},
-                        [dict(task), dict(task)], "hard", 0, False)
+                with ExitStack() as stack:
+                    for patcher in patches:
+                        stack.enter_context(patcher)
+                    with self.assertRaises(subject.CampaignError):
+                        subject.run_segment(
+                            root, {"worker_count": 2, "owner_ttl_hours": 1},
+                            [dict(task), dict(task)], "hard", 0, False)
             finally:
-                for patcher in reversed(patches):
-                    patcher.stop()
                 try:
                     os.close(pidfd)
                 except OSError:
@@ -2626,6 +3844,8 @@ class ProcessGuardTest(unittest.TestCase):
                             str(subject.KILL_PATH), "-KILL", str(pid),
                         ], check=False)
 
+    @unittest.skipUnless(
+        PIDFD_RUNTIME_AVAILABLE, "current Python lacks pidfd APIs")
     def test_privileged_sampler_supervisor_honors_pre_spawn_stop(self):
         current_start = subject.process_start_ticks(os.getpid())
         self.assertIsNotNone(current_start)
@@ -2820,7 +4040,8 @@ class ProcessGuardTest(unittest.TestCase):
                 self.assertIsNone(pid)
                 self.assertEqual(publication[3], b"701")
                 with mock.patch.object(
-                        subject.os, "pidfd_open") as pidfd_open:
+                        subject.os, "pidfd_open",
+                        create=True) as pidfd_open:
                     self.assertIsNone(subject.bind_sampler_identity(
                         pid_path, base / subject.SAMPLER_NAME,
                         base / "thermal.csv", (1234, 99),
@@ -2972,7 +4193,8 @@ class ProcessGuardTest(unittest.TestCase):
                         side_effect=(0.0, 0.1, 13.0)), \
                         mock.patch.object(subject.time, "sleep"), \
                         mock.patch.object(
-                            subject.os, "pidfd_open") as pidfd_open, \
+                            subject.os, "pidfd_open",
+                            create=True) as pidfd_open, \
                         self.assertRaises(subject.CampaignError):
                     subject.wait_sampler_ready(
                         FakeSampler(), pid_path,
@@ -3069,7 +4291,7 @@ class ProcessGuardTest(unittest.TestCase):
             try:
                 with mock.patch.object(
                         subject.os, "pidfd_open",
-                        side_effect=descriptors), \
+                        side_effect=descriptors, create=True), \
                         mock.patch.object(
                             subject, "pidfd_has_exited",
                             return_value=False), \
@@ -3132,7 +4354,7 @@ class ProcessGuardTest(unittest.TestCase):
                     patches = (
                         mock.patch.object(
                             subject.os, "pidfd_open",
-                            side_effect=descriptors),
+                            side_effect=descriptors, create=True),
                         mock.patch.object(
                             subject, "pidfd_has_exited",
                             return_value=False),
@@ -3146,9 +4368,9 @@ class ProcessGuardTest(unittest.TestCase):
                             subject, "process_tokens",
                             side_effect=lambda pid: tokens.get(pid)),
                     )
-                    for patcher in patches:
-                        patcher.start()
-                    try:
+                    with ExitStack() as stack:
+                        for patcher in patches:
+                            stack.enter_context(patcher)
                         if accepted:
                             self.assertEqual(
                                 subject.bind_sampler_identity(
@@ -3162,9 +4384,6 @@ class ProcessGuardTest(unittest.TestCase):
                                     pid_path, sampler, csv_path,
                                     controller_identity,
                                     (700, 10, wrapper_tokens))
-                    finally:
-                        for patcher in reversed(patches):
-                            patcher.stop()
                 finally:
                     for descriptor in descriptors:
                         try:
@@ -3202,7 +4421,7 @@ class ProcessGuardTest(unittest.TestCase):
 
             with mock.patch.object(
                     subject.os, "pidfd_open",
-                    side_effect=(900, 901)), \
+                    side_effect=(900, 901), create=True), \
                     mock.patch.object(
                         subject, "pidfd_has_exited",
                         return_value=False), \
@@ -3245,7 +4464,7 @@ class ProcessGuardTest(unittest.TestCase):
 
             with mock.patch.object(
                     subject.os, "pidfd_open",
-                    side_effect=(910, 911, 912)), \
+                    side_effect=(910, 911, 912), create=True), \
                     mock.patch.object(
                         subject, "pidfd_has_exited",
                         return_value=False), \
@@ -3322,7 +4541,8 @@ class ProcessGuardTest(unittest.TestCase):
                     mock.patch.object(
                         subject, "discover_owned_processes", return_value=[]):
                 actions = subject.terminate_owned_segment_processes(
-                    root, 0, [], (1234, 99))
+                    root, 0, [], (1234, 99),
+                    sampler_inventory_probe=lambda: [])
             self.assertEqual(actions, [{
                 "kind": "thermal", "pid": 701, "action": "terminated",
             }])

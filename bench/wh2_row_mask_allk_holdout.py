@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3.12 -I
 """Prepare, execute, and strictly reduce the WH2 survivor-mask all-K holdout.
 
 The development row-mask screen (wh2_grouped_row_mask_campaign.py) found the
@@ -57,6 +57,7 @@ import tempfile
 import threading
 import time
 from collections import defaultdict
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, getcontext
 from pathlib import Path
@@ -66,7 +67,7 @@ from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Seque
 sys.dont_write_bytecode = True
 getcontext().prec = 50
 
-SCHEMA = "wirehair.wh2.row_mask_allk_holdout.v1"
+SCHEMA = "wirehair.wh2.row_mask_allk_holdout.v2"
 CODEC_IMPLEMENTATION_HEAD = "42fb578b3df159970708c2db51684a9ad1abf93c"
 SOURCE_HEAD = "0978602bb535712f6136b94c298ef428e4883fbc"
 SOURCE_SUMMARY_SHA256 = (
@@ -362,6 +363,15 @@ THERMAL_END_TIMEOUT_SECONDS = 5.0
 # unbounded allocation; final reduction applies the same limit.
 MAX_THERMAL_STREAM_BYTES = 64 * 1024 * 1024
 MAX_THERMAL_STDERR_BYTES = 1024 * 1024
+MAX_RUNTIME_JSON_BYTES = 16 * 1024 * 1024
+MAX_ATTEMPT_MANIFEST_BYTES = 16 * 1024 * 1024
+MAX_BENCHMARK_RESULT_BYTES = 16 * 1024 * 1024
+MAX_ATTEMPT_PID_BYTES = 256
+MAX_ATTEMPT_EXIT_BYTES = 16
+# The largest sealed static artifact is the 34 MiB task ledger.  Bound every
+# prelaunch artifact snapshot while retaining enough headroom for this exact
+# protocol shape.
+MAX_STATIC_ARTIFACT_BYTES = 64 * 1024 * 1024
 MIN_PLAUSIBLE_CPU_C = Decimal("0")
 MAX_PLAUSIBLE_CPU_C = Decimal("130")
 MIN_PLAUSIBLE_DIMM_C = Decimal("0")
@@ -460,6 +470,16 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def attempt_artifact_max_bytes(suffix: str) -> int:
+    if suffix in ("stdout", "stderr"):
+        return MAX_BENCHMARK_RESULT_BYTES
+    if suffix == "pid":
+        return MAX_ATTEMPT_PID_BYTES
+    if suffix == "exit":
+        return MAX_ATTEMPT_EXIT_BYTES
+    die("unknown attempt artifact suffix: {}".format(suffix))
+
+
 def verify_safe_directory(path: Path, label: str) -> None:
     """Reject indirect, foreign-owned, or writable campaign directories."""
     try:
@@ -469,6 +489,91 @@ def verify_safe_directory(path: Path, label: str) -> None:
     if not stat.S_ISDIR(identity.st_mode) or identity.st_uid != os.getuid() or \
             identity.st_mode & 0o022:
         die("{} directory is indirect or unsafe: {}".format(label, path))
+
+
+@contextmanager
+def held_safe_directory(
+    path: Path,
+    label: str,
+    *,
+    parent_fd: Optional[int] = None,
+    entry_name: Optional[str] = None,
+) -> Iterator[int]:
+    """Hold one direct safe directory open across an entire traversal."""
+    if (parent_fd is None) != (entry_name is None):
+        die("{} directory binding is incomplete".format(label))
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | \
+        getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_DIRECTORY", 0)
+    target = str(path) if parent_fd is None else str(entry_name)
+    try:
+        descriptor = os.open(target, flags, dir_fd=parent_fd)
+    except OSError as exc:
+        die("{} directory cannot be opened safely: {}".format(label, exc))
+
+    def path_identity() -> os.stat_result:
+        try:
+            if parent_fd is None:
+                return path.lstat()
+            assert entry_name is not None
+            return os.stat(
+                entry_name, dir_fd=parent_fd, follow_symlinks=False)
+        except OSError as exc:
+            die("{} directory cannot be rebound: {}".format(label, exc))
+
+    try:
+        identity = os.fstat(descriptor)
+        visible = path_identity()
+    except BaseException:
+        os.close(descriptor)
+        raise
+    expected = (
+        identity.st_dev, identity.st_ino, identity.st_uid,
+        stat.S_IMODE(identity.st_mode), identity.st_nlink,
+        identity.st_size, identity.st_mtime_ns, identity.st_ctime_ns,
+    )
+    if not stat.S_ISDIR(identity.st_mode) or \
+            not stat.S_ISDIR(visible.st_mode) or \
+            identity.st_uid != os.getuid() or identity.st_mode & 0o022 or \
+            (
+                visible.st_dev, visible.st_ino, visible.st_uid,
+                stat.S_IMODE(visible.st_mode), visible.st_nlink,
+                visible.st_size, visible.st_mtime_ns, visible.st_ctime_ns,
+            ) != expected:
+        os.close(descriptor)
+        die("{} directory is indirect or unsafe: {}".format(label, path))
+    try:
+        yield descriptor
+    finally:
+        try:
+            after = os.fstat(descriptor)
+            visible_after = path_identity()
+        except BaseException:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+            raise
+        changed = (
+            not stat.S_ISDIR(after.st_mode) or
+            (
+                after.st_dev, after.st_ino, after.st_uid,
+                stat.S_IMODE(after.st_mode), after.st_nlink,
+                after.st_size, after.st_mtime_ns, after.st_ctime_ns,
+            ) != expected or
+            (
+                visible_after.st_dev, visible_after.st_ino,
+                visible_after.st_uid, stat.S_IMODE(visible_after.st_mode),
+                visible_after.st_nlink, visible_after.st_size,
+                visible_after.st_mtime_ns, visible_after.st_ctime_ns,
+            ) != expected
+        )
+        try:
+            os.close(descriptor)
+        except OSError as exc:
+            die("cannot close {} directory: {}".format(label, exc))
+        if changed:
+            die("{} directory identity changed during traversal".format(
+                label))
 
 
 def verify_runtime_directories(root: Path) -> None:
@@ -490,11 +595,16 @@ def make_private_directory(
 
 
 def write_once(path: Path, data: bytes) -> None:
+    def exact_existing_bytes() -> bool:
+        raw, _ = read_stable_runtime_bytes(
+            path, max_bytes=len(data), label="immutable artifact")
+        return raw == data
+
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.is_symlink():
         die("immutable artifact is a symlink {}".format(path))
     if path.exists():
-        if path.read_bytes() != data:
+        if not exact_existing_bytes():
             die("refusing to replace immutable artifact {}".format(path))
         return
     temporary = Path(
@@ -508,7 +618,7 @@ def write_once(path: Path, data: bytes) -> None:
         try:
             os.link(str(temporary), str(path))
         except FileExistsError:
-            if path.read_bytes() != data:
+            if not exact_existing_bytes():
                 die("refusing to replace immutable artifact {}".format(path))
     finally:
         try:
@@ -549,9 +659,12 @@ def strict_json_loads(raw: str) -> object:
 
 
 def load_json(path: Path) -> Dict[str, object]:
+    raw, _ = read_stable_runtime_bytes(
+        path, max_bytes=MAX_STATIC_ARTIFACT_BYTES,
+        label="JSON object")
     try:
-        value = strict_json_loads(path.read_text(encoding="ascii"))
-    except (OSError, UnicodeError, ValueError) as exc:
+        value = strict_json_loads(raw.decode("ascii"))
+    except (UnicodeError, ValueError) as exc:
         die("cannot read {}: {}".format(path, exc))
     if not isinstance(value, dict):
         die("{} is not a JSON object".format(path))
@@ -1041,7 +1154,7 @@ def decimal_field(row: Mapping[str, str], key: str) -> Decimal:
 
 def benchmark_uint(row: Mapping[str, str], key: str) -> int:
     text = row.get(key)
-    if not isinstance(text, str) or \
+    if not isinstance(text, str) or len(text) > 20 or \
             re.fullmatch(r"0|[1-9][0-9]*", text) is None:
         die("invalid unsigned benchmark field {}".format(key))
     value = int(text)
@@ -1052,7 +1165,7 @@ def benchmark_uint(row: Mapping[str, str], key: str) -> int:
 
 def benchmark_milli(row: Mapping[str, str], key: str) -> Decimal:
     text = row.get(key)
-    if not isinstance(text, str) or \
+    if not isinstance(text, str) or len(text) > 24 or \
             re.fullmatch(r"(?:0|[1-9][0-9]*)\.[0-9]{3}", text) is None:
         die("invalid fixed-milli benchmark field {}".format(key))
     value = Decimal(text)
@@ -1064,7 +1177,7 @@ def benchmark_milli(row: Mapping[str, str], key: str) -> Decimal:
 
 def benchmark_counter_mu(row: Mapping[str, str], key: str) -> int:
     text = row.get(key)
-    if not isinstance(text, str) or \
+    if not isinstance(text, str) or len(text) > 24 or \
             re.fullmatch(r"(?:0|[1-9][0-9]*)\.000", text) is None:
         die("invalid single-trial counter mean {}".format(key))
     value = int(text[:-4])
@@ -1140,10 +1253,13 @@ def parse_benchmark_csv(data: bytes, task: Mapping[str, object]) -> List[Dict[st
     expected = expected_preamble(task)
     if set(preamble) != set(expected) or preamble != expected:
         die("benchmark preamble differs from the sealed task")
-    reader = csv.DictReader(lines[1:])
-    if tuple(reader.fieldnames or ()) != CSV_FIELDS:
-        die("benchmark CSV header mismatch")
-    rows = list(reader)
+    try:
+        reader = csv.DictReader(lines[1:])
+        if tuple(reader.fieldnames or ()) != CSV_FIELDS:
+            die("benchmark CSV header mismatch")
+        rows = list(reader)
+    except csv.Error as exc:
+        die("benchmark CSV parser rejected output: {}".format(exc))
     if any(
             None in row or tuple(row) != CSV_FIELDS or
             any(value is None for value in row.values())
@@ -1612,23 +1728,29 @@ def command_prepare(args: argparse.Namespace) -> None:
     }, indent=2, sort_keys=True))
 
 
-def read_jsonl(path: Path) -> List[dict]:
+def parse_jsonl_bytes(raw: bytes, label: str) -> List[dict]:
     result: List[dict] = []
-    try:
-        raw_lines = path.read_bytes().splitlines(keepends=True)
-    except OSError as exc:
-        die("cannot read {}: {}".format(path, exc))
+    raw_lines = raw.splitlines(keepends=True)
     for index, raw in enumerate(raw_lines):
         if not raw.endswith(b"\n"):
-            die("{} line {} lacks LF".format(path, index + 1))
+            die("{} line {} lacks LF".format(label, index + 1))
         try:
             value = strict_json_loads(raw.decode("ascii"))
         except (UnicodeError, ValueError) as exc:
-            die("bad JSONL {} line {}: {}".format(path, index + 1, exc))
+            die("bad JSONL {} line {}: {}".format(
+                label, index + 1, exc))
         if not isinstance(value, dict) or canonical_json(value) != raw:
-            die("noncanonical JSONL {} line {}".format(path, index + 1))
+            die("noncanonical JSONL {} line {}".format(
+                label, index + 1))
         result.append(value)
     return result
+
+
+def read_jsonl(path: Path) -> List[dict]:
+    raw, _ = read_stable_runtime_bytes(
+        path, max_bytes=MAX_STATIC_ARTIFACT_BYTES,
+        label="JSONL ledger")
+    return parse_jsonl_bytes(raw, str(path))
 
 
 def verify_root(
@@ -1636,6 +1758,9 @@ def verify_root(
     expected_receipts: str,
     *,
     runtime_tolerant: bool = False,
+    static_snapshot_sink: Optional[
+        Dict[Path, Tuple[bytes, str]]
+    ] = None,
 ) -> Tuple[dict, List[dict]]:
     verify_runtime_directories(root)
     for path, label in (
@@ -1646,27 +1771,46 @@ def verify_root(
     receipt_path = root / "prelaunch_receipts.json"
     if not re.fullmatch(r"[0-9a-f]{64}", expected_receipts or ""):
         die("expected receipt hash must be 64 lowercase hex digits")
-    if sha256_file(receipt_path) != expected_receipts:
+    receipt_bytes, receipt_digest = read_stable_runtime_bytes(
+        receipt_path, max_bytes=MAX_RUNTIME_JSON_BYTES,
+        label="prelaunch receipt")
+    if receipt_digest != expected_receipts:
         die("external prelaunch receipt hash mismatch")
-    receipts = load_json(receipt_path)
+    try:
+        receipts = strict_json_loads(receipt_bytes.decode("ascii"))
+    except (UnicodeError, ValueError) as exc:
+        die("prelaunch receipt is malformed: {}".format(exc))
+    if not isinstance(receipts, dict) or \
+            canonical_json(receipts) != receipt_bytes:
+        die("prelaunch receipt is not a canonical JSON object")
     if receipts.get("schema") != SCHEMA + ".prelaunch":
         die("prelaunch schema mismatch")
     artifacts = receipts.get("artifacts")
-    if not isinstance(artifacts, dict) or set(artifacts) != set(artifact_map(root)):
+    artifact_paths = artifact_map(root)
+    if not isinstance(artifacts, dict) or \
+            set(artifacts) != set(artifact_paths):
         die("prelaunch artifact set mismatch")
-    for key, expected_path in artifact_map(root).items():
+    artifact_snapshots: Dict[str, Tuple[bytes, str]] = {}
+    for key, expected_path in artifact_paths.items():
         record = artifacts[key]
         if not isinstance(record, dict) or record.get("path") != str(expected_path.relative_to(root)):
             die("artifact path mismatch: {}".format(key))
-        if expected_path.is_symlink() or not expected_path.is_file():
-            die("artifact is not a regular file: {}".format(key))
-        if sha256_file(expected_path) != record.get("sha256"):
+        raw, digest = read_stable_runtime_bytes(
+            expected_path, max_bytes=MAX_STATIC_ARTIFACT_BYTES,
+            label="sealed prelaunch artifact {}".format(key))
+        if digest != record.get("sha256"):
             die("artifact hash mismatch: {}".format(key))
+        artifact_snapshots[key] = (raw, digest)
     controller_record = artifacts["controller"]
     current_controller_path = Path(__file__)
     current_controller = current_controller_path.resolve()
-    if current_controller_path.is_symlink() or not current_controller.is_file() or \
-            sha256_file(current_controller) != controller_record.get("sha256"):
+    current_controller_bytes, current_controller_digest = \
+        read_stable_runtime_bytes(
+            current_controller, max_bytes=MAX_STATIC_ARTIFACT_BYTES,
+            label="executing controller")
+    if current_controller_path.is_symlink() or \
+            current_controller_digest != controller_record.get("sha256") or \
+            current_controller_bytes != artifact_snapshots["controller"][0]:
         die("executing controller differs from the sealed controller artifact")
     expected_frozen_files = {
         CONTROLLER_NAME, BINARY_NAME, SAMPLER_NAME, SOURCE_SUMMARY_NAME,
@@ -1680,7 +1824,22 @@ def verify_root(
                     if path.name in expected_frozen_files else not path.is_dir())
                 for path in frozen_entries):
         die("frozen top-level inventory mismatch")
-    design = load_json(root / "design.json")
+    def artifact_json(
+        name: str,
+        *,
+        require_canonical: bool = True,
+    ) -> Dict[str, object]:
+        raw = artifact_snapshots[name][0]
+        try:
+            value = strict_json_loads(raw.decode("ascii"))
+        except (UnicodeError, ValueError) as exc:
+            die("sealed {} JSON is malformed: {}".format(name, exc))
+        if not isinstance(value, dict) or \
+                require_canonical and canonical_json(value) != raw:
+            die("sealed {} is not a canonical JSON object".format(name))
+        return value
+
+    design = artifact_json("design")
     if design.get("schema") != SCHEMA + ".design" or design.get("root") != str(root):
         die("design identity mismatch")
     if design.get("codec_implementation_head") != CODEC_IMPLEMENTATION_HEAD or \
@@ -1717,37 +1876,37 @@ def verify_root(
             design.get("retry_policy") != \
                 "stage-atomic non-selective retry after failed/interrupted segment":
         die("design trust anchor mismatch")
-    if sha256_file(root / "frozen" / SAMPLER_NAME) != SAMPLER_SHA256:
+    if artifact_snapshots["sampler"][1] != SAMPLER_SHA256:
         die("frozen thermal sampler does not match the pinned hardened worker")
-    build = load_json(root / "frozen" / "build_receipt.json")
-    smoke = load_json(root / "frozen" / "binary_smoke.json")
+    build = artifact_json("build_receipt")
+    smoke = artifact_json("binary_smoke")
     source = build.get("source")
     if not isinstance(source, dict) or \
             build.get("schema") != SCHEMA + ".fresh_build" or \
             build.get("fresh_build") is not True or \
-            build.get("binary_sha256") != sha256_file(root / "frozen" / BINARY_NAME) or \
+            build.get("binary_sha256") != artifact_snapshots["binary"][1] or \
             source.get("commit") != design.get("git_head") or \
             source.get("tree_oid") != design.get("git_tree_oid") or \
             design.get("binary_sha256") != build.get("binary_sha256") or \
-            design.get("build_receipt_sha256") != sha256_file(
-                root / "frozen" / "build_receipt.json"):
+            design.get("build_receipt_sha256") != \
+                artifact_snapshots["build_receipt"][1]:
         die("fresh-build provenance binding mismatch")
     if re.fullmatch(r"[0-9a-f]{40}", str(source.get("commit", ""))) is None or \
             re.fullmatch(r"[0-9a-f]{40}", str(source.get("tree_oid", ""))) is None or \
             re.fullmatch(r"[0-9a-f]{64}", str(source.get("source_archive_sha256", ""))) is None or \
             source.get("status_porcelain_sha256") != sha256_bytes(b"") or \
-            source.get("tree_manifest_sha256") != sha256_file(
-                root / "frozen" / "build" / "source_tree.txt") or \
-            source.get("tree_manifest_bytes") != (
-                root / "frozen" / "build" / "source_tree.txt").stat().st_size:
+            source.get("tree_manifest_sha256") != \
+                artifact_snapshots["build_source_tree.txt"][1] or \
+            source.get("tree_manifest_bytes") != len(
+                artifact_snapshots["build_source_tree.txt"][0]):
         die("fresh-build clean source/tree receipt mismatch")
     if smoke.get("schema") != SCHEMA + ".binary_smoke" or \
             smoke.get("bounded") is not True or \
             smoke.get("binary_sha256") != build.get("binary_sha256") or \
             not isinstance(smoke.get("cases"), list) or \
             len(smoke["cases"]) != len(SMOKE_CASES) or \
-            design.get("binary_smoke_sha256") != sha256_file(
-                root / "frozen" / "binary_smoke.json"):
+            design.get("binary_smoke_sha256") != \
+                artifact_snapshots["binary_smoke"][1]:
         die("bounded binary-smoke provenance binding mismatch")
     expected_build_names = {
         path.name for key, path in artifact_map(root).items()
@@ -1769,10 +1928,11 @@ def verify_root(
     if not isinstance(evidence, dict) or set(evidence) != expected_build_names:
         die("fresh-build evidence receipt set mismatch")
     for name in expected_build_names:
-        path = root / "frozen" / "build" / name
+        key = "build_" + name
         record = evidence[name]
-        if not isinstance(record, dict) or record.get("sha256") != sha256_file(path) or \
-                record.get("bytes") != path.stat().st_size:
+        if not isinstance(record, dict) or \
+                record.get("sha256") != artifact_snapshots[key][1] or \
+                record.get("bytes") != len(artifact_snapshots[key][0]):
             die("fresh-build evidence receipt mismatch: {}".format(name))
     for index, ((period, rows, mask), record) in enumerate(zip(SMOKE_CASES, smoke["cases"])):
         stem = "case{:02d}.P{}.r{}.mask{:03x}".format(index, period, rows, mask)
@@ -1785,26 +1945,29 @@ def verify_root(
                 record.get("mask") != mask or record.get("K") != 257 or \
                 record.get("stdout") != str(stdout_path.relative_to(root)) or \
                 record.get("stderr") != str(stderr_path.relative_to(root)) or \
-                record.get("stdout_sha256") != sha256_file(stdout_path) or \
-                record.get("stderr_sha256") != sha256_file(stderr_path) or \
-                stderr_path.stat().st_size:
+                record.get("stdout_sha256") != \
+                    artifact_snapshots["smoke_{}_stdout".format(index)][1] or \
+                record.get("stderr_sha256") != \
+                    artifact_snapshots["smoke_{}_stderr".format(index)][1] or \
+                artifact_snapshots["smoke_{}_stderr".format(index)][0]:
             die("bounded holdout smoke receipt mismatch")
-        parsed = parse_benchmark_csv(stdout_path.read_bytes(), task)
+        parsed = parse_benchmark_csv(
+            artifact_snapshots["smoke_{}_stdout".format(index)][0], task)
         if record.get("outcome") != classify(parsed[0]):
             die("bounded holdout smoke outcome receipt mismatch")
-    summary = load_json(root / "frozen" / SOURCE_SUMMARY_NAME)
-    if sha256_file(root / "frozen" / SOURCE_SUMMARY_NAME) != \
-            SOURCE_SUMMARY_SHA256:
+    summary = artifact_json("source_summary", require_canonical=False)
+    if artifact_snapshots["source_summary"][1] != SOURCE_SUMMARY_SHA256:
         die("frozen all-K validated-summary hash mismatch")
     plan = plan_from_summary(summary, str(root / "frozen" / BINARY_NAME))
     expected_files = {
-        root / "hard_keys.jsonl": json_lines(plan["hard"]),
-        root / "arms.jsonl": json_lines(plan["arms"]),
-        root / "tasks_manifest.jsonl": json_lines(plan["tasks"]),
+        "hard_keys": json_lines(plan["hard"]),
+        "arms": json_lines(plan["arms"]),
+        "tasks": json_lines(plan["tasks"]),
     }
-    for path, expected in expected_files.items():
-        if path.read_bytes() != expected:
-            die("regenerated ledger mismatch: {}".format(path.name))
+    for name, expected in expected_files.items():
+        if artifact_snapshots[name][0] != expected:
+            die("regenerated ledger mismatch: {}".format(
+                artifact_paths[name].name))
     tasks = plan["tasks"]
     total_cells = sum(len(task["Ks"]) for task in tasks)
     if design.get("task_count") != len(tasks) or \
@@ -1830,11 +1993,91 @@ def verify_root(
         if any(not any(name.startswith(prefix + ".part.") for prefix in expected)
                for name in partial):
             die("unexpected partial {} output(s)".format(directory))
+    verify_runtime_directories(root)
+    for path, label in (
+            (root / "frozen", "frozen"),
+            (root / "frozen" / "build", "frozen build"),
+            (root / "frozen" / "smoke", "frozen smoke")):
+        verify_safe_directory(path, label)
+    if static_snapshot_sink is not None:
+        static_snapshot_sink[receipt_path] = (
+            receipt_bytes, receipt_digest)
+        static_snapshot_sink.update({
+            artifact_paths[key]: snapshot
+            for key, snapshot in artifact_snapshots.items()
+        })
     return design, tasks
 
 
 def job_receipt_path(root: Path, job: int) -> Path:
     return root / "job_receipts" / "job{:05d}.json".format(job)
+
+
+def valid_monotonic_receipt(value: object) -> bool:
+    return isinstance(value, (int, float)) and \
+        not isinstance(value, bool) and \
+        not (isinstance(value, float) and not math.isfinite(value)) and \
+        0 <= value <= 1_000_000_000_000
+
+
+def utc_receipt_timestamp(value: object, label: str) -> datetime:
+    if not isinstance(value, str) or not value or len(value) > 40:
+        die("{} timestamp is malformed".format(label))
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        die("{} timestamp is malformed: {}".format(label, exc))
+    if parsed.tzinfo is None or parsed.utcoffset() != timedelta(0):
+        die("{} timestamp is not UTC".format(label))
+    return parsed
+
+
+def validate_job_receipt_record(
+    receipt: Mapping[str, object],
+    task: Mapping[str, object],
+    output_hashes: Mapping[str, str],
+    *,
+    expected_segment: Optional[int] = None,
+    segment_start: Optional[Decimal] = None,
+    segment_end: Optional[Decimal] = None,
+) -> None:
+    expected_fields = {
+        "schema", "job", "segment", "stage", "output_name", "returncode",
+        "started_monotonic_s", "ended_monotonic_s",
+        "stdout_sha256", "stderr_sha256", "exit_sha256",
+    }
+    started = receipt.get("started_monotonic_s")
+    ended = receipt.get("ended_monotonic_s")
+    segment = receipt.get("segment")
+    if set(receipt) != expected_fields or \
+            receipt.get("schema") != SCHEMA + ".job" or \
+            not isinstance(receipt.get("job"), int) or \
+            isinstance(receipt.get("job"), bool) or \
+            receipt.get("job") != task.get("job") or \
+            receipt.get("stage") != task.get("stage") or \
+            receipt.get("output_name") != task.get("output_name") or \
+            not isinstance(receipt.get("returncode"), int) or \
+            isinstance(receipt.get("returncode"), bool) or \
+            receipt.get("returncode") != 0 or \
+            not isinstance(segment, int) or isinstance(segment, bool) or \
+            segment < 0 or \
+            expected_segment is not None and segment != expected_segment or \
+            not valid_monotonic_receipt(started) or \
+            not valid_monotonic_receipt(ended) or \
+            ended < started:
+        die("job receipt has malformed identity or timing")
+    for suffix in ("stdout", "stderr", "exit"):
+        digest = receipt.get(suffix + "_sha256")
+        if not isinstance(digest, str) or \
+                re.fullmatch(r"[0-9a-f]{64}", digest) is None or \
+                output_hashes.get(suffix) != digest:
+            die("job receipt has a malformed output binding")
+    if (segment_start is None) != (segment_end is None):
+        die("job receipt segment window is incomplete")
+    if segment_start is not None and segment_end is not None and (
+            Decimal(str(started)) < segment_start or
+            Decimal(str(ended)) > segment_end):
+        die("job receipt lies outside its successful segment")
 
 
 def completed_jobs(root: Path, tasks: Sequence[dict]) -> Set[int]:
@@ -1851,31 +2094,25 @@ def completed_jobs(root: Path, tasks: Sequence[dict]) -> Set[int]:
         if any(present) and not all(present):
             die("partial output triplet for job {}".format(task["job"]))
         if all(present):
-            if any(path.is_symlink() or not path.is_file() for path in paths):
-                die("completed job contains an indirect artifact")
-            receipt = load_json(paths[3])
-            if not paths[0].stat().st_size or paths[1].stat().st_size or \
-                    paths[2].read_text(encoding="ascii") != "0\n" or \
-                    receipt.get("schema") != SCHEMA + ".job" or \
-                    not isinstance(receipt.get("job"), int) or \
-                    isinstance(receipt.get("job"), bool) or \
-                    receipt.get("job") != task["job"] or \
-                    receipt.get("stage") != task["stage"] or \
-                    receipt.get("output_name") != name or \
-                    not isinstance(receipt.get("returncode"), int) or \
-                    isinstance(receipt.get("returncode"), bool) or \
-                    receipt.get("returncode") != 0 or \
-                    receipt.get("stdout_sha256") != sha256_file(paths[0]) or \
-                    receipt.get("stderr_sha256") != sha256_file(paths[1]) or \
-                    receipt.get("exit_sha256") != sha256_file(paths[2]) or \
-                    not isinstance(receipt.get("segment"), int) or \
-                    isinstance(receipt.get("segment"), bool) or \
-                    not isinstance(receipt.get("started_monotonic_s"), (int, float)) or \
-                    isinstance(receipt.get("started_monotonic_s"), bool) or \
-                    not isinstance(receipt.get("ended_monotonic_s"), (int, float)) or \
-                    isinstance(receipt.get("ended_monotonic_s"), bool) or \
-                    receipt["ended_monotonic_s"] < receipt["started_monotonic_s"]:
+            stdout, stdout_digest = read_stable_runtime_bytes(
+                paths[0], max_bytes=MAX_BENCHMARK_RESULT_BYTES,
+                label="completed benchmark stdout")
+            stderr, stderr_digest = read_stable_runtime_bytes(
+                paths[1], max_bytes=MAX_BENCHMARK_RESULT_BYTES,
+                label="completed benchmark stderr")
+            exit_bytes, exit_digest = read_stable_runtime_bytes(
+                paths[2], max_bytes=MAX_ATTEMPT_EXIT_BYTES,
+                label="completed benchmark exit")
+            receipt, _ = load_canonical_runtime_json(
+                paths[3], label="completed job receipt")
+            if not stdout or stderr or exit_bytes != b"0\n":
                 die("unclean completed job {}".format(task["job"]))
+            validate_job_receipt_record(
+                receipt, task, {
+                    "stdout": stdout_digest,
+                    "stderr": stderr_digest,
+                    "exit": exit_digest,
+                })
             completed.add(int(task["job"]))
     return completed
 
@@ -2668,12 +2905,17 @@ def terminate_owned_segment_processes(
     segment: int,
     tasks: Sequence[dict],
     controller_identity: Optional[Tuple[int, int]] = None,
+    *,
+    sampler_inventory_probe: Optional[Any] = None,
 ) -> List[dict]:
     verify_runtime_directories(root)
     if controller_identity is None:
         die("segment reconciliation requires the original controller identity")
     actions: List[dict] = []
     cleanup_errors: List[str] = []
+    inventory_probe = (
+        other_samplers
+        if sampler_inventory_probe is None else sampler_inventory_probe)
     thermal_pid = root / "thermal" / "segment{:03d}.pid".format(segment)
     thermal_csv = root / "thermal" / "segment{:03d}.csv".format(segment)
     sampler_path = root / "frozen" / SAMPLER_NAME
@@ -2722,7 +2964,8 @@ def terminate_owned_segment_processes(
             expected_thermal_start: Optional[int] = None
             ready_path = segment_path(root, segment, "ready")
             if ready_path.is_file() and not ready_path.is_symlink():
-                ready = load_json(ready_path)
+                ready, _ = load_canonical_runtime_json(
+                    ready_path, label="segment ready receipt")
                 if ready.get("sampler_pid") == pid and \
                         isinstance(ready.get("sampler_start_ticks"), int) and \
                         not isinstance(
@@ -2800,7 +3043,7 @@ def terminate_owned_segment_processes(
         cleanup_errors.append("thermal_direct_blocker:{!r}".format(exc))
     sampler_inventory_empty = False
     try:
-        remaining_samplers = other_samplers()
+        remaining_samplers = inventory_probe()
         if remaining_samplers:
             die("sampler/I2C inventory remains live during reconciliation: {}"
                 .format(json.dumps(remaining_samplers, sort_keys=True)))
@@ -2828,7 +3071,16 @@ def terminate_owned_segment_processes(
         job = int(match.group(1))
         if job not in task_by_job:
             die("benchmark PID receipt names an unknown job")
-        identity = load_json(pid_path)
+        raw_identity, _ = read_stable_runtime_bytes(
+            pid_path, max_bytes=MAX_ATTEMPT_PID_BYTES,
+            label="benchmark PID receipt")
+        try:
+            identity = strict_json_loads(raw_identity.decode("ascii"))
+        except (UnicodeError, ValueError) as exc:
+            die("malformed benchmark PID identity: {}".format(exc))
+        if not isinstance(identity, dict) or \
+                canonical_json(identity) != raw_identity:
+            die("malformed benchmark PID identity")
         pid = identity.get("pid")
         start_ticks = identity.get("start_ticks")
         if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 1 or \
@@ -2961,10 +3213,17 @@ def seal_attempt_manifest(
             for job in allowed_jobs
             for suffix in ("pid", "stdout", "stderr", "exit")}:
         die("successful segment attempt evidence is incomplete")
-    data = b"".join(
-        "{}  {}\n".format(sha256_file(path), path.relative_to(root)).encode("ascii")
-        for path in files
-    )
+    manifest_lines = bytearray()
+    for path, match in zip(files, matches):
+        assert match is not None
+        suffix = match.group(2)
+        _, digest = read_stable_runtime_bytes(
+            path, max_bytes=attempt_artifact_max_bytes(suffix),
+            label="attempt evidence")
+        manifest_lines.extend(
+            "{}  {}\n".format(
+                digest, path.relative_to(root)).encode("ascii"))
+    data = bytes(manifest_lines)
     manifest = root / "segments" / "segment{:03d}.attempts.sha256".format(segment)
     write_once(manifest, data)
     return sha256_bytes(data), len(files)
@@ -3004,13 +3263,20 @@ def write_segment_final(
         die("segment final lacks a valid intent job ledger")
     attempts_sha256, attempt_file_count = seal_attempt_manifest(
         root, segment, set(raw_jobs), require_complete=state == "success")
+    _, intent_digest = read_stable_runtime_bytes(
+        segment_path(root, segment, "intent"),
+        max_bytes=MAX_RUNTIME_JSON_BYTES, label="segment intent receipt")
+    ready_path = segment_path(root, segment, "ready")
+    ready_digest: Optional[str] = None
+    if ready_path.is_file() and not ready_path.is_symlink():
+        _, ready_digest = read_stable_runtime_bytes(
+            ready_path, max_bytes=MAX_RUNTIME_JSON_BYTES,
+            label="segment ready receipt")
     record = {
         "schema": SCHEMA + ".segment_final", "segment": segment,
         "state": state, "stage": intent.get("stage"),
-        "intent_sha256": sha256_file(segment_path(root, segment, "intent")),
-        "ready_sha256": (
-            sha256_file(segment_path(root, segment, "ready"))
-            if segment_path(root, segment, "ready").is_file() else None),
+        "intent_sha256": intent_digest,
+        "ready_sha256": ready_digest,
         "ended_utc": datetime.now(timezone.utc).isoformat(),
         "jobs_ended_monotonic_s": jobs_ended_monotonic_s,
         "jobs": intent.get("jobs"), "jobs_sha256": intent.get("jobs_sha256"),
@@ -3031,8 +3297,16 @@ def write_segment_final(
     return record
 
 
-def reconcile_incomplete_segments(root: Path, tasks: Sequence[dict]) -> List[dict]:
+def reconcile_incomplete_segments(
+    root: Path,
+    tasks: Sequence[dict],
+    *,
+    sampler_inventory_probe: Optional[Any] = None,
+) -> List[dict]:
     reconciled: List[dict] = []
+    inventory_probe = (
+        other_samplers
+        if sampler_inventory_probe is None else sampler_inventory_probe)
     current_boot_id = required_boot_id()
     for segment in segment_indices(root):
         intent_path = segment_path(root, segment, "intent")
@@ -3043,7 +3317,8 @@ def reconcile_incomplete_segments(root: Path, tasks: Sequence[dict]) -> List[dic
             continue
         if not intent_path.exists():
             die("campaign segment artifacts lack an immutable intent")
-        intent = load_json(intent_path)
+        intent, _ = load_canonical_runtime_json(
+            intent_path, label="segment intent receipt")
         controller_pid = intent.get("controller_pid")
         controller_start = intent.get("controller_start_ticks")
         segment_boot_id = intent.get("boot_id")
@@ -3062,12 +3337,13 @@ def reconcile_incomplete_segments(root: Path, tasks: Sequence[dict]) -> List[dic
         if segment_boot_id == current_boot_id:
             actions = terminate_owned_segment_processes(
                 root, segment, selected,
-                (controller_pid, controller_start))
+                (controller_pid, controller_start),
+                sampler_inventory_probe=inventory_probe)
         else:
             # Linux start ticks are boot-relative.  A boot change proves every
             # old process object is gone, but forbids interpreting any current
             # PID/cmdline collision as signal authority.
-            current_samplers = other_samplers()
+            current_samplers = inventory_probe()
             if current_samplers:
                 die("prior-boot reconciliation is blocked by current "
                     "sampler(s): {}".format(json.dumps(
@@ -3101,12 +3377,17 @@ def read_bounded_regular_bytes(
     allow_missing: bool,
     max_bytes: int,
     label: str,
+    directory_fd: Optional[int] = None,
+    entry_name: Optional[str] = None,
 ) -> Optional[Tuple[bytes, bool]]:
     """Read at most one bounded, path-bound regular-file snapshot."""
+    if (directory_fd is None) != (entry_name is None):
+        die("{} file binding is incomplete".format(label))
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | \
         getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    target = str(path) if directory_fd is None else str(entry_name)
     try:
-        descriptor = os.open(str(path), flags)
+        descriptor = os.open(target, flags, dir_fd=directory_fd)
     except FileNotFoundError:
         if allow_missing:
             return None
@@ -3128,12 +3409,20 @@ def read_bounded_regular_bytes(
         raw = b"".join(chunks)
         after = os.fstat(descriptor)
         try:
-            path_identity = path.lstat()
+            if directory_fd is None:
+                path_identity = path.lstat()
+            else:
+                assert entry_name is not None
+                path_identity = os.stat(
+                    entry_name, dir_fd=directory_fd,
+                    follow_symlinks=False)
         except FileNotFoundError:
             die("{} disappeared during read: {}".format(label, path))
         expected_metadata = (
             identity.st_uid, identity.st_gid,
             stat.S_IMODE(identity.st_mode), identity.st_nlink)
+        expected_content_metadata = (
+            identity.st_size, identity.st_mtime_ns, identity.st_ctime_ns)
         if len(raw) > max_bytes:
             die("{} exceeds the bounded size policy: {}".format(label, path))
         if not stat.S_ISREG(after.st_mode) or after.st_nlink != 1 or \
@@ -3152,7 +3441,16 @@ def read_bounded_regular_bytes(
                     stat.S_IMODE(path_identity.st_mode),
                     path_identity.st_nlink) != expected_metadata:
             die("{} identity changed during read: {}".format(label, path))
-        stable = after.st_size == len(raw)
+        stable = (
+            after.st_size == len(raw) and
+            (
+                after.st_size, after.st_mtime_ns, after.st_ctime_ns
+            ) == expected_content_metadata and
+            (
+                path_identity.st_size, path_identity.st_mtime_ns,
+                path_identity.st_ctime_ns
+            ) == expected_content_metadata
+        )
     except OSError as exc:
         die("cannot read {} {}: {}".format(label, path, exc))
     finally:
@@ -3161,6 +3459,57 @@ def read_bounded_regular_bytes(
         except OSError as exc:
             die("cannot close {} {}: {}".format(label, path, exc))
     return raw, stable
+
+
+def read_stable_runtime_bytes(
+    path: Path,
+    *,
+    max_bytes: int,
+    label: str,
+    directory_fd: Optional[int] = None,
+    entry_name: Optional[str] = None,
+) -> Tuple[bytes, str]:
+    snapshot = read_bounded_regular_bytes(
+        path, allow_missing=False, max_bytes=max_bytes, label=label,
+        directory_fd=directory_fd, entry_name=entry_name)
+    assert snapshot is not None
+    raw, stable = snapshot
+    if not stable:
+        die("{} changed during snapshot: {}".format(label, path))
+    return raw, sha256_bytes(raw)
+
+
+def load_canonical_runtime_json(
+    path: Path,
+    *,
+    label: str,
+) -> Tuple[Dict[str, object], str]:
+    raw, digest = read_stable_runtime_bytes(
+        path, max_bytes=MAX_RUNTIME_JSON_BYTES, label=label)
+    try:
+        value = strict_json_loads(raw.decode("ascii"))
+    except (UnicodeError, ValueError) as exc:
+        die("cannot read {} {}: {}".format(label, path, exc))
+    if not isinstance(value, dict) or canonical_json(value) != raw:
+        die("{} is not a canonical JSON object: {}".format(label, path))
+    return value, digest
+
+
+def record_authenticated_runtime_hash(
+    root: Path,
+    path: Path,
+    digest: str,
+    sink: Optional[Dict[str, str]],
+) -> None:
+    if sink is None:
+        return
+    try:
+        relative = str(path.relative_to(root))
+    except ValueError:
+        die("authenticated runtime artifact escapes campaign root")
+    if relative in sink:
+        die("duplicate authenticated runtime artifact")
+    sink[relative] = digest
 
 
 def read_thermal_snapshot_with_sha256(
@@ -4250,45 +4599,66 @@ def run_segment(
         next_i2c_check = time.monotonic()
         with concurrent.futures.ThreadPoolExecutor(
                 max_workers=int(design["worker_count"])) as pool:
-            pending = {
-                pool.submit(run_one, task): int(task["job"])
-                for task in tasks
-            }
-            while pending:
-                now = time.monotonic()
-                if now >= next_i2c_check and not abort.is_set():
-                    readers = check_owned_sampler()
-                    validate_thermal_rows(
-                        read_live_thermal_rows(thermal_csv), segment=segment)
-                    if readers:
+            pending: Dict[concurrent.futures.Future, int] = {}
+            try:
+                for task in tasks:
+                    pending[pool.submit(run_one, task)] = int(task["job"])
+                while pending:
+                    now = time.monotonic()
+                    if now >= next_i2c_check and not abort.is_set():
+                        readers = check_owned_sampler()
+                        validate_thermal_rows(
+                            read_live_thermal_rows(thermal_csv),
+                            segment=segment)
+                        if readers:
+                            failures.append({
+                                "status": "concurrent_i2c_reader",
+                                "readers": readers,
+                            })
+                            abort.set()
+                            terminate_active()
+                        assert_current_controller_owner(root)
+                        next_i2c_check = \
+                            now + I2C_RECHECK_INTERVAL_SECONDS
+                    if sampler.poll() is not None and not abort.is_set():
                         failures.append({
-                            "status": "concurrent_i2c_reader",
-                            "readers": readers,
+                            "status": "sampler_exited",
+                            "returncode": sampler.returncode,
                         })
                         abort.set()
                         terminate_active()
-                    assert_current_controller_owner(root)
-                    next_i2c_check = now + I2C_RECHECK_INTERVAL_SECONDS
-                if sampler.poll() is not None and not abort.is_set():
-                    failures.append({"status": "sampler_exited", "returncode": sampler.returncode})
-                    abort.set()
-                    terminate_active()
-                done, _ = concurrent.futures.wait(
-                    tuple(pending), timeout=0.2,
-                    return_when=concurrent.futures.FIRST_COMPLETED,
-                )
-                for future in done:
-                    job = pending.pop(future)
+                    done, _ = concurrent.futures.wait(
+                        tuple(pending), timeout=0.2,
+                        return_when=concurrent.futures.FIRST_COMPLETED,
+                    )
+                    for future in done:
+                        job = pending.pop(future)
+                        result = benchmark_future_result(future, job)
+                        if result.get("status") != "success":
+                            failures.append(result)
+                            if not abort.is_set():
+                                abort.set()
+                                terminate_active()
+                    if abort.is_set():
+                        terminate_active()
+                        for future in pending:
+                            future.cancel()
+            except BaseException:
+                # Set abort while still inside the pool.  Otherwise
+                # ThreadPoolExecutor.__exit__ waits while queued jobs continue
+                # to start with abort false, potentially running the whole
+                # segment after monitoring or ownership has already failed.
+                abort.set()
+                for future in pending:
+                    future.cancel()
+                terminate_active()
+                concurrent.futures.wait(tuple(pending))
+                for future, job in list(pending.items()):
                     result = benchmark_future_result(future, job)
                     if result.get("status") != "success":
                         failures.append(result)
-                        if not abort.is_set():
-                            abort.set()
-                            terminate_active()
-                if abort.is_set():
-                    terminate_active()
-                    for future in pending:
-                        future.cancel()
+                pending.clear()
+                raise
         jobs_ended = time.monotonic()
         if not failures:
             check_owned_sampler()
@@ -4411,6 +4781,8 @@ def run_segment(
 
 
 def command_launch(args: argparse.Namespace) -> None:
+    if getattr(args, "execute", False):
+        require_pidfd_runtime()
     root = Path(args.root).resolve()
     lock_descriptor = acquire_environment_lock()
     if lock_descriptor is None:
@@ -4620,7 +4992,8 @@ def validate_attempt_manifest(
     allowed_jobs: Set[int],
     *,
     require_complete: bool,
-) -> None:
+    runtime_hash_sink: Optional[Dict[str, str]] = None,
+) -> Dict[Tuple[int, str], str]:
     attempt_dir = root / "attempts" / "segment{:03d}".format(segment)
     if not attempt_dir.is_dir() or attempt_dir.is_symlink():
         die("segment attempt directory is missing or indirect")
@@ -4633,6 +5006,7 @@ def validate_attempt_manifest(
     if any(match is None for match in matches):
         die("segment attempt inventory contains an unexpected artifact")
     groups: Dict[int, Set[str]] = defaultdict(set)
+    artifact_hashes: Dict[Tuple[int, str], str] = {}
     for path, match in zip(files, matches):
         assert match is not None
         job = int(match.group(1))
@@ -4640,17 +5014,36 @@ def validate_attempt_manifest(
             die("segment attempt inventory names a job outside its intent")
         suffix = path.suffix[1:]
         groups[job].add(suffix)
+        artifact_bytes, artifact_digest = read_stable_runtime_bytes(
+            path, max_bytes=attempt_artifact_max_bytes(suffix),
+            label="segment attempt artifact")
+        artifact_hashes[(job, suffix)] = artifact_digest
         if suffix == "pid":
-            identity = load_json(path)
+            try:
+                identity = strict_json_loads(
+                    artifact_bytes.decode("ascii"))
+            except (UnicodeError, ValueError) as exc:
+                die("segment attempt PID receipt is malformed: {}".format(
+                    exc))
+            if not isinstance(identity, dict):
+                die("segment attempt PID receipt is not an object")
             value = identity.get("pid")
             start_ticks = identity.get("start_ticks")
             if set(identity) != {"pid", "start_ticks"} or \
-                    path.read_bytes() != canonical_json(identity) or \
+                    artifact_bytes != canonical_json(identity) or \
                     not isinstance(value, int) or isinstance(value, bool) or value <= 1 or \
                     value > MAX_PROCESS_PID or \
                     not isinstance(start_ticks, int) or isinstance(start_ticks, bool) or \
                     start_ticks < 0:
                 die("segment attempt PID receipt is out of range")
+        elif suffix == "exit":
+            if re.fullmatch(
+                    rb"(?:0|[1-9][0-9]{0,9}|-[1-9][0-9]{0,9})\n",
+                    artifact_bytes) is None:
+                die("segment attempt exit receipt is malformed")
+            exit_value = int(artifact_bytes[:-1])
+            if exit_value < -(signal.NSIG - 1) or exit_value > 255:
+                die("segment attempt exit receipt is out of range")
     complete_suffixes = {"pid", "stdout", "stderr", "exit"}
     valid_prefixes = (
         {"pid"},
@@ -4664,33 +5057,30 @@ def validate_attempt_manifest(
         # only a successful segment requires the complete four-file set.
         if suffixes not in valid_prefixes:
             die("segment attempt is not an atomic output prefix")
-        if "exit" in suffixes:
-            exit_path = attempt_dir / "job{:05d}.exit".format(job)
-            try:
-                exit_bytes = exit_path.read_bytes()
-            except OSError:
-                die("segment attempt exit receipt is malformed")
-            if re.fullmatch(rb"(?:0|[1-9][0-9]*|-[1-9][0-9]*)\n",
-                            exit_bytes) is None:
-                die("segment attempt exit receipt is malformed")
-            exit_value = int(exit_bytes[:-1])
-            if exit_value < -(signal.NSIG - 1) or exit_value > 255:
-                die("segment attempt exit receipt is out of range")
     if require_complete and (set(groups) != allowed_jobs or
                              any(value != complete_suffixes for value in groups.values())):
         die("successful segment lacks complete attempt evidence for every job")
     data = b"".join(
-        "{}  {}\n".format(sha256_file(path), path.relative_to(root)).encode("ascii")
-        for path in files
+        "{}  {}\n".format(
+            artifact_hashes[(
+                int(match.group(1)), path.suffix[1:])],
+            path.relative_to(root)).encode("ascii")
+        for path, match in zip(files, matches) if match is not None
     )
     manifest = root / "segments" / "segment{:03d}.attempts.sha256".format(segment)
-    if not manifest.is_file() or manifest.is_symlink() or manifest.read_bytes() != data or \
+    manifest_bytes, manifest_digest = read_stable_runtime_bytes(
+        manifest, max_bytes=MAX_ATTEMPT_MANIFEST_BYTES,
+        label="segment attempt manifest")
+    if manifest_bytes != data or \
             final.get("attempt_manifest") != manifest.name or \
             final.get("attempt_manifest_sha256") != sha256_bytes(data) or \
             not isinstance(final.get("attempt_file_count"), int) or \
             isinstance(final.get("attempt_file_count"), bool) or \
             final.get("attempt_file_count") != len(files):
         die("segment attempt manifest mismatch")
+    record_authenticated_runtime_hash(
+        root, manifest, manifest_digest, runtime_hash_sink)
+    return artifact_hashes
 
 
 def validate_thermal_rows(
@@ -4811,7 +5201,600 @@ def validate_successful_thermal_coverage(
     return coverage_busy
 
 
-def validate_thermal(root: Path, design: Mapping[str, object], tasks: Sequence[dict]) -> Dict[str, object]:
+def validated_attempt_bytes(
+    root: Path,
+    segment: int,
+    job: int,
+    suffix: str,
+    attempt_hashes: Optional[
+        Mapping[Tuple[int, str], str]] = None,
+) -> bytes:
+    if suffix not in ("pid", "stdout", "stderr", "exit"):
+        die("invalid attempt artifact suffix")
+    path = root / "attempts" / "segment{:03d}".format(segment) / \
+        "job{:05d}.{}".format(job, suffix)
+    raw, digest = read_stable_runtime_bytes(
+        path, max_bytes=attempt_artifact_max_bytes(suffix),
+        label="failed segment attempt artifact")
+    if attempt_hashes is not None:
+        expected = attempt_hashes.get((job, suffix))
+        if expected is None or digest != expected:
+            die("failed segment attempt artifact changed after authentication")
+    return raw
+
+
+def validated_attempt_pid(
+    root: Path,
+    segment: int,
+    job: int,
+    attempt_hashes: Optional[
+        Mapping[Tuple[int, str], str]] = None,
+) -> int:
+    raw = validated_attempt_bytes(
+        root, segment, job, "pid", attempt_hashes)
+    try:
+        identity = strict_json_loads(raw.decode("ascii"))
+    except (UnicodeError, ValueError) as exc:
+        die("failed segment action has a malformed PID receipt: {}".format(
+            exc))
+    if not isinstance(identity, dict):
+        die("failed segment action PID receipt is not an object")
+    pid = identity.get("pid")
+    start_ticks = identity.get("start_ticks")
+    if set(identity) != {"pid", "start_ticks"} or \
+            raw != canonical_json(identity) or \
+            not isinstance(pid, int) or isinstance(pid, bool) or \
+            pid <= 1 or pid > MAX_PROCESS_PID or \
+            not isinstance(start_ticks, int) or \
+            isinstance(start_ticks, bool) or start_ticks < 0:
+        die("failed segment action has a malformed attempt PID receipt")
+    return pid
+
+
+def validated_attempt_exit(
+    root: Path,
+    segment: int,
+    job: int,
+    attempt_hashes: Optional[
+        Mapping[Tuple[int, str], str]] = None,
+) -> int:
+    raw = validated_attempt_bytes(
+        root, segment, job, "exit", attempt_hashes)
+    if re.fullmatch(
+            rb"(?:0|[1-9][0-9]{0,9}|-[1-9][0-9]{0,9})\n",
+            raw) is None:
+        die("failed segment attempt exit receipt is malformed")
+    value = int(raw[:-1])
+    if value < -(signal.NSIG - 1) or value > 255:
+        die("failed segment attempt exit receipt is out of range")
+    return value
+
+
+def attempt_suffixes(
+    root: Path,
+    segment: int,
+    job: int,
+    attempt_hashes: Optional[
+        Mapping[Tuple[int, str], str]] = None,
+) -> Set[str]:
+    if attempt_hashes is not None:
+        return {
+            suffix for candidate, suffix in attempt_hashes
+            if candidate == job
+        }
+    directory = root / "attempts" / "segment{:03d}".format(segment)
+    suffixes: Set[str] = set()
+    for suffix in ("pid", "stdout", "stderr", "exit"):
+        path = directory / "job{:05d}.{}".format(job, suffix)
+        if path.exists() or path.is_symlink():
+            if not path.is_file() or path.is_symlink():
+                die("failed segment attempt artifact is indirect")
+            suffixes.add(suffix)
+    return suffixes
+
+
+def validate_live_segment_actions(
+    actions: object,
+    jobs: Set[int],
+    *,
+    segment: int,
+    allow_benchmarks: bool,
+    ready_sampler_pid: Optional[int] = None,
+    require_thermal: bool = False,
+) -> Dict[int, dict]:
+    """Validate live-run cleanup actions and return unique per-job actions.
+
+    A failed live segment can contain signaled benchmark exits after some
+    independent infrastructure failure sets the abort flag.  Those exits do
+    not demonstrate a codec failure only when an exact action, PID receipt,
+    and signal-derived return code all agree.
+    """
+    if not isinstance(actions, list):
+        die("live segment process-action ledger is malformed")
+    benchmark_actions: Dict[int, dict] = {}
+    thermal_kinds: Set[str] = set()
+    for index, action in enumerate(actions):
+        label = "segment {} process action {}".format(segment, index)
+        if not isinstance(action, Mapping):
+            die("{} is malformed".format(label))
+        kind = action.get("kind")
+        expected_keys: Set[str]
+        if kind in ("benchmark", "benchmark_emergency"):
+            if not allow_benchmarks:
+                die("{} is forbidden for a successful segment".format(label))
+            expected_keys = {"kind", "job", "pid", "action"}
+            job = action.get("job")
+            if not isinstance(job, int) or isinstance(job, bool) or \
+                    job not in jobs or job in benchmark_actions:
+                die("{} names an invalid benchmark job".format(label))
+        elif kind in ("thermal", "thermal_wrapper"):
+            expected_keys = {"kind", "pid", "action"}
+            job = None
+            if kind in thermal_kinds:
+                die("{} duplicates a thermal process kind".format(label))
+            thermal_kinds.add(str(kind))
+        else:
+            die("{} has an unknown kind".format(label))
+        if set(action) != expected_keys:
+            die("{} has an unexpected schema".format(label))
+        pid = action.get("pid")
+        result = action.get("action")
+        if not isinstance(pid, int) or isinstance(pid, bool) or \
+                pid <= 1 or pid > MAX_PROCESS_PID or \
+                not isinstance(result, str) or \
+                result not in STOPPED_PROCESS_ACTIONS:
+            die("{} has an invalid process result".format(label))
+        if job is not None:
+            # A cleanup may happen before the worker can publish its PID
+            # receipt.  Store the strict action now and cross-bind it only
+            # when complete attempt output exists and the action is used to
+            # explain that output's signal return code.
+            benchmark_actions[int(job)] = dict(action)
+        elif kind == "thermal" and ready_sampler_pid is not None and \
+                pid != ready_sampler_pid:
+            die("{} is bound to the wrong ready sampler PID".format(label))
+    if require_thermal and "thermal" not in thermal_kinds:
+        die("successful segment lacks its stopped thermal-process action")
+    return benchmark_actions
+
+
+def validate_failed_segment_actions(
+    root: Path,
+    actions: object,
+    jobs: Set[int],
+    *,
+    segment: int,
+    attempt_hashes: Optional[
+        Mapping[Tuple[int, str], str]] = None,
+) -> Dict[int, dict]:
+    benchmark_actions = validate_live_segment_actions(
+        actions, jobs, segment=segment, allow_benchmarks=True)
+    for job, action in benchmark_actions.items():
+        suffixes = attempt_suffixes(
+            root, segment, job, attempt_hashes)
+        if "pid" not in suffixes:
+            # Registration cleanup can run before the worker publishes its
+            # PID receipt.  In that sole case there is nothing persistent to
+            # cross-bind.
+            continue
+        if action.get("kind") != "benchmark":
+            die("emergency cleanup action contradicts a PID receipt")
+        if validated_attempt_pid(
+                root, segment, job, attempt_hashes) != action.get("pid"):
+            die("benchmark cleanup action is bound to the wrong attempt PID")
+    return benchmark_actions
+
+
+def validate_interrupted_segment_actions(
+    root: Path,
+    actions: object,
+    jobs: Set[int],
+    *,
+    segment: int,
+    intent_boot_id: str,
+    attempt_hashes: Mapping[Tuple[int, str], str],
+) -> None:
+    """Validate the process-action variants emitted by crash reconciliation."""
+    if not isinstance(actions, list):
+        die("interrupted segment process-action ledger is malformed")
+    if any(isinstance(action, Mapping) and
+           action.get("kind") == "segment" for action in actions):
+        if len(actions) != 1:
+            die("boot-change reconciliation must be the sole process action")
+        action = actions[0]
+        if not isinstance(action, Mapping) or set(action) != {
+                "kind", "action", "from_boot_id", "to_boot_id"} or \
+                action.get("kind") != "segment" or \
+                action.get("action") != "boot_changed" or \
+                action.get("from_boot_id") != intent_boot_id or \
+                not valid_segment_boot_id(action.get("to_boot_id")) or \
+                action.get("from_boot_id") == action.get("to_boot_id"):
+            die("interrupted segment has an invalid boot-change action")
+        return
+    seen: Set[Tuple[str, int]] = set()
+    seen_benchmark_sources: Set[Tuple[str, int]] = set()
+    for index, action in enumerate(actions):
+        label = "segment {} interrupted action {}".format(segment, index)
+        if not isinstance(action, Mapping):
+            die("{} is malformed".format(label))
+        kind = action.get("kind")
+        job: Optional[int] = None
+        if kind == "benchmark":
+            if set(action) != {"kind", "job", "pid", "action"}:
+                die("{} has an invalid benchmark schema".format(label))
+            raw_job = action.get("job")
+            if not isinstance(raw_job, int) or isinstance(raw_job, bool) or \
+                    raw_job not in jobs:
+                die("{} names an invalid benchmark job".format(label))
+            job = int(raw_job)
+            allowed_results = STOPPED_PROCESS_ACTIONS | {
+                "stale_reused_pid"}
+        elif kind == "thermal":
+            if set(action) != {"kind", "pid", "action"}:
+                die("{} has an invalid thermal schema".format(label))
+            allowed_results = DISCOVERY_PROVED_GONE_ACTIONS | {
+                "stale_reused_pid"}
+        elif isinstance(kind, str) and re.fullmatch(
+                r"benchmark_job_(?:0|[1-9][0-9]{0,4})", kind):
+            if set(action) != {"kind", "pid", "action"}:
+                die("{} has an invalid discovered benchmark schema".format(
+                    label))
+            job = int(kind.rsplit("_", 1)[1])
+            if job not in jobs:
+                die("{} names an invalid discovered benchmark job".format(
+                    label))
+            allowed_results = DISCOVERY_PROVED_GONE_ACTIONS
+        else:
+            die("{} has an unknown kind".format(label))
+        pid = action.get("pid")
+        result = action.get("action")
+        if not isinstance(pid, int) or isinstance(pid, bool) or \
+                pid <= 1 or pid > MAX_PROCESS_PID or \
+                not isinstance(result, str) or result not in allowed_results:
+            die("{} has an invalid process result".format(label))
+        identity = (str(kind), pid)
+        if identity in seen:
+            die("{} duplicates a process action".format(label))
+        seen.add(identity)
+        if job is not None:
+            # Discovery can stop the original process and a subsequent PID
+            # receipt check can legitimately observe that numeric PID reused.
+            # Permit one action from each independently authenticated source,
+            # but never duplicate either source for the same job.
+            source = (
+                "receipt" if kind == "benchmark" else "discovery",
+                job,
+            )
+            if source in seen_benchmark_sources:
+                die("{} duplicates a benchmark job action".format(label))
+            seen_benchmark_sources.add(source)
+        if kind == "benchmark" and validated_attempt_pid(
+                root, segment, int(job), attempt_hashes) != pid:
+            die("{} is bound to the wrong attempt PID".format(label))
+
+
+def validate_complete_attempt_action(
+    root: Path,
+    segment: int,
+    job: int,
+    benchmark_actions: Mapping[int, Mapping[str, object]],
+    attempt_hashes: Optional[
+        Mapping[Tuple[int, str], str]] = None,
+) -> Optional[Mapping[str, object]]:
+    action = benchmark_actions.get(job)
+    if action is None:
+        return None
+    if action.get("kind") != "benchmark":
+        die("complete attempt output is paired with an emergency action")
+    if validated_attempt_pid(
+            root, segment, job, attempt_hashes) != action.get("pid"):
+        die("benchmark cleanup action is bound to the wrong attempt PID")
+    return action
+
+
+def controller_caused_attempt_exit(
+    root: Path,
+    segment: int,
+    job: int,
+    returncode: int,
+    benchmark_actions: Mapping[int, Mapping[str, object]],
+    attempt_hashes: Optional[
+        Mapping[Tuple[int, str], str]] = None,
+) -> bool:
+    action = validate_complete_attempt_action(
+        root, segment, job, benchmark_actions, attempt_hashes)
+    if action is None:
+        return False
+    expected_returncode = {
+        "terminated": -signal.SIGTERM,
+        "killed": -signal.SIGKILL,
+    }.get(action.get("action"))
+    return expected_returncode is not None and \
+        returncode == expected_returncode
+
+
+def validate_failed_segment_failures(
+    root: Path,
+    failures: object,
+    actions: object,
+    jobs: Set[int],
+    *,
+    segment: int,
+    stage: str,
+    attempt_hashes: Optional[
+        Mapping[Tuple[int, str], str]] = None,
+) -> List[dict]:
+    """Strictly validate and classify every failure from one failed segment."""
+    if not isinstance(failures, list) or not failures:
+        die("failed segment lacks a failure receipt")
+    benchmark_actions = validate_failed_segment_actions(
+        root, actions, jobs, segment=segment,
+        attempt_hashes=attempt_hashes)
+    job_statuses = {
+        "future_cancelled": set(),
+        "worker_exception": {"detail"},
+        "cancelled_before_start": set(),
+        "spawn_error": {"detail"},
+        "timeout": {"timeout_seconds"},
+        "exit": {"returncode"},
+        "validation_error": {"detail"},
+        "cancelled_after_run": set(),
+    }
+    infrastructure_statuses = {
+        "sampler_spawn_error": {"detail"},
+        "concurrent_i2c_reader": {"readers"},
+        "sampler_exited": {"returncode"},
+        "thermal_end_coverage_failed": set(),
+        "benchmark_stop_error": {"detail"},
+        "launcher_exception": {"detail"},
+        "sampler_stop_error": {"detail"},
+        "sampler_returncode": {"returncode"},
+        "sampler_stderr_nonempty_or_missing": set(),
+        "sealed_thermal_validation_error": {"detail"},
+    }
+    seen_job_results: Set[int] = set()
+    classified: List[dict] = []
+    for index, failure in enumerate(failures):
+        label = "segment {} failure {}".format(segment, index)
+        if not isinstance(failure, Mapping):
+            die("{} is malformed".format(label))
+        status = failure.get("status")
+        if not isinstance(status, str):
+            die("{} has a malformed status".format(label))
+        if status in job_statuses:
+            expected = {"status", "job", *job_statuses[str(status)]}
+            job = failure.get("job")
+            if not isinstance(job, int) or isinstance(job, bool) or \
+                    job not in jobs or job in seen_job_results:
+                die("{} names an invalid or duplicate job".format(label))
+            seen_job_results.add(job)
+        elif status in infrastructure_statuses:
+            expected = {"status", *infrastructure_statuses[str(status)]}
+            job = None
+        else:
+            die("{} has an unknown status".format(label))
+        if set(failure) != expected:
+            die("{} has an unexpected schema".format(label))
+
+        suffixes = attempt_suffixes(
+            root, segment, int(job), attempt_hashes) \
+            if job is not None else set()
+        if status in (
+                "future_cancelled", "cancelled_before_start",
+                "spawn_error") and suffixes:
+            die("{} unexpectedly has attempt artifacts".format(label))
+        if status in (
+                "timeout", "exit", "validation_error",
+                "cancelled_after_run") and suffixes != {
+                    "pid", "stdout", "stderr", "exit"}:
+            die("{} lacks complete attempt artifacts".format(label))
+        if "detail" in failure and not isinstance(failure["detail"], str):
+            die("{} has a malformed detail".format(label))
+        if "returncode" in failure:
+            returncode = failure["returncode"]
+            if not isinstance(returncode, int) or isinstance(returncode, bool) or \
+                    returncode < -(signal.NSIG - 1) or returncode > 255:
+                die("{} has a malformed return code".format(label))
+            if status in ("exit", "sampler_returncode") and returncode == 0:
+                die("{} has an impossible zero return code".format(label))
+        if status == "timeout":
+            timeout = failure["timeout_seconds"]
+            if not isinstance(timeout, (int, float)) or \
+                    isinstance(timeout, bool) or \
+                    isinstance(timeout, float) and \
+                    not math.isfinite(timeout) or \
+                    timeout != JOB_TIMEOUT_SECONDS:
+                die("{} has a malformed timeout".format(label))
+            validated_attempt_exit(
+                root, segment, int(job), attempt_hashes)
+        elif status == "exit":
+            if validated_attempt_exit(
+                    root, segment, int(job), attempt_hashes) != \
+                    failure["returncode"]:
+                die("{} disagrees with its attempt exit receipt".format(
+                    label))
+        elif status == "validation_error":
+            if validated_attempt_exit(
+                    root, segment, int(job), attempt_hashes) != 0:
+                die("{} has a nonzero attempt exit receipt".format(label))
+        elif status == "cancelled_after_run":
+            if validated_attempt_exit(
+                    root, segment, int(job), attempt_hashes) != 0:
+                die("{} has a nonzero attempt exit receipt".format(label))
+        if status == "concurrent_i2c_reader":
+            readers = failure["readers"]
+            if not isinstance(readers, Mapping) or not readers:
+                die("{} has a malformed I2C-reader map".format(label))
+            expected_devices = {
+                str(device) for device in DIMM_I2C_DEVICES
+            }
+            for pid_text, devices in readers.items():
+                if not isinstance(pid_text, str) or \
+                        len(pid_text) > len(str(MAX_PROCESS_PID)) or \
+                        re.fullmatch(r"[1-9][0-9]*", pid_text) is None or \
+                        int(pid_text) <= 1 or int(pid_text) > MAX_PROCESS_PID or \
+                        not isinstance(devices, list) or not devices or \
+                        any(not isinstance(device, str)
+                            for device in devices) or \
+                        devices != sorted(set(devices)) or \
+                        not set(devices).issubset(expected_devices):
+                    die("{} has a malformed I2C-reader entry".format(label))
+
+        classification = "infrastructure"
+        if status in ("timeout", "validation_error"):
+            classification = "codec"
+        elif status == "exit" and not controller_caused_attempt_exit(
+                root, segment, int(job), int(failure["returncode"]),
+                benchmark_actions, attempt_hashes):
+            classification = "codec"
+        classified.append({
+            "segment": segment,
+            "stage": stage,
+            "failure_index": index,
+            "classification": classification,
+            "failure": dict(failure),
+        })
+    return classified
+
+
+def classify_complete_attempt_codec_failures(
+    root: Path,
+    segment: int,
+    jobs: Sequence[int],
+    task_by_job: Mapping[int, Mapping[str, object]],
+    *,
+    stage: str,
+    explicit_failures: Sequence[Mapping[str, object]] = (),
+    benchmark_actions: Optional[
+        Mapping[int, Mapping[str, object]]] = None,
+    attempt_hashes: Optional[
+        Mapping[Tuple[int, str], str]] = None,
+    unexplained_exit_classification: str = "codec",
+) -> List[dict]:
+    """Recover promotion-blocking evidence from every complete attempt."""
+    if unexplained_exit_classification not in ("codec", "indeterminate"):
+        die("invalid unexplained-attempt classification")
+    attempt_dir = root / "attempts" / "segment{:03d}".format(segment)
+    explicit_by_job = {
+        int(failure["job"]): str(failure["status"])
+        for failure in explicit_failures if "job" in failure
+    }
+    actions = {} if benchmark_actions is None else benchmark_actions
+    failures: List[dict] = []
+    for job in sorted(jobs):
+        task = task_by_job.get(job)
+        if not isinstance(task, Mapping):
+            die("non-success attempt names an unknown job")
+        suffixes = attempt_suffixes(
+            root, segment, job, attempt_hashes)
+        if "exit" not in suffixes:
+            # Any started attempt that lacks a durable terminal receipt is
+            # unresolved.  In particular, worker-side publication can throw
+            # after the PID receipt but before stdout, and that must not be
+            # hidden as an infrastructure-only retry.
+            if suffixes:
+                failures.append({
+                    "segment": segment,
+                    "stage": stage,
+                    "failure_index":
+                        len(explicit_failures) + len(failures),
+                    "classification": "indeterminate",
+                    "failure": {
+                        "job": job,
+                        "status": "terminal_evidence_incomplete",
+                        "observed_suffixes": sorted(suffixes),
+                    },
+                })
+            continue
+        returncode = validated_attempt_exit(
+            root, segment, job, attempt_hashes)
+        validate_complete_attempt_action(
+            root, segment, job, actions, attempt_hashes)
+        failure: Optional[dict] = None
+        classification = "codec"
+        if returncode != 0:
+            if controller_caused_attempt_exit(
+                    root, segment, job, returncode, actions,
+                    attempt_hashes):
+                continue
+            if explicit_by_job.get(job) not in ("exit", "timeout"):
+                failure = {
+                    "job": job, "status": "exit",
+                    "returncode": returncode,
+                }
+                classification = unexplained_exit_classification
+        else:
+            if explicit_by_job.get(job) == "timeout":
+                continue
+            stdout = validated_attempt_bytes(
+                root, segment, job, "stdout", attempt_hashes)
+            stderr = validated_attempt_bytes(
+                root, segment, job, "stderr", attempt_hashes)
+            validation_error: Optional[CampaignError] = None
+            try:
+                parse_benchmark_csv(stdout, task)
+                if stderr:
+                    die("successful benchmark wrote stderr")
+            except CampaignError as exc:
+                validation_error = exc
+            if validation_error is not None:
+                if explicit_by_job.get(job) != "validation_error":
+                    failure = {
+                        "job": job, "status": "validation_error",
+                        "detail": str(validation_error),
+                    }
+            elif explicit_by_job.get(job) == "validation_error":
+                die("validation-error receipt has valid attempt output")
+        if failure is not None:
+            failures.append({
+                "segment": segment,
+                "stage": stage,
+                "failure_index": len(explicit_failures) + len(failures),
+                "classification": classification,
+                "failure": failure,
+            })
+    return failures
+
+
+def classify_interrupted_attempt_failures(
+    root: Path,
+    segment: int,
+    jobs: Sequence[int],
+    task_by_job: Mapping[int, Mapping[str, object]],
+    *,
+    stage: str,
+    attempt_hashes: Optional[
+        Mapping[Tuple[int, str], str]] = None,
+) -> List[dict]:
+    """Block every crash-reconciled segment and retain its attempt evidence."""
+    interrupted = {
+        "status": "segment_interrupted",
+    }
+    failures = [{
+        "segment": segment,
+        "stage": stage,
+        "failure_index": 0,
+        "classification": "indeterminate",
+        "failure": interrupted,
+    }]
+    failures.extend(classify_complete_attempt_codec_failures(
+        root, segment, jobs, task_by_job, stage=stage,
+        explicit_failures=[interrupted],
+        attempt_hashes=attempt_hashes,
+        unexplained_exit_classification="indeterminate"))
+    return failures
+
+
+def validate_thermal(
+    root: Path,
+    design: Mapping[str, object],
+    tasks: Sequence[dict],
+    *,
+    attempt_hash_sink: Optional[
+        Dict[Tuple[int, int, str], str]] = None,
+    runtime_hash_sink: Optional[Dict[str, str]] = None,
+    output_hash_sink: Optional[Dict[str, str]] = None,
+) -> Dict[str, object]:
     indices = segment_indices(root)
     if not indices:
         die("campaign has no launch segments")
@@ -4825,6 +5808,27 @@ def validate_thermal(root: Path, design: Mapping[str, object], tasks: Sequence[d
     seen_control_success = False
     expected_thermal_files: Set[str] = set()
     task_by_job = {int(task["job"]): task for task in tasks}
+    historical_failures: List[dict] = []
+    intent_fields = {
+        "schema", "segment", "boot_id", "created_utc",
+        "created_monotonic_s", "controller_pid", "controller_start_ticks",
+        "stage", "jobs", "jobs_sha256", "workers", "previously_complete",
+        "resume", "retry_policy",
+    }
+    ready_fields = {
+        "schema", "segment", "intent_sha256", "ready_utc",
+        "jobs_started_monotonic_s", "sampler_pid", "samples_at_ready",
+        "sampler_start_ticks", "last_sample_monotonic_s",
+    }
+    final_fields = {
+        "schema", "segment", "state", "stage", "intent_sha256",
+        "ready_sha256", "ended_utc", "jobs_ended_monotonic_s", "jobs",
+        "jobs_sha256", "failures", "rolled_back_jobs", "published_jobs",
+        "process_actions", "sampler_returncode", "thermal_csv",
+        "thermal_csv_sha256", "thermal_stderr", "thermal_stderr_sha256",
+        "attempt_manifest", "attempt_manifest_sha256",
+        "attempt_file_count", "retry_policy",
+    }
     for segment in indices:
         intent_path = segment_path(root, segment, "intent")
         ready_path = segment_path(root, segment, "ready")
@@ -4834,8 +5838,14 @@ def validate_thermal(root: Path, design: Mapping[str, object], tasks: Sequence[d
         if not intent_path.is_file() or intent_path.is_symlink() or \
                 not final_path.is_file() or final_path.is_symlink():
             die("campaign contains an unreconciled segment")
-        intent = load_json(intent_path)
-        final = load_json(final_path)
+        intent, intent_digest = load_canonical_runtime_json(
+            intent_path, label="segment intent")
+        final, final_digest = load_canonical_runtime_json(
+            final_path, label="segment final")
+        record_authenticated_runtime_hash(
+            root, intent_path, intent_digest, runtime_hash_sink)
+        record_authenticated_runtime_hash(
+            root, final_path, final_digest, runtime_hash_sink)
         selected = segment_jobs(intent, tasks)
         jobs = [int(task["job"]) for task in selected]
         stage = str(intent.get("stage"))
@@ -4847,7 +5857,9 @@ def validate_thermal(root: Path, design: Mapping[str, object], tasks: Sequence[d
             task["stage"] == "hard" and int(task["job"]) not in successful_jobs
             for task in tasks
         )
-        if intent.get("schema") != SCHEMA + ".segment_intent" or \
+        if set(intent) != intent_fields or \
+                set(final) != final_fields or \
+                intent.get("schema") != SCHEMA + ".segment_intent" or \
                 not isinstance(intent.get("segment"), int) or \
                 isinstance(intent.get("segment"), bool) or \
                 intent.get("segment") != segment or \
@@ -4859,12 +5871,17 @@ def validate_thermal(root: Path, design: Mapping[str, object], tasks: Sequence[d
                 not isinstance(intent.get("controller_start_ticks"), int) or \
                 isinstance(intent.get("controller_start_ticks"), bool) or \
                 intent["controller_start_ticks"] < 0 or \
+                not isinstance(intent.get("created_utc"), str) or \
+                not intent["created_utc"] or \
+                not valid_monotonic_receipt(
+                    intent.get("created_monotonic_s")) or \
                 not isinstance(intent.get("workers"), int) or \
                 isinstance(intent.get("workers"), bool) or \
                 intent.get("workers") != design.get("worker_count") or \
                 not isinstance(intent.get("previously_complete"), int) or \
                 isinstance(intent.get("previously_complete"), bool) or \
                 intent.get("previously_complete") != len(successful_jobs) or \
+                not isinstance(intent.get("resume"), bool) or \
                 jobs != expected_jobs or (stage == "control" and hard_remaining) or \
                 intent.get("retry_policy") != "stage-atomic non-selective retry" or \
                 final.get("schema") != SCHEMA + ".segment_final" or \
@@ -4872,16 +5889,34 @@ def validate_thermal(root: Path, design: Mapping[str, object], tasks: Sequence[d
                 isinstance(final.get("segment"), bool) or \
                 final.get("segment") != segment or \
                 final.get("stage") != stage or \
-                final.get("intent_sha256") != sha256_file(intent_path) or \
+                final.get("intent_sha256") != intent_digest or \
                 not isinstance(final.get("jobs"), list) or \
                 any(not isinstance(job, int) or isinstance(job, bool)
                     for job in final.get("jobs", [])) or \
                 final.get("jobs") != jobs or \
                 final.get("jobs_sha256") != intent.get("jobs_sha256") or \
+                not isinstance(final.get("ended_utc"), str) or \
+                not final["ended_utc"] or \
+                final.get("jobs_ended_monotonic_s") is not None and \
+                not valid_monotonic_receipt(
+                    final.get("jobs_ended_monotonic_s")) or \
+                final.get("thermal_csv") != \
+                    "segment{:03d}.csv".format(segment) or \
+                final.get("thermal_stderr") != \
+                    "segment{:03d}.stderr".format(segment) or \
                 final.get("retry_policy") != (
                     "entire stage segment; no successful survivor is retained "
                     "on failure"):
             die("segment intent/final binding mismatch")
+        intent_utc = utc_receipt_timestamp(
+            intent["created_utc"], "segment intent")
+        final_utc = utc_receipt_timestamp(
+            final["ended_utc"], "segment final")
+        if final_utc < intent_utc or \
+                final.get("jobs_ended_monotonic_s") is not None and \
+                final["jobs_ended_monotonic_s"] < \
+                    intent["created_monotonic_s"]:
+            die("segment receipt chronology is impossible")
         state = final.get("state")
         if state not in ("success", "failed", "interrupted"):
             die("unknown segment terminal state")
@@ -4896,22 +5931,33 @@ def validate_thermal(root: Path, design: Mapping[str, object], tasks: Sequence[d
                     for job in published) or \
                 not isinstance(failures, list):
             die("segment terminal retry ledger is malformed")
-        validate_attempt_manifest(
+        attempt_hashes = validate_attempt_manifest(
             root, segment, final, set(jobs), require_complete=state == "success",
+            runtime_hash_sink=runtime_hash_sink,
         )
+        if attempt_hash_sink is not None:
+            for (job, suffix), digest in attempt_hashes.items():
+                key = (segment, job, suffix)
+                if key in attempt_hash_sink:
+                    die("duplicate authenticated attempt artifact")
+                attempt_hash_sink[key] = digest
         ready: Optional[Dict[str, object]] = None
         if ready_path.exists():
             expected_segment_files.add(ready_path.name)
             if ready_path.is_symlink() or not ready_path.is_file():
                 die("segment ready receipt is indirect")
-            ready = load_json(ready_path)
+            ready, ready_digest = load_canonical_runtime_json(
+                ready_path, label="segment ready receipt")
+            record_authenticated_runtime_hash(
+                root, ready_path, ready_digest, runtime_hash_sink)
             samples_at_ready = ready.get("samples_at_ready")
-            if ready.get("schema") != SCHEMA + ".segment_ready" or \
+            if set(ready) != ready_fields or \
+                    ready.get("schema") != SCHEMA + ".segment_ready" or \
                     not isinstance(ready.get("segment"), int) or \
                     isinstance(ready.get("segment"), bool) or \
                     ready.get("segment") != segment or \
-                    ready.get("intent_sha256") != sha256_file(intent_path) or \
-                    final.get("ready_sha256") != sha256_file(ready_path) or \
+                    ready.get("intent_sha256") != intent_digest or \
+                    final.get("ready_sha256") != ready_digest or \
                     not isinstance(samples_at_ready, int) or isinstance(samples_at_ready, bool) or \
                     samples_at_ready < THERMAL_READY_SAMPLES or \
                     not isinstance(ready.get("sampler_pid"), int) or \
@@ -4920,9 +5966,20 @@ def validate_thermal(root: Path, design: Mapping[str, object], tasks: Sequence[d
                     not isinstance(ready.get("sampler_start_ticks"), int) or \
                     isinstance(ready.get("sampler_start_ticks"), bool) or \
                     ready["sampler_start_ticks"] < 0 or \
-                    not isinstance(ready.get("jobs_started_monotonic_s"), (int, float)) or \
-                    isinstance(ready.get("jobs_started_monotonic_s"), bool):
+                    not isinstance(ready.get("ready_utc"), str) or \
+                    not ready["ready_utc"] or \
+                    not valid_monotonic_receipt(
+                        ready.get("jobs_started_monotonic_s")):
                 die("segment readiness receipt mismatch")
+            ready_utc = utc_receipt_timestamp(
+                ready["ready_utc"], "segment ready")
+            if not intent_utc <= ready_utc <= final_utc or \
+                    ready["jobs_started_monotonic_s"] < \
+                        intent["created_monotonic_s"] or \
+                    final.get("jobs_ended_monotonic_s") is not None and \
+                    final["jobs_ended_monotonic_s"] < \
+                        ready["jobs_started_monotonic_s"]:
+                die("segment readiness chronology is impossible")
         elif final.get("ready_sha256") is not None:
             die("segment final references a missing readiness receipt")
         csv_path = root / "thermal" / "segment{:03d}.csv".format(segment)
@@ -4943,6 +6000,10 @@ def validate_thermal(root: Path, design: Mapping[str, object], tasks: Sequence[d
             expected_thermal_files.add(stderr_path.name)
             observed_stderr_sha256 = bounded_thermal_stderr_sha256(
                 stderr_path)
+            assert observed_stderr_sha256 is not None
+            record_authenticated_runtime_hash(
+                root, stderr_path, observed_stderr_sha256,
+                runtime_hash_sink)
             if final.get("thermal_stderr") != stderr_path.name or \
                     final.get("thermal_stderr_sha256") != \
                     observed_stderr_sha256 or \
@@ -4960,6 +6021,10 @@ def validate_thermal(root: Path, design: Mapping[str, object], tasks: Sequence[d
                     read_thermal_rows_with_sha256(csv_path)
             else:
                 observed_csv_sha256 = bounded_thermal_sha256(csv_path)
+                assert observed_csv_sha256 is not None
+            record_authenticated_runtime_hash(
+                root, csv_path, observed_csv_sha256,
+                runtime_hash_sink)
             if final.get("thermal_csv_sha256") != observed_csv_sha256:
                 die("segment thermal hash binding mismatch")
             if state == "success":
@@ -4996,6 +6061,12 @@ def validate_thermal(root: Path, design: Mapping[str, object], tasks: Sequence[d
                     final.get("published_jobs") != jobs or \
                     not isinstance(end_value, (int, float)) or isinstance(end_value, bool):
                 die("successful segment terminal receipt is incomplete")
+            validate_live_segment_actions(
+                final.get("process_actions"), set(jobs),
+                segment=segment, allow_benchmarks=False,
+                ready_sampler_pid=int(ready["sampler_pid"]),
+                require_thermal=True,
+            )
             start = Decimal(str(ready["jobs_started_monotonic_s"]))
             end = Decimal(str(final["jobs_ended_monotonic_s"]))
             coverage_busy = validate_successful_thermal_coverage(
@@ -5010,35 +6081,119 @@ def validate_thermal(root: Path, design: Mapping[str, object], tasks: Sequence[d
             if overlap:
                 die("successful job appears in more than one segment")
             for job in jobs:
-                receipt = load_json(job_receipt_path(root, job))
+                receipt_path = job_receipt_path(root, job)
+                receipt, receipt_digest = load_canonical_runtime_json(
+                    receipt_path, label="job receipt")
+                record_authenticated_runtime_hash(
+                    root, receipt_path, receipt_digest,
+                    runtime_hash_sink)
                 task = task_by_job[job]
                 name = task["output_name"]
-                if receipt.get("segment") != segment or \
-                        Decimal(str(receipt["started_monotonic_s"])) < start or \
-                        Decimal(str(receipt["ended_monotonic_s"])) > end or \
-                        sha256_file(root / "attempts" / "segment{:03d}".format(segment) /
-                                    "job{:05d}.stdout".format(job)) != \
-                            sha256_file(root / "raw" / name) or \
-                        sha256_file(root / "attempts" / "segment{:03d}".format(segment) /
-                                    "job{:05d}.stderr".format(job)) != \
-                            sha256_file(root / "stderr" / (name + ".stderr")) or \
-                        sha256_file(root / "attempts" / "segment{:03d}".format(segment) /
-                                    "job{:05d}.exit".format(job)) != \
-                            sha256_file(root / "exit" / (name + ".exit")):
+                output_paths = {
+                    "stdout": root / "raw" / name,
+                    "stderr": root / "stderr" / (name + ".stderr"),
+                    "exit": root / "exit" / (name + ".exit"),
+                }
+                output_hashes: Dict[str, str] = {}
+                for suffix, output_path in output_paths.items():
+                    _, output_digest = read_stable_runtime_bytes(
+                        output_path,
+                        max_bytes=MAX_BENCHMARK_RESULT_BYTES,
+                        label="published benchmark {}".format(suffix))
+                    output_hashes[suffix] = output_digest
+                    record_authenticated_runtime_hash(
+                        root, output_path, output_digest,
+                        output_hash_sink)
+                validate_job_receipt_record(
+                    receipt, task, output_hashes,
+                    expected_segment=segment,
+                    segment_start=start, segment_end=end)
+                if attempt_hashes.get((job, "stdout")) != \
+                            output_hashes["stdout"] or \
+                        attempt_hashes.get((job, "stderr")) != \
+                            output_hashes["stderr"] or \
+                        attempt_hashes.get((job, "exit")) != \
+                            output_hashes["exit"]:
                     die("job receipt is bound to the wrong successful segment")
             successful_jobs.update(jobs)
         else:
             if state == "failed":
                 failed_segments += 1
+                if any(not isinstance(failure, Mapping)
+                       for failure in failures):
+                    die("failed segment failure ledger is malformed")
+                sampler_returncode = final.get("sampler_returncode")
+                if sampler_returncode is not None and (
+                        not isinstance(sampler_returncode, int) or
+                        isinstance(sampler_returncode, bool) or
+                        sampler_returncode < -(signal.NSIG - 1) or
+                        sampler_returncode > 255):
+                    die("failed segment sampler return code is malformed")
+                sampler_returncode_failures = [
+                    failure for failure in failures
+                    if failure.get("status") == "sampler_returncode"
+                ]
+                sampler_exited_failures = [
+                    failure for failure in failures
+                    if failure.get("status") == "sampler_exited"
+                ]
+                if (sampler_returncode not in (None, 0) and (
+                        len(sampler_returncode_failures) != 1 or
+                        sampler_returncode_failures[0].get(
+                            "returncode") != sampler_returncode)) or \
+                        (sampler_returncode in (None, 0) and
+                         sampler_returncode_failures) or \
+                        any(failure.get("returncode") != sampler_returncode
+                            for failure in sampler_exited_failures):
+                    die("failed segment sampler return-code ledger disagrees")
+                classified_failures = validate_failed_segment_failures(
+                    root, failures, final.get("process_actions"), set(jobs),
+                    segment=segment, stage=stage,
+                    attempt_hashes=attempt_hashes,
+                )
+                benchmark_actions = validate_failed_segment_actions(
+                    root, final.get("process_actions"), set(jobs),
+                    segment=segment, attempt_hashes=attempt_hashes)
+                validate_live_segment_actions(
+                    final.get("process_actions"), set(jobs),
+                    segment=segment, allow_benchmarks=True,
+                    ready_sampler_pid=(
+                        int(ready["sampler_pid"])
+                        if ready is not None else None),
+                    require_thermal=ready is not None,
+                )
+                historical_failures.extend(classified_failures)
+                historical_failures.extend(
+                    classify_complete_attempt_codec_failures(
+                        root, segment, jobs, task_by_job, stage=stage,
+                        explicit_failures=failures,
+                        benchmark_actions=benchmark_actions,
+                        attempt_hashes=attempt_hashes))
             else:
                 interrupted_segments += 1
+                if final.get("sampler_returncode") is not None or \
+                        final.get("jobs_ended_monotonic_s") is not None:
+                    die("interrupted segment has noncanonical terminal fields")
+                validate_interrupted_segment_actions(
+                    root, final.get("process_actions"), set(jobs),
+                    segment=segment,
+                    intent_boot_id=str(intent["boot_id"]),
+                    attempt_hashes=attempt_hashes,
+                )
+                historical_failures.extend(
+                    classify_interrupted_attempt_failures(
+                        root, segment, jobs, task_by_job, stage=stage,
+                        attempt_hashes=attempt_hashes))
             if final.get("published_jobs") != []:
                 die("non-success segment retained published jobs")
-            if state == "failed" and not failures:
-                die("failed segment lacks a failure receipt")
+            if state == "interrupted" and failures:
+                die("interrupted segment contains a failure receipt")
             for job in jobs:
                 receipt_path = job_receipt_path(root, job)
-                if receipt_path.is_file() and load_json(receipt_path).get("segment") == segment:
+                if receipt_path.is_file() and \
+                        load_canonical_runtime_json(
+                            receipt_path, label="job receipt")[0].get(
+                                "segment") == segment:
                     die("non-success segment retained a job receipt")
     actual_segment_files = {path.name for path in (root / "segments").iterdir()}
     if actual_segment_files != expected_segment_files:
@@ -5072,10 +6227,35 @@ def validate_thermal(root: Path, design: Mapping[str, object], tasks: Sequence[d
     successful_busy_mean = sum(
         (value * duration for value, duration in all_busy), Decimal(0)
     ) / busy_duration
+    historical_codec_failures = [
+        entry for entry in historical_failures
+        if entry["classification"] == "codec"
+    ]
+    historical_infrastructure_failures = [
+        entry for entry in historical_failures
+        if entry["classification"] == "infrastructure"
+    ]
+    historical_indeterminate_failures = [
+        entry for entry in historical_failures
+        if entry["classification"] == "indeterminate"
+    ]
     return {
         "segments": len(indices), "successful_segments": successful_segments,
         "failed_segments": failed_segments,
         "interrupted_segments": interrupted_segments, "samples": samples,
+        "historical_failure_count": len(historical_failures),
+        "historical_failures": historical_failures,
+        "historical_codec_failure_count":
+            len(historical_codec_failures),
+        "historical_codec_failures": historical_codec_failures,
+        "historical_infrastructure_failure_count":
+            len(historical_infrastructure_failures),
+        "historical_infrastructure_failures":
+            historical_infrastructure_failures,
+        "historical_indeterminate_failure_count":
+            len(historical_indeterminate_failures),
+        "historical_indeterminate_failures":
+            historical_indeterminate_failures,
         "successful_busy_mean": str(successful_busy_mean),
         "cpu_max_c": str(max(all_cpu)) if all_cpu else None,
         "dimm_max_c_by_field": {
@@ -5098,6 +6278,7 @@ def reduce_outcomes(
     *,
     k_lo: int = K_LO,
     k_hi: int = K_HI,
+    historical_failures: Sequence[Mapping[str, object]] = (),
 ) -> Dict[str, object]:
     """Score both survivors against their sealed canonical comparators.
 
@@ -5120,6 +6301,162 @@ def reduce_outcomes(
     domain_count = (k_hi - k_lo + 1) * len(SEEDS) * len(SCHEDULES)
     if len(outcomes) != len(arms) * (domain_count + len(hard)):
         die("reduction outcome cardinality mismatch")
+    if not isinstance(historical_failures, (list, tuple)):
+        die("historical failure ledger is malformed")
+    normalized_historical_failures: List[dict] = []
+    prior_failure_key: Optional[Tuple[int, int]] = None
+    prior_failure_stage: Optional[str] = None
+    codec_statuses = {"timeout", "exit", "validation_error"}
+    failure_fields = {
+        "future_cancelled": {"status", "job"},
+        "worker_exception": {"status", "job", "detail"},
+        "cancelled_before_start": {"status", "job"},
+        "spawn_error": {"status", "job", "detail"},
+        "timeout": {"status", "job", "timeout_seconds"},
+        "exit": {"status", "job", "returncode"},
+        "validation_error": {"status", "job", "detail"},
+        "cancelled_after_run": {"status", "job"},
+        "sampler_spawn_error": {"status", "detail"},
+        "concurrent_i2c_reader": {"status", "readers"},
+        "sampler_exited": {"status", "returncode"},
+        "thermal_end_coverage_failed": {"status"},
+        "benchmark_stop_error": {"status", "detail"},
+        "launcher_exception": {"status", "detail"},
+        "sampler_stop_error": {"status", "detail"},
+        "sampler_returncode": {"status", "returncode"},
+        "sampler_stderr_nonempty_or_missing": {"status"},
+        "sealed_thermal_validation_error": {"status", "detail"},
+        "terminal_evidence_incomplete": {
+            "status", "job", "observed_suffixes"},
+        "segment_interrupted": {"status"},
+    }
+    infrastructure_statuses = {
+        "future_cancelled", "worker_exception",
+        "cancelled_before_start", "spawn_error", "exit",
+        "cancelled_after_run", "sampler_spawn_error",
+        "concurrent_i2c_reader", "sampler_exited",
+        "thermal_end_coverage_failed", "benchmark_stop_error",
+        "launcher_exception", "sampler_stop_error",
+        "sampler_returncode", "sampler_stderr_nonempty_or_missing",
+        "sealed_thermal_validation_error",
+    }
+    for entry in historical_failures:
+        if not isinstance(entry, Mapping) or set(entry) != {
+                "segment", "stage", "failure_index", "classification",
+                "failure"}:
+            die("historical failure ledger entry is malformed")
+        segment = entry["segment"]
+        failure_index = entry["failure_index"]
+        failure = entry["failure"]
+        classification = entry["classification"]
+        failure_status = (
+            failure.get("status") if isinstance(failure, Mapping) else None)
+        if not isinstance(segment, int) or isinstance(segment, bool) or \
+                segment < 0 or \
+                entry["stage"] not in ("hard", "control") or \
+                not isinstance(failure_index, int) or \
+                isinstance(failure_index, bool) or failure_index < 0 or \
+                entry["classification"] not in (
+                    "codec", "infrastructure", "indeterminate") or \
+                not isinstance(failure, Mapping) or \
+                not isinstance(failure_status, str) or \
+                classification == "codec" and \
+                failure_status not in codec_statuses or \
+                classification == "infrastructure" and \
+                failure_status not in infrastructure_statuses or \
+                classification == "indeterminate" and \
+                failure_status not in (
+                    "exit", "terminal_evidence_incomplete",
+                    "segment_interrupted"):
+            die("historical failure ledger entry is malformed")
+        expected_failure_fields = failure_fields.get(str(failure_status))
+        if expected_failure_fields is None or \
+                set(failure) != expected_failure_fields:
+            die("historical failure receipt schema is malformed")
+        if "job" in failure and (
+                not isinstance(failure.get("job"), int) or
+                isinstance(failure.get("job"), bool) or
+                int(failure["job"]) < 0 or int(failure["job"]) > 99999):
+            die("historical failure job is malformed")
+        if "detail" in failure and \
+                not isinstance(failure.get("detail"), str):
+            die("historical failure detail is malformed")
+        if "returncode" in failure:
+            returncode = failure.get("returncode")
+            if not isinstance(returncode, int) or \
+                    isinstance(returncode, bool) or \
+                    returncode < -(signal.NSIG - 1) or returncode > 255 or \
+                    failure_status in ("exit", "sampler_returncode") and \
+                    returncode == 0:
+                die("historical failure return code is malformed")
+        if failure_status == "timeout":
+            timeout = failure.get("timeout_seconds")
+            if not isinstance(timeout, (int, float)) or \
+                    isinstance(timeout, bool) or \
+                    isinstance(timeout, float) and \
+                    not math.isfinite(timeout) or \
+                    timeout != JOB_TIMEOUT_SECONDS:
+                die("historical failure timeout is malformed")
+        if failure_status == "concurrent_i2c_reader":
+            readers = failure.get("readers")
+            expected_devices = {str(device) for device in DIMM_I2C_DEVICES}
+            if not isinstance(readers, Mapping) or not readers:
+                die("historical failure reader map is malformed")
+            for pid_text, devices in readers.items():
+                if not isinstance(pid_text, str) or \
+                        len(pid_text) > len(str(MAX_PROCESS_PID)) or \
+                        re.fullmatch(r"[1-9][0-9]*", pid_text) is None or \
+                        int(pid_text) <= 1 or \
+                        int(pid_text) > MAX_PROCESS_PID or \
+                        not isinstance(devices, list) or not devices or \
+                        any(not isinstance(device, str)
+                            for device in devices) or \
+                        devices != sorted(set(devices)) or \
+                        not set(devices).issubset(expected_devices):
+                    die("historical failure reader map is malformed")
+        if classification == "indeterminate" and \
+                failure_status == "terminal_evidence_incomplete":
+            if failure.get("observed_suffixes") not in (
+                        ["pid"],
+                        ["pid", "stdout"],
+                        ["pid", "stderr", "stdout"]):
+                die("historical incomplete-terminal evidence is malformed")
+        failure_key = (segment, failure_index)
+        if prior_failure_key is None or segment != prior_failure_key[0]:
+            if failure_index != 0:
+                die("historical failure ledger does not start at index zero")
+            prior_failure_stage = str(entry["stage"])
+        elif failure_index != prior_failure_key[1] + 1 or \
+                entry["stage"] != prior_failure_stage:
+            die("historical failure ledger is not contiguous")
+        if prior_failure_key is not None and failure_key <= prior_failure_key:
+            die("historical failure ledger is not canonical")
+        prior_failure_key = failure_key
+        normalized_historical_failures.append({
+            "segment": segment,
+            "stage": entry["stage"],
+            "failure_index": failure_index,
+            "classification": entry["classification"],
+            "failure": dict(failure),
+        })
+    historical_codec_failures = [
+        entry for entry in normalized_historical_failures
+        if entry["classification"] == "codec"
+    ]
+    historical_infrastructure_failures = [
+        entry for entry in normalized_historical_failures
+        if entry["classification"] == "infrastructure"
+    ]
+    historical_indeterminate_failures = [
+        entry for entry in normalized_historical_failures
+        if entry["classification"] == "indeterminate"
+    ]
+    historical_blocking_failures = [
+        entry for entry in normalized_historical_failures
+        if entry["classification"] != "infrastructure"
+    ]
+    zero_historical_codec_failures = not historical_codec_failures
+    zero_historical_blocking_failures = not historical_blocking_failures
     panel_fs: Dict[str, Set[Tuple[int, int, str]]] = {}
     for panel in FINALIST_ARMS:
         rows = source_records.get(panel)
@@ -5249,9 +6586,18 @@ def reduce_outcomes(
         candidate_work = [Decimal(0), Decimal(0)]
         comparator_work = [Decimal(0), Decimal(0)]
         common_success = 0
+        transition_states = ("success", "field_shortfall", "q>H")
+        raw_transitions = {
+            "{}->{}".format(before, after): 0
+            for before in transition_states for after in transition_states
+        }
+        headline_transitions = dict(raw_transitions)
         for key in domain_iter(k_lo, k_hi):
             candidate_record = outcomes[(arm["name"], "control", *key)]
             comparator_record = outcomes[(comparator["name"], "control", *key)]
+            transition = "{}->{}".format(
+                comparator_record["outcome"], candidate_record["outcome"])
+            raw_transitions[transition] += 1
             # Configuration selection is inherited from the codec, with no
             # experiment-specific seed patches.  A mask can therefore alter
             # the selected attempt or solve dimensions; preserve those
@@ -5264,12 +6610,17 @@ def reduce_outcomes(
                     stats["max_abs"] = max(stats["max_abs"], abs(delta))
             if key in hard_set:
                 continue
+            headline_transitions[transition] += 1
             if key not in candidate_map and key not in comparator_map:
                 common_success += 1
                 candidate_work[0] += candidate_record["xors"]
                 candidate_work[1] += candidate_record["muladds"]
                 comparator_work[0] += comparator_record["xors"]
                 comparator_work[1] += comparator_record["muladds"]
+        if sum(raw_transitions.values()) != domain_count or \
+                sum(headline_transitions.values()) != \
+                domain_count - len(hard_set):
+            die("paired cause-transition accounting is incomplete")
         xor_ratio = (
             candidate_work[0] / comparator_work[0] if comparator_work[0] else None)
         muladd_ratio = (
@@ -5312,6 +6663,17 @@ def reduce_outcomes(
             xor_ratio <= COST_RATIO_MAX and muladd_ratio <= COST_RATIO_MAX)
         fix_confirmed = fixed > 0
         improved = candidate_fs < comparator_fs
+        field_shortfall_relabels = \
+            raw_transitions["field_shortfall->q>H"]
+        genuine_field_shortfall_repairs = \
+            raw_transitions["field_shortfall->success"]
+        genuine_field_shortfall_introductions = \
+            raw_transitions["success->field_shortfall"]
+        net_genuine_field_shortfall_repairs = (
+            genuine_field_shortfall_repairs -
+            genuine_field_shortfall_introductions)
+        genuine_field_shortfall_improved = (
+            improved and net_genuine_field_shortfall_repairs > 0)
         raw_recovery_improved = (
             candidate_raw_failures < comparator_raw_failures)
         recovery_improved = (
@@ -5327,6 +6689,18 @@ def reduce_outcomes(
                 "comparator": comparator_headline_fs,
             },
             "gate_field_shortfall_improved": improved,
+            "genuine_field_shortfall_repairs":
+                genuine_field_shortfall_repairs,
+            "genuine_field_shortfall_introductions":
+                genuine_field_shortfall_introductions,
+            "net_genuine_field_shortfall_repairs":
+                net_genuine_field_shortfall_repairs,
+            "field_shortfall_relabels_to_q_gt_h":
+                field_shortfall_relabels,
+            "q_gt_h_relabels_to_field_shortfall":
+                raw_transitions["q>H->field_shortfall"],
+            "gate_genuine_field_shortfall_improved":
+                genuine_field_shortfall_improved,
             "raw_total_failures": {
                 "candidate": candidate_raw_failures,
                 "comparator": comparator_raw_failures,
@@ -5347,9 +6721,19 @@ def reduce_outcomes(
             "gate_cost_within_tolerance": cost_within,
             "panel_source_failures_fixed": fixed,
             "gate_dev_fix_confirmed": fix_confirmed,
+            "historical_codec_failure_count":
+                len(historical_codec_failures),
+            "gate_zero_historical_codec_failures":
+                zero_historical_codec_failures,
+            "historical_blocking_failure_count":
+                len(historical_blocking_failures),
+            "gate_zero_historical_blocking_failures":
+                zero_historical_blocking_failures,
             "accepted": (
-                improved and raw_recovery_improved and recovery_improved and
-                no_new and cost_within and fix_confirmed),
+                genuine_field_shortfall_improved and
+                raw_recovery_improved and recovery_improved and no_new and
+                cost_within and fix_confirmed and
+                zero_historical_blocking_failures),
         }
         candidates[arm["name"]] = {
             "comparator": comparator["name"],
@@ -5364,6 +6748,9 @@ def reduce_outcomes(
             "headline_introduction_keys": [
                 cell_record(key) for key in headline_introductions
             ],
+            "raw_cause_transitions_vs_comparator": raw_transitions,
+            "headline_cause_transitions_vs_comparator":
+                headline_transitions,
             "paired_receipt_deltas_vs_comparator": receipt_deltas,
             "headline_common_success": common_success,
             "fix_confirmation": {
@@ -5379,45 +6766,323 @@ def reduce_outcomes(
         }
     return {
         "schema": SCHEMA + ".reduction",
-        "codec_errors": 0,
+        "codec_errors": len(historical_codec_failures),
+        "historical_failure_count":
+            len(normalized_historical_failures),
+        "historical_codec_failure_count":
+            len(historical_codec_failures),
+        "historical_codec_failures": historical_codec_failures,
+        "historical_infrastructure_failure_count":
+            len(historical_infrastructure_failures),
+        "historical_indeterminate_failure_count":
+            len(historical_indeterminate_failures),
+        "historical_indeterminate_failures":
+            historical_indeterminate_failures,
+        "historical_blocking_failure_count":
+            len(historical_blocking_failures),
         "K_range": [k_lo, k_hi],
         "cells_per_arm_control": domain_count,
         "hard_cells": [dict(cell) for cell in hard],
         "arms": arm_summaries,
         "candidates": candidates,
-        "accepted": all(
+        "accepted": zero_historical_blocking_failures and all(
             block["acceptance"]["accepted"] for block in candidates.values()),
     }
 
 
+def runtime_evidence_max_bytes(relative: Path) -> int:
+    """Return the exact bounded-read policy for a runtime artifact."""
+    if relative.parts and relative.parts[0] == "attempts":
+        return attempt_artifact_max_bytes(relative.suffix[1:])
+    if relative.parts and relative.parts[0] == "thermal":
+        if relative.suffix == ".csv":
+            return MAX_THERMAL_STREAM_BYTES
+        if relative.suffix == ".stderr":
+            return MAX_THERMAL_STDERR_BYTES
+    return MAX_RUNTIME_JSON_BYTES
+
+
+def verify_captured_leaf_digests(
+    captured: Sequence[Tuple[int, str, Path, int, str]],
+) -> None:
+    for directory_fd, name, path, max_bytes, expected_digest in captured:
+        _, observed_digest = read_stable_runtime_bytes(
+            path, max_bytes=max_bytes,
+            label="final captured evidence leaf",
+            directory_fd=directory_fd, entry_name=name)
+        if observed_digest != expected_digest:
+            die("captured evidence leaf changed during snapshot: {}".format(
+                path))
+
+
+def collect_runtime_evidence_snapshots(
+    root: Path,
+    expected_attempt_directories: Set[str],
+) -> List[Tuple[Path, str]]:
+    snapshots: List[Tuple[Path, str]] = []
+    captured_leaves: List[Tuple[int, str, Path, int, str]] = []
+    with held_safe_directory(root, "campaign root") as root_fd:
+        with ExitStack() as held_directories:
+            directory_fds: Dict[str, int] = {}
+            for directory_name in (
+                    "segments", "thermal", "job_receipts", "attempts"):
+                directory = root / directory_name
+                directory_fds[directory_name] = \
+                    held_directories.enter_context(held_safe_directory(
+                    directory, directory_name, parent_fd=root_fd,
+                    entry_name=directory_name))
+            for directory_name in ("segments", "thermal", "job_receipts"):
+                directory = root / directory_name
+                directory_fd = directory_fds[directory_name]
+                try:
+                    names = os.listdir(directory_fd)
+                except OSError as exc:
+                    die("{} runtime inventory cannot be listed: {}".format(
+                        directory_name, exc))
+                for name in names:
+                    path = directory / name
+                    relative = path.relative_to(root)
+                    max_bytes = runtime_evidence_max_bytes(relative)
+                    _, digest = read_stable_runtime_bytes(
+                        path,
+                        max_bytes=max_bytes,
+                        label="{} runtime evidence".format(directory_name),
+                        directory_fd=directory_fd, entry_name=name)
+                    captured_leaves.append(
+                        (directory_fd, name, path, max_bytes, digest))
+                    snapshots.append((path, digest))
+            attempt_root = root / "attempts"
+            attempt_root_fd = directory_fds["attempts"]
+            try:
+                attempt_names = os.listdir(attempt_root_fd)
+            except OSError as exc:
+                die("attempt runtime inventory cannot be listed: {}".format(
+                    exc))
+            if set(attempt_names) != expected_attempt_directories or \
+                    len(attempt_names) != len(expected_attempt_directories):
+                die("attempt runtime directory inventory changed")
+            for directory_name in attempt_names:
+                directory = attempt_root / directory_name
+                directory_fd = held_directories.enter_context(
+                    held_safe_directory(
+                        directory, "attempt runtime directory",
+                        parent_fd=attempt_root_fd,
+                        entry_name=directory_name))
+                try:
+                    names = os.listdir(directory_fd)
+                except OSError as exc:
+                    die("attempt runtime inventory cannot be listed: {}"
+                        .format(exc))
+                for name in names:
+                    path = directory / name
+                    relative = path.relative_to(root)
+                    max_bytes = runtime_evidence_max_bytes(relative)
+                    _, digest = read_stable_runtime_bytes(
+                        path,
+                        max_bytes=max_bytes,
+                        label="attempt runtime evidence",
+                        directory_fd=directory_fd, entry_name=name)
+                    captured_leaves.append(
+                        (directory_fd, name, path, max_bytes, digest))
+                    snapshots.append((path, digest))
+            verify_captured_leaf_digests(captured_leaves)
+    return sorted(
+        snapshots, key=lambda item: str(item[0].relative_to(root)))
+
+
+def authenticated_runtime_snapshot(
+    root: Path,
+    runtime_hashes: Mapping[str, str],
+    attempt_hashes: Mapping[Tuple[int, int, str], str],
+) -> List[Tuple[Path, str]]:
+    expected_attempt_directories = {
+        "segment{:03d}".format(int(match.group(1)))
+        for relative in runtime_hashes
+        for match in [re.fullmatch(
+            r"segments/segment([0-9]{3})\.intent\.json", relative)]
+        if match is not None
+    }
+    snapshots = collect_runtime_evidence_snapshots(
+        root, expected_attempt_directories)
+    attempt_name = re.compile(
+        r"job([0-9]{5})\.(pid|stdout|stderr|exit)$")
+    seen_runtime: Set[str] = set()
+    seen_attempts: Set[Tuple[int, int, str]] = set()
+    authenticated: List[Tuple[Path, str]] = []
+    for path, digest in snapshots:
+        relative = path.relative_to(root)
+        relative_text = str(relative)
+        if relative.parts and relative.parts[0] == "attempts":
+            match = attempt_name.fullmatch(path.name)
+            if len(relative.parts) != 3 or \
+                    re.fullmatch(
+                        r"segment[0-9]{3}", relative.parts[1]) is None or \
+                    match is None:
+                die("runtime attempt path is malformed")
+            key = (
+                int(relative.parts[1][7:]),
+                int(match.group(1)), match.group(2))
+            if key in seen_attempts or \
+                    attempt_hashes.get(key) != digest:
+                die("attempt artifact changed after authentication")
+            seen_attempts.add(key)
+        else:
+            if relative_text in seen_runtime or \
+                    runtime_hashes.get(relative_text) != digest:
+                die("runtime artifact changed after authentication")
+            seen_runtime.add(relative_text)
+        authenticated.append((path, digest))
+    if seen_attempts != set(attempt_hashes) or \
+            seen_runtime != set(runtime_hashes):
+        die("authenticated runtime inventory changed before reduction")
+    return authenticated
+
+
+def verify_published_output_snapshot(
+    root: Path,
+    output_hashes: Mapping[str, str],
+) -> None:
+    observed: Set[str] = set()
+    captured_leaves: List[Tuple[int, str, Path, int, str]] = []
+    with held_safe_directory(root, "campaign root") as root_fd:
+        with ExitStack() as held_directories:
+            directory_fds = {
+                directory_name: held_directories.enter_context(
+                    held_safe_directory(
+                        root / directory_name, directory_name,
+                        parent_fd=root_fd, entry_name=directory_name))
+                for directory_name in ("raw", "stderr", "exit")
+            }
+            for directory_name in ("raw", "stderr", "exit"):
+                directory = root / directory_name
+                directory_fd = directory_fds[directory_name]
+                try:
+                    names = os.listdir(directory_fd)
+                except OSError as exc:
+                    die("published output inventory cannot be listed: {}"
+                        .format(exc))
+                for name in names:
+                    path = directory / name
+                    relative = str(path.relative_to(root))
+                    _, digest = read_stable_runtime_bytes(
+                        path, max_bytes=MAX_BENCHMARK_RESULT_BYTES,
+                        label="published benchmark evidence",
+                        directory_fd=directory_fd, entry_name=name)
+                    captured_leaves.append((
+                        directory_fd, name, path,
+                        MAX_BENCHMARK_RESULT_BYTES, digest))
+                    if relative in observed or \
+                            output_hashes.get(relative) != digest:
+                        die("published benchmark evidence changed after "
+                            "validation")
+                    observed.add(relative)
+            verify_captured_leaf_digests(captured_leaves)
+    if observed != set(output_hashes):
+        die("published benchmark inventory changed after validation")
+
+
 def command_reduce(args: argparse.Namespace) -> None:
     root = Path(args.root).resolve()
-    design, tasks = verify_root(root, args.expected_receipts_sha256)
+    static_snapshots: Dict[Path, Tuple[bytes, str]] = {}
+    design, tasks = verify_root(
+        root, args.expected_receipts_sha256,
+        static_snapshot_sink=static_snapshots)
+    prelaunch_path = root / "prelaunch_receipts.json"
+    try:
+        prelaunch_bytes, prelaunch_digest = static_snapshots[prelaunch_path]
+    except KeyError:
+        die("root verification omitted the prelaunch receipt snapshot")
+    try:
+        prelaunch = strict_json_loads(prelaunch_bytes.decode("ascii"))
+    except (UnicodeError, ValueError) as exc:
+        die("captured prelaunch receipt is malformed: {}".format(exc))
+    if not isinstance(prelaunch, dict) or \
+            canonical_json(prelaunch) != prelaunch_bytes:
+        die("captured prelaunch receipt is not canonical")
+    if prelaunch_digest != args.expected_receipts_sha256:
+        die("prelaunch receipt changed after root verification")
+    artifacts = prelaunch.get("artifacts")
+    if not isinstance(artifacts, Mapping):
+        die("prelaunch artifact ledger is malformed")
+
+    def expected_artifact_digest(name: str) -> str:
+        record = artifacts.get(name)
+        digest = (
+            record.get("sha256") if isinstance(record, Mapping) else None)
+        if not isinstance(digest, str) or \
+                re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            die("prelaunch artifact digest is malformed: {}".format(name))
+        return digest
+
+    hard_path = root / "hard_keys.jsonl"
+    try:
+        hard_bytes, hard_digest = static_snapshots[hard_path]
+    except KeyError:
+        die("root verification omitted the hard-cell ledger snapshot")
+    if hard_digest != expected_artifact_digest("hard_keys"):
+        die("hard-cell ledger changed after root verification")
+    hard = parse_jsonl_bytes(hard_bytes, str(hard_path))
+    source_summary_path = root / "frozen" / SOURCE_SUMMARY_NAME
+    try:
+        source_summary_bytes, source_summary_digest = \
+            static_snapshots[source_summary_path]
+    except KeyError:
+        die("root verification omitted the source summary snapshot")
+    try:
+        source_summary = strict_json_loads(
+            source_summary_bytes.decode("ascii"))
+    except (UnicodeError, ValueError) as exc:
+        die("captured source summary is malformed: {}".format(exc))
+    if not isinstance(source_summary, dict):
+        die("captured source summary is not a JSON object")
+    if source_summary_digest != expected_artifact_digest("source_summary"):
+        die("source summary changed after root verification")
+    source_records = validate_source_summary(source_summary)
+    static_reduction_hashes = {
+        path: digest for path, (_, digest) in static_snapshots.items()
+    }
     if len(completed_jobs(root, tasks)) != len(tasks):
         die("campaign is incomplete")
-    thermal = validate_thermal(root, design, tasks)
+    authenticated_attempt_hashes: Dict[Tuple[int, int, str], str] = {}
+    authenticated_runtime_hashes: Dict[str, str] = {}
+    authenticated_output_hashes: Dict[str, str] = {}
+    thermal = validate_thermal(
+        root, design, tasks,
+        attempt_hash_sink=authenticated_attempt_hashes,
+        runtime_hash_sink=authenticated_runtime_hashes,
+        output_hash_sink=authenticated_output_hashes)
     outcomes: Dict[Tuple[str, str, int, int, str], dict] = {}
     manifest_lines = bytearray()
-    runtime_paths: List[Path] = []
-    for directory_name in ("segments", "thermal", "attempts", "job_receipts"):
-        directory = root / directory_name
-        for path in directory.rglob("*"):
-            if path.is_symlink():
-                die("runtime evidence contains a symlink")
-            if path.is_file():
-                runtime_paths.append(path)
-    for path in sorted(runtime_paths, key=lambda value: str(value.relative_to(root))):
+    for path, digest in authenticated_runtime_snapshot(
+            root, authenticated_runtime_hashes,
+            authenticated_attempt_hashes):
         manifest_lines.extend("{}  {}\n".format(
-            sha256_file(path), path.relative_to(root)).encode("ascii"))
+            digest, path.relative_to(root)).encode("ascii"))
+    seen_output_hashes: Set[str] = set()
     for task in tasks:
         name = task["output_name"]
         raw_path = root / "raw" / name
         stderr_path = root / "stderr" / (name + ".stderr")
         exit_path = root / "exit" / (name + ".exit")
-        for path in (raw_path, stderr_path, exit_path):
+        snapshots: Dict[str, bytes] = {}
+        for suffix, path in (
+                ("stdout", raw_path),
+                ("stderr", stderr_path),
+                ("exit", exit_path)):
+            raw, digest = read_stable_runtime_bytes(
+                path, max_bytes=MAX_BENCHMARK_RESULT_BYTES,
+                label="published benchmark {}".format(suffix))
+            relative = str(path.relative_to(root))
+            if relative in seen_output_hashes or \
+                    authenticated_output_hashes.get(relative) != digest:
+                die("published benchmark evidence changed after validation")
+            seen_output_hashes.add(relative)
+            snapshots[suffix] = raw
             manifest_lines.extend("{}  {}\n".format(
-                sha256_file(path), path.relative_to(root)).encode("ascii"))
-        rows = parse_benchmark_csv(raw_path.read_bytes(), task)
+                digest, path.relative_to(root)).encode("ascii"))
+        if snapshots["stderr"] or snapshots["exit"] != b"0\n":
+            die("published benchmark terminal evidence is not successful")
+        rows = parse_benchmark_csv(snapshots["stdout"], task)
         for row in rows:
             try:
                 K = int(row["N"])
@@ -5439,12 +7104,27 @@ def command_reduce(args: argparse.Namespace) -> None:
                 "inactivated": inactivated,
                 "binary_deficit": binary_deficit,
             }
+    if seen_output_hashes != set(authenticated_output_hashes):
+        die("published benchmark inventory changed before reduction")
     if len(outcomes) != int(design["total_cells"]):
         die("Cartesian result count mismatch")
-    hard = read_jsonl(root / "hard_keys.jsonl")
-    source_records = validate_source_summary(
-        load_json(root / "frozen" / SOURCE_SUMMARY_NAME))
-    reduction = reduce_outcomes(outcomes, hard, source_records)
+    reduction = reduce_outcomes(
+        outcomes, hard, source_records,
+        historical_failures=thermal["historical_failures"])
+    # Re-prove the complete inventory and every digest immediately before
+    # publishing the summary.  This detects additions, replacement, or
+    # content drift during the comparatively long Cartesian parse/reduction.
+    authenticated_runtime_snapshot(
+        root, authenticated_runtime_hashes,
+        authenticated_attempt_hashes)
+    verify_published_output_snapshot(
+        root, authenticated_output_hashes)
+    for path, expected_digest in static_reduction_hashes.items():
+        _, observed_digest = read_stable_runtime_bytes(
+            path, max_bytes=MAX_STATIC_ARTIFACT_BYTES,
+            label="static reduction evidence")
+        if observed_digest != expected_digest:
+            die("static reduction evidence changed during reduction")
     data_manifest = bytes(manifest_lines)
     data_manifest_sha256 = sha256_bytes(data_manifest)
     write_once(root / "data_manifest.sha256", data_manifest)
@@ -5503,6 +7183,37 @@ def make_thermal_bytes(
     return output.getvalue().encode("ascii")
 
 
+def make_success_benchmark_bytes(task: Mapping[str, object]) -> bytes:
+    """Build valid single-trial success output for receipt selftests."""
+    preamble = " ".join(
+        "{}={}".format(key, value)
+        for key, value in expected_preamble(task).items())
+    output = io.StringIO(newline="")
+    output.write("# precodefail: {}\n".format(preamble))
+    writer = csv.DictWriter(
+        output, fieldnames=CSV_FIELDS, lineterminator="\n")
+    writer.writeheader()
+    for K in task["Ks"]:
+        row = {field: "0" for field in CSV_FIELDS}
+        for field in CSV_MILLI_FIELDS:
+            row[field] = "0.000"
+        row.update({
+            "N": str(K), "bb": "64", "heavy_family": "periodic",
+            "mix_count": "2", "overhead": "0", "trials": "1",
+            "success": "1", "rank_fail": "0", "error": "0",
+            "fail_rate": "0.00000000",
+            "inact_mu": "0.000", "inact_max": "0",
+            "binary_def_mu": "0.000", "binary_def_max": "0",
+            "heavy_gain_mu": "0.000", "heavy_gain_min": "0",
+            "heavy_shortfall": "0", "first_rank_fail": "-1",
+            "binary_def_hist": "0:1", "heavy_gain_hist": "0:1",
+            "failure_trials": "",
+            "active_packet_peel_seed_xor": "0x0",
+        })
+        writer.writerow(row)
+    return output.getvalue().encode("ascii")
+
+
 def make_success_fixture(
     root: Path,
     *,
@@ -5513,7 +7224,12 @@ def make_success_fixture(
     make_private_directory(root, parents=True, exist_ok=True)
     for directory in RUNTIME_DIRECTORY_NAMES:
         make_private_directory(root / directory, parents=True, exist_ok=True)
-    task = {"job": 0, "stage": stage, "output_name": "job.csv", "argv": ["/bin/true"]}
+    task = {
+        "job": 0, "stage": stage, "output_name": "job.csv",
+        "argv": ["/bin/true"], "period": 48, "rows": 3,
+        "mask": 0x007, "seed_index": 0, "schedule": "burst",
+        "Ks": [2],
+    }
     intent = {
         "schema": SCHEMA + ".segment_intent", "segment": 0,
         "boot_id": required_boot_id(),
@@ -5545,7 +7261,7 @@ def make_success_fixture(
     raw = root / "raw" / "job.csv"
     stderr = root / "stderr" / "job.csv.stderr"
     exit_path = root / "exit" / "job.csv.exit"
-    raw.write_bytes(b"synthetic output\n")
+    raw.write_bytes(make_success_benchmark_bytes(task))
     stderr.write_bytes(b"")
     exit_path.write_bytes(b"0\n")
     (root / "attempts" / "segment000" / "job00000.stdout").write_bytes(raw.read_bytes())
@@ -5560,7 +7276,10 @@ def make_success_fixture(
     }))
     write_segment_final(
         root, 0, intent, "success", failures=[], rolled_back=[],
-        process_actions=[], jobs_ended_monotonic_s=101.5,
+        process_actions=[{
+            "kind": "thermal", "pid": 99999999,
+            "action": "terminated",
+        }], jobs_ended_monotonic_s=101.5,
         sampler_returncode=0,
         validated_thermal_csv_sha256=bounded_thermal_sha256(thermal_csv),
     )
@@ -5851,9 +7570,18 @@ def command_selftest(_: argparse.Namespace) -> None:
             p48["acceptance"]["headline_field_shortfalls"] != \
                 {"candidate": 0, "comparator": 0} or \
             not p48["acceptance"]["gate_actual_recovery_improved"] or \
+            not p48["acceptance"][
+                "gate_genuine_field_shortfall_improved"] or \
+            p48["acceptance"]["genuine_field_shortfall_repairs"] != 1 or \
+            p48["acceptance"][
+                "net_genuine_field_shortfall_repairs"] != 1 or \
+            p48["acceptance"][
+                "field_shortfall_relabels_to_q_gt_h"] != 0 or \
             not p48["acceptance"]["gate_raw_total_recovery_improved"] or \
             p48["repairs_vs_comparator"] != 2 or p48["introductions_vs_comparator"] != 0 or \
             p32["repairs_vs_comparator"] != 3 or \
+            sum(p48["raw_cause_transitions_vs_comparator"].values()) != 108 or \
+            sum(p48["headline_cause_transitions_vs_comparator"].values()) != 104 or \
             p48["fix_confirmation"]["panel_source_failures_fixed"] != 1 or \
             p48["fix_confirmation"]["panel_source_failures_residual"] != 1 or \
             p48["acceptance"]["common_success_xor_ratio"] != "1" or \
@@ -5889,9 +7617,12 @@ def command_selftest(_: argparse.Namespace) -> None:
         if key in hard_key_set:
             relabeled[("p48_r3_pfx007", "hard", *key)] = synth_cell("q>H")
     verdict = reduce_outcomes(relabeled, hard, source_records, k_lo=2, k_hi=13)
+    relabel_acceptance = \
+        verdict["candidates"]["p48_r3_pfx007"]["acceptance"]
     if verdict["accepted"] or \
-            verdict["candidates"]["p48_r3_pfx007"]["acceptance"][
-                "gate_actual_recovery_improved"]:
+            relabel_acceptance["gate_actual_recovery_improved"] or \
+            relabel_acceptance["gate_genuine_field_shortfall_improved"] or \
+            relabel_acceptance["field_shortfall_relabels_to_q_gt_h"] != 2:
         die("reducer cause-relabel rejection selftest failed")
     relabeled_with_repair = dict(outcomes)
     panel_keys = {
@@ -5909,8 +7640,23 @@ def command_selftest(_: argparse.Namespace) -> None:
     relabel_acceptance = verdict["candidates"]["p48_r3_pfx007"]["acceptance"]
     if verdict["accepted"] or \
             not relabel_acceptance["gate_actual_recovery_improved"] or \
+            relabel_acceptance["gate_genuine_field_shortfall_improved"] or \
+            relabel_acceptance["field_shortfall_relabels_to_q_gt_h"] != 2 or \
             relabel_acceptance["gate_dev_fix_confirmed"]:
         die("reducer hard-relabel fix-confirmation selftest failed")
+    historical_codec = [{
+        "segment": 0, "stage": "hard", "failure_index": 0,
+        "classification": "codec",
+        "failure": {
+            "job": 0, "status": "validation_error", "detail": "bad CSV"},
+    }]
+    verdict = reduce_outcomes(
+        outcomes, hard, source_records, k_lo=2, k_hi=13,
+        historical_failures=historical_codec)
+    if verdict["accepted"] or verdict["codec_errors"] != 1 or any(
+            block["acceptance"]["gate_zero_historical_codec_failures"]
+            for block in verdict["candidates"].values()):
+        die("reducer historical-codec rejection selftest failed")
     raw_gain_erased = dict(outcomes)
     for key in ((7, 2, "repair-only"), (9, 0, "burst")):
         raw_gain_erased[
@@ -6190,13 +7936,17 @@ def command_selftest(_: argparse.Namespace) -> None:
         (interrupted / "raw" / "retry.csv").write_bytes(b"failed output\n")
         (interrupted / "stderr" / "retry.csv.stderr").write_bytes(b"failure\n")
         (interrupted / "exit" / "retry.csv.exit").write_bytes(b"1\n")
-        reconciled = reconcile_incomplete_segments(interrupted, [retry_task])
+        reconciled = reconcile_incomplete_segments(
+            interrupted, [retry_task],
+            sampler_inventory_probe=lambda: [])
         if len(reconciled) != 1 or reconciled[0]["state"] != "interrupted" or \
                 completed_jobs(interrupted, [retry_task]) or \
                 any((interrupted / directory / name).exists() for directory, name in (
                     ("raw", "retry.csv"), ("stderr", "retry.csv.stderr"),
                     ("exit", "retry.csv.exit"))) or \
-                reconcile_incomplete_segments(interrupted, [retry_task]):
+                reconcile_incomplete_segments(
+                    interrupted, [retry_task],
+                    sampler_inventory_probe=lambda: []):
             die("interrupted failed-triplet resume selftest failed")
         expect_reject(lambda: validate_thermal_rows([], segment=0), "header-only thermal")
     print("wh2_row_mask_allk_holdout selftest: PASS")
@@ -6235,6 +7985,46 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def require_pidfd_runtime() -> None:
+    """Prove the Python and kernel pidfd APIs before any launch mutation."""
+    pidfd_open = getattr(os, "pidfd_open", None)
+    pidfd_send_signal = getattr(signal, "pidfd_send_signal", None)
+    if not callable(pidfd_open) or not callable(pidfd_send_signal):
+        die("campaign execution requires Python pidfd APIs")
+    descriptor: Optional[int] = None
+    try:
+        descriptor = pidfd_open(os.getpid(), 0)
+        pidfd_send_signal(descriptor, 0, None, 0)
+    except (OSError, RuntimeError) as exc:
+        die("campaign execution requires working kernel pidfds: {}".format(
+            exc))
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError as exc:
+                die("cannot close campaign pidfd capability probe: {}".format(
+                    exc))
+
+
+def ensure_pinned_cli_runtime() -> None:
+    """Re-exec direct CLI use under the interpreter sealed by the protocol."""
+    try:
+        pinned = os.path.samefile(sys.executable, PYTHON_PATH) and \
+            bool(sys.flags.isolated)
+    except OSError:
+        pinned = False
+    if not pinned:
+        try:
+            os.execv(str(PYTHON_PATH), [
+                str(PYTHON_PATH), "-I", str(Path(__file__).resolve()),
+                *sys.argv[1:],
+            ])
+        except OSError as exc:
+            die("cannot re-exec pinned Python runtime {}: {}".format(
+                PYTHON_PATH, exc))
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -6249,4 +8039,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
 
 if __name__ == "__main__":
+    try:
+        ensure_pinned_cli_runtime()
+    except CampaignError as exc:
+        print("campaign error: {}".format(exc), file=sys.stderr)
+        raise SystemExit(1)
     raise SystemExit(main())
