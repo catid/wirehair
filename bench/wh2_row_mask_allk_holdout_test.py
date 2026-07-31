@@ -1738,6 +1738,39 @@ class ProcessGuardTest(unittest.TestCase):
         self.assertIn("job0:", errors[0])
         self.assertIn("job1:", errors[1])
 
+    def test_identical_worker_exceptions_retain_each_job_identity(self):
+        futures = []
+        for _ in range(4):
+            future = subject.concurrent.futures.Future()
+            future.set_exception(subject.CampaignError("same failure"))
+            futures.append(future)
+        failures = [
+            subject.benchmark_future_result(future, job)
+            for job, future in zip((5, 14, 23, 32), futures)
+        ]
+        self.assertEqual(
+            [failure["job"] for failure in failures], [5, 14, 23, 32])
+        self.assertTrue(all(
+            failure["status"] == "worker_exception" and
+            failure["detail"] == "CampaignError('same failure')"
+            for failure in failures))
+        self.assertEqual(len(failures), 4)
+
+    def test_worker_result_mismatched_job_is_bound_to_expected_future(self):
+        future = subject.concurrent.futures.Future()
+        future.set_result({"job": 99, "status": "success"})
+        self.assertEqual(subject.benchmark_future_result(future, 7), {
+            "job": 7, "status": "worker_exception",
+            "detail": "worker returned a mismatched job identity",
+        })
+
+    def test_cancelled_worker_future_retains_job_identity(self):
+        future = subject.concurrent.futures.Future()
+        self.assertTrue(future.cancel())
+        self.assertEqual(subject.benchmark_future_result(future, 8), {
+            "job": 8, "status": "future_cancelled",
+        })
+
     def test_discovered_cleanup_attempts_every_identity_before_failing(self):
         identities = [
             ("first", 701, 10, ["first"]),
@@ -1798,6 +1831,249 @@ class ProcessGuardTest(unittest.TestCase):
             self.assertEqual(subject.discover_owned_processes([
                 ("owned", lambda tokens: tokens == ["owned"]),
             ]), [])
+
+    def test_benchmark_binding_accepts_terminal_before_exec_observation(self):
+        process = mock.Mock(pid=701)
+        wrapper = ["python", "-c", "wrapper"]
+        benchmark = ["/bin/true"]
+        with mock.patch.object(
+                subject, "process_start_ticks", return_value=20), \
+                mock.patch.object(
+                    subject, "process_tokens", return_value=wrapper), \
+                mock.patch.object(
+                    subject, "pidfd_has_exited", return_value=True):
+            identity = subject.bind_benchmark_exec_or_terminal(
+                process, 9, wrapper, benchmark, subject.threading.Event())
+        self.assertEqual(identity, (20, False))
+
+    def test_benchmark_binding_accepts_exit_during_live_exec_reproof(self):
+        process = mock.Mock(pid=701)
+        wrapper = ["python", "-c", "wrapper"]
+        benchmark = ["/bin/true"]
+        with mock.patch.object(
+                subject, "process_start_ticks",
+                side_effect=(20, 20, 20)), \
+                mock.patch.object(
+                    subject, "process_tokens",
+                    side_effect=(benchmark, benchmark)), \
+                mock.patch.object(
+                    subject, "pidfd_has_exited",
+                    side_effect=(False, True)):
+            identity = subject.bind_benchmark_exec_or_terminal(
+                process, 9, wrapper, benchmark, subject.threading.Event())
+        self.assertEqual(identity, (20, True))
+
+    def test_benchmark_binding_rejects_live_unexpected_command(self):
+        process = mock.Mock(pid=701)
+        wrapper = ["python", "-c", "wrapper"]
+        benchmark = ["/bin/true"]
+        with mock.patch.object(
+                subject, "process_start_ticks", return_value=20), \
+                mock.patch.object(
+                    subject, "process_tokens", return_value=["unexpected"]), \
+                mock.patch.object(
+                    subject, "pidfd_has_exited", return_value=False), \
+                self.assertRaises(subject.CampaignError):
+            subject.bind_benchmark_exec_or_terminal(
+                process, 9, wrapper, benchmark, subject.threading.Event())
+
+    def test_benchmark_binding_rejects_lost_start_even_when_terminal(self):
+        process = mock.Mock(pid=701)
+        wrapper = ["python", "-c", "wrapper"]
+        benchmark = ["/bin/true"]
+        with mock.patch.object(
+                subject, "process_start_ticks",
+                side_effect=(20, None)), \
+                mock.patch.object(
+                    subject, "process_tokens", return_value=[]), \
+                mock.patch.object(
+                    subject, "pidfd_has_exited", return_value=True), \
+                self.assertRaises(subject.CampaignError):
+            subject.bind_benchmark_exec_or_terminal(
+                process, 9, wrapper, benchmark, subject.threading.Event())
+
+    def test_real_fast_benchmark_binding_stress(self):
+        parent_start = subject.process_start_ticks(os.getpid())
+        self.assertIsNotNone(parent_start)
+        benchmark = ["/bin/true"]
+        for _ in range(32):
+            wrapper = [
+                str(subject.PYTHON_PATH), "-I", "-c",
+                subject.PDEATH_EXEC_CODE, str(os.getpid()),
+                str(parent_start), *benchmark,
+            ]
+            process = subject.subprocess.Popen(
+                wrapper, stdout=subject.subprocess.PIPE,
+                stderr=subject.subprocess.PIPE, start_new_session=True)
+            pidfd = os.pidfd_open(process.pid, 0)
+            try:
+                start_ticks, _ = subject.bind_benchmark_exec_or_terminal(
+                    process, pidfd, wrapper, benchmark,
+                    subject.threading.Event())
+                self.assertGreaterEqual(start_ticks, 0)
+                stdout, stderr = process.communicate(timeout=5.0)
+                self.assertEqual((process.returncode, stdout, stderr),
+                                 (0, b"", b""))
+            finally:
+                os.close(pidfd)
+                if process.poll() is None:
+                    process.kill()
+                process.communicate(timeout=5.0)
+
+    def test_terminal_before_exec_observation_publishes_full_success(self):
+        task = {
+            "job": 0, "stage": "hard", "arm": "p48_r3_pfx007",
+            "output_name": "job00000.csv",
+            "argv": ["/fake/wirehair_v2_bench", "precodefail"],
+            "period": 48, "rows": 3, "mask": 0x007,
+            "seed_index": 0, "schedule": "adversarial", "Ks": [257],
+        }
+        preamble = " ".join(
+            "{}={}".format(key, value)
+            for key, value in subject.expected_preamble(task).items())
+        row = {field: "0" for field in subject.CSV_FIELDS}
+        for field in subject.CSV_MILLI_FIELDS:
+            row[field] = "0.000"
+        row.update({
+            "N": "257", "bb": "64", "heavy_family": "periodic",
+            "mix_count": "2", "overhead": "0", "trials": "1",
+            "success": "1", "rank_fail": "0", "error": "0",
+            "fail_rate": "0.00000000",
+            "inact_mu": "0.000", "inact_max": "0",
+            "binary_def_mu": "0.000", "binary_def_max": "0",
+            "heavy_gain_mu": "0.000", "heavy_gain_min": "0",
+            "heavy_shortfall": "0", "first_rank_fail": "-1",
+            "binary_def_hist": "0:1", "heavy_gain_hist": "0:1",
+            "failure_trials": "",
+            "active_packet_peel_seed_xor": "0x0",
+        })
+        payload = (
+            "# precodefail: " + preamble + "\n" +
+            ",".join(subject.CSV_FIELDS) + "\n" +
+            ",".join(row[field] for field in subject.CSV_FIELDS) + "\n"
+        ).encode("ascii")
+
+        class FakeSampler:
+            pid = 700
+            returncode = None
+
+            def poll(self):
+                return self.returncode
+
+        class FastBenchmark:
+            pid = 701
+            returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def communicate(self, timeout=None):
+                self.returncode = 0
+                return payload, b""
+
+        sampler = FakeSampler()
+        benchmark = FastBenchmark()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "campaign"
+            subject.make_private_directory(root)
+            for name in subject.RUNTIME_DIRECTORY_NAMES:
+                subject.make_private_directory(root / name)
+            subject.make_private_directory(root / "frozen")
+            thermal_csv = root / "thermal" / "segment000.csv"
+            thermal_bytes = subject.make_thermal_bytes(
+                ("100.0", "101.0", "102.0"))
+            pidfd = os.open("/dev/null", os.O_RDONLY)
+
+            def launch_sampler(_command, _error_stream):
+                thermal_csv.write_bytes(thermal_bytes)
+                return sampler
+
+            def wait_ready(
+                    process, pid_file, sampler_path, csv_path,
+                    controller_identity, wrapper_identity, identity_sink):
+                identity_sink.append((702, 30, ["sampler-child"]))
+                return 702, subject.read_thermal_rows(csv_path)
+
+            def start_ticks(pid):
+                return {700: 10, 701: 20}.get(pid, 40)
+
+            def tokens(pid):
+                if pid == 700:
+                    return ["sampler-wrapper"]
+                if pid == 701:
+                    return [
+                        str(subject.PYTHON_PATH), "-I", "-c",
+                        subject.PDEATH_EXEC_CODE, str(os.getpid()), "40",
+                        *task["argv"],
+                    ]
+                return ["other"]
+
+            patches = (
+                mock.patch.object(
+                    subject.subprocess, "Popen",
+                    return_value=benchmark),
+                mock.patch.object(
+                    subject, "launch_thermal_sampler",
+                    side_effect=launch_sampler),
+                mock.patch.object(subject, "validate_trusted_root_tool"),
+                mock.patch.object(
+                    subject, "process_start_ticks", side_effect=start_ticks),
+                mock.patch.object(
+                    subject, "process_tokens", side_effect=tokens),
+                mock.patch.object(
+                    subject.os, "pidfd_open", return_value=pidfd),
+                mock.patch.object(
+                    subject, "pidfd_has_exited", return_value=True),
+                mock.patch.object(
+                    subject, "wait_sampler_ready", side_effect=wait_ready),
+                mock.patch.object(
+                    subject, "validate_thermal_rows", return_value={}),
+                mock.patch.object(
+                    subject, "read_live_thermal_rows",
+                    side_effect=lambda path:
+                        subject.read_thermal_rows(path)),
+                mock.patch.object(
+                    subject, "wait_thermal_coverage", return_value=True),
+                mock.patch.object(
+                    subject, "validate_successful_thermal_coverage",
+                    return_value=[]),
+                mock.patch.object(subject, "assert_process_identity"),
+                mock.patch.object(
+                    subject, "sole_sampler_competitors", return_value={}),
+                mock.patch.object(
+                    subject, "assert_current_controller_owner"),
+                mock.patch.object(subject, "write_owner_marker"),
+                mock.patch.object(
+                    subject, "stop_launched_sampler",
+                    return_value=(0, [])),
+            )
+            for patcher in patches:
+                patcher.start()
+            try:
+                final = subject.run_segment(
+                    root, {"worker_count": 1, "owner_ttl_hours": 1},
+                    [task], "hard", 0, False)
+            finally:
+                for patcher in reversed(patches):
+                    patcher.stop()
+                try:
+                    os.close(pidfd)
+                except OSError:
+                    pass
+            self.assertEqual(final["state"], "success", final)
+            self.assertEqual(final["failures"], [])
+            self.assertEqual(
+                sorted(path.suffix for path in
+                       (root / "attempts" / "segment000").iterdir()),
+                [".exit", ".pid", ".stderr", ".stdout"])
+            self.assertEqual(
+                subject.load_json(
+                    root / "attempts" / "segment000" / "job00000.pid"),
+                {"pid": 701, "start_ticks": 20})
+            self.assertEqual(
+                (root / "attempts" / "segment000" /
+                 "job00000.stdout").read_bytes(), payload)
+            self.assertTrue(subject.job_receipt_path(root, 0).is_file())
 
     def exercise_benchmark_cleanup(self, transient):
         class FakeSampler:

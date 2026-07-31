@@ -3392,6 +3392,72 @@ def pidfd_has_exited(pidfd: int) -> bool:
     return bool(poller.poll(0))
 
 
+def bind_benchmark_exec_or_terminal(
+    process: subprocess.Popen,
+    pidfd: int,
+    wrapper_argv: Sequence[str],
+    benchmark_argv: Sequence[str],
+    abort: threading.Event,
+) -> Tuple[int, bool]:
+    """Bind a direct child until its benchmark exec or pinned terminal state.
+
+    The benchmark can legitimately exec and finish before /proc exposes its
+    post-exec argv to this thread.  Its unreaped direct-child object and pidfd
+    still pin one PID/start identity, and its exact terminal stdout/stderr/exit
+    receipts are validated later.  Treat that terminal transition as safe
+    evidence rather than inventing a live-identity failure.  A process that is
+    still live must continue to prove either the exact controller-bound wrapper
+    or the exact frozen benchmark command.
+
+    Returns ``(start_ticks, exec_observed)``.  ``exec_observed`` is diagnostic;
+    both outcomes are safe for PID-receipt publication because the latter is
+    already terminal and therefore cannot become signal authority.
+    """
+    start_ticks = process_start_ticks(process.pid)
+    if start_ticks is None:
+        die("cannot bind benchmark direct-child start identity")
+    deadline = time.monotonic() + BENCHMARK_EXEC_READY_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        observed_start = process_start_ticks(process.pid)
+        tokens = process_tokens(process.pid)
+        if observed_start != start_ticks:
+            # A direct child remains unreaped throughout this function, so its
+            # PID cannot be reused.  Losing or changing /proc start identity is
+            # never a benign completion shortcut.
+            die("benchmark direct-child start identity changed")
+        if tokens == list(benchmark_argv):
+            # Repeat both live identity fields.  At either boundary, pidfd
+            # readability proves the same pinned object became terminal and
+            # makes a transient/empty cmdline harmless.
+            if pidfd_has_exited(pidfd):
+                return start_ticks, True
+            rebound_start = process_start_ticks(process.pid)
+            rebound_tokens = process_tokens(process.pid)
+            if rebound_start != start_ticks:
+                die("benchmark direct-child start identity changed")
+            if rebound_tokens == list(benchmark_argv):
+                if pidfd_has_exited(pidfd):
+                    return start_ticks, True
+                return start_ticks, True
+            if pidfd_has_exited(pidfd):
+                return start_ticks, True
+            if rebound_tokens:
+                die("benchmark identity changed during live exec binding")
+            # /proc/PID/cmdline can be transiently empty while exec replaces
+            # the argument pages.  The pidfd still says this object is live;
+            # retry rather than misclassifying that transition.
+            time.sleep(0.005)
+            continue
+        if pidfd_has_exited(pidfd):
+            return start_ticks, False
+        if tokens and tokens != list(wrapper_argv):
+            die("benchmark wrapper changed command unexpectedly")
+        if abort.is_set():
+            die("benchmark launch aborted before exec")
+        time.sleep(0.005)
+    die("benchmark wrapper did not exec before timeout")
+
+
 def bind_sampler_identity(
     pid_file: Path,
     sampler_path: Path,
@@ -3706,6 +3772,28 @@ def cleanup_failed_sampler_binding(sampler: subprocess.Popen) -> None:
             "; ".join(errors)))
 
 
+def benchmark_future_result(
+    future: concurrent.futures.Future,
+    job: int,
+) -> dict:
+    """Return one job-bound worker result without collapsing equal failures."""
+    if future.cancelled():
+        return {"job": job, "status": "future_cancelled"}
+    try:
+        result = future.result()
+    except BaseException as exc:
+        return {
+            "job": job, "status": "worker_exception",
+            "detail": repr(exc),
+        }
+    if not isinstance(result, dict) or result.get("job") != job:
+        return {
+            "job": job, "status": "worker_exception",
+            "detail": "worker returned a mismatched job identity",
+        }
+    return result
+
+
 def run_segment(
     root: Path,
     design: Mapping[str, object],
@@ -4006,34 +4094,23 @@ def run_segment(
                 except BaseException:
                     os.close(pidfd)
                     raise
-                deadline = (
-                    time.monotonic() + BENCHMARK_EXEC_READY_TIMEOUT_SECONDS)
-                start_ticks: Optional[int] = None
-                while time.monotonic() < deadline:
-                    if pidfd_has_exited(pidfd):
-                        die("benchmark wrapper exited before exec")
-                    observed_start = process_start_ticks(process.pid)
-                    tokens = process_tokens(process.pid)
-                    if observed_start is not None and tokens == task["argv"]:
-                        start_ticks = observed_start
-                        break
-                    if tokens and tokens != wrapper_argv:
-                        die("benchmark wrapper changed command unexpectedly")
-                    if abort.is_set():
-                        die("benchmark launch aborted before exec")
-                    time.sleep(0.005)
-                else:
-                    die("benchmark wrapper did not exec before timeout")
-                assert start_ticks is not None
+                start_ticks, exec_observed = bind_benchmark_exec_or_terminal(
+                    process, pidfd, wrapper_argv, task["argv"], abort)
                 with active_lock:
                     current = active.get(job)
                     if current is None or current[0] is not process or \
                             current[1] != pidfd or current[2] is not lease:
                         die("benchmark active identity changed before receipt")
-                if pidfd_has_exited(pidfd) or \
-                        process_start_ticks(process.pid) != start_ticks or \
-                        process_tokens(process.pid) != task["argv"]:
-                    die("benchmark identity changed before PID receipt")
+                if not pidfd_has_exited(pidfd):
+                    if not exec_observed:
+                        die("live benchmark lacks an observed exec identity")
+                    receipt_start = process_start_ticks(process.pid)
+                    receipt_tokens = process_tokens(process.pid)
+                    if receipt_start != start_ticks:
+                        die("benchmark start identity changed before receipt")
+                    if receipt_tokens != task["argv"] and \
+                            not pidfd_has_exited(pidfd):
+                        die("benchmark command identity changed before receipt")
                 atomic_result(
                     attempt_dir / "job{:05d}.pid".format(job),
                     canonical_json({
@@ -4170,11 +4247,13 @@ def run_segment(
               "start_ticks": sampled_start_ticks}],
             int(design["owner_ttl_hours"]),
         )
-        future_results: List[dict] = []
         next_i2c_check = time.monotonic()
         with concurrent.futures.ThreadPoolExecutor(
                 max_workers=int(design["worker_count"])) as pool:
-            pending = {pool.submit(run_one, task) for task in tasks}
+            pending = {
+                pool.submit(run_one, task): int(task["job"])
+                for task in tasks
+            }
             while pending:
                 now = time.monotonic()
                 if now >= next_i2c_check and not abort.is_set():
@@ -4194,30 +4273,22 @@ def run_segment(
                     failures.append({"status": "sampler_exited", "returncode": sampler.returncode})
                     abort.set()
                     terminate_active()
-                done, pending = concurrent.futures.wait(
-                    pending, timeout=0.2,
+                done, _ = concurrent.futures.wait(
+                    tuple(pending), timeout=0.2,
                     return_when=concurrent.futures.FIRST_COMPLETED,
                 )
                 for future in done:
-                    if future.cancelled():
-                        result = {"status": "future_cancelled"}
-                    else:
-                        try:
-                            result = future.result()
-                        except BaseException as exc:
-                            result = {"status": "worker_exception", "detail": repr(exc)}
-                    future_results.append(result)
-                    if result.get("status") != "success" and not abort.is_set():
+                    job = pending.pop(future)
+                    result = benchmark_future_result(future, job)
+                    if result.get("status") != "success":
                         failures.append(result)
-                        abort.set()
-                        terminate_active()
+                        if not abort.is_set():
+                            abort.set()
+                            terminate_active()
                 if abort.is_set():
                     terminate_active()
                     for future in pending:
                         future.cancel()
-            for result in future_results:
-                if result.get("status") != "success" and result not in failures:
-                    failures.append(result)
         jobs_ended = time.monotonic()
         if not failures:
             check_owned_sampler()
