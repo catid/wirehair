@@ -697,6 +697,136 @@ class ThermalGateTest(unittest.TestCase):
     def validate(self, root, design, tasks):
         return subject.validate_thermal(root, design, tasks)
 
+    def test_live_thermal_snapshot_retries_only_incomplete_tail(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            path = base / "thermal.csv"
+            complete = subject.make_thermal_bytes(("100.0",))
+            header = complete.split(b"\n", 1)[0] + b"\n"
+
+            for raw in (b"", header[:-1], complete + b"torn"):
+                path.write_bytes(raw)
+                self.assertIsNone(subject.read_thermal_snapshot(
+                    path, allow_incomplete=True))
+                with self.assertRaises(subject.CampaignError):
+                    subject.read_thermal_rows(path)
+
+            path.write_bytes(complete)
+            rows = subject.read_thermal_snapshot(
+                path, allow_incomplete=True)
+            self.assertIsNotNone(rows)
+            self.assertEqual(len(rows), 1)
+
+            path.write_bytes(complete + b"malformed\n")
+            with self.assertRaises(subject.CampaignError):
+                subject.read_thermal_snapshot(
+                    path, allow_incomplete=True)
+
+            path.write_bytes(complete)
+            replacement = base / "replacement.csv"
+            replacement.write_bytes(complete)
+            real_read = os.read
+            replaced = False
+
+            def replace_during_read(descriptor, size):
+                nonlocal replaced
+                chunk = real_read(descriptor, size)
+                if chunk and not replaced:
+                    replaced = True
+                    os.replace(replacement, path)
+                return chunk
+
+            with mock.patch.object(
+                    subject.os, "read", side_effect=replace_during_read), \
+                    self.assertRaises(subject.CampaignError):
+                subject.read_thermal_snapshot(
+                    path, allow_incomplete=True)
+            self.assertTrue(replaced)
+
+            path.write_bytes(complete)
+            changed_mode = False
+
+            def chmod_during_read(descriptor, size):
+                nonlocal changed_mode
+                chunk = real_read(descriptor, size)
+                if chunk and not changed_mode:
+                    changed_mode = True
+                    path.chmod(0o400)
+                return chunk
+
+            with mock.patch.object(
+                    subject.os, "read", side_effect=chmod_during_read), \
+                    self.assertRaises(subject.CampaignError):
+                subject.read_thermal_snapshot(
+                    path, allow_incomplete=True)
+            self.assertTrue(changed_mode)
+
+    def test_live_thermal_reader_retries_a_torn_observation(self):
+        rows = [{"monotonic_s": "100.0"}]
+        with mock.patch.object(
+                subject, "read_thermal_snapshot",
+                side_effect=(None, rows)) as snapshots, \
+                mock.patch.object(subject.time, "sleep") as sleep:
+            self.assertIs(
+                subject.read_live_thermal_rows(Path("/unused")), rows)
+        self.assertEqual(snapshots.call_count, 2)
+        sleep.assert_called_once_with(0.005)
+
+    def test_thermal_snapshot_rejects_oversized_stream_boundedly(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "thermal.csv"
+            path.write_bytes(b"x" * 33)
+            real_read = os.read
+            requests = []
+
+            def record_read(descriptor, size):
+                requests.append(size)
+                return real_read(descriptor, size)
+
+            with mock.patch.object(
+                    subject, "MAX_THERMAL_STREAM_BYTES", 32), \
+                    mock.patch.object(
+                        subject.os, "read", side_effect=record_read), \
+                    self.assertRaises(subject.CampaignError):
+                subject.read_thermal_snapshot(
+                    path, allow_incomplete=True)
+            self.assertEqual(requests, [33])
+
+    def test_terminal_thermal_hashes_are_bounded(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            csv_path = base / "thermal.csv"
+            stderr_path = base / "thermal.stderr"
+            csv_path.write_bytes(b"x" * 33)
+            stderr_path.write_bytes(b"y" * 17)
+            with mock.patch.object(
+                    subject, "MAX_THERMAL_STREAM_BYTES", 32), \
+                    self.assertRaises(subject.CampaignError):
+                subject.bounded_thermal_sha256(csv_path)
+            with mock.patch.object(
+                    subject, "MAX_THERMAL_STDERR_BYTES", 16), \
+                    self.assertRaises(subject.CampaignError):
+                subject.bounded_thermal_stderr_sha256(stderr_path)
+
+    def test_bounded_thermal_snapshot_close_error_is_attempted_once(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "thermal.csv"
+            path.write_bytes(subject.make_thermal_bytes(("100.0",)))
+            real_close = os.close
+            closes = []
+
+            def close_then_report_error(descriptor):
+                closes.append(descriptor)
+                real_close(descriptor)
+                raise OSError("injected close report")
+
+            with mock.patch.object(
+                    subject.os, "close",
+                    side_effect=close_then_report_error), \
+                    self.assertRaises(subject.CampaignError):
+                subject.read_thermal_rows(path)
+            self.assertEqual(len(closes), 1)
+
     def test_success_and_busy_floor_stage_scoping(self):
         with tempfile.TemporaryDirectory() as temporary:
             success = Path(temporary) / "success"
@@ -809,6 +939,93 @@ class ThermalGateTest(unittest.TestCase):
                     self.validate(target, design, tasks)
             with self.assertRaises(subject.CampaignError):
                 subject.validate_thermal_rows([], segment=0)
+
+    def test_failed_ready_segment_preserves_bounded_diagnostic_evidence(self):
+        for diagnostic in ("torn_csv", "stderr"):
+            with self.subTest(diagnostic=diagnostic), \
+                    tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary) / diagnostic
+                root.mkdir()
+                tasks, design = subject.make_success_fixture(root)
+                intent0 = subject.load_json(
+                    subject.segment_path(root, 0, "intent"))
+                ready0 = subject.load_json(
+                    subject.segment_path(root, 0, "ready"))
+                final0_path = subject.segment_path(root, 0, "final")
+                final0 = subject.load_json(final0_path)
+
+                intent1 = dict(intent0)
+                intent1["segment"] = 1
+                subject.write_once(
+                    subject.segment_path(root, 1, "intent"),
+                    subject.canonical_json(intent1))
+                ready1 = dict(ready0)
+                ready1["segment"] = 1
+                ready1["intent_sha256"] = subject.sha256_file(
+                    subject.segment_path(root, 1, "intent"))
+                subject.write_once(
+                    subject.segment_path(root, 1, "ready"),
+                    subject.canonical_json(ready1))
+                shutil.copytree(
+                    root / "attempts" / "segment000",
+                    root / "attempts" / "segment001")
+                manifest_sha256, file_count = \
+                    subject.seal_attempt_manifest(
+                        root, 1, {0}, require_complete=True)
+                csv_path = root / "thermal" / "segment000.csv"
+                stderr_path = root / "thermal" / "segment000.stderr"
+                retry_csv = root / "thermal" / "segment001.csv"
+                retry_stderr = root / "thermal" / "segment001.stderr"
+                retry_csv.write_bytes(csv_path.read_bytes())
+                retry_stderr.write_bytes(stderr_path.read_bytes())
+                receipt_path = subject.job_receipt_path(root, 0)
+                receipt = subject.load_json(receipt_path)
+                receipt["segment"] = 1
+                receipt_path.write_bytes(subject.canonical_json(receipt))
+                final1 = dict(final0)
+                final1.update({
+                    "segment": 1,
+                    "intent_sha256": subject.sha256_file(
+                        subject.segment_path(root, 1, "intent")),
+                    "ready_sha256": subject.sha256_file(
+                        subject.segment_path(root, 1, "ready")),
+                    "thermal_csv": retry_csv.name,
+                    "thermal_csv_sha256":
+                        subject.bounded_thermal_sha256(retry_csv),
+                    "thermal_stderr": retry_stderr.name,
+                    "thermal_stderr_sha256":
+                        subject.bounded_thermal_stderr_sha256(
+                            retry_stderr),
+                    "attempt_manifest":
+                        "segment001.attempts.sha256",
+                    "attempt_manifest_sha256": manifest_sha256,
+                    "attempt_file_count": file_count,
+                })
+                subject.write_once(
+                    subject.segment_path(root, 1, "final"),
+                    subject.canonical_json(final1))
+
+                if diagnostic == "torn_csv":
+                    with csv_path.open("ab") as stream:
+                        stream.write(b"torn")
+                else:
+                    stderr_path.write_bytes(b"sampler traceback\n")
+                final0.update({
+                    "state": "failed",
+                    "failures": [{"status": "sampler_failed"}],
+                    "rolled_back_jobs": [0],
+                    "published_jobs": [],
+                    "sampler_returncode": 1,
+                    "thermal_csv_sha256":
+                        subject.bounded_thermal_sha256(csv_path),
+                    "thermal_stderr_sha256":
+                        subject.bounded_thermal_stderr_sha256(stderr_path),
+                })
+                final0_path.write_bytes(subject.canonical_json(final0))
+                receipt = self.validate(root, design, tasks)
+                self.assertEqual(receipt["failed_segments"], 1)
+                self.assertEqual(receipt["successful_segments"], 1)
+                self.assertEqual(receipt["samples"], 3)
 
     def test_interrupted_segment_reconciliation(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1198,6 +1415,10 @@ class OwnerMarkerTest(unittest.TestCase):
         self.assertEqual(subject.active_owner_live_identities(
             active, alive_probe=lambda pid: pid == 1234,
             start_ticks_probe=lambda pid: 100), [])
+        alive = iter((True, False))
+        self.assertEqual(subject.active_owner_live_identities(
+            active, alive_probe=lambda _pid: next(alive),
+            start_ticks_probe=lambda _pid: None), [])
         self.publish(phase="complete", protected=[])
         self.assertIsNone(self.load())
 
@@ -1559,6 +1780,25 @@ class ProcessGuardTest(unittest.TestCase):
             subject.terminate_discovered_owned_processes(
                 [("unused", lambda tokens: False)])
 
+    def test_discovery_identity_probe_race_to_exit_is_inert(self):
+        proc = mock.Mock()
+        entry = mock.Mock()
+        entry.name = "701"
+        proc.iterdir.return_value = [entry]
+        with mock.patch.object(
+                subject, "Path", return_value=proc), \
+                mock.patch.object(
+                    subject, "process_tokens",
+                    side_effect=(["owned"], None)), \
+                mock.patch.object(
+                    subject, "process_alive",
+                    side_effect=(True, False)), \
+                mock.patch.object(
+                    subject, "process_start_ticks", return_value=None):
+            self.assertEqual(subject.discover_owned_processes([
+                ("owned", lambda tokens: tokens == ["owned"]),
+            ]), [])
+
     def exercise_benchmark_cleanup(self, transient):
         class FakeSampler:
             pid = 700
@@ -1649,7 +1889,7 @@ class ProcessGuardTest(unittest.TestCase):
                 mock.patch.object(
                     subject, "validate_thermal_rows", return_value={}),
                 mock.patch.object(
-                    subject, "read_thermal_rows", return_value=rows),
+                    subject, "read_live_thermal_rows", return_value=rows),
                 mock.patch.object(subject, "assert_process_identity"),
                 mock.patch.object(
                     subject, "sole_sampler_competitors", return_value={}),
@@ -1706,6 +1946,167 @@ class ProcessGuardTest(unittest.TestCase):
         self.assertEqual(result["termination_calls"], 2)
         self.assertTrue(result["receipt_injection_hit"])
         self.assertTrue(result["final_exists"])
+
+    def test_success_revalidates_sealed_thermal_stream_after_sampler_stop(self):
+        class FakeSampler:
+            pid = 700
+            returncode = None
+
+            def poll(self):
+                return self.returncode
+
+        real_validate = subject.validate_thermal_rows
+        real_coverage = subject.validate_successful_thermal_coverage
+        for failure_kind in ("semantic", "coverage"):
+            with self.subTest(failure_kind=failure_kind), \
+                    tempfile.TemporaryDirectory() as temporary:
+                sampler = FakeSampler()
+                root = Path(temporary) / "campaign"
+                subject.make_private_directory(root)
+                for name in subject.RUNTIME_DIRECTORY_NAMES:
+                    subject.make_private_directory(root / name)
+                subject.make_private_directory(root / "frozen")
+                thermal_csv = root / "thermal" / "segment000.csv"
+                thermal_bytes = subject.make_thermal_bytes(
+                    ("100.0", "101.0", "102.0"))
+                validation_calls = []
+                coverage_calls = []
+
+                def launch_sampler(_command, _error_stream):
+                    thermal_csv.write_bytes(thermal_bytes)
+                    return sampler
+
+                def wait_ready(
+                        process, pid_file, sampler_path, csv_path,
+                        controller_identity, wrapper_identity, identity_sink):
+                    identity_sink.append((702, 30, ["sampler-child"]))
+                    return 702, subject.read_thermal_rows(thermal_csv)
+
+                def validate_rows(rows, *, segment):
+                    validation_calls.append(len(rows))
+                    if len(validation_calls) == 3:
+                        return real_validate(rows, segment=segment)
+                    return {}
+
+                def validate_coverage(
+                        rows, thermal, *, start, end, stage, segment):
+                    coverage_calls.append((start, end))
+                    if failure_kind == "coverage" and \
+                            len(coverage_calls) == 2:
+                        return real_coverage(
+                            rows, thermal, start=start, end=end,
+                            stage=stage, segment=segment)
+                    return []
+
+                def stop_and_corrupt(*_args):
+                    if failure_kind == "semantic":
+                        invalid = subject.make_thermal_bytes(
+                            ("103.0",), edac_ce="1")
+                        with thermal_csv.open("ab") as stream:
+                            stream.write(invalid.split(b"\n", 1)[1])
+                            stream.flush()
+                            os.fsync(stream.fileno())
+                    sampler.returncode = 0
+                    return 0, []
+
+                patches = (
+                    mock.patch.object(
+                        subject, "launch_thermal_sampler",
+                        side_effect=launch_sampler),
+                    mock.patch.object(subject, "validate_trusted_root_tool"),
+                    mock.patch.object(
+                        subject, "process_start_ticks", return_value=10),
+                    mock.patch.object(
+                        subject, "process_tokens",
+                        return_value=["sampler-wrapper"]),
+                    mock.patch.object(
+                        subject, "wait_sampler_ready",
+                        side_effect=wait_ready),
+                    mock.patch.object(
+                        subject, "validate_thermal_rows",
+                        side_effect=validate_rows),
+                    mock.patch.object(
+                        subject, "read_live_thermal_rows",
+                        side_effect=lambda _path:
+                            subject.read_thermal_rows(thermal_csv)),
+                    mock.patch.object(
+                        subject, "wait_thermal_coverage",
+                        return_value=True),
+                    mock.patch.object(
+                        subject, "validate_successful_thermal_coverage",
+                        side_effect=validate_coverage),
+                    mock.patch.object(subject, "assert_process_identity"),
+                    mock.patch.object(
+                        subject, "sole_sampler_competitors",
+                        return_value={}),
+                    mock.patch.object(
+                        subject, "assert_current_controller_owner"),
+                    mock.patch.object(subject, "write_owner_marker"),
+                    mock.patch.object(
+                        subject, "stop_launched_sampler",
+                        side_effect=stop_and_corrupt),
+                )
+                for patcher in patches:
+                    patcher.start()
+                try:
+                    final = subject.run_segment(
+                        root, {"worker_count": 1, "owner_ttl_hours": 1},
+                        [], "hard", 0, False)
+                finally:
+                    for patcher in reversed(patches):
+                        patcher.stop()
+                self.assertEqual(final["state"], "failed")
+                self.assertEqual(
+                    [failure["status"] for failure in final["failures"]],
+                    ["sealed_thermal_validation_error"])
+                self.assertEqual(final["rolled_back_jobs"], [])
+                self.assertEqual(
+                    final["thermal_csv_sha256"],
+                    subject.bounded_thermal_sha256(thermal_csv))
+                self.assertEqual(len(validation_calls), 3)
+                self.assertEqual(len(coverage_calls), 1 if
+                                 failure_kind == "semantic" else 2)
+
+    def test_success_final_rechecks_validated_thermal_digest_and_empty_stderr(
+            self):
+        for mutation in ("csv", "stderr"):
+            with self.subTest(mutation=mutation), \
+                    tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary) / "campaign"
+                subject.make_private_directory(root)
+                for name in subject.RUNTIME_DIRECTORY_NAMES:
+                    subject.make_private_directory(root / name)
+                intent = {
+                    "stage": "hard", "jobs": [],
+                    "jobs_sha256": subject.sha256_bytes(
+                        subject.json_lines([])),
+                }
+                subject.write_once(
+                    subject.segment_path(root, 0, "intent"),
+                    subject.canonical_json(intent))
+                subject.make_private_directory(
+                    root / "attempts" / "segment000")
+                thermal_csv = root / "thermal" / "segment000.csv"
+                thermal_stderr = \
+                    root / "thermal" / "segment000.stderr"
+                thermal_csv.write_bytes(subject.make_thermal_bytes(
+                    ("100.0", "101.0", "102.0")))
+                thermal_stderr.write_bytes(b"")
+                validated = subject.bounded_thermal_sha256(thermal_csv)
+                if mutation == "csv":
+                    thermal_csv.write_bytes(subject.make_thermal_bytes(
+                        ("200.0", "201.0", "202.0")))
+                else:
+                    thermal_stderr.write_bytes(b"late diagnostic\n")
+                with self.assertRaises(subject.CampaignError):
+                    subject.write_segment_final(
+                        root, 0, intent, "success", failures=[],
+                        rolled_back=[], process_actions=[],
+                        jobs_ended_monotonic_s=1.0,
+                        sampler_returncode=0,
+                        validated_thermal_csv_sha256=validated)
+                self.assertFalse(
+                    subject.segment_path(root, 0, "final").exists())
 
     def test_registration_fallback_cleanup_failure_stays_incomplete(self):
         class FakeSampler:
@@ -1799,7 +2200,7 @@ class ProcessGuardTest(unittest.TestCase):
                 mock.patch.object(
                     subject, "validate_thermal_rows", return_value={}),
                 mock.patch.object(
-                    subject, "read_thermal_rows", return_value=rows),
+                    subject, "read_live_thermal_rows", return_value=rows),
                 mock.patch.object(subject, "assert_process_identity"),
                 mock.patch.object(
                     subject, "sole_sampler_competitors", return_value={}),
@@ -2102,6 +2503,211 @@ class ProcessGuardTest(unittest.TestCase):
             "--csv", str(csv_path), "--pid-file", str(pid_path),
         ], sampler, csv_path, pid_path, controller_identity))
 
+    def test_sampler_launch_is_detached_from_callers_terminal(self):
+        launched = object()
+        error_stream = object()
+        command = [str(subject.SUDO_PATH), "-n", "/bin/true"]
+        with mock.patch.object(
+                subject.subprocess, "Popen",
+                return_value=launched) as popen:
+            self.assertIs(
+                subject.launch_thermal_sampler(command, error_stream),
+                launched)
+        popen.assert_called_once_with(
+            command,
+            stdin=subject.subprocess.DEVNULL,
+            stdout=subject.subprocess.DEVNULL,
+            stderr=error_stream,
+            start_new_session=True,
+        )
+
+    def test_sampler_pid_publication_waits_for_canonical_newline(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            pid_path = base / "thermal.pid"
+            descriptor = os.open(
+                str(pid_path),
+                os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
+                0o444)
+            os.fchmod(descriptor, 0o444)
+            publication = None
+            try:
+                pid, publication = subject.read_sampler_pid_publication(
+                    pid_path)
+                self.assertIsNone(pid)
+                self.assertIsNotNone(publication)
+
+                os.write(descriptor, b"701")
+                os.fsync(descriptor)
+                pid, publication = subject.read_sampler_pid_publication(
+                    pid_path, publication)
+                self.assertIsNone(pid)
+                self.assertEqual(publication[3], b"701")
+                with mock.patch.object(
+                        subject.os, "pidfd_open") as pidfd_open:
+                    self.assertIsNone(subject.bind_sampler_identity(
+                        pid_path, base / subject.SAMPLER_NAME,
+                        base / "thermal.csv", (1234, 99),
+                        (700, 10, ["/unused"])))
+                pidfd_open.assert_not_called()
+
+                os.write(descriptor, b"\n")
+                os.fsync(descriptor)
+                pid, publication = subject.read_sampler_pid_publication(
+                    pid_path, publication)
+                self.assertEqual(pid, 701)
+                self.assertEqual(publication[3], b"701\n")
+            finally:
+                subject.close_sampler_pid_publication(publication)
+                os.close(descriptor)
+
+    def test_sampler_pid_publication_rejects_mutation_and_replacement(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            for case in (
+                    "mutation", "metadata", "replacement",
+                    "disappearance"):
+                with self.subTest(case=case):
+                    pid_path = base / (case + ".pid")
+                    descriptor = os.open(
+                        str(pid_path),
+                        os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
+                        0o444)
+                    os.fchmod(descriptor, 0o444)
+                    os.write(descriptor, b"70")
+                    os.fsync(descriptor)
+                    _pid, publication = \
+                        subject.read_sampler_pid_publication(pid_path)
+                    self.assertIsNotNone(publication)
+                    if case == "mutation":
+                        os.ftruncate(descriptor, 0)
+                        os.lseek(descriptor, 0, os.SEEK_SET)
+                        os.write(descriptor, b"71")
+                        os.fsync(descriptor)
+                    elif case != "metadata":
+                        os.close(descriptor)
+                        descriptor = -1
+                        pid_path.unlink()
+                        if case == "replacement":
+                            replacement = os.open(
+                                str(pid_path),
+                                os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                                os.O_CLOEXEC, 0o444)
+                            os.fchmod(replacement, 0o444)
+                            os.write(replacement, b"70")
+                            os.fsync(replacement)
+                            os.close(replacement)
+                    try:
+                        if case == "metadata":
+                            real_read = os.read
+                            changed_mode = False
+
+                            def chmod_during_read(value, size):
+                                nonlocal changed_mode
+                                chunk = real_read(value, size)
+                                if chunk and not changed_mode:
+                                    changed_mode = True
+                                    os.fchmod(descriptor, 0o666)
+                                return chunk
+
+                            with mock.patch.object(
+                                    subject.os, "read",
+                                    side_effect=chmod_during_read), \
+                                    self.assertRaises(subject.CampaignError):
+                                subject.read_sampler_pid_publication(
+                                    pid_path, publication)
+                            self.assertTrue(changed_mode)
+                        else:
+                            with self.assertRaises(subject.CampaignError):
+                                subject.read_sampler_pid_publication(
+                                    pid_path, publication)
+                    finally:
+                        subject.close_sampler_pid_publication(publication)
+                        if descriptor >= 0:
+                            os.close(descriptor)
+
+    def test_incomplete_pid_publication_close_error_is_not_retried(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            pid_path = base / "thermal.pid"
+            descriptor = os.open(
+                str(pid_path),
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
+                0o444)
+            os.fchmod(descriptor, 0o444)
+            os.write(descriptor, b"70")
+            os.fsync(descriptor)
+            os.close(descriptor)
+            real_close = os.close
+            closes = []
+
+            def close_then_report_error(value):
+                closes.append(value)
+                real_close(value)
+                raise OSError("injected close report")
+
+            with mock.patch.object(
+                    subject.os, "close",
+                    side_effect=close_then_report_error), \
+                    self.assertRaises(subject.CampaignError):
+                subject.bind_sampler_identity(
+                    pid_path, base / subject.SAMPLER_NAME,
+                    base / "thermal.csv", (1234, 99),
+                    (700, 10, ["/unused"]))
+            self.assertEqual(len(closes), 1)
+
+    def test_sampler_pid_publication_rejects_noncanonical_content(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            for index, raw in enumerate((
+                    b"0", b"01", b"+7\n", b"7 \n",
+                    str(subject.MAX_PROCESS_PID + 1).encode("ascii"))):
+                with self.subTest(raw=raw):
+                    path = base / "receipt{}.pid".format(index)
+                    descriptor = os.open(
+                        str(path),
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
+                        0o444)
+                    os.fchmod(descriptor, 0o444)
+                    os.write(descriptor, raw)
+                    os.fsync(descriptor)
+                    os.close(descriptor)
+                    with self.assertRaises(subject.CampaignError):
+                        subject.read_sampler_pid_publication(path)
+
+    def test_sampler_readiness_bounds_incomplete_pid_publication(self):
+        class FakeSampler:
+            @staticmethod
+            def poll():
+                return None
+
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            pid_path = base / "thermal.pid"
+            descriptor = os.open(
+                str(pid_path),
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
+                0o444)
+            os.fchmod(descriptor, 0o444)
+            identities = []
+            try:
+                with mock.patch.object(
+                        subject.time, "monotonic",
+                        side_effect=(0.0, 0.1, 13.0)), \
+                        mock.patch.object(subject.time, "sleep"), \
+                        mock.patch.object(
+                            subject.os, "pidfd_open") as pidfd_open, \
+                        self.assertRaises(subject.CampaignError):
+                    subject.wait_sampler_ready(
+                        FakeSampler(), pid_path,
+                        base / subject.SAMPLER_NAME,
+                        base / "thermal.csv", (1234, 99),
+                        (700, 10, ["/unused"]), identities)
+                pidfd_open.assert_not_called()
+                self.assertEqual(identities, [])
+            finally:
+                os.close(descriptor)
+
     def test_sampler_pid_receipt_requires_exact_child_command(self):
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
@@ -2109,6 +2715,7 @@ class ProcessGuardTest(unittest.TestCase):
             csv_path = base / "thermal.csv"
             pid_path = base / "thermal.pid"
             pid_path.write_text("701\n", encoding="ascii")
+            pid_path.chmod(0o444)
             expected = subject.campaign_sampled_command(
                 sampler, csv_path, pid_path)
             with mock.patch.object(
@@ -2135,6 +2742,22 @@ class ProcessGuardTest(unittest.TestCase):
                     subject.sampler_identity(
                         pid_path, sampler, csv_path)
 
+    def test_sampler_identity_cmdline_race_to_exit_is_inert(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            pid_path = base / "thermal.pid"
+            pid_path.write_text("701\n", encoding="ascii")
+            pid_path.chmod(0o444)
+            alive = iter((True, False))
+            with mock.patch.object(
+                    subject, "process_alive",
+                    side_effect=lambda _pid: next(alive)), \
+                    mock.patch.object(
+                        subject, "process_tokens", return_value=[]):
+                self.assertIsNone(subject.sampler_identity(
+                    pid_path, base / subject.SAMPLER_NAME,
+                    base / "thermal.csv"))
+
     def test_sampler_binding_rejects_reused_pid_before_publication(self):
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
@@ -2142,6 +2765,7 @@ class ProcessGuardTest(unittest.TestCase):
             csv_path = base / "thermal.csv"
             pid_path = base / "thermal.pid"
             pid_path.write_text("701\n", encoding="ascii")
+            pid_path.chmod(0o444)
             controller_identity = (1234, 99)
             child_tokens = subject.campaign_sampled_command(
                 sampler, csv_path, pid_path)
@@ -2201,6 +2825,7 @@ class ProcessGuardTest(unittest.TestCase):
             csv_path = base / "thermal.csv"
             pid_path = base / "thermal.pid"
             pid_path.write_text("702\n", encoding="ascii")
+            pid_path.chmod(0o444)
             controller_identity = (1234, 99)
             child_tokens = subject.campaign_sampled_command(
                 sampler, csv_path, pid_path)
@@ -2285,11 +2910,20 @@ class ProcessGuardTest(unittest.TestCase):
                     sampler, csv_path, pid_path, controller_identity)
 
             pid_path.write_text("701\n", encoding="ascii")
+            pid_path.chmod(0o444)
             direct_tokens = {
                 700: supervisor_tokens,
                 701: child_tokens,
             }
             direct_closes = []
+            real_close = os.close
+
+            def close_direct(descriptor):
+                if descriptor in (900, 901):
+                    direct_closes.append(descriptor)
+                else:
+                    real_close(descriptor)
+
             with mock.patch.object(
                     subject.os, "pidfd_open",
                     side_effect=(900, 901)), \
@@ -2307,8 +2941,7 @@ class ProcessGuardTest(unittest.TestCase):
                         side_effect=lambda pid: direct_tokens.get(pid)), \
                     mock.patch.object(
                         subject.os, "close",
-                        side_effect=lambda descriptor:
-                            direct_closes.append(descriptor)):
+                        side_effect=close_direct):
                 self.assertEqual(
                     subject.bind_sampler_identity(
                         pid_path, sampler, csv_path, controller_identity,
@@ -2316,7 +2949,9 @@ class ProcessGuardTest(unittest.TestCase):
                     (701, 30, child_tokens))
             self.assertEqual(direct_closes, [900, 901])
 
+            pid_path.chmod(0o644)
             pid_path.write_text("702\n", encoding="ascii")
+            pid_path.chmod(0o444)
             forked_tokens = {
                 700: wrapper_tokens,
                 701: supervisor_tokens,
@@ -2325,6 +2960,9 @@ class ProcessGuardTest(unittest.TestCase):
             forked_closes = []
 
             def fail_first_close(descriptor):
+                if descriptor not in (910, 911, 912):
+                    real_close(descriptor)
+                    return
                 forked_closes.append(descriptor)
                 if len(forked_closes) == 1:
                     raise OSError("injected close failure")
@@ -2384,6 +3022,7 @@ class ProcessGuardTest(unittest.TestCase):
             subject.make_private_directory(root / "frozen")
             pid_path = root / "thermal" / "segment000.pid"
             pid_path.write_text("701\n", encoding="ascii")
+            pid_path.chmod(0o444)
             state = {"alive": True}
 
             def terminate_discovered(matchers):
@@ -2413,6 +3052,137 @@ class ProcessGuardTest(unittest.TestCase):
             }])
             self.assertFalse(pid_path.exists())
 
+    def test_incomplete_sampler_publication_is_removed_only_after_no_reader(self):
+        for blocker in ("none", "direct", "inventory", "wrapper"):
+            with self.subTest(blocker=blocker), \
+                    tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary) / "campaign"
+                subject.make_private_directory(root)
+                for name in subject.RUNTIME_DIRECTORY_NAMES:
+                    subject.make_private_directory(root / name)
+                subject.make_private_directory(root / "frozen")
+                pid_path = root / "thermal" / "segment000.pid"
+                descriptor = os.open(
+                    str(pid_path),
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
+                    0o444)
+                os.fchmod(descriptor, 0o444)
+                os.write(descriptor, b"70")
+                os.fsync(descriptor)
+                os.close(descriptor)
+                direct = [(
+                    "unreceipted_thermal", 701, 20,
+                    subject.campaign_sampled_command(
+                        root / "frozen" / subject.SAMPLER_NAME,
+                        root / "thermal" / "segment000.csv", pid_path),
+                )] if blocker == "direct" else []
+                discoveries = iter((direct, []))
+
+                def terminate_wrappers(_matchers):
+                    if blocker == "wrapper" and \
+                            terminate_wrappers.calls == 0:
+                        terminate_wrappers.calls += 1
+                        raise subject.CampaignError("injected wrapper failure")
+                    terminate_wrappers.calls += 1
+                    return []
+
+                terminate_wrappers.calls = 0
+                with mock.patch.object(
+                        subject, "terminate_discovered_owned_processes",
+                        side_effect=terminate_wrappers), \
+                        mock.patch.object(
+                            subject, "discover_owned_processes",
+                            side_effect=lambda _matchers:
+                                next(discoveries)), \
+                        mock.patch.object(
+                            subject, "other_samplers",
+                            return_value=(
+                                [{"pid": 702, "command": "foreign",
+                                  "i2c_devices": ["/dev/i2c-1"]}]
+                                if blocker == "inventory" else [])):
+                    if blocker != "none":
+                        with self.assertRaises(subject.CampaignError):
+                            subject.terminate_owned_segment_processes(
+                                root, 0, [], (1234, 99))
+                    else:
+                        self.assertEqual(
+                            subject.terminate_owned_segment_processes(
+                                root, 0, [], (1234, 99)),
+                            [])
+                self.assertEqual(pid_path.exists(), blocker != "none")
+
+    def test_reused_unbound_complete_sampler_receipt_is_never_signaled(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "campaign"
+            subject.make_private_directory(root)
+            for name in subject.RUNTIME_DIRECTORY_NAMES:
+                subject.make_private_directory(root / name)
+            subject.make_private_directory(root / "frozen")
+            pid_path = root / "thermal" / "segment000.pid"
+            pid_path.write_text("701\n", encoding="ascii")
+            pid_path.chmod(0o444)
+            start = mock.Mock()
+            terminate = mock.Mock()
+            with mock.patch.object(
+                    subject, "terminate_discovered_owned_processes",
+                    return_value=[]), \
+                    mock.patch.object(
+                        subject, "discover_owned_processes",
+                        return_value=[]), \
+                    mock.patch.object(
+                        subject, "other_samplers", return_value=[]), \
+                    mock.patch.object(
+                        subject, "process_alive", return_value=True), \
+                    mock.patch.object(
+                        subject, "process_start_ticks", start), \
+                    mock.patch.object(
+                        subject, "terminate_verified_process", terminate):
+                self.assertEqual(
+                    subject.terminate_owned_segment_processes(
+                        root, 0, [], (1234, 99)),
+                    [])
+            start.assert_not_called()
+            terminate.assert_not_called()
+            self.assertFalse(pid_path.exists())
+
+    def test_receipted_sampler_post_stop_probe_race_to_exit_is_inert(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "campaign"
+            subject.make_private_directory(root)
+            for name in subject.RUNTIME_DIRECTORY_NAMES:
+                subject.make_private_directory(root / name)
+            subject.make_private_directory(root / "frozen")
+            pid_path = root / "thermal" / "segment000.pid"
+            pid_path.write_text("701\n", encoding="ascii")
+            pid_path.chmod(0o444)
+            subject.segment_path(root, 0, "ready").write_bytes(
+                subject.canonical_json({
+                    "sampler_pid": 701, "sampler_start_ticks": 20,
+                }))
+            alive = iter((True, True, False))
+            with mock.patch.object(
+                    subject, "terminate_discovered_owned_processes",
+                    return_value=[]), \
+                    mock.patch.object(
+                        subject, "discover_owned_processes",
+                        return_value=[]), \
+                    mock.patch.object(
+                        subject, "other_samplers", return_value=[]), \
+                    mock.patch.object(
+                        subject, "process_alive",
+                        side_effect=lambda _pid: next(alive)), \
+                    mock.patch.object(
+                        subject, "process_start_ticks", return_value=None), \
+                    mock.patch.object(
+                        subject, "terminate_verified_process",
+                        return_value="terminated"):
+                actions = subject.terminate_owned_segment_processes(
+                    root, 0, [], (1234, 99))
+            self.assertEqual(actions, [{
+                "kind": "thermal", "pid": 701, "action": "terminated",
+            }])
+            self.assertFalse(pid_path.exists())
+
     def test_segment_cleanup_attempts_other_categories_after_corruption(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "campaign"
@@ -2422,8 +3192,9 @@ class ProcessGuardTest(unittest.TestCase):
             subject.make_private_directory(root / "frozen")
             attempt = root / "attempts" / "segment000"
             subject.make_private_directory(attempt)
-            (root / "thermal" / "segment000.pid").write_text(
-                "malformed\n", encoding="ascii")
+            thermal_pid = root / "thermal" / "segment000.pid"
+            thermal_pid.write_text("malformed\n", encoding="ascii")
+            thermal_pid.chmod(0o444)
             (attempt / "job00000.pid").write_text(
                 "not json\n", encoding="ascii")
             (attempt / "job00001.pid").write_bytes(subject.canonical_json({
@@ -2488,6 +3259,12 @@ class ProcessGuardTest(unittest.TestCase):
                     root / "thermal" / "segment000.pid")
                 if kind == "thermal":
                     protected_path.write_text("701\n", encoding="ascii")
+                    protected_path.chmod(0o444)
+                    subject.segment_path(root, 0, "ready").write_bytes(
+                        subject.canonical_json({
+                            "sampler_pid": 701,
+                            "sampler_start_ticks": 20,
+                        }))
                 else:
                     attempt = root / "attempts" / "segment000"
                     subject.make_private_directory(attempt)
@@ -2541,6 +3318,40 @@ class ProcessGuardTest(unittest.TestCase):
             signal_sender=lambda signal_name: False,
         )
         self.assertEqual(action, "terminated")
+
+    def test_identity_probe_race_to_exit_is_not_misclassified_as_corruption(self):
+        for field in ("start", "tokens_none", "tokens_empty"):
+            with self.subTest(field=field):
+                alive_values = iter((True, False))
+                sender = mock.Mock()
+                action = subject.terminate_verified_process(
+                    1234, 99, ["owned", "worker"],
+                    alive_probe=lambda _pid: next(alive_values),
+                    start_ticks_probe=(
+                        (lambda _pid: None) if field == "start" else
+                        (lambda _pid: 99)),
+                    tokens_probe=(
+                        (lambda _pid: [])
+                        if field == "tokens_empty" else
+                        (lambda _pid: None)),
+                    signal_sender=sender,
+                )
+                self.assertEqual(action, "already_exited")
+                sender.assert_not_called()
+
+    def test_unreadable_identity_that_remains_live_still_fails_closed(self):
+        for field in ("start", "tokens"):
+            with self.subTest(field=field), \
+                    self.assertRaises(subject.CampaignError):
+                subject.terminate_verified_process(
+                    1234, 99, ["owned", "worker"],
+                    alive_probe=lambda _pid: True,
+                    start_ticks_probe=(
+                        (lambda _pid: None) if field == "start" else
+                        (lambda _pid: 99)),
+                    tokens_probe=lambda _pid: None,
+                    signal_sender=lambda _signal: True,
+                )
 
     def test_sampler_stop_rejects_identity_loss(self):
         class FakeSampler:

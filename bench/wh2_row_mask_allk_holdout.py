@@ -330,6 +330,8 @@ K_LO = 2
 K_HI = 64_000
 CHUNK_MAX = 250
 DEFAULT_WORKERS = 126
+MIN_CAMPAIGN_WORKERS = 64
+MAX_CAMPAIGN_WORKERS = 256
 # The paired cost gate: the development screen measured XOR ratios of
 # exactly 1.0 and muladd ratios within +/-3e-5 for every alternative
 # mask, so a sealed 5e-4 ceiling is ~16x the observed noise while still
@@ -352,6 +354,14 @@ THERMAL_MAX_GAP_SECONDS = Decimal("2.5")
 THERMAL_READY_SAMPLES = 2
 THERMAL_READY_TIMEOUT_SECONDS = 12.0
 THERMAL_END_TIMEOUT_SECONDS = 5.0
+# At one sample per second, 64 MiB accommodates well over 40 hours even at
+# 400 bytes per row.  The sealed controller requires at least 64 workers, so
+# this also exceeds the one-segment all-jobs-at-timeout bound; at the intended
+# 126 workers it has more than 2x margin.
+# The cap keeps a corrupt live artifact from turning a freshness check into an
+# unbounded allocation; final reduction applies the same limit.
+MAX_THERMAL_STREAM_BYTES = 64 * 1024 * 1024
+MAX_THERMAL_STDERR_BYTES = 1024 * 1024
 MIN_PLAUSIBLE_CPU_C = Decimal("0")
 MAX_PLAUSIBLE_CPU_C = Decimal("130")
 MIN_PLAUSIBLE_DIMM_C = Decimal("0")
@@ -419,6 +429,8 @@ DISCOVERY_PROVED_GONE_ACTIONS = STOPPED_PROCESS_ACTIONS | {"identity_reused"}
 # prevents untrusted receipts from reaching those APIs as unrepresentable
 # Python integers.
 MAX_PROCESS_PID = (1 << 31) - 1
+MAX_SAMPLER_PID_RECEIPT_BYTES = len(str(MAX_PROCESS_PID)) + 1
+SamplerPidPublication = Tuple[int, int, int, bytes]
 
 
 class CampaignError(RuntimeError):
@@ -1373,7 +1385,7 @@ def load_active_owner_marker(
     boot are inert and return None.
     """
     try:
-        identity = marker_path.stat(follow_symlinks=False)
+        identity = marker_path.lstat()
     except FileNotFoundError:
         return None
     except OSError as exc:
@@ -1443,7 +1455,7 @@ def acquire_environment_lock(
         die("cannot open environment-owner lock: {}".format(exc))
     try:
         identity = os.fstat(descriptor)
-        path_identity = lock_path.stat(follow_symlinks=False)
+        path_identity = lock_path.lstat()
         if not stat.S_ISREG(identity.st_mode) or identity.st_nlink != 1 or \
                 identity.st_uid != os.getuid() or identity.st_mode & 0o077 or \
                 (identity.st_dev, identity.st_ino) != \
@@ -1692,6 +1704,10 @@ def verify_root(
             design.get("thermal_min_gap_seconds") != str(THERMAL_MIN_GAP_SECONDS) or \
             design.get("thermal_max_gap_seconds") != str(THERMAL_MAX_GAP_SECONDS) or \
             design.get("thermal_ready_samples") != THERMAL_READY_SAMPLES or \
+            not isinstance(design.get("worker_count"), int) or \
+            isinstance(design.get("worker_count"), bool) or \
+            not MIN_CAMPAIGN_WORKERS <= design["worker_count"] <= \
+                MAX_CAMPAIGN_WORKERS or \
             design.get("owner_marker_path") != str(OWNER_MARKER_PATH) or \
             design.get("owner_marker_schema") != OWNER_MARKER_SCHEMA or \
             not isinstance(design.get("owner_ttl_hours"), int) or \
@@ -2010,6 +2026,8 @@ def active_owner_live_identities(
             continue
         observed_start = start_ticks(identity[0])
         if observed_start is None:
+            if not alive(identity[0]):
+                continue
             die("cannot inspect a live protected process identity")
         if int(observed_start) == identity[1]:
             identities.append({
@@ -2057,7 +2075,7 @@ def parse_fuser_i2c_result(
 
 def validate_trusted_root_tool(path: Path) -> None:
     try:
-        identity = path.stat(follow_symlinks=False)
+        identity = path.lstat()
     except OSError as exc:
         die("trusted root tool is unavailable: {}".format(exc))
     if not stat.S_ISREG(identity.st_mode) or identity.st_uid != 0 or \
@@ -2288,13 +2306,19 @@ def terminate_verified_process(
             return "exited"
         observed_start = start_ticks(pid)
         if observed_start is None:
+            if not alive(pid):
+                return "exited"
             die("cannot re-prove live process start identity")
         if int(observed_start) != expected_start_ticks:
             return "reused"
         observed_tokens = read_tokens(pid)
         if observed_tokens is None:
+            if not alive(pid):
+                return "exited"
             die("cannot re-prove live process command identity")
         if observed_tokens != list(expected):
+            if not alive(pid):
+                return "exited"
             return "changed"
         return "match"
 
@@ -2532,6 +2556,18 @@ def campaign_sampler_command_matches(
     return list(tokens) in (supervisor, sudo_wrapper)
 
 
+def launch_thermal_sampler(
+    command: Sequence[str],
+    sampler_error: Any,
+) -> subprocess.Popen:
+    """Launch sudo outside any caller terminal so its ancestry is invariant."""
+    return subprocess.Popen(
+        list(command), stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL, stderr=sampler_error,
+        start_new_session=True,
+    )
+
+
 def benchmark_command_matches(
     tokens: Sequence[str],
     expected: Sequence[str],
@@ -2578,6 +2614,8 @@ def discover_owned_processes(
         start_ticks = process_start_ticks(pid)
         rebound_tokens = process_tokens(pid)
         if start_ticks is None or rebound_tokens is None:
+            if not process_alive(pid):
+                continue
             die("cannot bind discovered owned process identity")
         if rebound_tokens != tokens:
             # A sudo/Python wrapper may legitimately exec between reads.  The
@@ -2662,26 +2700,25 @@ def terminate_owned_segment_processes(
     # potentially corrupt receipt, then try every remaining safe leg.  One
     # malformed sampler artifact must never strand benchmark children (or
     # vice versa).
+    thermal_wrapper_cleanup_proved = False
     for label, matchers in (
             ("thermal_wrapper_discovery", sampler_matchers),
             ("benchmark_wrapper_discovery", benchmark_matchers)):
         try:
             actions.extend(terminate_discovered_owned_processes(matchers))
+            if label == "thermal_wrapper_discovery":
+                thermal_wrapper_cleanup_proved = True
         except BaseException as exc:
             cleanup_errors.append("{}:{!r}".format(label, exc))
 
+    incomplete_thermal_publication = False
+    unbound_thermal_publication = False
+    thermal_publication: Optional[SamplerPidPublication] = None
     try:
-        if thermal_pid.is_symlink():
-            die("owned thermal PID file is a symlink")
-        if thermal_pid.exists():
-            try:
-                pid = int(thermal_pid.read_text(encoding="ascii").strip())
-            except (OSError, ValueError):
-                die("malformed owned thermal PID file for segment {}"
-                    .format(segment))
-            if pid <= 1 or pid > MAX_PROCESS_PID:
-                die("owned thermal PID is out of range for segment {}"
-                    .format(segment))
+        pid, thermal_publication = read_sampler_pid_publication(thermal_pid)
+        if thermal_publication is not None and pid is None:
+            incomplete_thermal_publication = True
+        if pid is not None:
             expected_thermal_start: Optional[int] = None
             ready_path = segment_path(root, segment, "ready")
             if ready_path.is_file() and not ready_path.is_symlink():
@@ -2696,51 +2733,59 @@ def terminate_owned_segment_processes(
             owned_stopped = False
             initially_alive = process_alive(pid)
             if initially_alive:
-                observed_start = process_start_ticks(pid)
-                if observed_start is None:
-                    die("cannot inspect a live thermal PID start identity")
                 if expected_thermal_start is None:
-                    die("unbound pre-ready thermal PID remains live; refusing "
-                        "command-only signal authority")
-                if observed_start != expected_thermal_start:
+                    # A complete PID can be published before the ready receipt.
+                    # It is not signal authority: defer it to the same exact
+                    # wrapper/direct-command/I2C absence proof used for an
+                    # incomplete publication.
+                    unbound_thermal_publication = True
+                else:
+                    expected_tokens = campaign_sampled_command(
+                        sampler_path, thermal_csv, thermal_pid)
+                    action = terminate_verified_process(
+                        pid, expected_thermal_start, expected_tokens)
+                    if action == "identity_reused":
+                        # The receipt's original process object is gone.  Never
+                        # signal its numeric replacement.
+                        actions.append({
+                            "kind": "thermal", "pid": pid,
+                            "action": "stale_reused_pid",
+                        })
+                        receipt_stale = True
+                    else:
+                        actions.append({
+                            "kind": "thermal", "pid": pid, "action": action,
+                        })
+                        require_stopped_action(
+                            action, "receipted thermal reconciliation")
+                        owned_stopped = True
+            if not unbound_thermal_publication:
+                still_alive = process_alive(pid)
+                if still_alive and process_start_ticks(pid) is None:
+                    if process_alive(pid):
+                        die("cannot re-prove a live thermal PID start identity")
+                    still_alive = False
+                if still_alive and not initially_alive:
                     actions.append({
                         "kind": "thermal", "pid": pid,
                         "action": "stale_reused_pid",
                     })
                     receipt_stale = True
-                else:
-                    expected_tokens = campaign_sampled_command(
-                        sampler_path, thermal_csv, thermal_pid)
-                    tokens = process_tokens(pid)
-                    if tokens is None:
-                        die("cannot inspect a live thermal PID command")
-                    if tokens != expected_tokens:
-                        die("live receipted thermal PID changed command")
-                    action = terminate_verified_process(
-                        pid, expected_thermal_start, expected_tokens)
-                    actions.append({
-                        "kind": "thermal", "pid": pid, "action": action,
-                    })
-                    require_stopped_action(
-                        action, "receipted thermal reconciliation")
-                    owned_stopped = True
-            still_alive = process_alive(pid)
-            if still_alive and process_start_ticks(pid) is None:
-                die("cannot re-prove a live thermal PID start identity")
-            if still_alive and not initially_alive:
-                actions.append({
-                    "kind": "thermal", "pid": pid,
-                    "action": "stale_reused_pid",
-                })
-                receipt_stale = True
-            if not still_alive or receipt_stale or owned_stopped:
-                try:
-                    thermal_pid.unlink()
-                except FileNotFoundError:
-                    pass
+                if not still_alive or receipt_stale or owned_stopped:
+                    try:
+                        thermal_pid.unlink()
+                    except FileNotFoundError:
+                        pass
     except BaseException as exc:
         cleanup_errors.append("thermal_receipt:{!r}".format(exc))
+    finally:
+        try:
+            close_sampler_pid_publication(thermal_publication)
+        except BaseException as exc:
+            cleanup_errors.append(
+                "thermal_receipt_close:{!r}".format(exc))
 
+    direct_sampler_blocked = True
     try:
         unreceipted_samplers = discover_owned_processes([(
             "unreceipted_thermal",
@@ -2750,8 +2795,29 @@ def terminate_owned_segment_processes(
         if unreceipted_samplers:
             die("unreceipted direct sampler command remains live; refusing "
                 "command-only signal authority")
+        direct_sampler_blocked = False
     except BaseException as exc:
         cleanup_errors.append("thermal_direct_blocker:{!r}".format(exc))
+    sampler_inventory_empty = False
+    try:
+        remaining_samplers = other_samplers()
+        if remaining_samplers:
+            die("sampler/I2C inventory remains live during reconciliation: {}"
+                .format(json.dumps(remaining_samplers, sort_keys=True)))
+        sampler_inventory_empty = True
+    except BaseException as exc:
+        cleanup_errors.append("thermal_inventory:{!r}".format(exc))
+    if (incomplete_thermal_publication or
+            unbound_thermal_publication) and \
+            thermal_wrapper_cleanup_proved and \
+            not direct_sampler_blocked and sampler_inventory_empty:
+        try:
+            thermal_pid.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            cleanup_errors.append(
+                "thermal_partial_receipt_cleanup:{!r}".format(exc))
 
     def cleanup_benchmark_receipt(pid_path: Path) -> None:
         if pid_path.is_symlink() or not pid_path.is_file():
@@ -2772,21 +2838,15 @@ def terminate_owned_segment_processes(
             die("malformed benchmark PID identity")
         if not process_alive(pid):
             return
-        observed_start = process_start_ticks(pid)
-        if observed_start is None:
-            die("cannot inspect a live owned benchmark start identity")
-        if observed_start != start_ticks:
+        expected_tokens = list(task_by_job[job]["argv"])
+        action = terminate_verified_process(
+            pid, start_ticks, expected_tokens)
+        if action == "identity_reused":
             actions.append({
                 "kind": "benchmark", "job": job, "pid": pid,
                 "action": "stale_reused_pid",
             })
             return
-        tokens = process_tokens(pid)
-        if tokens is None:
-            die("cannot inspect a live owned benchmark PID")
-        if tokens != task_by_job[job]["argv"]:
-            die("live owned benchmark PID changed command")
-        action = terminate_verified_process(pid, start_ticks, tokens)
         actions.append({
             "kind": "benchmark", "job": job, "pid": pid,
             "action": action,
@@ -2921,9 +2981,22 @@ def write_segment_final(
     process_actions: Sequence[dict],
     jobs_ended_monotonic_s: Optional[float],
     sampler_returncode: Optional[int],
+    validated_thermal_csv_sha256: Optional[str] = None,
 ) -> Dict[str, object]:
     thermal_csv = root / "thermal" / "segment{:03d}.csv".format(segment)
     thermal_stderr = root / "thermal" / "segment{:03d}.stderr".format(segment)
+    thermal_csv_sha256 = bounded_thermal_sha256(thermal_csv)
+    thermal_stderr_sha256 = bounded_thermal_stderr_sha256(thermal_stderr)
+    if state == "success":
+        if not isinstance(validated_thermal_csv_sha256, str) or \
+                re.fullmatch(r"[0-9a-f]{64}",
+                             validated_thermal_csv_sha256) is None or \
+                thermal_csv_sha256 != validated_thermal_csv_sha256:
+            die("successful segment thermal bytes changed after validation")
+        if thermal_stderr_sha256 != sha256_bytes(b""):
+            die("successful segment thermal stderr is not canonically empty")
+    elif validated_thermal_csv_sha256 is not None:
+        die("non-success segment cannot claim validated thermal bytes")
     raw_jobs = intent.get("jobs")
     if not isinstance(raw_jobs, list) or any(
             not isinstance(job, int) or isinstance(job, bool)
@@ -2946,10 +3019,9 @@ def write_segment_final(
         "process_actions": list(process_actions),
         "sampler_returncode": sampler_returncode,
         "thermal_csv": thermal_csv.name,
-        "thermal_csv_sha256": sha256_file(thermal_csv) if thermal_csv.is_file() else None,
+        "thermal_csv_sha256": thermal_csv_sha256,
         "thermal_stderr": thermal_stderr.name,
-        "thermal_stderr_sha256": (
-            sha256_file(thermal_stderr) if thermal_stderr.is_file() else None),
+        "thermal_stderr_sha256": thermal_stderr_sha256,
         "attempt_manifest": "segment{:03d}.attempts.sha256".format(segment),
         "attempt_manifest_sha256": attempts_sha256,
         "attempt_file_count": attempt_file_count,
@@ -3023,38 +3095,295 @@ def reconcile_incomplete_segments(root: Path, tasks: Sequence[dict]) -> List[dic
     return reconciled
 
 
-def read_thermal_rows(path: Path) -> List[Dict[str, str]]:
+def read_bounded_regular_bytes(
+    path: Path,
+    *,
+    allow_missing: bool,
+    max_bytes: int,
+    label: str,
+) -> Optional[Tuple[bytes, bool]]:
+    """Read at most one bounded, path-bound regular-file snapshot."""
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | \
+        getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
-        with path.open(newline="", encoding="ascii") as stream:
-            reader = csv.DictReader(stream)
-            if tuple(reader.fieldnames or ()) != THERMAL_FIELDS:
-                die("thermal header mismatch: {}".format(path))
-            rows = list(reader)
-    except (OSError, UnicodeError, csv.Error) as exc:
+        descriptor = os.open(str(path), flags)
+    except FileNotFoundError:
+        if allow_missing:
+            return None
+        die("{} is missing: {}".format(label, path))
+    except OSError as exc:
+        die("cannot read {} {}: {}".format(label, path, exc))
+    try:
+        identity = os.fstat(descriptor)
+        if not stat.S_ISREG(identity.st_mode) or identity.st_nlink != 1:
+            die("{} is not a direct regular file: {}".format(label, path))
+        chunks: List[bytes] = []
+        remaining = max_bytes + 1
+        while remaining > 0:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+        after = os.fstat(descriptor)
+        try:
+            path_identity = path.lstat()
+        except FileNotFoundError:
+            die("{} disappeared during read: {}".format(label, path))
+        expected_metadata = (
+            identity.st_uid, identity.st_gid,
+            stat.S_IMODE(identity.st_mode), identity.st_nlink)
+        if len(raw) > max_bytes:
+            die("{} exceeds the bounded size policy: {}".format(label, path))
+        if not stat.S_ISREG(after.st_mode) or after.st_nlink != 1 or \
+                not stat.S_ISREG(path_identity.st_mode) or \
+                path_identity.st_nlink != 1 or \
+                (identity.st_dev, identity.st_ino) != \
+                (after.st_dev, after.st_ino) or \
+                (after.st_dev, after.st_ino) != \
+                (path_identity.st_dev, path_identity.st_ino) or \
+                (
+                    after.st_uid, after.st_gid,
+                    stat.S_IMODE(after.st_mode), after.st_nlink) != \
+                expected_metadata or \
+                (
+                    path_identity.st_uid, path_identity.st_gid,
+                    stat.S_IMODE(path_identity.st_mode),
+                    path_identity.st_nlink) != expected_metadata:
+            die("{} identity changed during read: {}".format(label, path))
+        stable = after.st_size == len(raw)
+    except OSError as exc:
+        die("cannot read {} {}: {}".format(label, path, exc))
+    finally:
+        try:
+            os.close(descriptor)
+        except OSError as exc:
+            die("cannot close {} {}: {}".format(label, path, exc))
+    return raw, stable
+
+
+def read_thermal_snapshot_with_sha256(
+    path: Path,
+    *,
+    allow_incomplete: bool,
+) -> Optional[Tuple[List[Dict[str, str]], str]]:
+    snapshot = read_bounded_regular_bytes(
+        path, allow_missing=allow_incomplete,
+        max_bytes=MAX_THERMAL_STREAM_BYTES, label="thermal stream")
+    if snapshot is None:
+        return None
+    raw, stable = snapshot
+    if not stable or not raw or not raw.endswith(b"\n"):
+        if allow_incomplete:
+            return None
+        die("thermal stream has an incomplete trailing record: {}".format(path))
+    try:
+        text = raw.decode("ascii")
+        reader = csv.DictReader(io.StringIO(text, newline=""))
+        if tuple(reader.fieldnames or ()) != THERMAL_FIELDS:
+            die("thermal header mismatch: {}".format(path))
+        rows = list(reader)
+    except (UnicodeError, csv.Error) as exc:
         die("cannot parse thermal stream {}: {}".format(path, exc))
     if any(set(row) != set(THERMAL_FIELDS) or any(value is None for value in row.values())
            for row in rows):
         die("thermal stream contains a malformed row")
-    return rows
+    return rows, sha256_bytes(raw)
+
+
+def read_thermal_snapshot(
+    path: Path,
+    *,
+    allow_incomplete: bool,
+) -> Optional[List[Dict[str, str]]]:
+    snapshot = read_thermal_snapshot_with_sha256(
+        path, allow_incomplete=allow_incomplete)
+    return None if snapshot is None else snapshot[0]
+
+
+def read_thermal_rows(path: Path) -> List[Dict[str, str]]:
+    return read_thermal_rows_with_sha256(path)[0]
+
+
+def read_thermal_rows_with_sha256(
+    path: Path,
+) -> Tuple[List[Dict[str, str]], str]:
+    snapshot = read_thermal_snapshot_with_sha256(
+        path, allow_incomplete=False)
+    assert snapshot is not None
+    return snapshot
+
+
+def bounded_thermal_sha256(path: Path) -> Optional[str]:
+    snapshot = read_bounded_regular_bytes(
+        path, allow_missing=True, max_bytes=MAX_THERMAL_STREAM_BYTES,
+        label="thermal stream")
+    if snapshot is None:
+        return None
+    raw, stable = snapshot
+    if not stable:
+        die("thermal stream changed during terminal hashing: {}".format(path))
+    return sha256_bytes(raw)
+
+
+def bounded_thermal_stderr_sha256(path: Path) -> Optional[str]:
+    snapshot = read_bounded_regular_bytes(
+        path, allow_missing=True, max_bytes=MAX_THERMAL_STDERR_BYTES,
+        label="thermal sampler stderr")
+    if snapshot is None:
+        return None
+    raw, stable = snapshot
+    if not stable:
+        die("thermal sampler stderr changed during terminal hashing: {}"
+            .format(path))
+    return sha256_bytes(raw)
+
+
+def read_live_thermal_rows(path: Path) -> List[Dict[str, str]]:
+    deadline = time.monotonic() + 0.5
+    while True:
+        rows = read_thermal_snapshot(path, allow_incomplete=True)
+        if rows is not None:
+            return rows
+        if time.monotonic() >= deadline:
+            die("live thermal stream remained incomplete: {}".format(path))
+        time.sleep(0.005)
+
+
+def read_sampler_pid_publication(
+    pid_file: Path,
+    previous: Optional[SamplerPidPublication] = None,
+) -> Tuple[Optional[int], Optional[SamplerPidPublication]]:
+    """Read one append-only sampler PID publication without parsing a prefix."""
+    opened_here = False
+    if previous is not None:
+        if not isinstance(previous, tuple) or len(previous) != 4 or \
+                any(not isinstance(value, int) for value in previous[:3]) or \
+                not isinstance(previous[3], bytes):
+            die("thermal sampler PID publication tracker is malformed")
+        descriptor = previous[0]
+    else:
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | \
+            getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        try:
+            descriptor = os.open(str(pid_file), flags)
+        except FileNotFoundError:
+            return None, None
+        except OSError as exc:
+            die("cannot open thermal sampler PID publication: {}".format(exc))
+        opened_here = True
+    try:
+        identity = os.fstat(descriptor)
+        if not stat.S_ISREG(identity.st_mode) or identity.st_nlink != 1 or \
+                identity.st_uid not in (0, os.geteuid()) or \
+                identity.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            die("thermal sampler PID publication is not a safe regular file")
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        chunks: List[bytes] = []
+        remaining = MAX_SAMPLER_PID_RECEIPT_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(descriptor, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+        after = os.fstat(descriptor)
+        try:
+            path_identity = pid_file.lstat()
+        except FileNotFoundError:
+            die("thermal sampler PID publication disappeared during read")
+        def safe_publication_identity(value: os.stat_result) -> bool:
+            return stat.S_ISREG(value.st_mode) and value.st_nlink == 1 and \
+                value.st_uid in (0, os.geteuid()) and not (
+                    value.st_mode & (stat.S_IWGRP | stat.S_IWOTH))
+
+        if not safe_publication_identity(after) or \
+                not safe_publication_identity(path_identity) or \
+                (identity.st_dev, identity.st_ino) != \
+                (after.st_dev, after.st_ino) or \
+                (after.st_dev, after.st_ino) != \
+                (path_identity.st_dev, path_identity.st_ino) or \
+                (
+                    identity.st_uid, identity.st_gid,
+                    stat.S_IMODE(identity.st_mode), identity.st_nlink) != (
+                    after.st_uid, after.st_gid,
+                    stat.S_IMODE(after.st_mode), after.st_nlink) or \
+                (
+                    after.st_uid, after.st_gid,
+                    stat.S_IMODE(after.st_mode), after.st_nlink) != (
+                    path_identity.st_uid, path_identity.st_gid,
+                    stat.S_IMODE(path_identity.st_mode),
+                    path_identity.st_nlink):
+            die("thermal sampler PID publication identity changed")
+        if len(raw) > MAX_SAMPLER_PID_RECEIPT_BYTES:
+            die("thermal sampler PID publication is oversized")
+        publication = (
+            descriptor, int(after.st_dev), int(after.st_ino), raw)
+        if previous is not None:
+            if publication[:3] != previous[:3]:
+                die("thermal sampler PID publication was replaced")
+            if len(raw) < len(previous[3]) or \
+                    not raw.startswith(previous[3]):
+                die("thermal sampler PID publication did not grow append-only")
+
+        stable_size = after.st_size == len(raw)
+        if raw == b"":
+            return None, publication
+        if re.fullmatch(rb"[1-9][0-9]*", raw) is not None:
+            if int(raw) > MAX_PROCESS_PID:
+                die("thermal sampler PID publication prefix is out of range")
+            return None, publication
+        if re.fullmatch(rb"[1-9][0-9]*\n", raw) is None or not stable_size:
+            die("thermal sampler PID file is malformed")
+        pid = int(raw[:-1])
+        if pid <= 1 or pid > MAX_PROCESS_PID:
+            die("thermal sampler PID is out of range")
+        return pid, publication
+    except OSError as exc:
+        if opened_here:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        die("cannot read thermal sampler PID publication: {}".format(exc))
+    except BaseException:
+        if opened_here:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        raise
+
+
+def close_sampler_pid_publication(
+    publication: Optional[SamplerPidPublication],
+) -> None:
+    if publication is None:
+        return
+    try:
+        os.close(publication[0])
+    except OSError as exc:
+        die("cannot close thermal sampler PID publication: {}".format(exc))
 
 
 def sampler_identity(pid_file: Path, sampler_path: Path, csv_path: Path) -> Optional[int]:
-    if pid_file.is_symlink():
-        die("thermal sampler PID file is a symlink")
-    if not pid_file.is_file():
-        return None
+    publication: Optional[SamplerPidPublication] = None
     try:
-        pid = int(pid_file.read_text(encoding="ascii").strip())
-    except (OSError, ValueError):
-        die("thermal sampler PID file is malformed")
-    if pid <= 1 or pid > MAX_PROCESS_PID:
-        die("thermal sampler PID is out of range")
-    if not process_alive(pid):
-        return None
-    tokens = process_tokens(pid)
-    if tokens != campaign_sampled_command(sampler_path, csv_path, pid_file):
-        die("thermal sampler PID is not bound to this segment")
-    return pid
+        pid, publication = read_sampler_pid_publication(pid_file)
+        if pid is None:
+            return None
+        if not process_alive(pid):
+            return None
+        tokens = process_tokens(pid)
+        if tokens != campaign_sampled_command(sampler_path, csv_path, pid_file):
+            if not process_alive(pid):
+                return None
+            die("thermal sampler PID is not bound to this segment")
+        return pid
+    finally:
+        close_sampler_pid_publication(publication)
 
 
 def pidfd_has_exited(pidfd: int) -> bool:
@@ -3069,33 +3398,46 @@ def bind_sampler_identity(
     csv_path: Path,
     controller_identity: Tuple[int, int],
     wrapper_identity: Tuple[int, int, Sequence[str]],
+    publication: Optional[SamplerPidPublication] = None,
 ) -> Optional[Tuple[int, int, List[str]]]:
     """Bind sampled child -> supervisor -> this unreaped sudo Popen."""
-    if pid_file.is_symlink():
-        die("thermal sampler PID file is a symlink")
-    if not pid_file.is_file():
-        return None
+    owns_publication = publication is None
+    publication_closed = False
+    observed_publication: Optional[SamplerPidPublication] = None
+
+    def close_owned_publication() -> None:
+        nonlocal publication_closed
+        if owns_publication and not publication_closed:
+            publication_closed = True
+            close_sampler_pid_publication(observed_publication)
+
     try:
-        pid_text = pid_file.read_text(encoding="ascii")
-        pid = int(pid_text.strip())
-    except (OSError, ValueError):
-        die("thermal sampler PID file is malformed")
-    if pid <= 1 or pid > MAX_PROCESS_PID:
-        die("thermal sampler PID is out of range")
-    wrapper_pid, expected_wrapper_start, expected_wrapper_tokens = \
-        wrapper_identity
-    exact_supervisor, exact_sudo_wrapper = \
-        campaign_sampler_supervisor_commands(
-            sampler_path, csv_path, pid_file, controller_identity)
-    expected_wrapper_tokens = list(expected_wrapper_tokens)
-    if not isinstance(wrapper_pid, int) or isinstance(wrapper_pid, bool) or \
-            wrapper_pid <= 1 or wrapper_pid > MAX_PROCESS_PID or \
-            not isinstance(expected_wrapper_start, int) or \
-            isinstance(expected_wrapper_start, bool) or \
-            expected_wrapper_start < 0 or \
-            expected_wrapper_tokens not in (
-                exact_supervisor, exact_sudo_wrapper):
-        die("thermal sampler wrapper identity is malformed")
+        pid, observed_publication = read_sampler_pid_publication(
+            pid_file, publication)
+        if pid is None:
+            close_owned_publication()
+            return None
+        if publication is not None and observed_publication != publication:
+            die("thermal sampler PID publication changed before binding")
+        assert observed_publication is not None
+        wrapper_pid, expected_wrapper_start, expected_wrapper_tokens = \
+            wrapper_identity
+        exact_supervisor, exact_sudo_wrapper = \
+            campaign_sampler_supervisor_commands(
+                sampler_path, csv_path, pid_file, controller_identity)
+        expected_wrapper_tokens = list(expected_wrapper_tokens)
+        if not isinstance(wrapper_pid, int) or \
+                isinstance(wrapper_pid, bool) or \
+                wrapper_pid <= 1 or wrapper_pid > MAX_PROCESS_PID or \
+                not isinstance(expected_wrapper_start, int) or \
+                isinstance(expected_wrapper_start, bool) or \
+                expected_wrapper_start < 0 or \
+                expected_wrapper_tokens not in (
+                    exact_supervisor, exact_sudo_wrapper):
+            die("thermal sampler wrapper identity is malformed")
+    except BaseException:
+        close_owned_publication()
+        raise
     child_pidfd: Optional[int] = None
     supervisor_pidfd: Optional[int] = None
     wrapper_pidfd: Optional[int] = None
@@ -3151,10 +3493,13 @@ def bind_sampler_identity(
                 supervisor_parent != wrapper_pid:
             die("thermal sampler forked supervisor topology is invalid")
         # Repeat every numeric-PID and ancestry proof while all object handles
-        # are held.  sudo forks a monitor on this host, so the supported shape
-        # is wrapper -> supervisor -> sampled child; direct sudo exec remains
-        # safe when wrapper == supervisor.
-        if pid_file.read_text(encoding="ascii") != pid_text or \
+        # are held.  The sampler launch has no controlling TTY, so the
+        # supported shape is wrapper -> supervisor -> sampled child; direct
+        # sudo exec remains safe when wrapper == supervisor.
+        stable_pid, stable_publication = read_sampler_pid_publication(
+            pid_file, observed_publication)
+        if stable_pid != pid or \
+                stable_publication != observed_publication or \
                 process_start_ticks(pid) != child_start or \
                 process_parent_pid(pid) != supervisor_pid or \
                 process_tokens(pid) != expected_child or \
@@ -3183,6 +3528,10 @@ def bind_sampler_identity(
                 os.close(descriptor)
             except OSError as exc:
                 close_errors.append("{}:{!r}".format(descriptor, exc))
+        try:
+            close_owned_publication()
+        except BaseException as exc:
+            close_errors.append("publication:{!r}".format(exc))
         if close_errors:
             die("thermal sampler pidfd cleanup failed: {}".format(
                 "; ".join(close_errors)))
@@ -3198,27 +3547,37 @@ def wait_sampler_ready(
     identity_sink: List[Tuple[int, int, List[str]]],
 ) -> Tuple[int, List[Dict[str, str]]]:
     deadline = time.monotonic() + THERMAL_READY_TIMEOUT_SECONDS
-    while time.monotonic() < deadline:
-        if sampler.poll() is not None:
-            die("thermal sampler exited before readiness")
-        identity = bind_sampler_identity(
-            pid_file, sampler_path, csv_path, controller_identity,
-            wrapper_identity)
-        pid = None if identity is None else identity[0]
-        if identity is not None:
-            if identity_sink and identity_sink[0] != identity:
-                die("launched thermal sampler identity changed before readiness")
-            if not identity_sink:
-                identity_sink.append(identity)
-        if pid is not None and csv_path.is_file():
-            rows = read_thermal_rows(csv_path)
-            if len(rows) >= THERMAL_READY_SAMPLES:
-                last = decimal_field(rows[-1], "monotonic_s")
-                age = Decimal(str(time.monotonic())) - last
-                if 0 <= age <= THERMAL_MAX_GAP_SECONDS:
-                    return pid, rows
-        time.sleep(0.05)
-    die("thermal sampler did not provide two live data rows")
+    publication: Optional[SamplerPidPublication] = None
+    try:
+        while time.monotonic() < deadline:
+            if sampler.poll() is not None:
+                die("thermal sampler exited before readiness")
+            published_pid, publication = read_sampler_pid_publication(
+                pid_file, publication)
+            identity = None
+            if published_pid is not None:
+                identity = bind_sampler_identity(
+                    pid_file, sampler_path, csv_path, controller_identity,
+                    wrapper_identity, publication)
+            pid = None if identity is None else identity[0]
+            if identity is not None:
+                if identity_sink and identity_sink[0] != identity:
+                    die("launched thermal sampler identity changed before "
+                        "readiness")
+                if not identity_sink:
+                    identity_sink.append(identity)
+            if pid is not None and csv_path.is_file():
+                rows = read_thermal_snapshot(
+                    csv_path, allow_incomplete=True)
+                if rows is not None and len(rows) >= THERMAL_READY_SAMPLES:
+                    last = decimal_field(rows[-1], "monotonic_s")
+                    age = Decimal(str(time.monotonic())) - last
+                    if 0 <= age <= THERMAL_MAX_GAP_SECONDS:
+                        return pid, rows
+            time.sleep(0.05)
+        die("thermal sampler did not provide two live data rows")
+    finally:
+        close_sampler_pid_publication(publication)
 
 
 def wait_thermal_coverage(
@@ -3231,7 +3590,7 @@ def wait_thermal_coverage(
     while time.monotonic() < deadline:
         if sampler.poll() is not None:
             return False
-        rows = read_thermal_rows(csv_path)
+        rows = read_live_thermal_rows(csv_path)
         if rows and decimal_field(rows[-1], "monotonic_s") >= target:
             return True
         time.sleep(0.05)
@@ -3394,9 +3753,7 @@ def run_segment(
     validate_trusted_root_tool(SUDO_PATH)
     validate_trusted_root_tool(PYTHON_PATH)
     try:
-        sampler = subprocess.Popen(
-            sampler_command, stdout=subprocess.DEVNULL, stderr=sampler_error,
-        )
+        sampler = launch_thermal_sampler(sampler_command, sampler_error)
     except OSError as exc:
         sampler_error.close()
         return write_segment_final(
@@ -3440,6 +3797,7 @@ def run_segment(
     jobs_started: Optional[float] = None
     jobs_ended: Optional[float] = None
     sampler_returncode: Optional[int] = None
+    sealed_thermal_sha256: Optional[str] = None
     ready_written = False
     sampler_cleanup_proved = False
 
@@ -3822,7 +4180,7 @@ def run_segment(
                 if now >= next_i2c_check and not abort.is_set():
                     readers = check_owned_sampler()
                     validate_thermal_rows(
-                        read_thermal_rows(thermal_csv), segment=segment)
+                        read_live_thermal_rows(thermal_csv), segment=segment)
                     if readers:
                         failures.append({
                             "status": "concurrent_i2c_reader",
@@ -3867,7 +4225,7 @@ def run_segment(
             failures.append({"status": "thermal_end_coverage_failed"})
         if not failures:
             readers = check_owned_sampler()
-            final_rows = read_thermal_rows(thermal_csv)
+            final_rows = read_live_thermal_rows(thermal_csv)
             final_thermal = validate_thermal_rows(
                 final_rows, segment=segment)
             assert jobs_started is not None and jobs_ended is not None
@@ -3943,6 +4301,29 @@ def run_segment(
     if not thermal_stderr.is_file() or thermal_stderr.stat().st_size:
         failures.append({"status": "sampler_stderr_nonempty_or_missing"})
         state = "failed"
+    if state == "success":
+        assert jobs_started is not None and jobs_ended is not None
+        try:
+            # The live checks above can race the sampler's final write.  Only
+            # the bytes observed after the writer has exited are immutable and
+            # therefore safe to bless in the segment-final hash.
+            sealed_rows, candidate_thermal_sha256 = \
+                read_thermal_rows_with_sha256(thermal_csv)
+            sealed_thermal = validate_thermal_rows(
+                sealed_rows, segment=segment)
+            validate_successful_thermal_coverage(
+                sealed_rows, sealed_thermal,
+                start=Decimal(str(jobs_started)),
+                end=Decimal(str(jobs_ended)),
+                stage=stage, segment=segment)
+            sealed_thermal_sha256 = candidate_thermal_sha256
+        except Exception as exc:
+            sealed_thermal_sha256 = None
+            failures.append({
+                "status": "sealed_thermal_validation_error",
+                "detail": repr(exc),
+            })
+            state = "failed"
     rolled_back: List[int] = []
     if state != "success":
         rolled_back = rollback_segment_outputs(root, tasks)
@@ -3951,6 +4332,7 @@ def run_segment(
         rolled_back=rolled_back, process_actions=process_actions,
         jobs_ended_monotonic_s=jobs_ended,
         sampler_returncode=sampler_returncode,
+        validated_thermal_csv_sha256=sealed_thermal_sha256,
     )
     if caught is not None:
         raise caught
@@ -4488,30 +4870,50 @@ def validate_thermal(root: Path, design: Mapping[str, object], tasks: Sequence[d
             expected_thermal_files.add(csv_path.name)
         if stderr_exists:
             expected_thermal_files.add(stderr_path.name)
+            observed_stderr_sha256 = bounded_thermal_stderr_sha256(
+                stderr_path)
+            if final.get("thermal_stderr") != stderr_path.name or \
+                    final.get("thermal_stderr_sha256") != \
+                    observed_stderr_sha256 or \
+                    state == "success" and observed_stderr_sha256 != \
+                    sha256_bytes(b""):
+                die("segment thermal stderr hash binding mismatch")
         thermal: Optional[Dict[str, object]] = None
         rows: List[Dict[str, str]] = []
         if csv_exists:
             if final.get("thermal_csv") != csv_path.name or \
-                    final.get("thermal_csv_sha256") != sha256_file(csv_path) or \
                     (stderr_exists and final.get("thermal_stderr") != stderr_path.name):
                 die("segment thermal hash binding mismatch")
-            if ready is not None and stderr_path.stat().st_size:
-                die("thermal sampler stderr is nonempty")
-            rows = read_thermal_rows(csv_path)
-            if ready is not None:
+            if state == "success":
+                rows, observed_csv_sha256 = \
+                    read_thermal_rows_with_sha256(csv_path)
+            else:
+                observed_csv_sha256 = bounded_thermal_sha256(csv_path)
+            if final.get("thermal_csv_sha256") != observed_csv_sha256:
+                die("segment thermal hash binding mismatch")
+            if state == "success":
                 thermal = validate_thermal_rows(rows, segment=segment)
-                count = int(ready["samples_at_ready"])
-                if count > len(rows) or \
-                        ready.get("last_sample_monotonic_s") != rows[count - 1]["monotonic_s"] or \
-                        Decimal(str(ready["jobs_started_monotonic_s"])) < \
-                            decimal_field(rows[count - 1], "monotonic_s") or \
-                        Decimal(str(ready["jobs_started_monotonic_s"])) - \
-                            decimal_field(rows[count - 1], "monotonic_s") > THERMAL_MAX_GAP_SECONDS:
-                    die("segment readiness is not bound to its live thermal prefix")
+                if ready is not None:
+                    count = int(ready["samples_at_ready"])
+                    if count > len(rows) or \
+                            ready.get("last_sample_monotonic_s") != \
+                            rows[count - 1]["monotonic_s"] or \
+                            Decimal(str(
+                                ready["jobs_started_monotonic_s"])) < \
+                            decimal_field(
+                                rows[count - 1], "monotonic_s") or \
+                            Decimal(str(
+                                ready["jobs_started_monotonic_s"])) - \
+                            decimal_field(
+                                rows[count - 1], "monotonic_s") > \
+                            THERMAL_MAX_GAP_SECONDS:
+                        die("segment readiness is not bound to its live "
+                            "thermal prefix")
                 samples += int(thermal["samples"])
                 all_cpu.extend(thermal["cpu"])
                 for key, values in thermal["dimm_by_field"].items():
-                    dimm_maxima[key] = max(dimm_maxima.get(key, values[0]), max(values))
+                    dimm_maxima[key] = max(
+                        dimm_maxima.get(key, values[0]), max(values))
         if state == "success":
             successful_segments += 1
             end_value = final.get("jobs_ended_monotonic_s")
@@ -4567,9 +4969,6 @@ def validate_thermal(root: Path, design: Mapping[str, object], tasks: Sequence[d
                 receipt_path = job_receipt_path(root, job)
                 if receipt_path.is_file() and load_json(receipt_path).get("segment") == segment:
                     die("non-success segment retained a job receipt")
-        if stderr_exists and final.get("thermal_stderr") != stderr_path.name or \
-                (stderr_exists and final.get("thermal_stderr_sha256") != sha256_file(stderr_path)):
-            die("segment thermal stderr hash binding mismatch")
     actual_segment_files = {path.name for path in (root / "segments").iterdir()}
     if actual_segment_files != expected_segment_files:
         die("segment receipt inventory contains missing or unexpected files")
@@ -5092,6 +5491,7 @@ def make_success_fixture(
         root, 0, intent, "success", failures=[], rolled_back=[],
         process_actions=[], jobs_ended_monotonic_s=101.5,
         sampler_returncode=0,
+        validated_thermal_csv_sha256=bounded_thermal_sha256(thermal_csv),
     )
     return [task], {"worker_count": 1}
 
@@ -5741,7 +6141,9 @@ def build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--output-root", required=True)
     prepare.add_argument("--allk-root", required=True)
     prepare.add_argument("--sampler", required=True)
-    prepare.add_argument("--workers", type=int, default=DEFAULT_WORKERS, choices=range(1, 257))
+    prepare.add_argument(
+        "--workers", type=int, default=DEFAULT_WORKERS,
+        choices=range(MIN_CAMPAIGN_WORKERS, MAX_CAMPAIGN_WORKERS + 1))
     prepare.add_argument("--owner-ttl-hours", type=int, default=DEFAULT_OWNER_TTL_HOURS)
     prepare.set_defaults(function=command_prepare)
     launch = sub.add_parser("launch", help="preflight or execute a frozen holdout")
