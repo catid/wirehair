@@ -9207,7 +9207,10 @@ int main(int argc, char** argv)
     }
 
     if (argc < 2) {
-#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS) && \
+#if defined(WIREHAIR_V2_GROUPED_TIMING_ONLY)
+        std::fprintf(stderr,
+            "usage: wirehair_v2_bench groupedtiming [opts]\n");
+#elif defined(WIREHAIR_V2_ENABLE_TEST_HOOKS) && \
     !defined(WIREHAIR_V2_BENCH_DISABLE_PREFERRED_ATTEMPT)
         std::fprintf(stderr,
             "usage: wirehair_v2_bench compare|precodecheck|seedtable|"
@@ -9224,6 +9227,11 @@ int main(int argc, char** argv)
     }
     try
     {
+#if defined(WIREHAIR_V2_GROUPED_TIMING_ONLY)
+        if (!std::strcmp(argv[1], "groupedtiming")) {
+            return CmdGroupedTiming(argc - 2, argv + 2);
+        }
+#else
         if (!std::strcmp(argv[1], "compare")) {
             return CmdCompare(argc - 2, argv + 2);
         }
@@ -9270,6 +9278,7 @@ int main(int argc, char** argv)
             }
             return CmdSelfTest();
         }
+#endif
     }
     catch (const std::bad_alloc&)
     {
