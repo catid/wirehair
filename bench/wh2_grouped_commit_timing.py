@@ -82,6 +82,51 @@ MALLOC_MMAP_THRESHOLD = "1073741824"
 MALLOC_TRIM_THRESHOLD = "-1"
 MAX_ENVIRONMENTAL_ATTEMPTS = 10
 MAX_MINOR_FAULTS = 64
+SIBLING_PREFLIGHT_WINDOW_NS = 250_000_000
+SIBLING_PREFLIGHT_MAX_BUSY_TICKS = 1
+SIBLING_PREFLIGHT_MAX_SCHED_RUNTIME_NS = 0
+SIBLING_PREFLIGHT_MAX_SCHED_PCOUNT = 0
+SIBLING_ACCEPTED_EXECUTION_MAX_BUSY_TICKS = 0
+SIBLING_ACCEPTED_EXECUTION_MAX_SCHED_RUNTIME_NS = 0
+SIBLING_ACCEPTED_EXECUTION_MAX_SCHED_PCOUNT = 0
+SIBLING_CAMPAIGN_MAX_BUSY_PPM = 50
+SIBLING_CAMPAIGN_MIN_BUSY_TICKS = 1
+CLOCK_TICKS_PER_SECOND = int(os.sysconf("SC_CLK_TCK"))
+SIBLING_ACCEPTED_EXECUTION_MIN_DURATION_NS = \
+    ((1_000_000_000 + CLOCK_TICKS_PER_SECOND - 1) //
+     CLOCK_TICKS_PER_SECOND if CLOCK_TICKS_PER_SECOND > 0 else 0)
+SCHEDSTAT_VERSION = 15
+SCHEDSTAT_CPU_FIELD_COUNT = 9
+SCHEDSTAT_DOMAIN_FIELD_COUNT = 36
+SCHEDSTAT_RUNTIME_FIELD = 7
+SCHEDSTAT_PCOUNT_FIELD = 9
+SIBLING_IDLE_POLICY = {
+    "accounting_sources": ["/proc/stat", "/proc/schedstat"],
+    "clock_ticks_per_second": CLOCK_TICKS_PER_SECOND,
+    "schedstat_version": SCHEDSTAT_VERSION,
+    "schedstat_runtime_field": SCHEDSTAT_RUNTIME_FIELD,
+    "schedstat_pcount_field": SCHEDSTAT_PCOUNT_FIELD,
+    "schedstat_sched_schedstats_sysctl_required": False,
+    "preflight_window_ns": SIBLING_PREFLIGHT_WINDOW_NS,
+    "preflight_max_busy_ticks": SIBLING_PREFLIGHT_MAX_BUSY_TICKS,
+    "preflight_max_sched_runtime_ns":
+        SIBLING_PREFLIGHT_MAX_SCHED_RUNTIME_NS,
+    "preflight_max_sched_pcount": SIBLING_PREFLIGHT_MAX_SCHED_PCOUNT,
+    "accepted_execution_max_busy_ticks":
+        SIBLING_ACCEPTED_EXECUTION_MAX_BUSY_TICKS,
+    "accepted_execution_max_sched_runtime_ns":
+        SIBLING_ACCEPTED_EXECUTION_MAX_SCHED_RUNTIME_NS,
+    "accepted_execution_max_sched_pcount":
+        SIBLING_ACCEPTED_EXECUTION_MAX_SCHED_PCOUNT,
+    "accepted_execution_min_duration_ns":
+        SIBLING_ACCEPTED_EXECUTION_MIN_DURATION_NS,
+    "accepted_execution_hybrid_proof":
+        "at-least-one-USER_HZ-tick with zero proc-stat busy ticks, "
+        "schedstat runtime ns, and schedstat pcount delta",
+    "campaign_max_busy_ppm": SIBLING_CAMPAIGN_MAX_BUSY_PPM,
+    "campaign_min_busy_ticks": SIBLING_CAMPAIGN_MIN_BUSY_TICKS,
+    "campaign_max_sched_runtime_ppm": SIBLING_CAMPAIGN_MAX_BUSY_PPM,
+}
 MAX_CPU_TEMP_C = 85.0
 MAX_DIMM_TEMP_C = 90.0
 MAX_THERMAL_GAP_S = 2.25
@@ -95,6 +140,7 @@ MAX_JSON_EVIDENCE_BYTES = 16 * 1024 * 1024
 MAX_TASK_MANIFEST_BYTES = 16 * 1024 * 1024
 MAX_THERMAL_CSV_BYTES = 256 * 1024 * 1024
 MAX_SIGNED_COUNTER = (1 << 63) - 1
+MAX_UNSIGNED_COUNTER = (1 << 64) - 1
 MAX_CPU_ID = (1 << 31) - 1
 MAX_PROCESS_PID = (1 << 31) - 1
 EXEC_BIND_TIMEOUT_S = 5.0
@@ -252,6 +298,9 @@ EXECUTION_RECEIPT_FIELDS = frozenset((
     "timed_phase_ns", "all_phase_ns",
     "timed_minor_faults", "discard_minor_faults", "max_minor_faults",
     "row_count", "timed_row_count", "process_identity", "cleanup_action",
+    "sibling_ticks_before", "sibling_ticks_after", "sibling_busy_ticks",
+    "sibling_schedstat_before", "sibling_schedstat_after",
+    "sibling_sched_runtime_ns", "sibling_sched_pcount",
 ))
 FAILURE_RECEIPT_FIELDS = frozenset((
     "schema", "self_sha256_excluding_field", "job", "task_id",
@@ -261,11 +310,17 @@ FAILURE_RECEIPT_FIELDS = frozenset((
     "returncode", "error_type", "error_message", "stdout_name",
     "stdout_sha256", "stderr_name", "stderr_sha256", "process_identity",
     "cleanup_action", "cleanup_error",
+    "sibling_ticks_before", "sibling_ticks_after", "sibling_busy_ticks",
+    "sibling_schedstat_before", "sibling_schedstat_after",
+    "sibling_sched_runtime_ns", "sibling_sched_pcount",
 ))
 CONTAMINATION_RECEIPT_FIELDS = frozenset((
     "schema", "self_sha256_excluding_field", "name", "attempt", "argv",
     "start_monotonic_ns", "end_monotonic_ns", "stdout_name",
     "stdout_sha256", "stderr_name", "stderr_sha256", "contaminations",
+    "sibling_ticks_before", "sibling_ticks_after", "sibling_busy_ticks",
+    "sibling_schedstat_before", "sibling_schedstat_after",
+    "sibling_sched_runtime_ns", "sibling_sched_pcount",
 ))
 TASK_RECEIPT_FIELDS = frozenset((
     "schema", "self_sha256_excluding_field", "job", "task_id", "task_sha256",
@@ -282,7 +337,8 @@ PREPARE_RECEIPT_FIELDS = frozenset((
 ))
 LAUNCH_RECEIPT_FIELDS = frozenset((
     "schema", "self_sha256_excluding_field", "started_utc", "ended_utc",
-    "start_monotonic_s", "end_monotonic_s", "duration_s", "design_sha256",
+    "start_monotonic_s", "end_monotonic_s", "duration_s",
+    "start_monotonic_ns", "end_monotonic_ns", "duration_ns", "design_sha256",
     "prepare_receipt_sha256", "tasks_manifest_sha256", "task_count",
     "execution_count", "retry_count", "execution_receipts", "task_receipts",
     "thermal_reader", "thermal_source_device", "thermal_source_inode",
@@ -290,7 +346,16 @@ LAUNCH_RECEIPT_FIELDS = frozenset((
     "load_workers_stopped", "controller_core", "controller_affinity",
     "core_ticks_before", "core_ticks_after", "sibling_ticks_before",
     "sibling_ticks_after", "sibling_busy_ticks", "preflight_quiet_core_ticks",
-    "preflight_quiet_sibling_ticks",
+    "preflight_quiet_sibling_ticks", "sibling_busy_limit_ticks",
+    "sibling_attempt_busy_ticks", "sibling_gap_busy_ticks",
+    "preflight_sibling_schedstat_before",
+    "preflight_sibling_schedstat_after",
+    "preflight_sibling_sched_runtime_ns", "preflight_sibling_sched_pcount",
+    "sibling_schedstat_before", "sibling_schedstat_after",
+    "sibling_sched_runtime_ns", "sibling_sched_runtime_limit_ns",
+    "sibling_sched_pcount", "sibling_attempt_sched_runtime_ns",
+    "sibling_gap_sched_runtime_ns", "sibling_attempt_sched_pcount",
+    "sibling_gap_sched_pcount",
 ))
 
 
@@ -1949,6 +2014,11 @@ def prepare_campaign(args: argparse.Namespace) -> None:
             args.numa_node < 0 or args.evict_bytes < 4096 or
             args.build_jobs <= 0):
         raise TimingError("prepare integer argument is outside its domain")
+    if (CLOCK_TICKS_PER_SECOND <= 0 or
+            SIBLING_ACCEPTED_EXECUTION_MIN_DURATION_NS !=
+            (1_000_000_000 + CLOCK_TICKS_PER_SECOND - 1) //
+            CLOCK_TICKS_PER_SECOND):
+        raise TimingError("SC_CLK_TCK is outside its domain")
     require_pidfd_runtime()
     tool_names = ("git", "cmake", "env", "taskset", "numactl", "ldd", "nm",
                   "sudo", "fuser", "true")
@@ -2111,6 +2181,7 @@ def prepare_campaign(args: argparse.Namespace) -> None:
                 "major_faults": 0, "all_cycles_receipted": True,
             },
             "max_environmental_attempts": MAX_ENVIRONMENTAL_ATTEMPTS,
+            "sibling_idle_policy": SIBLING_IDLE_POLICY,
             "core": args.core, "numa_node": args.numa_node,
             "topology": topology, "controller_core": args.controller_core,
             "controller_topology": controller_topology,
@@ -2134,7 +2205,7 @@ def prepare_campaign(args: argparse.Namespace) -> None:
             "prepare_smoke": prepare_smoke,
         }
         design = sealed_record(
-            "wirehair.wh2.grouped_commit_timing.design.v1", design_payload)
+            "wirehair.wh2.grouped_commit_timing.design.v2", design_payload)
         design_path = staging / "design.json"
         write_new(design_path, canonical_json(design))
         receipt = sealed_record(
@@ -2184,10 +2255,16 @@ def prepare_campaign(args: argparse.Namespace) -> None:
             shutil.rmtree(workspace)
 
 
+def require_frozen_sibling_idle_policy(value: object) -> None:
+    """Require exact JSON types as well as values for the proof policy."""
+    if canonical_json(value) != canonical_json(SIBLING_IDLE_POLICY):
+        raise TimingError("timing design policy changed: sibling_idle_policy")
+
+
 def _load_design(root: Path) -> Dict[str, object]:
     design = load_canonical(root / "design.json", "timing design")
     verify_sealed_record(
-        design, "wirehair.wh2.grouped_commit_timing.design.v1", "timing design")
+        design, "wirehair.wh2.grouped_commit_timing.design.v2", "timing design")
     if design.get("root") != str(root.resolve()):
         raise TimingError("timing root moved after preparation")
     if design.get("base_commit") != BASE_COMMIT or \
@@ -2237,6 +2314,7 @@ def _load_design(root: Path) -> Dict[str, object]:
             "major_faults": 0, "all_cycles_receipted": True,
         },
         "max_environmental_attempts": MAX_ENVIRONMENTAL_ATTEMPTS,
+        "sibling_idle_policy": SIBLING_IDLE_POLICY,
         "thermal_limits_c": {
             "cpu": MAX_CPU_TEMP_C, "dimm": MAX_DIMM_TEMP_C,
             "max_gap_s": MAX_THERMAL_GAP_S,
@@ -2250,7 +2328,9 @@ def _load_design(root: Path) -> Dict[str, object]:
         "fresh_only": True,
     }
     for key, value in expected.items():
-        if design.get(key) != value:
+        if key == "sibling_idle_policy":
+            require_frozen_sibling_idle_policy(design.get(key))
+        elif design.get(key) != value:
             raise TimingError("timing design policy changed: %s" % key)
     overlay = design.get("measurement_overlay")
     if _overlay_identity({
@@ -2540,9 +2620,224 @@ def cpu_ticks(cpu: int) -> Tuple[int, ...]:
     raise TimingError("CPU is missing from /proc/stat")
 
 
+def _schedstat_uint(token: bytes, context: str) -> int:
+    if (len(token) > 20 or
+            re.fullmatch(rb"0|[1-9][0-9]*", token) is None):
+        raise TimingError("%s is not a canonical unsigned integer" % context)
+    value = int(token)
+    if value > MAX_UNSIGNED_COUNTER:
+        raise TimingError("%s is outside the schedstat counter domain" % context)
+    return value
+
+
+def parse_schedstat_cpu(raw: bytes, cpu: int) -> Dict[str, int]:
+    """Strictly parse Linux schedstat v15 and return one CPU's counters."""
+    if (not isinstance(raw, bytes) or not raw or not raw.endswith(b"\n") or
+            len(raw) > MAX_JSON_EVIDENCE_BYTES or b"\r" in raw or
+            b"\0" in raw or not isinstance(cpu, int) or
+            isinstance(cpu, bool) or not 0 <= cpu <= MAX_CPU_ID):
+        raise TimingError("schedstat input is malformed")
+    lines = raw.splitlines()
+    if (len(lines) < 3 or lines[0] != b"version 15" or
+            len(lines[1].split(b" ")) != 2 or
+            lines[1].split(b" ")[0] != b"timestamp"):
+        raise TimingError("schedstat version/header is malformed")
+    _schedstat_uint(lines[1].split(b" ")[1], "schedstat timestamp")
+    wanted: Optional[Dict[str, int]] = None
+    previous_cpu = -1
+    current_cpu: Optional[int] = None
+    next_domain = 0
+    mask_re = re.compile(rb"(?:[0-9a-f]{8},)*[0-9a-f]{8}\Z")
+    for line in lines[2:]:
+        fields = line.split(b" ")
+        if not fields or any(field == b"" for field in fields):
+            raise TimingError("schedstat line shape is malformed")
+        cpu_match = re.fullmatch(rb"cpu(0|[1-9][0-9]*)", fields[0])
+        if cpu_match is not None:
+            if len(fields) != SCHEDSTAT_CPU_FIELD_COUNT + 1:
+                raise TimingError("schedstat CPU line shape is malformed")
+            cpu_id = _schedstat_uint(
+                cpu_match.group(1), "schedstat CPU identifier")
+            if cpu_id > MAX_CPU_ID or cpu_id <= previous_cpu:
+                raise TimingError("schedstat CPU identifiers are duplicated or unordered")
+            values = [
+                _schedstat_uint(value, "schedstat CPU field")
+                for value in fields[1:]
+            ]
+            # Version 15 retains fields 1 and 3-6.  Only the legacy field 2
+            # is retired and emitted as zero.
+            if values[1] != 0:
+                raise TimingError("schedstat v15 retired CPU field is nonzero")
+            if cpu_id == cpu:
+                wanted = {
+                    "runtime_ns": values[SCHEDSTAT_RUNTIME_FIELD - 1],
+                    "pcount": values[SCHEDSTAT_PCOUNT_FIELD - 1],
+                }
+            previous_cpu = cpu_id
+            current_cpu = cpu_id
+            next_domain = 0
+            continue
+        domain_match = re.fullmatch(rb"domain(0|[1-9][0-9]*)", fields[0])
+        if (domain_match is None or current_cpu is None or
+                len(fields) != SCHEDSTAT_DOMAIN_FIELD_COUNT + 2 or
+                mask_re.fullmatch(fields[1]) is None):
+            raise TimingError("schedstat domain line shape is malformed")
+        domain_id = _schedstat_uint(
+            domain_match.group(1), "schedstat domain identifier")
+        if domain_id != next_domain:
+            raise TimingError("schedstat domains are duplicated or unordered")
+        for value in fields[2:]:
+            _schedstat_uint(value, "schedstat domain field")
+        next_domain += 1
+    if wanted is None:
+        raise TimingError("CPU is missing from /proc/schedstat")
+    return wanted
+
+
+def schedstat_cpu(cpu: int) -> Dict[str, int]:
+    try:
+        with Path("/proc/schedstat").open("rb") as stream:
+            raw = stream.read(MAX_JSON_EVIDENCE_BYTES + 1)
+    except OSError as exc:
+        raise TimingError("cannot read /proc/schedstat") from exc
+    return parse_schedstat_cpu(raw, cpu)
+
+
 def busy_ticks(ticks: Sequence[int]) -> int:
     idle = ticks[3] + (ticks[4] if len(ticks) > 4 else 0)
     return sum(ticks) - idle
+
+
+def checked_busy_tick_delta(
+    before: Sequence[int], after: Sequence[int], context: str,
+) -> int:
+    """Validate two /proc/stat CPU snapshots and return non-idle ticks."""
+    if (not isinstance(before, (list, tuple)) or
+            not isinstance(after, (list, tuple)) or len(before) < 5 or
+            len(after) != len(before) or
+            any(not isinstance(value, int) or isinstance(value, bool) or
+                value < 0 for values in (before, after) for value in values) or
+            any(right < left for left, right in zip(before, after))):
+        raise TimingError("%s CPU tick receipt is malformed" % context)
+    delta = busy_ticks(after) - busy_ticks(before)
+    if delta < 0:
+        raise TimingError("%s busy CPU tick delta is negative" % context)
+    return delta
+
+
+def require_tick_snapshot_order(
+    earlier: Sequence[int], later: Sequence[int], context: str,
+) -> None:
+    if (not isinstance(earlier, (list, tuple)) or
+            not isinstance(later, (list, tuple)) or
+            len(earlier) != len(later) or
+            any(right < left for left, right in zip(earlier, later))):
+        raise TimingError("%s CPU tick order is malformed" % context)
+
+
+def checked_schedstat_delta(
+    before: Mapping[str, object], after: Mapping[str, object], context: str,
+) -> Tuple[int, int]:
+    """Validate schedstat snapshots and return runtime-ns/pcount deltas."""
+    fields = {"runtime_ns", "pcount"}
+    if (not isinstance(before, dict) or not isinstance(after, dict) or
+            set(before) != fields or set(after) != fields or
+            any(not isinstance(value, int) or isinstance(value, bool) or
+                not 0 <= value <= MAX_UNSIGNED_COUNTER
+                for snapshot in (before, after)
+                for value in snapshot.values()) or
+            any(after[field] < before[field] for field in fields)):
+        raise TimingError("%s schedstat receipt is malformed" % context)
+    return (
+        int(after["runtime_ns"]) - int(before["runtime_ns"]),
+        int(after["pcount"]) - int(before["pcount"]),
+    )
+
+
+def require_schedstat_snapshot_order(
+    earlier: Mapping[str, object], later: Mapping[str, object], context: str,
+) -> None:
+    checked_schedstat_delta(earlier, later, context)
+
+
+def require_exact_counter(value: object, expected: int, context: str) -> None:
+    if (not isinstance(value, int) or isinstance(value, bool) or
+            value != expected):
+        raise TimingError("%s counter receipt mismatch" % context)
+
+
+def _positive_duration_ns(value: object, context: str) -> int:
+    if (not isinstance(value, int) or isinstance(value, bool) or
+            not 0 < value <= MAX_UNSIGNED_COUNTER):
+        raise TimingError("%s duration is malformed" % context)
+    return value
+
+
+def checked_campaign_interval(
+    launch: Mapping[str, object],
+) -> Tuple[float, float, float, int, int, int]:
+    start_s = launch.get("start_monotonic_s")
+    end_s = launch.get("end_monotonic_s")
+    duration_s = launch.get("duration_s")
+    start_ns = launch.get("start_monotonic_ns")
+    end_ns = launch.get("end_monotonic_ns")
+    duration_ns = launch.get("duration_ns")
+    if (not isinstance(start_s, (int, float)) or isinstance(start_s, bool) or
+            not isinstance(end_s, (int, float)) or isinstance(end_s, bool) or
+            not isinstance(duration_s, (int, float)) or
+            isinstance(duration_s, bool)):
+        raise TimingError("launch monotonic interval is malformed")
+    try:
+        finite_seconds = all(math.isfinite(float(value)) for value in (
+            start_s, end_s, duration_s))
+    except (OverflowError, ValueError):
+        finite_seconds = False
+    if (not finite_seconds or end_s <= start_s or
+            not isinstance(start_ns, int) or isinstance(start_ns, bool) or
+            not isinstance(end_ns, int) or isinstance(end_ns, bool) or
+            not isinstance(duration_ns, int) or isinstance(duration_ns, bool) or
+            not 0 <= start_ns <= MAX_UNSIGNED_COUNTER or
+            not 0 < end_ns <= MAX_UNSIGNED_COUNTER or end_ns <= start_ns or
+            duration_ns != end_ns - start_ns or
+            start_s != start_ns / 1_000_000_000 or
+            end_s != end_ns / 1_000_000_000 or
+            duration_s != end_s - start_s):
+        raise TimingError("launch monotonic interval is malformed")
+    return (float(start_s), float(end_s), float(duration_s),
+            start_ns, end_ns, duration_ns)
+
+
+def sibling_campaign_busy_limit_ns(duration_ns: int) -> int:
+    """Return the whole-tick floor of the 50-ppm /proc/stat allowance."""
+    duration_ns = _positive_duration_ns(duration_ns, "sibling campaign")
+    if CLOCK_TICKS_PER_SECOND <= 0:
+        raise TimingError("sibling campaign tick rate is malformed")
+    scaled = (duration_ns * CLOCK_TICKS_PER_SECOND *
+              SIBLING_CAMPAIGN_MAX_BUSY_PPM) // (1_000_000_000 * 1_000_000)
+    return max(SIBLING_CAMPAIGN_MIN_BUSY_TICKS, scaled)
+
+
+def sibling_campaign_runtime_limit_ns(duration_ns: int) -> int:
+    """Return the exact nanosecond floor of the 50-ppm schedstat bound."""
+    duration_ns = _positive_duration_ns(duration_ns, "sibling campaign")
+    return (duration_ns * SIBLING_CAMPAIGN_MAX_BUSY_PPM) // 1_000_000
+
+
+def _attempt_contaminations(
+    parsed: ParsedOutput, sibling_busy: int, sibling_runtime_ns: int,
+    sibling_pcount: int,
+) -> Tuple[str, ...]:
+    for value in (sibling_busy, sibling_runtime_ns, sibling_pcount):
+        if (not isinstance(value, int) or isinstance(value, bool) or value < 0):
+            raise TimingError("attempt sibling counters are malformed")
+    result = list(parsed.contaminations)
+    if sibling_busy > SIBLING_ACCEPTED_EXECUTION_MAX_BUSY_TICKS:
+        result.append("sibling-busy:%d" % sibling_busy)
+    if sibling_runtime_ns:
+        result.append("sibling-sched-runtime-ns:%d" % sibling_runtime_ns)
+    if sibling_pcount:
+        result.append("sibling-sched-pcount:%d" % sibling_pcount)
+    return tuple(result)
 
 
 def _filler_pids() -> Tuple[int, ...]:
@@ -2851,21 +3146,48 @@ def _execution_receipt(
     attempt: int, started_utc: str, start_ns: int, end_ns: int,
     parsed: ParsedOutput, stderr: bytes, prior: Sequence[Mapping[str, object]],
     binary_sha256: str, process_identity: Mapping[str, object],
-    cleanup_action: str,
+    cleanup_action: str, sibling_ticks_before: Sequence[int],
+    sibling_ticks_after: Sequence[int],
+    sibling_schedstat_before: Mapping[str, object],
+    sibling_schedstat_after: Mapping[str, object],
 ) -> Dict[str, object]:
+    if (not isinstance(start_ns, int) or isinstance(start_ns, bool) or
+            not isinstance(end_ns, int) or isinstance(end_ns, bool) or
+            not 0 <= start_ns < end_ns <= MAX_UNSIGNED_COUNTER):
+        raise TimingError("accepted execution duration is malformed")
+    duration_ns = end_ns - start_ns
+    if duration_ns < SIBLING_ACCEPTED_EXECUTION_MIN_DURATION_NS:
+        raise TimingError("accepted execution is shorter than one USER_HZ tick")
+    sibling_busy = checked_busy_tick_delta(
+        sibling_ticks_before, sibling_ticks_after, "accepted execution")
+    sibling_runtime_ns, sibling_pcount = checked_schedstat_delta(
+        sibling_schedstat_before, sibling_schedstat_after,
+        "accepted execution")
+    if (sibling_busy > SIBLING_ACCEPTED_EXECUTION_MAX_BUSY_TICKS or
+            sibling_runtime_ns >
+            SIBLING_ACCEPTED_EXECUTION_MAX_SCHED_RUNTIME_NS or
+            sibling_pcount > SIBLING_ACCEPTED_EXECUTION_MAX_SCHED_PCOUNT):
+        raise TimingError("accepted execution used the SMT sibling")
     return sealed_record(
-        "wirehair.wh2.grouped_commit_timing.execution_receipt.v1", {
+        "wirehair.wh2.grouped_commit_timing.execution_receipt.v2", {
             "job": task["job"], "task_id": task["task_id"],
             "task_sha256": sha256_bytes(canonical_json(task)),
             "outer_slot": slot, "outer_marker": OUTER_ORDER[slot],
             "binary_label": label, "binary_sha256": binary_sha256,
             "argv": list(command), "attempt": attempt,
             "started_utc": started_utc, "start_monotonic_ns": start_ns,
-            "end_monotonic_ns": end_ns, "duration_ns": end_ns - start_ns,
+            "end_monotonic_ns": end_ns, "duration_ns": duration_ns,
             "stderr_sha256": sha256_bytes(stderr),
             "prior_contamination_receipts": list(prior),
             "process_identity": dict(process_identity),
             "cleanup_action": cleanup_action,
+            "sibling_ticks_before": list(sibling_ticks_before),
+            "sibling_ticks_after": list(sibling_ticks_after),
+            "sibling_busy_ticks": sibling_busy,
+            "sibling_schedstat_before": dict(sibling_schedstat_before),
+            "sibling_schedstat_after": dict(sibling_schedstat_after),
+            "sibling_sched_runtime_ns": sibling_runtime_ns,
+            "sibling_sched_pcount": sibling_pcount,
             **_receipt_summary(parsed),
         })
 
@@ -2873,19 +3195,38 @@ def _execution_receipt(
 def _save_contamination(
     root: Path, name: str, attempt: int, raw: bytes, stderr: bytes,
     parsed: ParsedOutput, command: Sequence[str], start_ns: int, end_ns: int,
+    sibling_ticks_before: Sequence[int], sibling_ticks_after: Sequence[int],
+    sibling_schedstat_before: Mapping[str, object],
+    sibling_schedstat_after: Mapping[str, object],
 ) -> str:
+    sibling_busy = checked_busy_tick_delta(
+        sibling_ticks_before, sibling_ticks_after, "contaminated execution")
+    sibling_runtime_ns, sibling_pcount = checked_schedstat_delta(
+        sibling_schedstat_before, sibling_schedstat_after,
+        "contaminated execution")
+    contaminations = _attempt_contaminations(
+        parsed, sibling_busy, sibling_runtime_ns, sibling_pcount)
+    if not contaminations:
+        raise TimingError("cannot save an uncontaminated execution as contamination")
     prefix = "%s.attempt%d" % (name, attempt)
     raw_name = prefix + ".stdout"
     stderr_name = prefix + ".stderr"
     write_new(root / "contamination" / raw_name, raw)
     write_new(root / "contamination" / stderr_name, stderr)
     receipt = sealed_record(
-        "wirehair.wh2.grouped_commit_timing.contamination_receipt.v1", {
+        "wirehair.wh2.grouped_commit_timing.contamination_receipt.v2", {
             "name": name, "attempt": attempt, "argv": list(command),
             "start_monotonic_ns": start_ns, "end_monotonic_ns": end_ns,
             "stdout_name": raw_name, "stdout_sha256": sha256_bytes(raw),
             "stderr_name": stderr_name, "stderr_sha256": sha256_bytes(stderr),
-            "contaminations": list(parsed.contaminations),
+            "contaminations": list(contaminations),
+            "sibling_ticks_before": list(sibling_ticks_before),
+            "sibling_ticks_after": list(sibling_ticks_after),
+            "sibling_busy_ticks": sibling_busy,
+            "sibling_schedstat_before": dict(sibling_schedstat_before),
+            "sibling_schedstat_after": dict(sibling_schedstat_after),
+            "sibling_sched_runtime_ns": sibling_runtime_ns,
+            "sibling_sched_pcount": sibling_pcount,
         })
     receipt_name = prefix + ".json"
     write_new(root / "contamination" / receipt_name, canonical_json(receipt))
@@ -2898,8 +3239,16 @@ def _save_failure(
     end_ns: int, stdout: bytes, stderr: bytes, returncode: Optional[int],
     error: BaseException, binary_sha256: str,
     process_identity: Optional[Mapping[str, object]], cleanup_action: str,
-    cleanup_error: Optional[str],
+    cleanup_error: Optional[str], sibling_ticks_before: Sequence[int],
+    sibling_ticks_after: Sequence[int],
+    sibling_schedstat_before: Mapping[str, object],
+    sibling_schedstat_after: Mapping[str, object],
 ) -> str:
+    sibling_busy = checked_busy_tick_delta(
+        sibling_ticks_before, sibling_ticks_after, "failed execution")
+    sibling_runtime_ns, sibling_pcount = checked_schedstat_delta(
+        sibling_schedstat_before, sibling_schedstat_after,
+        "failed execution")
     name = execution_name(task, slot, label)
     prefix = "%s.attempt%d" % (name, attempt)
     stdout_name = prefix + ".stdout"
@@ -2908,7 +3257,7 @@ def _save_failure(
     write_new(root / "failure" / stdout_name, stdout)
     write_new(root / "failure" / stderr_name, stderr)
     receipt = sealed_record(
-        "wirehair.wh2.grouped_commit_timing.failure_receipt.v1", {
+        "wirehair.wh2.grouped_commit_timing.failure_receipt.v2", {
             "job": task["job"], "task_id": task["task_id"],
             "task_sha256": sha256_bytes(canonical_json(task)),
             "outer_slot": slot, "outer_marker": OUTER_ORDER[slot],
@@ -2925,11 +3274,67 @@ def _save_failure(
                 if process_identity is not None else None),
             "cleanup_action": cleanup_action,
             "cleanup_error": cleanup_error,
+            "sibling_ticks_before": list(sibling_ticks_before),
+            "sibling_ticks_after": list(sibling_ticks_after),
+            "sibling_busy_ticks": sibling_busy,
+            "sibling_schedstat_before": dict(sibling_schedstat_before),
+            "sibling_schedstat_after": dict(sibling_schedstat_after),
+            "sibling_sched_runtime_ns": sibling_runtime_ns,
+            "sibling_sched_pcount": sibling_pcount,
         })
     if set(receipt) != FAILURE_RECEIPT_FIELDS:
         raise TimingError("failure receipt constructor/schema drift")
     write_new(root / "failure" / receipt_name, canonical_json(receipt))
+    replay_failure_receipt(root, receipt_name)
     return sha256_file(root / "failure" / receipt_name)
+
+
+def replay_failure_receipt(root: Path, receipt_name: str) -> Dict[str, object]:
+    """Replay a terminal failure's bounded streams and isolation counters."""
+    if (not isinstance(receipt_name, str) or receipt_name in ("", ".", "..") or
+            Path(receipt_name).name != receipt_name):
+        raise TimingError("failure receipt name is malformed")
+    receipt = load_canonical(
+        root / "failure" / receipt_name, "failure receipt")
+    verify_sealed_record(
+        receipt, "wirehair.wh2.grouped_commit_timing.failure_receipt.v2",
+        "failure receipt")
+    if set(receipt) != FAILURE_RECEIPT_FIELDS:
+        raise TimingError("failure receipt fields changed")
+    start_ns = receipt.get("start_monotonic_ns")
+    end_ns = receipt.get("end_monotonic_ns")
+    duration_ns = receipt.get("duration_ns")
+    if (not isinstance(start_ns, int) or isinstance(start_ns, bool) or
+            not isinstance(end_ns, int) or isinstance(end_ns, bool) or
+            not isinstance(duration_ns, int) or isinstance(duration_ns, bool) or
+            not 0 <= start_ns < end_ns <= MAX_UNSIGNED_COUNTER or
+            duration_ns != end_ns - start_ns):
+        raise TimingError("failure duration receipt is malformed")
+    for stream, maximum in (("stdout", MAX_GROUPED_OUTPUT_BYTES),
+                            ("stderr", MAX_BENCHMARK_STDERR_BYTES)):
+        name = receipt.get(stream + "_name")
+        if (not isinstance(name, str) or name in ("", ".", "..") or
+                Path(name).name != name or
+                sha256_bytes(stable_bytes(
+                    root / "failure" / name, max_bytes=maximum)) !=
+                receipt.get(stream + "_sha256")):
+            raise TimingError("failure %s receipt does not replay" % stream)
+    busy = checked_busy_tick_delta(
+        receipt.get("sibling_ticks_before"),
+        receipt.get("sibling_ticks_after"), "failed execution")
+    require_exact_counter(
+        receipt.get("sibling_busy_ticks"), busy,
+        "failed execution busy ticks")
+    runtime_ns, pcount = checked_schedstat_delta(
+        receipt.get("sibling_schedstat_before"),
+        receipt.get("sibling_schedstat_after"), "failed execution")
+    require_exact_counter(
+        receipt.get("sibling_sched_runtime_ns"), runtime_ns,
+        "failed execution runtime")
+    require_exact_counter(
+        receipt.get("sibling_sched_pcount"), pcount,
+        "failed execution pcount")
+    return receipt
 
 
 def run_campaign(args: argparse.Namespace) -> None:
@@ -2950,11 +3355,23 @@ def run_campaign(args: argparse.Namespace) -> None:
     core = int(design["core"])
     sibling = int(topology["sibling"])
     before_core = cpu_ticks(core)
+    preflight_sibling_schedstat_before = schedstat_cpu(sibling)
     before_sibling = cpu_ticks(sibling)
-    time.sleep(0.25)
-    quiet_core = busy_ticks(cpu_ticks(core)) - busy_ticks(before_core)
-    quiet_sibling = busy_ticks(cpu_ticks(sibling)) - busy_ticks(before_sibling)
-    if quiet_core > 1 or quiet_sibling > 1:
+    time.sleep(SIBLING_PREFLIGHT_WINDOW_NS / 1_000_000_000)
+    quiet_core = checked_busy_tick_delta(
+        before_core, cpu_ticks(core), "preflight timing core")
+    preflight_sibling_ticks_after = cpu_ticks(sibling)
+    preflight_sibling_schedstat_after = schedstat_cpu(sibling)
+    quiet_sibling = checked_busy_tick_delta(
+        before_sibling, preflight_sibling_ticks_after, "preflight sibling")
+    quiet_sibling_runtime_ns, quiet_sibling_pcount = checked_schedstat_delta(
+        preflight_sibling_schedstat_before,
+        preflight_sibling_schedstat_after, "preflight sibling")
+    if (quiet_core > SIBLING_PREFLIGHT_MAX_BUSY_TICKS or
+            quiet_sibling > SIBLING_PREFLIGHT_MAX_BUSY_TICKS or
+            quiet_sibling_runtime_ns >
+            SIBLING_PREFLIGHT_MAX_SCHED_RUNTIME_NS or
+            quiet_sibling_pcount > SIBLING_PREFLIGHT_MAX_SCHED_PCOUNT):
         raise TimingError("timing core/sibling are not quiet before launch")
     thermal_csv = Path(args.thermal_csv).resolve()
     thermal_pid = Path(args.thermal_pid_file).resolve()
@@ -2963,17 +3380,22 @@ def run_campaign(args: argparse.Namespace) -> None:
     thermal_stat = thermal_csv.stat()
     thermal_identity = (thermal_stat.st_dev, thermal_stat.st_ino)
     latest = _latest_thermal_row(thermal_csv)
-    campaign_start_s = time.monotonic()
     baseline_edac_ce = int(latest["edac_ce"])
     baseline_edac_ue = int(latest["edac_ue"])
     _validate_live_thermal_row(
-        latest, campaign_start_s, baseline_edac_ce, baseline_edac_ue)
+        latest, time.monotonic(), baseline_edac_ce, baseline_edac_ue)
     started_utc = utc_now()
-    core_ticks_before = cpu_ticks(core)
+    sibling_schedstat_before = schedstat_cpu(sibling)
     sibling_ticks_before = cpu_ticks(sibling)
+    core_ticks_before = cpu_ticks(core)
+    campaign_start_ns = time.monotonic_ns()
+    campaign_start_s = campaign_start_ns / 1_000_000_000
     execution_hashes: List[Dict[str, object]] = []
     task_hashes: List[Dict[str, object]] = []
     retry_count = 0
+    sibling_attempt_busy = 0
+    sibling_attempt_runtime_ns = 0
+    sibling_attempt_pcount = 0
     immutable = design["immutable_files"]
     cross_cache: Dict[
         Tuple[object, ...], Dict[str, Dict[str, object]]
@@ -2991,6 +3413,8 @@ def run_campaign(args: argparse.Namespace) -> None:
                 immutable["frozen/" + BINARY_NAMES[label]])
             prior: List[Dict[str, object]] = []
             for attempt in range(MAX_ENVIRONMENTAL_ATTEMPTS):
+                attempt_sibling_schedstat_before = schedstat_cpu(sibling)
+                attempt_sibling_before = cpu_ticks(sibling)
                 attempt_utc = utc_now()
                 start_ns = time.monotonic_ns()
                 try:
@@ -2998,14 +3422,31 @@ def run_campaign(args: argparse.Namespace) -> None:
                         command, binary, python, args.timeout_seconds)
                 except BoundCommandError as exc:
                     end_ns = time.monotonic_ns()
+                    attempt_sibling_after = cpu_ticks(sibling)
+                    attempt_sibling_schedstat_after = schedstat_cpu(sibling)
                     _save_failure(
                         root, task, slot, label, command, attempt, attempt_utc,
                         start_ns, end_ns, exc.stdout, exc.stderr,
                         exc.returncode, exc, binary_sha256,
                         exc.process_identity, exc.cleanup_action,
-                        exc.cleanup_error)
+                        exc.cleanup_error, attempt_sibling_before,
+                        attempt_sibling_after,
+                        attempt_sibling_schedstat_before,
+                        attempt_sibling_schedstat_after)
                     raise
                 end_ns = time.monotonic_ns()
+                attempt_sibling_after = cpu_ticks(sibling)
+                attempt_sibling_schedstat_after = schedstat_cpu(sibling)
+                attempt_sibling_delta = checked_busy_tick_delta(
+                    attempt_sibling_before, attempt_sibling_after,
+                    "timing attempt")
+                attempt_sibling_runtime_ns, attempt_sibling_pcount = \
+                    checked_schedstat_delta(
+                        attempt_sibling_schedstat_before,
+                        attempt_sibling_schedstat_after, "timing attempt")
+                sibling_attempt_busy += attempt_sibling_delta
+                sibling_attempt_runtime_ns += attempt_sibling_runtime_ns
+                sibling_attempt_pcount += attempt_sibling_pcount
                 try:
                     if result.returncode != 0 or result.stderr:
                         raise TimingError(
@@ -3015,23 +3456,36 @@ def run_campaign(args: argparse.Namespace) -> None:
                     parsed = parse_grouped_output(
                         result.stdout, label, task,
                         int(design["evict_bytes"]), core)
+                    if (end_ns - start_ns <
+                            SIBLING_ACCEPTED_EXECUTION_MIN_DURATION_NS):
+                        raise TimingError(
+                            "execution is shorter than one USER_HZ tick")
                 except TimingError as exc:
                     _save_failure(
                         root, task, slot, label, command, attempt, attempt_utc,
                         start_ns, end_ns, result.stdout, result.stderr,
                         result.returncode, exc, binary_sha256,
-                        result.process_identity, result.cleanup_action, None)
+                        result.process_identity, result.cleanup_action, None,
+                        attempt_sibling_before, attempt_sibling_after,
+                        attempt_sibling_schedstat_before,
+                        attempt_sibling_schedstat_after)
                     raise
-                if parsed.contaminations:
+                contaminations = _attempt_contaminations(
+                    parsed, attempt_sibling_delta,
+                    attempt_sibling_runtime_ns, attempt_sibling_pcount)
+                if contaminations:
                     digest = _save_contamination(
                         root, name, attempt, result.stdout, result.stderr,
-                        parsed, command, start_ns, end_ns)
+                        parsed, command, start_ns, end_ns,
+                        attempt_sibling_before, attempt_sibling_after,
+                        attempt_sibling_schedstat_before,
+                        attempt_sibling_schedstat_after)
                     prior.append({"attempt": attempt, "receipt_sha256": digest})
                     retry_count += 1
                     if attempt + 1 == MAX_ENVIRONMENTAL_ATTEMPTS:
                         raise ContaminationError(
                             "environmental retry limit exhausted: %s" %
-                            ",".join(parsed.contaminations))
+                            ",".join(contaminations))
                     continue
                 raw_path = root / "raw" / name
                 stderr_path = root / "stderr" / (name + ".stderr")
@@ -3044,7 +3498,10 @@ def run_campaign(args: argparse.Namespace) -> None:
                     task, slot, label, command, attempt, attempt_utc, start_ns,
                     end_ns, parsed, result.stderr, prior,
                     binary_sha256, result.process_identity,
-                    result.cleanup_action)
+                    result.cleanup_action, attempt_sibling_before,
+                    attempt_sibling_after,
+                    attempt_sibling_schedstat_before,
+                    attempt_sibling_schedstat_after)
                 write_new(receipt_path, canonical_json(receipt))
                 receipt_hash = sha256_file(receipt_path)
                 record = {"name": name, "receipt_sha256": receipt_hash}
@@ -3129,7 +3586,38 @@ def run_campaign(args: argparse.Namespace) -> None:
             print("progress=%d/%d retries=%d" %
                   (int(task["job"]) + 1, len(tasks), retry_count), flush=True)
     _validate_cross_cache_ledger(cross_cache)
-    campaign_end_s = time.monotonic()
+    campaign_end_ns = time.monotonic_ns()
+    campaign_end_s = campaign_end_ns / 1_000_000_000
+    # Seal CPU isolation immediately after the final task.  Thermal identity
+    # verification and interval collection may launch helpers or wait for the
+    # next sampler row; neither belongs in the timed sibling-idle interval.
+    core_ticks_after = cpu_ticks(core)
+    sibling_ticks_after = cpu_ticks(sibling)
+    sibling_schedstat_after = schedstat_cpu(sibling)
+    sibling_busy = checked_busy_tick_delta(
+        sibling_ticks_before, sibling_ticks_after, "campaign sibling")
+    duration_ns = campaign_end_ns - campaign_start_ns
+    duration_s = campaign_end_s - campaign_start_s
+    sibling_busy_limit = sibling_campaign_busy_limit_ns(duration_ns)
+    sibling_runtime_ns, sibling_pcount = checked_schedstat_delta(
+        sibling_schedstat_before, sibling_schedstat_after,
+        "campaign sibling")
+    sibling_runtime_limit_ns = sibling_campaign_runtime_limit_ns(duration_ns)
+    sibling_gap_busy = sibling_busy - sibling_attempt_busy
+    sibling_gap_runtime_ns = sibling_runtime_ns - sibling_attempt_runtime_ns
+    sibling_gap_pcount = sibling_pcount - sibling_attempt_pcount
+    if (sibling_gap_busy < 0 or sibling_gap_runtime_ns < 0 or
+            sibling_gap_pcount < 0):
+        raise TimingError(
+            "execution sibling accounting exceeds the campaign interval")
+    if sibling_busy > sibling_busy_limit:
+        raise TimingError(
+            "SMT sibling accumulated %d busy ticks during timing (limit=%d)" %
+            (sibling_busy, sibling_busy_limit))
+    if sibling_runtime_ns > sibling_runtime_limit_ns:
+        raise TimingError(
+            "SMT sibling accumulated %d scheduled ns during timing "
+            "(limit=%d)" % (sibling_runtime_ns, sibling_runtime_limit_ns))
     thermal_reader_end = _thermal_reader(
         design, thermal_pid, thermal_csv, thermal_pidfd,
         int(thermal_reader["pid"]), int(thermal_reader["start_ticks"]))
@@ -3141,19 +3629,15 @@ def run_campaign(args: argparse.Namespace) -> None:
     thermal_raw, thermal_summary = collect_thermal_interval(
         thermal_csv, campaign_start_s, campaign_end_s)
     write_new(root / "thermal_interval.csv", thermal_raw)
-    core_ticks_after = cpu_ticks(core)
-    sibling_ticks_after = cpu_ticks(sibling)
-    sibling_busy = busy_ticks(sibling_ticks_after) - busy_ticks(sibling_ticks_before)
-    if sibling_busy > 1:
-        raise TimingError(
-            "SMT sibling accumulated %d busy ticks during timing (limit=1)" %
-            sibling_busy)
     launch = sealed_record(
-        "wirehair.wh2.grouped_commit_timing.launch_receipt.v1", {
+        "wirehair.wh2.grouped_commit_timing.launch_receipt.v2", {
             "started_utc": started_utc, "ended_utc": utc_now(),
             "start_monotonic_s": campaign_start_s,
             "end_monotonic_s": campaign_end_s,
-            "duration_s": campaign_end_s - campaign_start_s,
+            "duration_s": duration_s,
+            "start_monotonic_ns": campaign_start_ns,
+            "end_monotonic_ns": campaign_end_ns,
+            "duration_ns": duration_ns,
             "design_sha256": sha256_file(root / "design.json"),
             "prepare_receipt_sha256": sha256_file(root / "prepare_receipt.json"),
             "tasks_manifest_sha256": sha256_file(root / "tasks_manifest.jsonl"),
@@ -3174,8 +3658,27 @@ def run_campaign(args: argparse.Namespace) -> None:
             "sibling_ticks_before": list(sibling_ticks_before),
             "sibling_ticks_after": list(sibling_ticks_after),
             "sibling_busy_ticks": sibling_busy,
+            "sibling_busy_limit_ticks": sibling_busy_limit,
+            "sibling_attempt_busy_ticks": sibling_attempt_busy,
+            "sibling_gap_busy_ticks": sibling_gap_busy,
             "preflight_quiet_core_ticks": quiet_core,
             "preflight_quiet_sibling_ticks": quiet_sibling,
+            "preflight_sibling_schedstat_before":
+                preflight_sibling_schedstat_before,
+            "preflight_sibling_schedstat_after":
+                preflight_sibling_schedstat_after,
+            "preflight_sibling_sched_runtime_ns": quiet_sibling_runtime_ns,
+            "preflight_sibling_sched_pcount": quiet_sibling_pcount,
+            "sibling_schedstat_before": sibling_schedstat_before,
+            "sibling_schedstat_after": sibling_schedstat_after,
+            "sibling_sched_runtime_ns": sibling_runtime_ns,
+            "sibling_sched_runtime_limit_ns": sibling_runtime_limit_ns,
+            "sibling_sched_pcount": sibling_pcount,
+            "sibling_attempt_sched_runtime_ns":
+                sibling_attempt_runtime_ns,
+            "sibling_gap_sched_runtime_ns": sibling_gap_runtime_ns,
+            "sibling_attempt_sched_pcount": sibling_attempt_pcount,
+            "sibling_gap_sched_pcount": sibling_gap_pcount,
         })
     write_new(root / "launch_receipt.json", canonical_json(launch))
     os.close(thermal_pidfd)
@@ -3190,7 +3693,10 @@ def run_campaign(args: argparse.Namespace) -> None:
 def _validate_execution_receipt(
     root: Path, design: Mapping[str, object], task: Mapping[str, object],
     slot: int, not_before_ns: int, not_after_ns: int,
-) -> Tuple[Dict[str, object], ParsedOutput]:
+) -> Tuple[
+    Dict[str, object], ParsedOutput, int, int, int,
+    Sequence[int], Sequence[int], Mapping[str, object], Mapping[str, object],
+]:
     marker = OUTER_ORDER[slot]
     label = "base" if marker == "A" else "candidate"
     name = execution_name(task, slot, label)
@@ -3210,7 +3716,7 @@ def _validate_execution_receipt(
     path = root / "receipts" / (name + ".json")
     receipt = load_canonical(path, "execution receipt")
     verify_sealed_record(
-        receipt, "wirehair.wh2.grouped_commit_timing.execution_receipt.v1",
+        receipt, "wirehair.wh2.grouped_commit_timing.execution_receipt.v2",
         "execution receipt")
     if set(receipt) != EXECUTION_RECEIPT_FIELDS:
         raise TimingError("execution receipt fields changed")
@@ -3269,6 +3775,7 @@ def _validate_execution_receipt(
             not isinstance(end, int) or isinstance(end, bool) or end <= start or
             start < not_before_ns or end > not_after_ns or
             receipt.get("duration_ns") != end - start or
+            end - start < SIBLING_ACCEPTED_EXECUTION_MIN_DURATION_NS or
             not isinstance(attempt, int) or isinstance(attempt, bool) or
             not 0 <= attempt < MAX_ENVIRONMENTAL_ATTEMPTS or
             not isinstance(prior, list) or len(prior) != attempt):
@@ -3276,10 +3783,48 @@ def _validate_execution_receipt(
     if (not isinstance(receipt.get("started_utc"), str) or
             UTC_RE.fullmatch(receipt["started_utc"]) is None):
         raise TimingError("execution UTC receipt is malformed")
+    accepted_sibling_before = receipt.get("sibling_ticks_before")
+    accepted_sibling_after = receipt.get("sibling_ticks_after")
+    accepted_sibling_busy = checked_busy_tick_delta(
+        accepted_sibling_before, accepted_sibling_after,
+        "accepted execution")
+    recorded_accepted_sibling_busy = receipt.get("sibling_busy_ticks")
+    if (not isinstance(recorded_accepted_sibling_busy, int) or
+            isinstance(recorded_accepted_sibling_busy, bool) or
+            accepted_sibling_busy != recorded_accepted_sibling_busy or
+            accepted_sibling_busy >
+            SIBLING_ACCEPTED_EXECUTION_MAX_BUSY_TICKS):
+        raise TimingError("accepted execution sibling-idle receipt mismatch")
+    accepted_schedstat_before = receipt.get("sibling_schedstat_before")
+    accepted_schedstat_after = receipt.get("sibling_schedstat_after")
+    accepted_sibling_runtime_ns, accepted_sibling_pcount = \
+        checked_schedstat_delta(
+            accepted_schedstat_before, accepted_schedstat_after,
+            "accepted execution")
+    require_exact_counter(
+        receipt.get("sibling_sched_runtime_ns"),
+        accepted_sibling_runtime_ns, "accepted execution runtime")
+    require_exact_counter(
+        receipt.get("sibling_sched_pcount"), accepted_sibling_pcount,
+        "accepted execution pcount")
+    if (accepted_sibling_runtime_ns >
+            SIBLING_ACCEPTED_EXECUTION_MAX_SCHED_RUNTIME_NS or
+            accepted_sibling_pcount >
+            SIBLING_ACCEPTED_EXECUTION_MAX_SCHED_PCOUNT):
+        raise TimingError("accepted execution schedstat receipt mismatch")
+    attempt_sibling_busy = accepted_sibling_busy
+    attempt_sibling_runtime_ns = accepted_sibling_runtime_ns
+    attempt_sibling_pcount = accepted_sibling_pcount
     previous_contamination_end: Optional[int] = None
+    previous_sibling_after: Optional[Sequence[int]] = None
+    first_sibling_before: Optional[Sequence[int]] = None
+    previous_schedstat_after: Optional[Mapping[str, object]] = None
+    first_schedstat_before: Optional[Mapping[str, object]] = None
     for index, record in enumerate(prior):
         if (not isinstance(record, dict) or
                 set(record) != {"attempt", "receipt_sha256"} or
+                not isinstance(record.get("attempt"), int) or
+                isinstance(record.get("attempt"), bool) or
                 record.get("attempt") != index):
             raise TimingError("contamination retry order mismatch")
         require_sha256(record.get("receipt_sha256"), "contamination receipt hash")
@@ -3290,12 +3835,14 @@ def _validate_execution_receipt(
         contamination = load_canonical(contamination_path, "contamination receipt")
         verify_sealed_record(
             contamination,
-            "wirehair.wh2.grouped_commit_timing.contamination_receipt.v1",
+            "wirehair.wh2.grouped_commit_timing.contamination_receipt.v2",
             "contamination receipt")
         expected_stdout_name = prefix + ".stdout"
         expected_stderr_name = prefix + ".stderr"
         if (set(contamination) != CONTAMINATION_RECEIPT_FIELDS or
                 contamination.get("name") != name or
+                not isinstance(contamination.get("attempt"), int) or
+                isinstance(contamination.get("attempt"), bool) or
                 contamination.get("attempt") != index or
                 contamination.get("argv") != command_for(design, task, label) or
                 contamination.get("stdout_name") != expected_stdout_name or
@@ -3316,6 +3863,25 @@ def _validate_execution_receipt(
             max_bytes=MAX_BENCHMARK_STDERR_BYTES)
         contamination_start = contamination.get("start_monotonic_ns")
         contamination_end = contamination.get("end_monotonic_ns")
+        contamination_sibling_before = contamination.get(
+            "sibling_ticks_before")
+        contamination_sibling_after = contamination.get(
+            "sibling_ticks_after")
+        contamination_sibling_busy = checked_busy_tick_delta(
+            contamination_sibling_before, contamination_sibling_after,
+            "contaminated execution")
+        contamination_schedstat_before = contamination.get(
+            "sibling_schedstat_before")
+        contamination_schedstat_after = contamination.get(
+            "sibling_schedstat_after")
+        contamination_sibling_runtime_ns, contamination_sibling_pcount = \
+            checked_schedstat_delta(
+                contamination_schedstat_before, contamination_schedstat_after,
+                "contaminated execution")
+        expected_contaminations = _attempt_contaminations(
+            contaminated, contamination_sibling_busy,
+            contamination_sibling_runtime_ns,
+            contamination_sibling_pcount)
         if (contamination_stderr or
                 not isinstance(contamination_start, int) or
                 isinstance(contamination_start, bool) or
@@ -3326,16 +3892,62 @@ def _validate_execution_receipt(
                 (previous_contamination_end is not None and
                  contamination_start < previous_contamination_end) or
                 contamination_end > start or
-                not contaminated.contaminations or
+                not expected_contaminations or
                 contaminated.semantic_sha256 != parsed.semantic_sha256 or
                 contaminated.work_signature != parsed.work_signature or
                 contaminated.preamble["trace_sha256"] !=
                 parsed.preamble["trace_sha256"] or
-                list(contaminated.contaminations) !=
-                contamination.get("contaminations")):
+                list(expected_contaminations) !=
+                contamination.get("contaminations") or
+                (not isinstance(contamination.get("sibling_busy_ticks"), int) or
+                 isinstance(contamination.get("sibling_busy_ticks"), bool) or
+                 contamination.get("sibling_busy_ticks") !=
+                 contamination_sibling_busy) or
+                (previous_sibling_after is not None and
+                 (len(previous_sibling_after) !=
+                  len(contamination_sibling_before) or
+                  any(right < left for left, right in zip(
+                      previous_sibling_after,
+                      contamination_sibling_before)))) or
+                (previous_schedstat_after is not None and
+                 any(contamination_schedstat_before[field] <
+                     previous_schedstat_after[field]
+                     for field in ("runtime_ns", "pcount")))):
             raise TimingError("contamination classification changed on replay")
+        require_exact_counter(
+            contamination.get("sibling_sched_runtime_ns"),
+            contamination_sibling_runtime_ns,
+            "contaminated execution runtime")
+        require_exact_counter(
+            contamination.get("sibling_sched_pcount"),
+            contamination_sibling_pcount, "contaminated execution pcount")
         previous_contamination_end = contamination_end
-    return receipt, parsed
+        if first_sibling_before is None:
+            first_sibling_before = contamination_sibling_before
+        if first_schedstat_before is None:
+            first_schedstat_before = contamination_schedstat_before
+        previous_sibling_after = contamination_sibling_after
+        previous_schedstat_after = contamination_schedstat_after
+        attempt_sibling_busy += contamination_sibling_busy
+        attempt_sibling_runtime_ns += contamination_sibling_runtime_ns
+        attempt_sibling_pcount += contamination_sibling_pcount
+    if previous_sibling_after is not None:
+        require_tick_snapshot_order(
+            previous_sibling_after, accepted_sibling_before,
+            "accepted execution")
+    if previous_schedstat_after is not None:
+        require_schedstat_snapshot_order(
+            previous_schedstat_after, accepted_schedstat_before,
+            "accepted execution")
+    if first_sibling_before is None:
+        first_sibling_before = accepted_sibling_before
+    if first_schedstat_before is None:
+        first_schedstat_before = accepted_schedstat_before
+    return (
+        receipt, parsed, attempt_sibling_busy, attempt_sibling_runtime_ns,
+        attempt_sibling_pcount, first_sibling_before, accepted_sibling_after,
+        first_schedstat_before, accepted_schedstat_after,
+    )
 
 
 def _fraction_record(value: Fraction) -> Dict[str, object]:
@@ -3508,7 +4120,7 @@ def replay_campaign(root: Path) -> Tuple[Dict[str, object], set[str]]:
     _validate_prepare_receipt(root, design)
     launch = load_canonical(root / "launch_receipt.json", "launch receipt")
     verify_sealed_record(
-        launch, "wirehair.wh2.grouped_commit_timing.launch_receipt.v1",
+        launch, "wirehair.wh2.grouped_commit_timing.launch_receipt.v2",
         "launch receipt")
     if set(launch) != LAUNCH_RECEIPT_FIELDS:
         raise TimingError("launch receipt fields changed")
@@ -3525,6 +4137,12 @@ def replay_campaign(root: Path) -> Tuple[Dict[str, object], set[str]]:
             launch.get("controller_core") != design.get("controller_core") or \
             launch.get("controller_affinity") != [design.get("controller_core")]:
         raise TimingError("launch isolation receipt mismatch")
+    if (not isinstance(launch.get("retry_count"), int) or
+            isinstance(launch.get("retry_count"), bool) or
+            not 0 <= launch["retry_count"] <=
+            len(tasks) * len(OUTER_ORDER) *
+            (MAX_ENVIRONMENTAL_ATTEMPTS - 1)):
+        raise TimingError("launch retry count is malformed")
     if (not isinstance(launch.get("started_utc"), str) or
             UTC_RE.fullmatch(launch["started_utc"]) is None or
             not isinstance(launch.get("ended_utc"), str) or
@@ -3571,36 +4189,83 @@ def replay_campaign(root: Path) -> Tuple[Dict[str, object], set[str]]:
         root / "thermal_interval.csv", max_bytes=MAX_THERMAL_CSV_BYTES)
     if sha256_bytes(thermal_raw) != launch.get("thermal_interval_sha256"):
         raise TimingError("thermal interval hash mismatch")
-    start_s = launch.get("start_monotonic_s")
-    end_s = launch.get("end_monotonic_s")
-    if (not isinstance(start_s, (int, float)) or isinstance(start_s, bool) or
-            not isinstance(end_s, (int, float)) or isinstance(end_s, bool) or
-            end_s <= start_s):
-        raise TimingError("launch monotonic interval is malformed")
-    if launch.get("duration_s") != end_s - start_s:
-        raise TimingError("launch duration receipt mismatch")
+    (start_s, end_s, _duration_s, start_ns, end_ns, duration_ns) = \
+        checked_campaign_interval(launch)
     thermal_summary = validate_sealed_thermal_interval(
         thermal_raw, float(start_s), float(end_s))
     if launch.get("thermal_summary") != thermal_summary:
         raise TimingError("thermal summary does not replay")
-    for prefix in ("core", "sibling"):
-        before = launch.get(prefix + "_ticks_before")
-        after = launch.get(prefix + "_ticks_after")
-        if (not isinstance(before, list) or not isinstance(after, list) or
-                len(before) < 5 or len(after) != len(before) or
-                any(not isinstance(value, int) or isinstance(value, bool) or value < 0
-                    for value in before + after) or
-                any(right < left for left, right in zip(before, after))):
-            raise TimingError("launch CPU tick receipt is malformed")
-    sibling_busy = busy_ticks(launch["sibling_ticks_after"]) - \
-        busy_ticks(launch["sibling_ticks_before"])
-    if sibling_busy > 1 or launch.get("sibling_busy_ticks") != sibling_busy:
+    checked_busy_tick_delta(
+        launch.get("core_ticks_before"), launch.get("core_ticks_after"),
+        "launch core")
+    sibling_busy = checked_busy_tick_delta(
+        launch.get("sibling_ticks_before"),
+        launch.get("sibling_ticks_after"), "launch sibling")
+    sibling_busy_limit = sibling_campaign_busy_limit_ns(duration_ns)
+    recorded_sibling_busy = launch.get("sibling_busy_ticks")
+    recorded_sibling_limit = launch.get("sibling_busy_limit_ticks")
+    if (not isinstance(recorded_sibling_busy, int) or
+            isinstance(recorded_sibling_busy, bool) or
+            not isinstance(recorded_sibling_limit, int) or
+            isinstance(recorded_sibling_limit, bool) or
+            recorded_sibling_busy != sibling_busy or
+            recorded_sibling_limit != sibling_busy_limit or
+            sibling_busy > sibling_busy_limit):
         raise TimingError("launch sibling-idle receipt mismatch")
+    sibling_schedstat_before = launch.get("sibling_schedstat_before")
+    sibling_schedstat_after = launch.get("sibling_schedstat_after")
+    sibling_runtime_ns, sibling_pcount = checked_schedstat_delta(
+        sibling_schedstat_before, sibling_schedstat_after, "launch sibling")
+    sibling_runtime_limit_ns = sibling_campaign_runtime_limit_ns(duration_ns)
+    require_exact_counter(
+        launch.get("sibling_sched_runtime_ns"), sibling_runtime_ns,
+        "launch sibling runtime")
+    require_exact_counter(
+        launch.get("sibling_sched_pcount"), sibling_pcount,
+        "launch sibling pcount")
+    require_exact_counter(
+        launch.get("sibling_sched_runtime_limit_ns"),
+        sibling_runtime_limit_ns, "launch sibling runtime limit")
+    if sibling_runtime_ns > sibling_runtime_limit_ns:
+        raise TimingError("launch sibling schedstat receipt mismatch")
     if (not isinstance(launch.get("preflight_quiet_core_ticks"), int) or
-            not 0 <= launch["preflight_quiet_core_ticks"] <= 1 or
+            isinstance(launch.get("preflight_quiet_core_ticks"), bool) or
+            not 0 <= launch["preflight_quiet_core_ticks"] <=
+            SIBLING_PREFLIGHT_MAX_BUSY_TICKS or
             not isinstance(launch.get("preflight_quiet_sibling_ticks"), int) or
-            not 0 <= launch["preflight_quiet_sibling_ticks"] <= 1):
+            isinstance(launch.get("preflight_quiet_sibling_ticks"), bool) or
+            not 0 <= launch["preflight_quiet_sibling_ticks"] <=
+            SIBLING_PREFLIGHT_MAX_BUSY_TICKS):
         raise TimingError("launch preflight quiet receipt mismatch")
+    preflight_sibling_runtime_ns, preflight_sibling_pcount = \
+        checked_schedstat_delta(
+            launch.get("preflight_sibling_schedstat_before"),
+            launch.get("preflight_sibling_schedstat_after"),
+            "launch preflight sibling")
+    require_exact_counter(
+        launch.get("preflight_sibling_sched_runtime_ns"),
+        preflight_sibling_runtime_ns, "launch preflight sibling runtime")
+    require_exact_counter(
+        launch.get("preflight_sibling_sched_pcount"),
+        preflight_sibling_pcount, "launch preflight sibling pcount")
+    if (preflight_sibling_runtime_ns >
+            SIBLING_PREFLIGHT_MAX_SCHED_RUNTIME_NS or
+            preflight_sibling_pcount > SIBLING_PREFLIGHT_MAX_SCHED_PCOUNT):
+        raise TimingError("launch preflight schedstat receipt mismatch")
+    require_schedstat_snapshot_order(
+        launch["preflight_sibling_schedstat_after"],
+        sibling_schedstat_before, "preflight-to-campaign sibling")
+    for field in ("sibling_attempt_busy_ticks", "sibling_gap_busy_ticks"):
+        value = launch.get(field)
+        if (not isinstance(value, int) or isinstance(value, bool) or value < 0):
+            raise TimingError("launch sibling accounting is malformed")
+    for field in (
+            "sibling_attempt_sched_runtime_ns",
+            "sibling_gap_sched_runtime_ns", "sibling_attempt_sched_pcount",
+            "sibling_gap_sched_pcount"):
+        value = launch.get(field)
+        if (not isinstance(value, int) or isinstance(value, bool) or value < 0):
+            raise TimingError("launch sibling schedstat accounting is malformed")
     execution_ledger = []
     task_ledger = []
     result_records: List[Dict[str, object]] = []
@@ -3615,15 +4280,38 @@ def replay_campaign(root: Path) -> Tuple[Dict[str, object], set[str]]:
         expected_files.add(str(relative))
     contamination_expected = set()
     replay_retry_count = 0
-    previous_execution_end = int(math.floor(float(start_s) * 1_000_000_000)) - 1000
-    campaign_end_ns = int(math.ceil(float(end_s) * 1_000_000_000)) + 1000
+    replay_sibling_attempt_busy = 0
+    replay_sibling_attempt_runtime_ns = 0
+    replay_sibling_attempt_pcount = 0
+    previous_sibling_attempt_after = launch["sibling_ticks_before"]
+    previous_sibling_schedstat_after = sibling_schedstat_before
+    previous_execution_end = start_ns
+    campaign_end_ns = end_ns
     for task in tasks:
         parsed_outputs = []
         execution_records = []
         for slot in range(len(OUTER_ORDER)):
-            receipt, parsed = _validate_execution_receipt(
-                root, design, task, slot, previous_execution_end,
-                campaign_end_ns)
+            (receipt, parsed, attempt_sibling_busy,
+             attempt_sibling_runtime_ns, attempt_sibling_pcount,
+             attempt_sibling_before, attempt_sibling_after,
+             attempt_sibling_schedstat_before,
+             attempt_sibling_schedstat_after) = \
+                _validate_execution_receipt(
+                    root, design, task, slot, previous_execution_end,
+                    campaign_end_ns)
+            require_tick_snapshot_order(
+                previous_sibling_attempt_after, attempt_sibling_before,
+                "cross-execution sibling")
+            require_schedstat_snapshot_order(
+                previous_sibling_schedstat_after,
+                attempt_sibling_schedstat_before,
+                "cross-execution sibling")
+            previous_sibling_attempt_after = attempt_sibling_after
+            previous_sibling_schedstat_after = \
+                attempt_sibling_schedstat_after
+            replay_sibling_attempt_busy += attempt_sibling_busy
+            replay_sibling_attempt_runtime_ns += attempt_sibling_runtime_ns
+            replay_sibling_attempt_pcount += attempt_sibling_pcount
             previous_execution_end = int(receipt["end_monotonic_ns"])
             replay_retry_count += int(receipt["attempt"])
             label = str(receipt["binary_label"])
@@ -3719,12 +4407,38 @@ def replay_campaign(root: Path) -> Tuple[Dict[str, object], set[str]]:
             },
         })
     _validate_cross_cache_ledger(cross_cache)
+    require_tick_snapshot_order(
+        previous_sibling_attempt_after, launch["sibling_ticks_after"],
+        "campaign-final sibling")
+    require_schedstat_snapshot_order(
+        previous_sibling_schedstat_after, sibling_schedstat_after,
+        "campaign-final sibling")
     expected_files.update(contamination_expected)
     if launch.get("execution_receipts") != execution_ledger or \
             launch.get("task_receipts") != task_ledger:
         raise TimingError("launch receipt ledger does not replay exactly")
     if launch.get("retry_count") != replay_retry_count:
         raise TimingError("launch retry count does not replay")
+    replay_sibling_gap_busy = sibling_busy - replay_sibling_attempt_busy
+    replay_sibling_gap_runtime_ns = \
+        sibling_runtime_ns - replay_sibling_attempt_runtime_ns
+    replay_sibling_gap_pcount = \
+        sibling_pcount - replay_sibling_attempt_pcount
+    if (replay_sibling_gap_busy < 0 or
+            replay_sibling_gap_runtime_ns < 0 or
+            replay_sibling_gap_pcount < 0 or
+            launch.get("sibling_attempt_busy_ticks") !=
+            replay_sibling_attempt_busy or
+            launch.get("sibling_gap_busy_ticks") != replay_sibling_gap_busy or
+            launch.get("sibling_attempt_sched_runtime_ns") !=
+            replay_sibling_attempt_runtime_ns or
+            launch.get("sibling_gap_sched_runtime_ns") !=
+            replay_sibling_gap_runtime_ns or
+            launch.get("sibling_attempt_sched_pcount") !=
+            replay_sibling_attempt_pcount or
+            launch.get("sibling_gap_sched_pcount") !=
+            replay_sibling_gap_pcount):
+        raise TimingError("launch sibling accounting does not replay")
     actual_contamination = {
         "contamination/" + path.name for path in (root / "contamination").iterdir()
     }
@@ -3756,6 +4470,21 @@ def replay_campaign(root: Path) -> Tuple[Dict[str, object], set[str]]:
         "work_and_recovery_exact": True, "trace_identity_exact": True,
         "cold_warm_graph_trace_work_exact": True,
         "timing_promotional": True,
+        "sibling_idle": {
+            "policy": design["sibling_idle_policy"],
+            "busy_ticks": sibling_busy,
+            "busy_limit_ticks": sibling_busy_limit,
+            "attempt_busy_ticks": replay_sibling_attempt_busy,
+            "gap_busy_ticks": replay_sibling_gap_busy,
+            "scheduled_runtime_ns": sibling_runtime_ns,
+            "scheduled_runtime_limit_ns": sibling_runtime_limit_ns,
+            "pcount": sibling_pcount,
+            "attempt_scheduled_runtime_ns":
+                replay_sibling_attempt_runtime_ns,
+            "gap_scheduled_runtime_ns": replay_sibling_gap_runtime_ns,
+            "attempt_pcount": replay_sibling_attempt_pcount,
+            "gap_pcount": replay_sibling_gap_pcount,
+        },
         "thermal_interval_sha256": sha256_bytes(thermal_raw),
         "thermal_summary": thermal_summary,
         "overall": elapsed["overall"],

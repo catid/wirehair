@@ -126,6 +126,19 @@ def thermal_csv(times=(9.0, 10.0, 11.0, 12.0)):
     return output.getvalue().encode("ascii")
 
 
+def schedstat_text(records=((0, 1000, 10), (1, 2000, 20))):
+    lines = ["version 15", "timestamp 123456"]
+    for cpu, runtime_ns, pcount in records:
+        # Fields 1 and 3-6 are legitimate nonzero v15 counters.  Field 2 is
+        # the sole retired field and must remain zero.
+        values = (7, 0, 8, 9, 10, 11, runtime_ns, 12, pcount)
+        lines.append("cpu%d %s" % (
+            cpu, " ".join(str(value) for value in values)))
+        lines.append("domain0 00000001 " + " ".join(
+            "0" for _index in range(timing.SCHEDSTAT_DOMAIN_FIELD_COUNT)))
+    return ("\n".join(lines) + "\n").encode("ascii")
+
+
 class TaskLedgerTests(unittest.TestCase):
     def test_exact_grid_is_deterministic_and_complete(self):
         first = timing.generate_tasks()
@@ -323,9 +336,11 @@ class ReceiptAndThermalTests(unittest.TestCase):
         task = one_task()
         parsed = timing.parse_grouped_output(
             grouped_stdout("base", task), "base", task, 4096, 8)
+        start_ns = 10
+        end_ns = start_ns + timing.SIBLING_ACCEPTED_EXECUTION_MIN_DURATION_NS
         receipt = timing._execution_receipt(
             task, 0, "base", ["example"], 0,
-            "2026-07-18T00:00:00.000Z", 10, 20, parsed, b"", [],
+            "2026-07-18T00:00:00.000Z", start_ns, end_ns, parsed, b"", [],
             "c" * 64, {
                 "pid": 123, "start_ticks": 456,
                 "executable": {
@@ -334,10 +349,305 @@ class ReceiptAndThermalTests(unittest.TestCase):
                 "argv": ["/example"], "boot_id":
                     "1788608a-7aa1-48de-8f7c-848485be3cc3",
                 "binding_observation": "double-proc-snapshot",
-            }, "exited_group_swept")
+            }, "exited_group_swept",
+            (0, 0, 0, 10, 0), (0, 0, 0, 11, 0),
+            {"runtime_ns": 100, "pcount": 5},
+            {"runtime_ns": 100, "pcount": 5})
         self.assertEqual(set(receipt), timing.EXECUTION_RECEIPT_FIELDS)
         self.assertEqual(receipt["timed_phase_ns"], parsed.timed_phase_ns)
         self.assertEqual(receipt["all_phase_ns"], parsed.all_phase_ns)
+        self.assertEqual(receipt["sibling_busy_ticks"], 0)
+        self.assertEqual(receipt["sibling_sched_runtime_ns"], 0)
+        self.assertEqual(receipt["sibling_sched_pcount"], 0)
+
+    def test_execution_receipt_rejects_any_sibling_busy_tick(self):
+        task = one_task()
+        parsed = timing.parse_grouped_output(
+            grouped_stdout("base", task), "base", task, 4096, 8)
+        end_ns = 10 + timing.SIBLING_ACCEPTED_EXECUTION_MIN_DURATION_NS
+        with self.assertRaisesRegex(
+                timing.TimingError, "accepted execution used"):
+            timing._execution_receipt(
+                task, 0, "base", ["example"], 0,
+                "2026-07-18T00:00:00.000Z", 10, end_ns, parsed, b"", [],
+                "c" * 64, {
+                    "pid": 123, "start_ticks": 456,
+                    "executable": {
+                        "path": "/example", "device": 7, "inode": 8,
+                    },
+                    "argv": ["/example"], "boot_id":
+                        "1788608a-7aa1-48de-8f7c-848485be3cc3",
+                    "binding_observation": "double-proc-snapshot",
+                }, "exited_group_swept",
+                (0, 0, 0, 10, 0), (1, 0, 0, 11, 0),
+                {"runtime_ns": 100, "pcount": 5},
+                {"runtime_ns": 100, "pcount": 5})
+
+    def test_execution_receipt_rejects_subtick_schedstat_activity_and_short_run(self):
+        task = one_task()
+        parsed = timing.parse_grouped_output(
+            grouped_stdout("base", task), "base", task, 4096, 8)
+        arguments = (
+            task, 0, "base", ["example"], 0,
+            "2026-07-18T00:00:00.000Z", 10,
+            10 + timing.SIBLING_ACCEPTED_EXECUTION_MIN_DURATION_NS,
+            parsed, b"", [], "c" * 64, {}, "exited_group_swept",
+            (0, 0, 0, 10, 0), (0, 0, 0, 11, 0),
+            {"runtime_ns": 100, "pcount": 5},
+        )
+        with self.assertRaisesRegex(timing.TimingError, "used the SMT sibling"):
+            timing._execution_receipt(
+                *arguments, {"runtime_ns": 101, "pcount": 6})
+        with self.assertRaisesRegex(timing.TimingError, "shorter"):
+            timing._execution_receipt(
+                task, 0, "base", ["example"], 0,
+                "2026-07-18T00:00:00.000Z", 10,
+                9 + timing.SIBLING_ACCEPTED_EXECUTION_MIN_DURATION_NS,
+                parsed, b"", [], "c" * 64, {}, "exited_group_swept",
+                (0, 0, 0, 10, 0), (0, 0, 0, 11, 0),
+                {"runtime_ns": 100, "pcount": 5},
+                {"runtime_ns": 100, "pcount": 5})
+
+    def test_execution_receipt_replay_rejects_resealed_schedstat_tamper(self):
+        task = one_task()
+        raw = grouped_stdout("base", task)
+        parsed = timing.parse_grouped_output(raw, "base", task, 4096, 8)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for directory in ("frozen", "raw", "stderr", "exit",
+                              "receipts", "contamination"):
+                (root / directory).mkdir(mode=0o700)
+            binary = root / "frozen" / timing.BINARY_NAMES["base"]
+            binary.write_bytes(b"fixture")
+            design = {
+                "root": str(root), "core": 8, "numa_node": 0,
+                "evict_bytes": 4096,
+                "tools": {
+                    name: {"path": "/usr/bin/" + name}
+                    for name in ("env", "taskset", "numactl")
+                },
+                "immutable_files": {
+                    "frozen/" + timing.BINARY_NAMES["base"]:
+                        timing.sha256_file(binary),
+                },
+            }
+            command = timing.command_for(design, task, "base")
+            name = timing.execution_name(task, 0, "base")
+            contamination_digest = timing._save_contamination(
+                root, name, 0, raw, b"", parsed, command, 10, 20,
+                (0, 0, 0, 10, 0), (3, 0, 0, 11, 0),
+                {"runtime_ns": 100, "pcount": 5},
+                {"runtime_ns": 140, "pcount": 6})
+            binary_index = command.index(str(binary))
+            binary_stat = binary.stat()
+            start_ns = 100
+            end_ns = start_ns + \
+                timing.SIBLING_ACCEPTED_EXECUTION_MIN_DURATION_NS
+            receipt = timing._execution_receipt(
+                task, 0, "base", command, 1,
+                "2026-07-18T00:00:00.000Z", start_ns, end_ns,
+                parsed, b"", [{
+                    "attempt": 0,
+                    "receipt_sha256": contamination_digest,
+                }], timing.sha256_file(binary), {
+                    "pid": 123, "start_ticks": 456,
+                    "executable": {
+                        "path": str(binary), "device": binary_stat.st_dev,
+                        "inode": binary_stat.st_ino,
+                    },
+                    "argv": command[binary_index:],
+                    "boot_id": "1788608a-7aa1-48de-8f7c-848485be3cc3",
+                    "binding_observation": "double-proc-snapshot",
+                }, "exited_group_swept",
+                (3, 0, 0, 20, 0), (3, 0, 0, 21, 0),
+                {"runtime_ns": 200, "pcount": 10},
+                {"runtime_ns": 200, "pcount": 10})
+            (root / "raw" / name).write_bytes(raw)
+            (root / "stderr" / (name + ".stderr")).write_bytes(b"")
+            (root / "exit" / (name + ".exit")).write_bytes(b"0\n")
+            receipt_path = root / "receipts" / (name + ".json")
+            receipt_path.write_bytes(timing.canonical_json(receipt))
+            validated = timing._validate_execution_receipt(
+                root, design, task, 0, 0, end_ns)
+            self.assertEqual(validated[2:5], (3, 40, 1))
+
+            payload = {
+                key: value for key, value in receipt.items()
+                if key not in ("schema", "self_sha256_excluding_field")
+            }
+            payload["sibling_schedstat_after"] = {
+                "runtime_ns": 201, "pcount": 10}
+            tampered = timing.sealed_record(receipt["schema"], payload)
+            receipt_path.write_bytes(timing.canonical_json(tampered))
+            with self.assertRaisesRegex(timing.TimingError, "counter receipt"):
+                timing._validate_execution_receipt(
+                    root, design, task, 0, 0, end_ns)
+
+    def test_sibling_tick_delta_and_50ppm_campaign_boundary(self):
+        before = (10, 20, 30, 100, 5, 6, 7, 0, 0, 0)
+        after = (11, 20, 31, 200, 6, 6, 8, 0, 0, 0)
+        self.assertEqual(
+            timing.checked_busy_tick_delta(before, after, "fixture"), 3)
+        with self.assertRaisesRegex(timing.TimingError, "malformed"):
+            timing.checked_busy_tick_delta(before, after[:-1], "fixture")
+        with self.assertRaisesRegex(timing.TimingError, "malformed"):
+            timing.checked_busy_tick_delta(before, (*after[:-1], True),
+                                           "fixture")
+        with mock.patch.object(timing, "CLOCK_TICKS_PER_SECOND", 100):
+            self.assertEqual(
+                timing.sibling_campaign_busy_limit_ns(180_000_000_000), 1)
+            self.assertEqual(
+                timing.sibling_campaign_busy_limit_ns(200_000_000_000), 1)
+            self.assertEqual(
+                timing.sibling_campaign_busy_limit_ns(200_000_001_000), 1)
+            self.assertEqual(
+                timing.sibling_campaign_busy_limit_ns(399_999_999_999), 1)
+            self.assertEqual(
+                timing.sibling_campaign_busy_limit_ns(400_000_000_000), 2)
+            self.assertEqual(
+                timing.sibling_campaign_busy_limit_ns(1_500_000_000_000), 7)
+        self.assertEqual(timing.sibling_campaign_runtime_limit_ns(19_999), 0)
+        self.assertEqual(timing.sibling_campaign_runtime_limit_ns(20_000), 1)
+        self.assertEqual(
+            timing.sibling_campaign_runtime_limit_ns(200_000_000_000),
+            10_000_000)
+
+    def test_schedstat_v15_parser_is_strict_and_accepts_live_fields(self):
+        raw = schedstat_text()
+        self.assertEqual(timing.parse_schedstat_cpu(raw, 1), {
+            "runtime_ns": 2000, "pcount": 20})
+        malformed = (
+            raw.replace(b"version 15", b"version 14", 1),
+            raw.replace(b"cpu1 ", b"cpu0 ", 1),
+            raw.replace(b"cpu0 7 0 ", b"cpu0 7 1 ", 1),
+            raw.replace(b"domain0 ", b"domain1 ", 1),
+            raw.replace(b" 1000 12 10\n", b" -1 12 10\n", 1),
+            raw.replace(b" 1000 12 10\n", b" " + b"9" * 21 +
+                        b" 12 10\n", 1),
+            raw.replace(b"cpu0 7 0 8 9 10 11 1000 12 10",
+                        b"cpu0 7 0 8 9 10 11 1000 12"),
+        )
+        for value in malformed:
+            with self.subTest(value=value[:40]):
+                with self.assertRaises(timing.TimingError):
+                    timing.parse_schedstat_cpu(value, 0)
+        with self.assertRaisesRegex(timing.TimingError, "malformed"):
+            timing.parse_schedstat_cpu(raw, True)
+        with self.assertRaisesRegex(timing.TimingError, "missing"):
+            timing.parse_schedstat_cpu(raw, 2)
+
+    def test_schedstat_delta_order_and_typed_tamper_checks(self):
+        before = {"runtime_ns": 100, "pcount": 5}
+        after = {"runtime_ns": 140, "pcount": 6}
+        self.assertEqual(
+            timing.checked_schedstat_delta(before, after, "fixture"),
+            (40, 1))
+        with self.assertRaisesRegex(timing.TimingError, "malformed"):
+            timing.checked_schedstat_delta(
+                before, {"runtime_ns": 99, "pcount": 6}, "fixture")
+        with self.assertRaisesRegex(timing.TimingError, "malformed"):
+            timing.checked_schedstat_delta(
+                before, {"runtime_ns": 140, "pcount": True}, "fixture")
+        with self.assertRaisesRegex(timing.TimingError, "counter receipt"):
+            timing.require_exact_counter(True, 1, "tampered pcount")
+
+    def test_sibling_policy_and_launch_interval_reject_bool_or_nonfinite_aliases(self):
+        timing.require_frozen_sibling_idle_policy(timing.SIBLING_IDLE_POLICY)
+        changed = {
+            **timing.SIBLING_IDLE_POLICY,
+            "campaign_min_busy_ticks": True,
+        }
+        with self.assertRaisesRegex(timing.TimingError, "sibling_idle_policy"):
+            timing.require_frozen_sibling_idle_policy(changed)
+        changed = {
+            **timing.SIBLING_IDLE_POLICY,
+            "schedstat_sched_schedstats_sysctl_required": 0,
+        }
+        with self.assertRaisesRegex(timing.TimingError, "sibling_idle_policy"):
+            timing.require_frozen_sibling_idle_policy(changed)
+        valid = {
+            "start_monotonic_s": 10.0, "end_monotonic_s": 11.0,
+            "duration_s": 1.0, "start_monotonic_ns": 10_000_000_000,
+            "end_monotonic_ns": 11_000_000_000,
+            "duration_ns": 1_000_000_000,
+        }
+        self.assertEqual(timing.checked_campaign_interval(valid)[-1],
+                         1_000_000_000)
+        for field, value in (("duration_s", True),
+                             ("duration_s", float("nan")),
+                             ("start_monotonic_s", float("inf")),
+                             ("start_monotonic_s", 10 ** 400),
+                             ("duration_ns", True)):
+            with self.subTest(field=field, value=value):
+                with self.assertRaisesRegex(timing.TimingError, "interval"):
+                    timing.checked_campaign_interval({**valid, field: value})
+
+    def test_sibling_only_contamination_is_receipted_for_retry(self):
+        task = one_task()
+        parsed = timing.parse_grouped_output(
+            grouped_stdout("base", task), "base", task, 4096, 8)
+        self.assertEqual(parsed.contaminations, ())
+        self.assertEqual(
+            timing._attempt_contaminations(parsed, 0, 0, 0), ())
+        self.assertEqual(
+            timing._attempt_contaminations(parsed, 3, 40, 1),
+            ("sibling-busy:3", "sibling-sched-runtime-ns:40",
+             "sibling-sched-pcount:1"))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "contamination").mkdir(mode=0o700)
+            digest = timing._save_contamination(
+                root, "sample", 0, grouped_stdout("base", task), b"",
+                parsed, ["example"], 10, 20,
+                (0, 0, 0, 10, 0), (3, 0, 0, 11, 0),
+                {"runtime_ns": 100, "pcount": 5},
+                {"runtime_ns": 140, "pcount": 6})
+            receipt = timing.load_canonical(
+                root / "contamination" / "sample.attempt0.json",
+                "test contamination")
+        self.assertRegex(digest, r"^[0-9a-f]{64}$")
+        self.assertEqual(set(receipt), timing.CONTAMINATION_RECEIPT_FIELDS)
+        self.assertEqual(receipt["schema"],
+                         "wirehair.wh2.grouped_commit_timing."
+                         "contamination_receipt.v2")
+        self.assertEqual(receipt["contaminations"], [
+            "sibling-busy:3", "sibling-sched-runtime-ns:40",
+            "sibling-sched-pcount:1"])
+        self.assertEqual(receipt["sibling_busy_ticks"], 3)
+        self.assertEqual(receipt["sibling_sched_runtime_ns"], 40)
+        self.assertEqual(receipt["sibling_sched_pcount"], 1)
+
+    def test_failure_receipt_records_exact_schedstat_accounting(self):
+        task = one_task()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "failure").mkdir(mode=0o700)
+            digest = timing._save_failure(
+                root, task, 0, "base", ["example"], 0,
+                "2026-07-18T00:00:00.000Z", 10, 20, b"out", b"err", 7,
+                timing.TimingError("failure"), "c" * 64, None,
+                "exited_group_swept", None,
+                (0, 0, 0, 10, 0), (2, 0, 0, 11, 0),
+                {"runtime_ns": 100, "pcount": 5},
+                {"runtime_ns": 125, "pcount": 6})
+            name = timing.execution_name(task, 0, "base") + ".attempt0.json"
+            receipt_path = root / "failure" / name
+            receipt = timing.load_canonical(receipt_path, "test failure")
+            tampered_payload = {
+                key: value for key, value in receipt.items()
+                if key not in ("schema", "self_sha256_excluding_field")
+            }
+            tampered_payload["sibling_sched_pcount"] = True
+            tampered = timing.sealed_record(receipt["schema"], tampered_payload)
+            receipt_path.chmod(0o600)
+            receipt_path.write_bytes(timing.canonical_json(tampered))
+            receipt_path.chmod(0o444)
+            with self.assertRaisesRegex(timing.TimingError, "counter receipt"):
+                timing.replay_failure_receipt(root, name)
+        self.assertRegex(digest, r"^[0-9a-f]{64}$")
+        self.assertEqual(set(receipt), timing.FAILURE_RECEIPT_FIELDS)
+        self.assertEqual(receipt["sibling_sched_runtime_ns"], 25)
+        self.assertEqual(receipt["sibling_sched_pcount"], 1)
 
     def test_thermal_interval_is_exactly_bracketed_and_bounded(self):
         with tempfile.TemporaryDirectory() as temporary:
