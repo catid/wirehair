@@ -3145,7 +3145,9 @@ def run_campaign(args: argparse.Namespace) -> None:
     sibling_ticks_after = cpu_ticks(sibling)
     sibling_busy = busy_ticks(sibling_ticks_after) - busy_ticks(sibling_ticks_before)
     if sibling_busy > 1:
-        raise TimingError("SMT sibling accumulated busy ticks during timing")
+        raise TimingError(
+            "SMT sibling accumulated %d busy ticks during timing (limit=1)" %
+            sibling_busy)
     launch = sealed_record(
         "wirehair.wh2.grouped_commit_timing.launch_receipt.v1", {
             "started_utc": started_utc, "ended_utc": utc_now(),
