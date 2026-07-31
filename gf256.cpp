@@ -3650,6 +3650,27 @@ gf256_addset_multi_mem_avx512_target(
     }
 }
 
+#if defined(__GNUC__) && defined(__ELF__)
+// GCC and Clang can drop the primary template's section attribute during
+// implicit instantiation.  Instantiate the added large-count bodies
+// explicitly and keep native builds from folding them back into the
+// dispatcher, so non-AVX-512 hot code retains its existing layout.
+# define GF256_INSTANTIATE_ADDSET_AVX512(n) \
+    template __attribute__((noinline)) GF256_WH2_AVX512_SECTION void \
+    gf256_addset_multi_mem_avx512_target<n>( \
+        uint8_t* GF256_RESTRICT, \
+        const void* const* GF256_RESTRICT, \
+        int)
+GF256_INSTANTIATE_ADDSET_AVX512(10);
+GF256_INSTANTIATE_ADDSET_AVX512(11);
+GF256_INSTANTIATE_ADDSET_AVX512(12);
+GF256_INSTANTIATE_ADDSET_AVX512(13);
+GF256_INSTANTIATE_ADDSET_AVX512(14);
+GF256_INSTANTIATE_ADDSET_AVX512(15);
+GF256_INSTANTIATE_ADDSET_AVX512(16);
+# undef GF256_INSTANTIATE_ADDSET_AVX512
+#endif
+
 static GF256_AVX2_TARGET GF256_WH2_AVX512_SECTION bool
 gf256_try_addset_multi_mem_avx512_target(
     uint8_t* GF256_RESTRICT destination,
@@ -3677,6 +3698,20 @@ gf256_try_addset_multi_mem_avx512_target(
     case 8: gf256_addset_multi_mem_avx512_target<8>(
         destination, sources, bytes); return true;
     case 9: gf256_addset_multi_mem_avx512_target<9>(
+        destination, sources, bytes); return true;
+    case 10: gf256_addset_multi_mem_avx512_target<10>(
+        destination, sources, bytes); return true;
+    case 11: gf256_addset_multi_mem_avx512_target<11>(
+        destination, sources, bytes); return true;
+    case 12: gf256_addset_multi_mem_avx512_target<12>(
+        destination, sources, bytes); return true;
+    case 13: gf256_addset_multi_mem_avx512_target<13>(
+        destination, sources, bytes); return true;
+    case 14: gf256_addset_multi_mem_avx512_target<14>(
+        destination, sources, bytes); return true;
+    case 15: gf256_addset_multi_mem_avx512_target<15>(
+        destination, sources, bytes); return true;
+    case 16: gf256_addset_multi_mem_avx512_target<16>(
         destination, sources, bytes); return true;
     default: return false;
     }
