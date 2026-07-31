@@ -593,7 +593,10 @@ public:
     }
 
 private:
-    static const uint32_t kRegularBatchSize = 8u;
+    // Keep the additive tail as wide as the legacy accumulator.  Unused
+    // residual equations can contain many known columns; halving this batch
+    // after the first set-form pass needlessly scans the destination twice.
+    static const uint32_t kRegularBatchSize = 16u;
     static const uint32_t kFusedBatchSize = 16u;
     uint8_t* Destination;
     uint32_t BlockBytes;
@@ -7580,19 +7583,45 @@ WH2_TEST_NOINLINE bool CheckMixedRhsFusionOracleForTesting()
                 }
                 BatchedBlockXorAccumulator expected_xor(
                     expected.data(), block_bytes);
-                std::vector<uint8_t> actual(block_bytes, 0x5au);
-                BatchedBlockXorInitializer actual_xor(
-                    actual.data(), block_bytes, first);
                 for (uint32_t i = 0u; i < source_count; ++i)
                 {
                     const uint8_t* source =
                         sources.data() + (size_t)i * block_bytes;
                     expected_xor.Add(source);
-                    actual_xor.Add(source);
                 }
                 expected_xor.Flush();
+#if defined(WH_COUNT)
+                gf256_count_reset();
+#endif
+                std::vector<uint8_t> actual(block_bytes, 0x5au);
+                BatchedBlockXorInitializer actual_xor(
+                    actual.data(), block_bytes, first);
+                for (uint32_t i = 0u; i < source_count; ++i)
+                {
+                    actual_xor.Add(
+                        sources.data() + (size_t)i * block_bytes);
+                }
                 actual_xor.Flush();
                 if (actual != expected) return false;
+#if defined(WH_COUNT)
+                // The 16-source set pass must be followed by one 16-source
+                // additive pass and only its one- or two-source tail.  This
+                // catches accidental reversion to eight-source destination
+                // scans without adding instrumentation to production builds.
+                if (gf256_count_calls(2) != 1u ||
+                    gf256_count_calls(0) !=
+                        (data_mode == 0u ? 2u : 1u) ||
+                    gf256_count_calls(1) !=
+                        (data_mode == 0u ? 0u : 1u) ||
+                    gf256_count_bytes(2) != block_bytes ||
+                    gf256_count_bytes(0) != (uint64_t)block_bytes *
+                        (data_mode == 0u ? 2u : 1u) ||
+                    gf256_count_bytes(1) != (uint64_t)block_bytes *
+                        (data_mode == 0u ? 0u : 1u))
+                {
+                    return false;
+                }
+#endif
             }
         }
 
