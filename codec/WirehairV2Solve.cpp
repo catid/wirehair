@@ -567,6 +567,14 @@ public:
                     std::memset(Destination, 0, BlockBytes);
                 }
             }
+            else if (PendingCount == 1u) {
+                std::memcpy(Destination, PendingSources[0], BlockBytes);
+            }
+            else if (PendingCount == 2u) {
+                gf256_addset_mem(
+                    Destination, PendingSources[0], PendingSources[1],
+                    (int)BlockBytes);
+            }
             else {
                 gf256_addset_multi_mem(
                     Destination, PendingSources, (int)PendingCount,
