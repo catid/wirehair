@@ -4893,11 +4893,7 @@ uint32_t Sha256RotateRight(uint32_t value, uint32_t shift)
     return (value >> shift) | (value << (32u - shift));
 }
 
-// Small benchmark-only SHA-256 implementation used to bind a trusted route
-// manifest to the exact bytes produced by route mode.  Keeping verification in
-// the consumer prevents a stale or forged preferred map from being blessed by
-// an unrelated digest supplied on the command line.
-std::string Sha256Hex(const std::string& input)
+void Sha256CompressBlock(const uint8_t* block, uint32_t state[8])
 {
     static const uint32_t kRound[64] = {
         0x428a2f98u, 0x71374491u, 0xb5c0fbcfu, 0xe9b5dba5u,
@@ -4917,57 +4913,82 @@ std::string Sha256Hex(const std::string& input)
         0x748f82eeu, 0x78a5636fu, 0x84c87814u, 0x8cc70208u,
         0x90befffau, 0xa4506cebu, 0xbef9a3f7u, 0xc67178f2u,
     };
+    uint32_t words[64];
+    for (uint32_t i = 0u; i < 16u; ++i) {
+        const size_t pos = (size_t)i * 4u;
+        words[i] = ((uint32_t)block[pos] << 24) |
+            ((uint32_t)block[pos + 1u] << 16) |
+            ((uint32_t)block[pos + 2u] << 8) |
+            (uint32_t)block[pos + 3u];
+    }
+    for (uint32_t i = 16u; i < 64u; ++i) {
+        const uint32_t x = words[i - 15u];
+        const uint32_t y = words[i - 2u];
+        const uint32_t s0 = Sha256RotateRight(x, 7u) ^
+            Sha256RotateRight(x, 18u) ^ (x >> 3u);
+        const uint32_t s1 = Sha256RotateRight(y, 17u) ^
+            Sha256RotateRight(y, 19u) ^ (y >> 10u);
+        words[i] = words[i - 16u] + s0 + words[i - 7u] + s1;
+    }
+    uint32_t a = state[0], b = state[1], c = state[2], d = state[3];
+    uint32_t e = state[4], f = state[5], g = state[6], h = state[7];
+    for (uint32_t i = 0u; i < 64u; ++i) {
+        const uint32_t s1 = Sha256RotateRight(e, 6u) ^
+            Sha256RotateRight(e, 11u) ^ Sha256RotateRight(e, 25u);
+        const uint32_t choose = (e & f) ^ ((~e) & g);
+        const uint32_t temp1 = h + s1 + choose + kRound[i] + words[i];
+        const uint32_t s0 = Sha256RotateRight(a, 2u) ^
+            Sha256RotateRight(a, 13u) ^ Sha256RotateRight(a, 22u);
+        const uint32_t majority = (a & b) ^ (a & c) ^ (b & c);
+        const uint32_t temp2 = s0 + majority;
+        h = g; g = f; f = e; e = d + temp1;
+        d = c; c = b; b = a; a = temp1 + temp2;
+    }
+    state[0] += a; state[1] += b; state[2] += c; state[3] += d;
+    state[4] += e; state[5] += f; state[6] += g; state[7] += h;
+}
+
+// Small benchmark-only SHA-256 implementation used for exact binary receipts.
+// The byte-span entry point avoids allocating a second full-payload copy when
+// timing cells bind hundreds of megabytes of prefaulted packet data.
+std::string Sha256HexBytes(const uint8_t* data, size_t bytes)
+{
+    if ((bytes != 0u && !data) || (uint64_t)bytes > UINT64_MAX / 8u) {
+        return std::string();
+    }
     uint32_t state[8] = {
         0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
         0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u,
     };
-    std::vector<uint8_t> bytes(input.begin(), input.end());
-    const uint64_t bit_count = (uint64_t)bytes.size() * 8u;
-    bytes.push_back(0x80u);
-    while ((bytes.size() & 63u) != 56u) bytes.push_back(0u);
-    for (int shift = 56; shift >= 0; shift -= 8) {
-        bytes.push_back((uint8_t)(bit_count >> shift));
+    const size_t complete_bytes = bytes & ~(size_t)63u;
+    for (size_t offset = 0u; offset < complete_bytes; offset += 64u) {
+        Sha256CompressBlock(data + offset, state);
     }
-    for (size_t offset = 0u; offset < bytes.size(); offset += 64u)
-    {
-        uint32_t words[64];
-        for (uint32_t i = 0u; i < 16u; ++i) {
-            const size_t pos = offset + (size_t)i * 4u;
-            words[i] = ((uint32_t)bytes[pos] << 24) |
-                ((uint32_t)bytes[pos + 1u] << 16) |
-                ((uint32_t)bytes[pos + 2u] << 8) |
-                (uint32_t)bytes[pos + 3u];
-        }
-        for (uint32_t i = 16u; i < 64u; ++i) {
-            const uint32_t x = words[i - 15u];
-            const uint32_t y = words[i - 2u];
-            const uint32_t s0 = Sha256RotateRight(x, 7u) ^
-                Sha256RotateRight(x, 18u) ^ (x >> 3u);
-            const uint32_t s1 = Sha256RotateRight(y, 17u) ^
-                Sha256RotateRight(y, 19u) ^ (y >> 10u);
-            words[i] = words[i - 16u] + s0 + words[i - 7u] + s1;
-        }
-        uint32_t a = state[0], b = state[1], c = state[2], d = state[3];
-        uint32_t e = state[4], f = state[5], g = state[6], h = state[7];
-        for (uint32_t i = 0u; i < 64u; ++i) {
-            const uint32_t s1 = Sha256RotateRight(e, 6u) ^
-                Sha256RotateRight(e, 11u) ^ Sha256RotateRight(e, 25u);
-            const uint32_t choose = (e & f) ^ ((~e) & g);
-            const uint32_t temp1 = h + s1 + choose + kRound[i] + words[i];
-            const uint32_t s0 = Sha256RotateRight(a, 2u) ^
-                Sha256RotateRight(a, 13u) ^ Sha256RotateRight(a, 22u);
-            const uint32_t majority = (a & b) ^ (a & c) ^ (b & c);
-            const uint32_t temp2 = s0 + majority;
-            h = g; g = f; f = e; e = d + temp1;
-            d = c; c = b; b = a; a = temp1 + temp2;
-        }
-        state[0] += a; state[1] += b; state[2] += c; state[3] += d;
-        state[4] += e; state[5] += f; state[6] += g; state[7] += h;
+    uint8_t tail[128] = {};
+    const size_t remainder = bytes - complete_bytes;
+    if (remainder != 0u) {
+        std::memcpy(tail, data + complete_bytes, remainder);
     }
+    tail[remainder] = 0x80u;
+    const size_t tail_bytes = remainder < 56u ? 64u : 128u;
+    const uint64_t bit_count = (uint64_t)bytes * 8u;
+    for (uint32_t i = 0u; i < 8u; ++i) {
+        tail[tail_bytes - 1u - i] = (uint8_t)(bit_count >> (i * 8u));
+    }
+    Sha256CompressBlock(tail, state);
+    if (tail_bytes == 128u) Sha256CompressBlock(tail + 64u, state);
     std::ostringstream output;
     output << std::hex << std::setfill('0');
     for (uint32_t value : state) output << std::setw(8) << value;
     return output.str();
+}
+
+// Keeping verification in the consumer prevents a stale or forged preferred
+// map from being blessed by an unrelated digest supplied on the command line.
+std::string Sha256Hex(const std::string& input)
+{
+    return Sha256HexBytes(
+        reinterpret_cast<const uint8_t*>(input.data()), input.size());
 }
 
 bool ReadBoundedFile(
@@ -7512,6 +7533,870 @@ int CmdGroupedTiming(int argc, char** argv)
     return 0;
 }
 
+enum class RhsTimingOverheadStream
+{
+    Paired,
+    Salted
+};
+
+static const uint64_t kRhsTimingMaxEvictionBytes =
+    UINT64_C(1073741824);
+static const char kRhsTimingOutputValidation[] =
+    "exact-all-zero-full-scan-v1";
+
+const char* RhsTimingOverheadStreamName(RhsTimingOverheadStream stream)
+{
+    return stream == RhsTimingOverheadStream::Paired ? "paired" : "salted";
+}
+
+std::string RhsTimingPacketPrefixSha256(
+    const PreferredTimingCell& cell,
+    uint32_t K)
+{
+    if (cell.Packets.size() < (size_t)K) return std::string();
+    std::ostringstream prefix;
+    prefix << "wirehair-wh2-rhstiming-packet-prefix-v1\nK=" << K
+           << "\nids=";
+    for (uint32_t packet = 0u; packet < K; ++packet) {
+        if (packet != 0u) prefix << ',';
+        prefix << cell.Packets[packet].BlockId;
+    }
+    prefix << '\n';
+    return Sha256Hex(prefix.str());
+}
+
+std::string RhsTimingGraphSha256(
+    const wirehair_v2::PrecodeSystem& system,
+    const wirehair_v2::PacketRowConfig& config,
+    const PreferredTimingCell& cell)
+{
+    const wirehair_v2::PrecodeParams& params = system.Params;
+    std::ostringstream graph;
+    graph << "wirehair-wh2-rhstiming-graph-v1\n"
+          << params.BlockCount << ',' << params.Staircase << ','
+          << params.DenseRows << ',' << params.HeavyRows << ','
+          << params.SourceHits << ',' << (uint32_t)params.Field << ','
+          << (params.DenseIdentityCorner ? 1u : 0u) << ','
+          << (params.DenseTwoAnchor ? 1u : 0u) << ','
+          << params.DenseTwoAnchorPhase << ','
+          << (uint32_t)params.HeavyFamily << ',' << params.Seed << ','
+          << config.PeelSeed << ',' << config.MixCount << '\n';
+    const auto append_rows = [&graph](
+        const char* tag,
+        const std::vector<std::vector<uint32_t>>& rows)
+    {
+        graph << tag << '=' << rows.size() << '\n';
+        for (size_t row = 0u; row < rows.size(); ++row) {
+            graph << row << ':';
+            for (uint32_t column : rows[row]) graph << column << ',';
+            graph << '\n';
+        }
+    };
+    append_rows("staircase", system.StaircaseRows);
+    append_rows("dense", system.DenseRowColumns);
+    const uint64_t intermediate_columns_wide = (uint64_t)params.BlockCount +
+        params.Staircase + params.DenseRows + params.HeavyRows;
+    graph << "heavy=" << params.HeavyRows << 'x'
+          << intermediate_columns_wide
+          << '\n' << std::hex << std::setfill('0');
+    for (uint64_t column = 0u;
+         column < intermediate_columns_wide;
+         ++column)
+    {
+        for (uint32_t row = 0u; row < params.HeavyRows; ++row) {
+            graph << std::setw(2) << (uint32_t)
+                wirehair_v2::HeavyCoefficientForParams(
+                    params, row, (uint32_t)column);
+        }
+        graph << '\n';
+    }
+    graph << std::dec << "packets=" << cell.Packets.size() << '\n';
+    const uint64_t precode_count_wide = (uint64_t)params.Staircase +
+        params.DenseRows + params.HeavyRows;
+    if (precode_count_wide > UINT32_MAX) return std::string();
+    for (size_t packet = 0u; packet < cell.Packets.size(); ++packet)
+    {
+        const std::vector<uint32_t> row =
+            wirehair_v2::GeneratePacketMatrixRowWithRuntime(
+                params.BlockCount, (uint32_t)precode_count_wide,
+                cell.Packets[packet].BlockId, config, cell.Runtime);
+        if (row.empty()) return std::string();
+        graph << packet << '@' << cell.Packets[packet].BlockId << ':';
+        for (uint32_t column : row) graph << column << ',';
+        graph << '\n';
+    }
+    return Sha256Hex(graph.str());
+}
+
+struct RhsTimingObservation
+{
+    WirehairResult Result = Wirehair_Error;
+    wirehair_v2::PrecodeSolveStats Stats;
+    size_t IntermediateBytes = 0u;
+    bool OutputAllZero = false;
+    std::string OutputSha256;
+};
+
+// The RHS timing payload and every precode RHS are homogeneous zero.  A
+// successful full-rank solve therefore has exactly one valid output: every
+// intermediate byte is zero.  Accumulate every machine word and tail byte so
+// optimized builds can vectorize the scan without introducing an early-exit
+// data dependency or silently sampling only part of the output.
+bool RhsTimingOutputAllZero(
+    const uint8_t* output,
+    size_t output_bytes,
+    uint64_t expected_output_bytes)
+{
+    if ((uint64_t)output_bytes != expected_output_bytes ||
+        (output_bytes != 0u && !output))
+    {
+        return false;
+    }
+    uint64_t nonzero = 0u;
+    size_t offset = 0u;
+    for (; output_bytes - offset >= sizeof(uint64_t);
+         offset += sizeof(uint64_t))
+    {
+        uint64_t word = 0u;
+        std::memcpy(&word, output + offset, sizeof(word));
+        nonzero |= word;
+    }
+    for (; offset < output_bytes; ++offset) nonzero |= output[offset];
+    return nonzero == 0u;
+}
+
+bool RunRhsTimingObservation(
+    const wirehair_v2::PrecodeSystem& system,
+    const wirehair_v2::PacketRowConfig& config,
+    const PreferredTimingCell& cell,
+    uint32_t block_bytes,
+    uint64_t expected_intermediate_bytes,
+    bool compute_output_sha256,
+    RhsTimingObservation& observation)
+{
+    observation = RhsTimingObservation{};
+    std::vector<uint8_t> intermediate;
+    observation.Result =
+        wirehair_v2::SolvePrecodeSystemForValidatedSystemWithRuntime(
+            system, config, cell.Runtime, cell.Packets, block_bytes,
+            intermediate, &observation.Stats);
+    if (observation.Result != Wirehair_Success &&
+        observation.Result != Wirehair_NeedMore)
+    {
+        return false;
+    }
+    observation.IntermediateBytes = intermediate.size();
+    observation.OutputAllZero = RhsTimingOutputAllZero(
+        intermediate.data(), intermediate.size(), expected_intermediate_bytes);
+    if (compute_output_sha256 && observation.OutputAllZero) {
+        observation.OutputSha256 = Sha256HexBytes(
+            intermediate.data(), intermediate.size());
+    }
+    return true;
+}
+
+struct RhsTimingDerived
+{
+    uint32_t Q = 0u;
+    uint32_t HeavyGain = 0u;
+    uint32_t UnusedBinaryRows = 0u;
+    uint64_t RhsInitDestinationBytes = 0u;
+    uint64_t PhaseSumNanoseconds = 0u;
+};
+
+bool AddRhsTimingPhase(uint64_t value, uint64_t& total)
+{
+    if (value > UINT64_MAX - total) return false;
+    total += value;
+    return true;
+}
+
+int64_t RhsTimingUsageDelta(int64_t before, int64_t after)
+{
+    if (before < 0 || after < 0) return -1;
+    if (after < before) return -2;
+    return after - before;
+}
+
+bool RhsTimingEnvironmentReceiptValid(
+    int cpu_before,
+    int cpu_after,
+    int64_t minor_fault_delta,
+    int64_t major_fault_delta)
+{
+    const bool cpu_known_and_stable =
+        cpu_before >= 0 && cpu_after >= 0 && cpu_before == cpu_after;
+    const bool cpu_unavailable = cpu_before == -1 && cpu_after == -1;
+    const bool faults_known_and_clean =
+        minor_fault_delta == 0 && major_fault_delta == 0;
+    const bool faults_unavailable =
+        minor_fault_delta == -1 && major_fault_delta == -1;
+    return (cpu_known_and_stable || cpu_unavailable) &&
+        (faults_known_and_clean || faults_unavailable);
+}
+
+bool DeriveRhsTimingStats(
+    const wirehair_v2::PrecodeSolveStats& stats,
+    uint32_t K,
+    uint32_t overhead,
+    uint32_t block_bytes,
+    uint32_t heavy_rows,
+    size_t intermediate_bytes,
+    uint64_t expected_intermediate_bytes,
+    RhsTimingDerived& derived)
+{
+    derived = RhsTimingDerived{};
+    if ((uint64_t)K + overhead > UINT32_MAX ||
+        stats.PacketRows != K + overhead ||
+        stats.InactivatedColumns == 0u ||
+        stats.InactivatedColumns < stats.BinaryResidualRank ||
+        stats.ResidualRank < stats.BinaryResidualRank ||
+        stats.ResidualRows < heavy_rows ||
+        stats.PeeledColumns > UINT32_MAX - stats.InactivatedColumns ||
+        stats.PeeledColumns + stats.InactivatedColumns !=
+            expected_intermediate_bytes / block_bytes ||
+        intermediate_bytes != expected_intermediate_bytes ||
+        stats.MixedJointSourceXors != 0u ||
+        stats.MixedJointMarginalXors != 0u ||
+        stats.MixedJointMarginalCopies != 0u ||
+        stats.MixedJointActiveDeltas != 0u ||
+        stats.MixedJointScratchBytes != 0u ||
+        stats.MixedDualSourceColumns != 0u)
+    {
+        return false;
+    }
+    derived.Q =
+        stats.InactivatedColumns - stats.BinaryResidualRank;
+    derived.HeavyGain = stats.ResidualRank - stats.BinaryResidualRank;
+    derived.UnusedBinaryRows = stats.ResidualRows - heavy_rows;
+    derived.RhsInitDestinationBytes =
+        (uint64_t)derived.UnusedBinaryRows * block_bytes;
+    if (derived.Q > heavy_rows || derived.HeavyGain != derived.Q ||
+        derived.UnusedBinaryRows == 0u ||
+        !AddRhsTimingPhase(
+            stats.BuildNanoseconds, derived.PhaseSumNanoseconds) ||
+        !AddRhsTimingPhase(
+            stats.PeelNanoseconds, derived.PhaseSumNanoseconds) ||
+        !AddRhsTimingPhase(
+            stats.ProjectNanoseconds, derived.PhaseSumNanoseconds) ||
+        !AddRhsTimingPhase(
+            stats.ResidualNanoseconds, derived.PhaseSumNanoseconds) ||
+        !AddRhsTimingPhase(
+            stats.BackSubNanoseconds, derived.PhaseSumNanoseconds))
+    {
+        return false;
+    }
+    return true;
+}
+
+bool SameRhsTimingConfiguration(
+    const wirehair_v2::PrecodeParams& expected_params,
+    const wirehair_v2::PacketRowConfig& expected_config,
+    const wirehair_v2::PrecodeSystem& system,
+    const wirehair_v2::PacketRowConfig& config)
+{
+    const wirehair_v2::PrecodeParams& params = system.Params;
+    return params.BlockCount == expected_params.BlockCount &&
+        params.Staircase == expected_params.Staircase &&
+        params.DenseRows == expected_params.DenseRows &&
+        params.HeavyRows == expected_params.HeavyRows &&
+        params.SourceHits == expected_params.SourceHits &&
+        params.Field == expected_params.Field &&
+        params.DenseIdentityCorner == expected_params.DenseIdentityCorner &&
+        params.DenseTwoAnchor == expected_params.DenseTwoAnchor &&
+        params.DenseTwoAnchorPhase == expected_params.DenseTwoAnchorPhase &&
+        params.HeavyFamily == expected_params.HeavyFamily &&
+        params.Seed == expected_params.Seed &&
+        config.PeelSeed == expected_config.PeelSeed &&
+        config.MixCount == expected_config.MixCount;
+}
+
+int CmdRhsTiming(int argc, char** argv)
+{
+    uint32_t K = 0u;
+    uint32_t block_bytes = 0u;
+    uint32_t overhead = 0u;
+    uint32_t expect_q = 0u;
+    uint32_t cycle_index = 0u;
+    uint64_t eviction_bytes = 0u;
+    double loss = 0.0;
+    uint64_t seed = 0u;
+    PacketScheduleKind schedule = PacketScheduleKind::Burst;
+    GroupedTimingCacheState cache_state = GroupedTimingCacheState::Cold;
+    RhsTimingOverheadStream overhead_stream = RhsTimingOverheadStream::Paired;
+    bool have_K = false;
+    bool have_block_bytes = false;
+    bool have_overhead = false;
+    bool have_expect_q = false;
+    bool have_overhead_stream = false;
+    bool have_eviction = false;
+    bool have_cache_state = false;
+    bool have_loss = false;
+    bool have_seed = false;
+    bool have_schedule = false;
+    bool have_cycle_index = false;
+
+    for (int i = 0; i < argc; ++i)
+    {
+        const char* value = nullptr;
+        if (!std::strcmp(argv[i], "--N")) {
+            if (have_K ||
+                !TakeArg("rhstiming", "--N", argc, argv, i, value) ||
+                !ParseCanonicalU32Arg("--N", value, K)) return 1;
+            have_K = true;
+        }
+        else if (!std::strcmp(argv[i], "--bb")) {
+            if (have_block_bytes ||
+                !TakeArg("rhstiming", "--bb", argc, argv, i, value) ||
+                !ParseCanonicalU32Arg("--bb", value, block_bytes)) return 1;
+            have_block_bytes = true;
+        }
+        else if (!std::strcmp(argv[i], "--overhead")) {
+            if (have_overhead || !TakeArg(
+                    "rhstiming", "--overhead", argc, argv, i, value) ||
+                !ParseCanonicalU32Arg("--overhead", value, overhead))
+            {
+                return 1;
+            }
+            have_overhead = true;
+        }
+        else if (!std::strcmp(argv[i], "--expect-q")) {
+            if (have_expect_q || !TakeArg(
+                    "rhstiming", "--expect-q", argc, argv, i, value) ||
+                !ParseCanonicalU32Arg("--expect-q", value, expect_q))
+            {
+                return 1;
+            }
+            have_expect_q = true;
+        }
+        else if (!std::strcmp(argv[i], "--overhead-stream")) {
+            if (have_overhead_stream || !TakeArg(
+                    "rhstiming", "--overhead-stream",
+                    argc, argv, i, value))
+            {
+                return 1;
+            }
+            if (!std::strcmp(value, "paired")) {
+                overhead_stream = RhsTimingOverheadStream::Paired;
+            }
+            else if (!std::strcmp(value, "salted")) {
+                overhead_stream = RhsTimingOverheadStream::Salted;
+            }
+            else {
+                std::fprintf(stderr,
+                    "rhstiming --overhead-stream must be paired or salted\n");
+                return 1;
+            }
+            have_overhead_stream = true;
+        }
+        else if (!std::strcmp(argv[i], "--evict-bytes")) {
+            if (have_eviction || !TakeArg(
+                    "rhstiming", "--evict-bytes", argc, argv, i, value) ||
+                !ParseCanonicalU64Arg(
+                    "--evict-bytes", value, eviction_bytes))
+            {
+                return 1;
+            }
+            have_eviction = true;
+        }
+        else if (!std::strcmp(argv[i], "--cache-state")) {
+            if (have_cache_state || !TakeArg(
+                    "rhstiming", "--cache-state", argc, argv, i, value))
+            {
+                return 1;
+            }
+            if (!std::strcmp(value, "cold")) {
+                cache_state = GroupedTimingCacheState::Cold;
+            }
+            else if (!std::strcmp(value, "warm")) {
+                cache_state = GroupedTimingCacheState::Warm;
+            }
+            else {
+                std::fprintf(stderr,
+                    "rhstiming --cache-state must be cold or warm\n");
+                return 1;
+            }
+            have_cache_state = true;
+        }
+        else if (!std::strcmp(argv[i], "--cycle-index")) {
+            if (have_cycle_index || !TakeArg(
+                    "rhstiming", "--cycle-index", argc, argv, i, value) ||
+                !ParseCanonicalU32Arg(
+                    "--cycle-index", value, cycle_index))
+            {
+                return 1;
+            }
+            have_cycle_index = true;
+        }
+        else if (!std::strcmp(argv[i], "--loss")) {
+            if (have_loss || !TakeArg(
+                    "rhstiming", "--loss", argc, argv, i, value) ||
+                !ParseDoubleArg("--loss", value, loss)) return 1;
+            have_loss = true;
+        }
+        else if (!std::strcmp(argv[i], "--seed")) {
+            if (have_seed || !TakeArg(
+                    "rhstiming", "--seed", argc, argv, i, value) ||
+                !ParseCanonicalU64Arg("--seed", value, seed)) return 1;
+            have_seed = true;
+        }
+        else if (!std::strcmp(argv[i], "--schedule")) {
+            if (have_schedule || !TakeArg(
+                    "rhstiming", "--schedule", argc, argv, i, value) ||
+                !ParsePacketSchedule(value, schedule))
+            {
+                std::fprintf(stderr,
+                    "rhstiming --schedule must be burst, adversarial, "
+                    "or repair-only\n");
+                return 1;
+            }
+            have_schedule = true;
+        }
+        else if (!UnknownArg("rhstiming", argv[i])) {
+            return 1;
+        }
+    }
+    if (!have_K || !have_block_bytes || !have_overhead || !have_expect_q ||
+        !have_overhead_stream || !have_eviction || !have_cache_state ||
+        !have_loss || !have_seed || !have_schedule)
+    {
+        std::fprintf(stderr,
+            "rhstiming requires --N, --bb, --overhead, --expect-q, "
+            "--overhead-stream, --evict-bytes, --cache-state, --loss, "
+            "--seed, and --schedule\n");
+        return 1;
+    }
+    if (eviction_bytes > kRhsTimingMaxEvictionBytes) {
+        std::fprintf(stderr,
+            "rhstiming --evict-bytes exceeds frozen maximum %llu\n",
+            (unsigned long long)kRhsTimingMaxEvictionBytes);
+        return 1;
+    }
+    if (K < 2u || K > 64000u ||
+        (block_bytes != 64u && block_bytes != 256u &&
+         block_bytes != 1280u && block_bytes != 4096u) ||
+        overhead > 1024u || (uint64_t)K + overhead > UINT32_MAX ||
+        expect_q > 12u || (have_cycle_index && cycle_index > 3u) ||
+        eviction_bytes < 4096u ||
+        eviction_bytes > (uint64_t)std::numeric_limits<size_t>::max() ||
+        !ValidateLoss(loss, "rhstiming") ||
+        (schedule != PacketScheduleKind::Burst &&
+         schedule != PacketScheduleKind::Adversarial &&
+         schedule != PacketScheduleKind::RepairOnly))
+    {
+        std::fprintf(stderr, "rhstiming argument domain mismatch\n");
+        return 1;
+    }
+    const std::vector<int> one_K(1u, (int)K);
+    const std::vector<int> one_bb(1u, (int)block_bytes);
+    if (!ValidatePayloadE2EInputs(one_K, one_bb, "rhstiming")) return 1;
+
+    const wirehair_v2::SeedProfile profile =
+        wirehair_v2::SelectSeedProfile(K, block_bytes);
+    const uint64_t base_matrix_seed = wirehair_v2::MatrixSeedFromProfile(
+        profile, 0u, wirehair_v2::kMessagePrecodeSeedSalt);
+    const uint32_t base_peel_seed = wirehair_v2::PacketPeelSeedFromProfile(
+        profile, wirehair_v2::kMessageRecoveryRowSeedSalt);
+    wirehair_v2::PrecodeParams base_params =
+        wirehair_v2::MakeCertifiedParams(K, base_matrix_seed);
+    base_params.Staircase = profile.DenseCount;
+    base_params.HeavyFamily =
+        wirehair_v2::HeavyCoefficientFamily::PeriodicCauchy;
+    base_params.DenseTwoAnchor = false;
+    base_params.DenseTwoAnchorPhase = 0u;
+    wirehair_v2::PacketRowConfig base_config;
+    base_config.PeelSeed = base_peel_seed;
+    base_config.MixCount = wirehair_v2::kCertifiedPacketMixCount;
+    if (base_params.Field != wirehair_v2::CompletionField::GF256 ||
+        base_params.DenseRows != 12u || base_params.HeavyRows != 12u ||
+        base_params.DenseIdentityCorner || base_params.DenseTwoAnchor ||
+        base_params.DenseTwoAnchorPhase != 0u ||
+        base_params.HeavyFamily !=
+            wirehair_v2::HeavyCoefficientFamily::PeriodicCauchy ||
+        base_config.MixCount != 3u)
+    {
+        std::fprintf(stderr,
+            "rhstiming certified graph contract construction failed\n");
+        return 2;
+    }
+    wirehair_v2::PrecodeSystem system;
+    wirehair_v2::PacketRowConfig config;
+    uint32_t selected_attempt = 0u;
+    const WirehairResult select_result =
+        wirehair_v2::SelectSystematicConfiguration(
+            base_params, base_config, system, config, &selected_attempt);
+    if (select_result != Wirehair_Success) {
+        std::fprintf(stderr,
+            "rhstiming systematic seed selection failed result=%d\n",
+            (int)select_result);
+        return 2;
+    }
+    const wirehair_v2::PrecodeParams expected_params =
+        wirehair_v2::PrecodeParamsForAttempt(base_params, selected_attempt);
+    const wirehair_v2::PacketRowConfig expected_config =
+        wirehair_v2::PacketConfigForAttempt(base_config, selected_attempt);
+    if (!SameRhsTimingConfiguration(
+            expected_params, expected_config, system, config) ||
+        !wirehair_v2::ValidatePrecodeSystem(system))
+    {
+        std::fprintf(stderr,
+            "rhstiming selected graph does not match certified contract\n");
+        return 2;
+    }
+
+    PreferredTimingCell cell;
+    const bool salt_overhead =
+        overhead_stream == RhsTimingOverheadStream::Salted;
+    const char* const trace_tag = salt_overhead ?
+        "wirehair-wh2-rhs-timing-trace-v1-salted" :
+        "wirehair-wh2-rhs-timing-trace-v1-paired";
+    if (!BuildFullPayloadTimingCell(
+            system.Params, config, block_bytes, overhead, loss, seed, schedule,
+            salt_overhead, trace_tag, cell))
+    {
+        std::fprintf(stderr, "rhstiming solve setup failed\n");
+        return 2;
+    }
+    const uint64_t packet_payload_bytes =
+        ((uint64_t)K + overhead) * block_bytes;
+    const uint64_t source_bytes = (uint64_t)K * block_bytes;
+    const uint64_t intermediate_blocks = (uint64_t)K +
+        system.Params.Staircase + system.Params.DenseRows +
+        system.Params.HeavyRows;
+    if (intermediate_blocks > UINT64_MAX / block_bytes ||
+        packet_payload_bytes > (uint64_t)std::numeric_limits<size_t>::max() ||
+        cell.Packets.size() != (size_t)K + overhead ||
+        cell.Payload == nullptr ||
+        (reinterpret_cast<uintptr_t>(cell.Payload) & 63u) != 0u)
+    {
+        std::fprintf(stderr, "rhstiming payload receipt mismatch\n");
+        return 2;
+    }
+    for (size_t packet = 0u; packet < cell.Packets.size(); ++packet) {
+        if (cell.Packets[packet].Data !=
+            cell.Payload + packet * (size_t)block_bytes)
+        {
+            std::fprintf(stderr,
+                "rhstiming packet payloads are not distinct and contiguous\n");
+            return 2;
+        }
+    }
+    const uint64_t expected_intermediate_bytes =
+        intermediate_blocks * block_bytes;
+    const std::string payload_sha256 = Sha256HexBytes(
+        cell.Payload, (size_t)packet_payload_bytes);
+    const std::string graph_sha256 =
+        RhsTimingGraphSha256(system, config, cell);
+    const std::string packet_prefix_sha256 =
+        RhsTimingPacketPrefixSha256(cell, K);
+    if (!IsLowerHexSha256(payload_sha256) ||
+        !IsLowerHexSha256(graph_sha256) ||
+        !IsLowerHexSha256(cell.TraceSha256) ||
+        !IsLowerHexSha256(packet_prefix_sha256))
+    {
+        std::fprintf(stderr, "rhstiming receipt hashing failed\n");
+        return 2;
+    }
+
+    std::vector<uint8_t> eviction;
+    try {
+        eviction.assign((size_t)eviction_bytes, 0u);
+    }
+    catch (const std::bad_alloc&) {
+        std::fprintf(stderr, "rhstiming eviction allocation failed\n");
+        return 2;
+    }
+    catch (const std::length_error&) {
+        std::fprintf(stderr, "rhstiming eviction allocation failed\n");
+        return 2;
+    }
+    EvictPreferredTimingCache(eviction);
+    RhsTimingObservation control_preflight;
+    RhsTimingObservation candidate_preflight;
+    if (!RunRhsTimingObservation(
+            system, config, cell, block_bytes, expected_intermediate_bytes,
+            true, control_preflight) ||
+        !RunRhsTimingObservation(
+            system, config, cell, block_bytes, expected_intermediate_bytes,
+            false, candidate_preflight))
+    {
+        std::fprintf(stderr, "rhstiming preflight failed\n");
+        return 2;
+    }
+    RhsTimingDerived control_derived;
+    RhsTimingDerived candidate_derived;
+    const bool control_stats_valid = DeriveRhsTimingStats(
+        control_preflight.Stats, K, overhead, block_bytes,
+        system.Params.HeavyRows,
+        control_preflight.IntermediateBytes,
+        expected_intermediate_bytes, control_derived);
+    const bool candidate_stats_valid = DeriveRhsTimingStats(
+        candidate_preflight.Stats, K, overhead, block_bytes,
+        system.Params.HeavyRows,
+        candidate_preflight.IntermediateBytes,
+        expected_intermediate_bytes, candidate_derived);
+    if (control_preflight.Result != Wirehair_Success ||
+        candidate_preflight.Result != Wirehair_Success ||
+        (uint64_t)control_preflight.IntermediateBytes !=
+            expected_intermediate_bytes ||
+        (uint64_t)candidate_preflight.IntermediateBytes !=
+            expected_intermediate_bytes ||
+        control_preflight.IntermediateBytes !=
+            candidate_preflight.IntermediateBytes ||
+        !control_preflight.OutputAllZero ||
+        !candidate_preflight.OutputAllZero ||
+        !IsLowerHexSha256(control_preflight.OutputSha256) ||
+        !candidate_preflight.OutputSha256.empty() ||
+        control_preflight.Stats.PacketSeedAttempt !=
+            candidate_preflight.Stats.PacketSeedAttempt ||
+        !SameNonTimingSolveStats(
+            control_preflight.Stats, candidate_preflight.Stats) ||
+        !control_stats_valid || !candidate_stats_valid)
+    {
+        std::fprintf(stderr,
+            "rhstiming native A/B preflight receipt mismatch: "
+            "control_valid=%u candidate_valid=%u packet_rows=%u "
+            "peeled=%u inactivated=%u residual_rows=%u residual_rank=%u "
+            "binary_rank=%u packet_attempt=%u intermediate=%zu "
+            "expected_intermediate=%llu mixed=[%llu,%llu,%llu,%u,%llu,%llu]\n",
+            control_stats_valid ? 1u : 0u,
+            candidate_stats_valid ? 1u : 0u,
+            control_preflight.Stats.PacketRows,
+            control_preflight.Stats.PeeledColumns,
+            control_preflight.Stats.InactivatedColumns,
+            control_preflight.Stats.ResidualRows,
+            control_preflight.Stats.ResidualRank,
+            control_preflight.Stats.BinaryResidualRank,
+            control_preflight.Stats.PacketSeedAttempt,
+            control_preflight.IntermediateBytes,
+            (unsigned long long)expected_intermediate_bytes,
+            (unsigned long long)control_preflight.Stats.MixedJointSourceXors,
+            (unsigned long long)control_preflight.Stats.MixedJointMarginalXors,
+            (unsigned long long)control_preflight.Stats.MixedJointMarginalCopies,
+            control_preflight.Stats.MixedJointActiveDeltas,
+            (unsigned long long)control_preflight.Stats.MixedJointScratchBytes,
+            (unsigned long long)control_preflight.Stats.MixedDualSourceColumns);
+        return 2;
+    }
+    if (control_derived.Q != expect_q || candidate_derived.Q != expect_q) {
+        std::fprintf(stderr,
+            "rhstiming expected q mismatch: expected=%u control=%u "
+            "candidate=%u\n",
+            expect_q, control_derived.Q, candidate_derived.Q);
+        return 2;
+    }
+
+    static const char kOrder[] = {'A', 'B', 'B', 'A', 'B', 'A', 'A', 'B'};
+    const std::string cycle_index_text =
+        have_cycle_index ? std::to_string(cycle_index) : "all";
+    std::printf(
+        "# rhstiming: schema=v1 policy=certified-gf256-rhs "
+        "timing_scope=solve native_pair=identical-negative-control "
+        "cycles=%u order=ABBABAAB discard_cycle=0 cycle_mode=%s "
+        "cycle_index=%s N=%u bb=%u overhead=%u expect_q=%u "
+        "overhead_stream=%s loss=%.17g seed=%llu schedule=%s "
+        "cache_state=%s evict_bytes=%llu eviction_prefaulted=1 "
+        "completion=gf256 field=gf256 H=%u D2=%u S=%u source_hits=%u "
+        "mix=%u dense_two_anchor=0 heavy_family=periodic "
+        "base_matrix_seed=0x%llx base_peel_seed=0x%x "
+        "selected_attempt=%u preflight_packet_seed_attempt=%u "
+        "matrix_seed=0x%llx peel_seed=0x%x "
+        "graph_sha256=%s trace_sha256=%s packet_prefix_sha256=%s "
+        "payload=distinct-packet-zero-v1 payload_count=%u "
+        "payload_bytes=%llu payload_alignment=64 payload_prefaulted=1 "
+        "payload_sha256=%s system_build=outside-timer "
+        "output_validation=%s "
+        "allocator_state=preflight-warmed preflight_control_result=%d "
+        "preflight_candidate_result=%d cell_class=common-success "
+        "common_success=1 preflight_output_all_zero=1 "
+        "preflight_output_sha256=%s "
+        "preflight_intermediate_bytes=%zu preflight_packet_rows=%u "
+        "preflight_peeled_columns=%u preflight_inactivated=%u "
+        "preflight_residual_rows=%u preflight_residual_rank=%u "
+        "preflight_binary_residual_rank=%u preflight_q=%u "
+        "preflight_heavy_gain=%u preflight_unused_binary_rows=%u "
+        "preflight_rhs_init_destination_bytes=%llu\n",
+        have_cycle_index ? 1u : 4u,
+        have_cycle_index ? "replacement" : "full",
+        cycle_index_text.c_str(), K, block_bytes, overhead, expect_q,
+        RhsTimingOverheadStreamName(overhead_stream), loss,
+        (unsigned long long)seed, PacketScheduleName(schedule),
+        GroupedTimingCacheStateName(cache_state),
+        (unsigned long long)eviction_bytes,
+        system.Params.HeavyRows, system.Params.DenseRows,
+        system.Params.Staircase, system.Params.SourceHits, config.MixCount,
+        (unsigned long long)base_matrix_seed, base_peel_seed,
+        selected_attempt, control_preflight.Stats.PacketSeedAttempt,
+        (unsigned long long)system.Params.Seed,
+        config.PeelSeed, graph_sha256.c_str(), cell.TraceSha256.c_str(),
+        packet_prefix_sha256.c_str(),
+        K + overhead, (unsigned long long)packet_payload_bytes,
+        payload_sha256.c_str(), kRhsTimingOutputValidation,
+        (int)control_preflight.Result,
+        (int)candidate_preflight.Result,
+        control_preflight.OutputSha256.c_str(),
+        control_preflight.IntermediateBytes,
+        control_preflight.Stats.PacketRows,
+        control_preflight.Stats.PeeledColumns,
+        control_preflight.Stats.InactivatedColumns,
+        control_preflight.Stats.ResidualRows,
+        control_preflight.Stats.ResidualRank,
+        control_preflight.Stats.BinaryResidualRank,
+        control_derived.Q, control_derived.HeavyGain,
+        control_derived.UnusedBinaryRows,
+        (unsigned long long)control_derived.RhsInitDestinationBytes);
+    std::printf(
+        "N,bb,overhead,expect_q,overhead_stream,schedule,seed,loss,"
+        "cache_state,cycle,slot,arm,field,completion,H,D2,S,source_hits,mix,"
+        "dense_two_anchor,heavy_family,seed_attempt,packet_seed_attempt,"
+        "matrix_seed,peel_seed,"
+        "graph_sha256,trace_sha256,packet_prefix_sha256,payload_contract,"
+        "payload_sha256,"
+        "preflight_result,output_sha256,output_validation,all_zero,"
+        "cell_class,common_success,"
+        "result,outcome_stable,elapsed_ns,saturated,cpu_before,cpu_after,"
+        "cpu_migrated,minflt_delta,majflt_delta,fault_contaminated,"
+        "packet_rows,peeled_columns,inactivated,residual_rows,residual_rank,"
+        "binary_residual_rank,q,heavy_gain,unused_binary_rows,"
+        "rhs_init_destination_bytes,binary_row_references,"
+        "binary_row_storage_bytes,binary_adjacency_storage_bytes,"
+        "binary_row_storage_allocations,binary_adjacency_storage_allocations,"
+        "block_xors,block_muladds,build_ns,peel_ns,project_ns,residual_ns,"
+        "backsub_ns,phase_sum_ns,mixed_joint_source_xors,"
+        "mixed_joint_marginal_xors,mixed_joint_marginal_copies,"
+        "mixed_joint_active_deltas,mixed_joint_scratch_bytes,"
+        "mixed_dual_source_columns,source_bytes,packet_payload_bytes,"
+        "intermediate_bytes\n");
+
+    const uint32_t first_cycle = have_cycle_index ? cycle_index : 0u;
+    const uint32_t end_cycle = have_cycle_index ? cycle_index + 1u : 4u;
+    for (uint32_t cycle = first_cycle; cycle < end_cycle; ++cycle)
+    {
+        for (uint32_t slot = 0u; slot < 8u; ++slot)
+        {
+            const bool control = kOrder[slot] == 'A';
+            const RhsTimingObservation& preflight = control ?
+                control_preflight : candidate_preflight;
+            if (cache_state == GroupedTimingCacheState::Cold) {
+                EvictPreferredTimingCache(eviction);
+            }
+            const PreferredTimingUsage usage_before =
+                ReadPreferredTimingUsage();
+            const int cpu_before = PreferredTimingCurrentCpu();
+            const Clock::time_point begin = Clock::now();
+            wirehair_v2::PrecodeSolveStats stats;
+            std::vector<uint8_t> intermediate;
+            const WirehairResult result =
+                wirehair_v2::SolvePrecodeSystemForValidatedSystemWithRuntime(
+                    system, config, cell.Runtime, cell.Packets, block_bytes,
+                    intermediate, &stats);
+            const Clock::time_point end = Clock::now();
+            const int cpu_after = PreferredTimingCurrentCpu();
+            const PreferredTimingUsage usage_after =
+                ReadPreferredTimingUsage();
+            bool saturated = false;
+            const uint64_t elapsed_ns =
+                PreferredTimingElapsedNanoseconds(begin, end, saturated);
+            const int64_t minflt_delta = RhsTimingUsageDelta(
+                usage_before.MinorFaults, usage_after.MinorFaults);
+            const int64_t majflt_delta = RhsTimingUsageDelta(
+                usage_before.MajorFaults, usage_after.MajorFaults);
+            const int cpu_migrated =
+                GroupedTimingCpuMigrated(cpu_before, cpu_after);
+            const int fault_contaminated =
+                GroupedTimingFaultContaminated(minflt_delta, majflt_delta);
+            const bool output_all_zero = RhsTimingOutputAllZero(
+                intermediate.data(), intermediate.size(),
+                expected_intermediate_bytes);
+            const char* const output_sha256 = output_all_zero ?
+                control_preflight.OutputSha256.c_str() : "none";
+            RhsTimingDerived derived;
+            const bool derived_valid = DeriveRhsTimingStats(
+                stats, K, overhead, block_bytes,
+                system.Params.HeavyRows,
+                intermediate.size(), expected_intermediate_bytes,
+                derived);
+            const bool receipt_valid =
+                RhsTimingEnvironmentReceiptValid(
+                    cpu_before, cpu_after, minflt_delta, majflt_delta) &&
+                output_all_zero &&
+                stats.PacketSeedAttempt ==
+                    preflight.Stats.PacketSeedAttempt &&
+                SameNonTimingSolveStats(stats, preflight.Stats) &&
+                derived_valid &&
+                derived.Q == expect_q &&
+                derived.PhaseSumNanoseconds <= elapsed_ns;
+            const bool outcome_stable = result == preflight.Result;
+            std::ostringstream row;
+            row << K << ',' << block_bytes << ',' << overhead << ','
+                << expect_q << ','
+                << RhsTimingOverheadStreamName(overhead_stream) << ','
+                << PacketScheduleName(schedule) << ',' << seed << ','
+                << std::setprecision(17) << loss << ','
+                << GroupedTimingCacheStateName(cache_state) << ','
+                << cycle << ',' << slot << ','
+                << (control ? "control" : "candidate")
+                << ",gf256,gf256," << system.Params.HeavyRows << ','
+                << system.Params.DenseRows << ',' << system.Params.Staircase
+                << ',' << system.Params.SourceHits << ',' << config.MixCount
+                << ",0,periodic," << selected_attempt << ','
+                << stats.PacketSeedAttempt << ",0x"
+                << std::hex << system.Params.Seed << ",0x"
+                << config.PeelSeed << std::dec << ','
+                << graph_sha256 << ',' << cell.TraceSha256 << ','
+                << packet_prefix_sha256
+                << ",distinct-packet-zero-v1," << payload_sha256 << ','
+                << (int)preflight.Result << ',' << output_sha256
+                << ',' << kRhsTimingOutputValidation << ','
+                << (output_all_zero ? 1u : 0u)
+                << ",common-success,1," << (int)result << ','
+                << (outcome_stable ? 1u : 0u) << ',' << elapsed_ns << ','
+                << (saturated ? 1u : 0u) << ',' << cpu_before << ','
+                << cpu_after << ',' << cpu_migrated << ','
+                << minflt_delta << ',' << majflt_delta << ','
+                << fault_contaminated
+                << ',' << stats.PacketRows << ',' << stats.PeeledColumns
+                << ',' << stats.InactivatedColumns << ','
+                << stats.ResidualRows << ',' << stats.ResidualRank << ','
+                << stats.BinaryResidualRank << ',' << derived.Q << ','
+                << derived.HeavyGain << ',' << derived.UnusedBinaryRows << ','
+                << derived.RhsInitDestinationBytes << ','
+                << stats.BinaryRowReferences << ','
+                << stats.BinaryRowStorageBytes << ','
+                << stats.BinaryAdjacencyStorageBytes << ','
+                << stats.BinaryRowStorageAllocations << ','
+                << stats.BinaryAdjacencyStorageAllocations << ','
+                << stats.BlockXors << ',' << stats.BlockMulAdds << ','
+                << stats.BuildNanoseconds << ',' << stats.PeelNanoseconds
+                << ',' << stats.ProjectNanoseconds << ','
+                << stats.ResidualNanoseconds << ',' << stats.BackSubNanoseconds
+                << ',' << derived.PhaseSumNanoseconds << ','
+                << stats.MixedJointSourceXors << ','
+                << stats.MixedJointMarginalXors << ','
+                << stats.MixedJointMarginalCopies << ','
+                << stats.MixedJointActiveDeltas << ','
+                << stats.MixedJointScratchBytes << ','
+                << stats.MixedDualSourceColumns << ',' << source_bytes << ','
+                << packet_payload_bytes << ',' << intermediate.size();
+            const std::string row_text = row.str();
+            std::printf("%s\n", row_text.c_str());
+            if (saturated || !outcome_stable || result != Wirehair_Success ||
+                !receipt_valid)
+            {
+                std::fprintf(stderr,
+                    "rhstiming run receipt failed cycle=%u slot=%u "
+                    "result=%d preflight=%d receipt_valid=%u "
+                    "cpu_migrated=%d fault_contaminated=%d\n",
+                    cycle, slot, (int)result, (int)preflight.Result,
+                    receipt_valid ? 1u : 0u,
+                    cpu_migrated, fault_contaminated);
+                return 2;
+            }
+        }
+    }
+    return 0;
+}
+
 #endif // test hooks && !WIREHAIR_V2_BENCH_DISABLE_PREFERRED_ATTEMPT
 
 int CmdPrecodeFail(int argc, char** argv)
@@ -9160,6 +10045,79 @@ int CmdSelfTest()
     std::printf("mixed null-witness exit policy: PASS\n");
 #endif
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS) && \
+    !defined(WIREHAIR_V2_BENCH_DISABLE_PREFERRED_ATTEMPT)
+    static const size_t kShaLengths[] = {0u, 55u, 56u, 64u, 65u};
+    static const char* const kShaExpected[] = {
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318",
+        "b35439a4ac6f0948b6d6f9e3c6af0f5f590ce20f1bde7090ef7970686ec6738a",
+        "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb",
+        "635361c48bb9eab14198e76ea8ab7f1a41685d6ad62aa9146d301d4f17eb0ae0",
+    };
+    for (size_t i = 0u; i < sizeof(kShaLengths) / sizeof(kShaLengths[0]); ++i)
+    {
+        const std::string input(kShaLengths[i], 'a');
+        const std::string actual = Sha256Hex(input);
+        if (actual != kShaExpected[i]) {
+            std::fprintf(stderr,
+                "SHA-256 receipt oracle mismatch at %zu bytes: %s\n",
+                kShaLengths[i], actual.c_str());
+            return 1;
+        }
+    }
+    std::printf("SHA-256 receipt oracle: PASS\n");
+
+    if (!RhsTimingEnvironmentReceiptValid(7, 7, 0, 0) ||
+        !RhsTimingEnvironmentReceiptValid(-1, -1, -1, -1) ||
+        RhsTimingEnvironmentReceiptValid(7, 8, 0, 0) ||
+        RhsTimingEnvironmentReceiptValid(-1, 7, -1, -1) ||
+        RhsTimingEnvironmentReceiptValid(7, 7, 1, 0) ||
+        RhsTimingEnvironmentReceiptValid(7, 7, 0, 1) ||
+        RhsTimingEnvironmentReceiptValid(7, 7, -1, 0) ||
+        RhsTimingEnvironmentReceiptValid(7, 7, -2, 0))
+    {
+        std::fprintf(stderr,
+            "RHS timing environment receipt policy mismatch\n");
+        return 1;
+    }
+    std::printf("RHS timing environment receipt policy: PASS\n");
+
+    std::vector<uint8_t> timed_output(129u, 0u);
+    if (!RhsTimingOutputAllZero(
+            timed_output.data(), timed_output.size(), timed_output.size()) ||
+        RhsTimingOutputAllZero(
+            timed_output.data(), timed_output.size(),
+            timed_output.size() - 1u) ||
+        RhsTimingOutputAllZero(
+            timed_output.data(), timed_output.size(),
+            timed_output.size() + 1u) ||
+        RhsTimingOutputAllZero(nullptr, 1u, 1u) ||
+        !RhsTimingOutputAllZero(nullptr, 0u, 0u))
+    {
+        std::fprintf(stderr,
+            "RHS timing output full-scan length policy mismatch\n");
+        return 1;
+    }
+    const size_t corrupt_offsets[] = {
+        0u, timed_output.size() / 2u, timed_output.size() - 1u
+    };
+    for (size_t offset : corrupt_offsets) {
+        timed_output[offset] = 1u;
+        if (RhsTimingOutputAllZero(
+                timed_output.data(), timed_output.size(),
+                timed_output.size()))
+        {
+            std::fprintf(stderr,
+                "RHS timing output full-scan missed corruption at %zu\n",
+                offset);
+            return 1;
+        }
+        timed_output[offset] = 0u;
+    }
+    std::printf("RHS timing output full-scan policy: PASS\n");
+#endif
+
     double wilson_lower = 0.0;
     double wilson_upper = 0.0;
     Wilson95(0u, 4u, wilson_lower, wilson_upper);
@@ -9212,7 +10170,7 @@ int main(int argc, char** argv)
         std::fprintf(stderr,
             "usage: wirehair_v2_bench compare|precodecheck|seedtable|"
             "peelcost|densecheck|densetune|densecount|densegrid|precodefail|"
-            "preferredattempt|preferredtiming|groupedtiming|selftest "
+            "preferredattempt|preferredtiming|groupedtiming|rhstiming|selftest "
             "[opts]\n");
 #else
         std::fprintf(stderr,
@@ -9261,6 +10219,9 @@ int main(int argc, char** argv)
         }
         if (!std::strcmp(argv[1], "groupedtiming")) {
             return CmdGroupedTiming(argc - 2, argv + 2);
+        }
+        if (!std::strcmp(argv[1], "rhstiming")) {
+            return CmdRhsTiming(argc - 2, argv + 2);
         }
 #endif
         if (!std::strcmp(argv[1], "selftest")) {

@@ -140,6 +140,8 @@ expect_success("loss=0.98999999999999999" densegrid --N 2 --bb-list 1
 # Valid one-trial smoke for all remaining modes.
 expect_success("loss boundary oracle: PASS" selftest)
 expect_success("mixed null-witness exit policy: PASS" selftest)
+expect_success("RHS timing environment receipt policy: PASS" selftest)
+expect_success("RHS timing output full-scan policy: PASS" selftest)
 expect_success("# compare:" compare --nlo 2 --nhi 2 --trials 1
     --bb-list 8 --max-message-mib 1 --loss 0)
 expect_success("64,8,1,1,0,0,0,0,0," precodecheck --N 64 --bb-list 8
@@ -1302,6 +1304,202 @@ expect_failure("cache-state must be cold or warm" groupedtiming
     --candidate-period 48 --candidate-grouped-rows 3
     --candidate-buckets separate --evict-bytes 4096 --cache-state tepid
     --loss 0.5 --seed 4660 --schedule burst)
+
+if(NOT SKIP_CONSTRAINED)
+    # Generic GF(256) RHS timing freezes the production certified H12/D12/mix3
+    # graph and uses a native identical A/B pair.  A full warm run exercises
+    # all four ABBABAAB cycles while binding the graph, trace, payload,
+    # preflight and timed outputs, q, and every non-timing solve receipt.  Each
+    # CSV record has exactly 78 fields.  Sanitizer instrumentation necessarily
+    # page-faults inside these solves, so instrumented builds exercise the
+    # deterministic receipt-policy self-test instead.
+    run_bench(rhs_timing_result rhs_timing rhs_timing_err rhstiming
+    --N 128 --bb 64 --overhead 0 --expect-q 12
+    --overhead-stream paired --evict-bytes 4096 --cache-state warm
+    --loss 0.5 --seed 4660 --schedule adversarial)
+string(REGEX MATCHALL
+    "\n128,64,0,12,paired,adversarial,4660,0.5,warm," rhs_timing_rows
+    "${rhs_timing}")
+list(LENGTH rhs_timing_rows rhs_timing_row_count)
+string(REGEX MATCHALL
+    "\n128,64,0,12,paired,adversarial,4660,0.5,warm,[0-3],[0-7],(control|candidate),gf256,gf256,12,12,30,2,3,0,periodic,0,0,0xdcd8ae7a9da0e7f6,0x272fe371,[0-9a-f]+,[0-9a-f]+,2ae4f445661207afaccaf36ff407666c7279bf8f95289d74952df078795c0da3,distinct-packet-zero-v1,9f1dcbc35c350d6027f98be0f5c8b43b42ca52b7604459c0c42be3aa88913d47,0,3dab159376fbc08730201dc7b6f18f866f6e3ed7980f20597cb97ebaaf3e382f,exact-all-zero-full-scan-v1,1,common-success,1,0,1,[0-9]+,0,-?[0-9]+,-?[0-9]+,(-1|0),(-1|0),(-1|0),(-1|0),128,125,57,57,57,45,12,12,45,2880,[0-9]+,[0-9]+,[0-9]+,[0-9]+,[0-9]+,[0-9]+,[0-9]+,[0-9]+,[0-9]+,[0-9]+,[0-9]+,[0-9]+,[0-9]+,0,0,0,0,0,0,8192,8192,11648"
+    rhs_timing_valid_rows "${rhs_timing}")
+list(LENGTH rhs_timing_valid_rows rhs_timing_valid_row_count)
+if(NOT rhs_timing_result EQUAL 0 OR rhs_timing_err OR
+   NOT rhs_timing_row_count EQUAL 32 OR
+   NOT rhs_timing_valid_row_count EQUAL 32 OR NOT rhs_timing MATCHES
+       "schema=v1 policy=certified-gf256-rhs timing_scope=solve native_pair=identical-negative-control cycles=4 order=ABBABAAB discard_cycle=0 cycle_mode=full cycle_index=all.*expect_q=12 overhead_stream=paired.*completion=gf256 field=gf256 H=12 D2=12 S=30 source_hits=2 mix=3 dense_two_anchor=0 heavy_family=periodic.*selected_attempt=0 preflight_packet_seed_attempt=0 matrix_seed=0xdcd8ae7a9da0e7f6 peel_seed=0x272fe371 graph_sha256=[0-9a-f]+ trace_sha256=[0-9a-f]+ packet_prefix_sha256=2ae4f445661207afaccaf36ff407666c7279bf8f95289d74952df078795c0da3.*payload=distinct-packet-zero-v1 payload_count=128 payload_bytes=8192 payload_alignment=64 payload_prefaulted=1 payload_sha256=9f1dcbc35c350d6027f98be0f5c8b43b42ca52b7604459c0c42be3aa88913d47.*output_validation=exact-all-zero-full-scan-v1.*preflight_control_result=0 preflight_candidate_result=0 cell_class=common-success common_success=1 preflight_output_all_zero=1 preflight_output_sha256=3dab159376fbc08730201dc7b6f18f866f6e3ed7980f20597cb97ebaaf3e382f preflight_intermediate_bytes=11648.*preflight_q=12 preflight_heavy_gain=12 preflight_unused_binary_rows=45 preflight_rhs_init_destination_bytes=2880" OR
+   NOT rhs_timing MATCHES
+       "N,bb,overhead,expect_q,overhead_stream,schedule,seed,loss,cache_state,cycle,slot,arm,field,completion,H,D2,S,source_hits,mix,dense_two_anchor,heavy_family,seed_attempt,packet_seed_attempt,matrix_seed,peel_seed,graph_sha256,trace_sha256,packet_prefix_sha256,payload_contract,payload_sha256,preflight_result,output_sha256,output_validation,all_zero,cell_class,common_success,result,outcome_stable,elapsed_ns,saturated,cpu_before,cpu_after,cpu_migrated,minflt_delta,majflt_delta,fault_contaminated,packet_rows,peeled_columns,inactivated,residual_rows,residual_rank,binary_residual_rank,q,heavy_gain,unused_binary_rows,rhs_init_destination_bytes,binary_row_references,binary_row_storage_bytes,binary_adjacency_storage_bytes,binary_row_storage_allocations,binary_adjacency_storage_allocations,block_xors,block_muladds,build_ns,peel_ns,project_ns,residual_ns,backsub_ns,phase_sum_ns,mixed_joint_source_xors,mixed_joint_marginal_xors,mixed_joint_marginal_copies,mixed_joint_active_deltas,mixed_joint_scratch_bytes,mixed_dual_source_columns,source_bytes,packet_payload_bytes,intermediate_bytes")
+    message(FATAL_ERROR
+        "generic RHS warm timing fixture failed\n"
+        "${rhs_timing}\n${rhs_timing_err}")
+endif()
+string(REGEX MATCHALL "\n[^#N][^\n]*" rhs_timing_csv_rows
+    "${rhs_timing}")
+foreach(rhs_timing_csv_row IN LISTS rhs_timing_csv_rows)
+    string(STRIP "${rhs_timing_csv_row}" rhs_timing_csv_row)
+    string(REPLACE "," ";" rhs_timing_csv_fields
+        "${rhs_timing_csv_row}")
+    list(LENGTH rhs_timing_csv_fields rhs_timing_csv_arity)
+    if(NOT rhs_timing_csv_arity EQUAL 78)
+        message(FATAL_ERROR
+            "rhstiming CSV arity ${rhs_timing_csv_arity}, expected 78: "
+            "${rhs_timing_csv_row}")
+    endif()
+endforeach()
+foreach(cycle RANGE 0 3)
+    foreach(slot RANGE 0 7)
+        if(slot EQUAL 0 OR slot EQUAL 3 OR slot EQUAL 5 OR slot EQUAL 6)
+            set(rhs_timing_arm "control")
+        else()
+            set(rhs_timing_arm "candidate")
+        endif()
+        if(NOT rhs_timing MATCHES
+           "warm,${cycle},${slot},${rhs_timing_arm},gf256,gf256,")
+            message(FATAL_ERROR
+                "rhstiming order mismatch cycle=${cycle} slot=${slot}")
+        endif()
+    endforeach()
+endforeach()
+
+# One salted replacement cycle covers the second overhead stream and verifies
+# that --cycle-index remains a bounded eight-observation unit.  Keep this
+# correctness fixture warm: cold observations may legitimately be rejected by
+# the timing-environment receipt when the solve incurs a page fault.
+run_bench(rhs_salted_result rhs_salted rhs_salted_err rhstiming
+    --N 128 --bb 64 --overhead 4 --expect-q 8
+    --overhead-stream salted --evict-bytes 4096 --cache-state warm
+    --cycle-index 1 --loss 0.5 --seed 4660 --schedule adversarial)
+string(REGEX MATCHALL
+    "\n128,64,4,8,salted,adversarial,4660,0.5,warm,1,"
+    rhs_salted_rows "${rhs_salted}")
+list(LENGTH rhs_salted_rows rhs_salted_row_count)
+if(NOT rhs_salted_result EQUAL 0 OR rhs_salted_err OR
+   NOT rhs_salted_row_count EQUAL 8 OR NOT rhs_salted MATCHES
+       "cycles=1 order=ABBABAAB discard_cycle=0 cycle_mode=replacement cycle_index=1.*expect_q=8 overhead_stream=salted.*cache_state=warm.*selected_attempt=0 preflight_packet_seed_attempt=0.*packet_prefix_sha256=5e7636d8fd816c71d65abce1b8b3497b055970f838a68d8fdd65806e105be2f5.*output_validation=exact-all-zero-full-scan-v1.*preflight_output_all_zero=1 preflight_output_sha256=3dab159376fbc08730201dc7b6f18f866f6e3ed7980f20597cb97ebaaf3e382f.*preflight_packet_rows=132.*preflight_q=8 preflight_heavy_gain=8 preflight_unused_binary_rows=47 preflight_rhs_init_destination_bytes=3008" OR
+   NOT rhs_salted MATCHES
+       ",8,8,47,3008,[0-9]+,[0-9]+,[0-9]+,[0-9]+,[0-9]+,[0-9]+,[0-9]+,[0-9]+,[0-9]+,[0-9]+,[0-9]+,[0-9]+,[0-9]+,0,0,0,0,0,0,8192,8448,11648")
+    message(FATAL_ERROR
+        "generic RHS salted timing fixture failed\n"
+        "${rhs_salted}\n${rhs_salted_err}")
+endif()
+
+# The smallest legal K binds three otherwise uncovered contracts with bounded
+# one-cycle fixtures.  The zero-overhead packet prefix is frozen first; a
+# paired positive-overhead cell at nonzero loss must retain that exact prefix.
+# Separate q=0 and bb=4096/q=12 cells exercise both quotient boundaries.  Exact
+# preflight output receipts make a seed/policy drift fail instead of silently
+# moving these fixtures to a different solve.
+set(rhs_tiny_prefix_sha256
+    "3c6947b8ff0dce25b8d9b5669ef82e7b54619c463ef89df1b9eb69cce6675c83")
+run_bench(rhs_tiny_result rhs_tiny rhs_tiny_err rhstiming
+    --N 2 --bb 64 --overhead 0 --expect-q 12
+    --overhead-stream paired --evict-bytes 4096 --cache-state warm
+    --cycle-index 0 --loss 0.5 --seed 4660 --schedule adversarial)
+string(REGEX MATCHALL
+    "\n2,64,0,12,paired,adversarial,4660,0.5,warm,0,"
+    rhs_tiny_rows "${rhs_tiny}")
+list(LENGTH rhs_tiny_rows rhs_tiny_row_count)
+if(NOT rhs_tiny_result EQUAL 0 OR rhs_tiny_err OR
+   NOT rhs_tiny_row_count EQUAL 8 OR NOT rhs_tiny MATCHES
+       "N=2 bb=64 overhead=0 expect_q=12 overhead_stream=paired loss=0.5 seed=4660 schedule=adversarial.*selected_attempt=7 preflight_packet_seed_attempt=0 matrix_seed=0x86f76d76ed8265af peel_seed=0x38c822e7 graph_sha256=6503383cab001ca396cc153d24bbf2a0df3c8bd23af4a4153ee2b0282b35e696 trace_sha256=4b50fe99457ec121dd1934867ab2eabc12d52ddb4a8344caaf002c0739904bb0 packet_prefix_sha256=${rhs_tiny_prefix_sha256}.*payload_sha256=38723a2e5e8a17aa7950dc008209944e898f69a7bd10a23c839d341e935fd5ca.*output_validation=exact-all-zero-full-scan-v1.*preflight_output_all_zero=1 preflight_output_sha256=7b4fc1a8dbe6b6121f16ada516e2ac27e02964716bacea5fb7d07cf30595948e.*preflight_packet_rows=2.*preflight_q=12 preflight_heavy_gain=12 preflight_unused_binary_rows=5 preflight_rhs_init_destination_bytes=320" OR
+   NOT rhs_tiny MATCHES
+       "periodic,7,0,0x86f76d76ed8265af,0x38c822e7.*exact-all-zero-full-scan-v1,1,common-success")
+    message(FATAL_ERROR
+        "generic RHS tiny prefix fixture failed\n"
+        "${rhs_tiny}\n${rhs_tiny_err}")
+endif()
+
+run_bench(rhs_paired_result rhs_paired rhs_paired_err rhstiming
+    --N 2 --bb 64 --overhead 4 --expect-q 8
+    --overhead-stream paired --evict-bytes 4096 --cache-state warm
+    --cycle-index 0 --loss 0.5 --seed 4660 --schedule adversarial)
+string(REGEX MATCHALL
+    "\n2,64,4,8,paired,adversarial,4660,0.5,warm,0,"
+    rhs_paired_rows "${rhs_paired}")
+list(LENGTH rhs_paired_rows rhs_paired_row_count)
+if(NOT rhs_paired_result EQUAL 0 OR rhs_paired_err OR
+   NOT rhs_paired_row_count EQUAL 8 OR NOT rhs_paired MATCHES
+       "N=2 bb=64 overhead=4 expect_q=8 overhead_stream=paired loss=0.5 seed=4660 schedule=adversarial.*selected_attempt=7 preflight_packet_seed_attempt=0 matrix_seed=0x86f76d76ed8265af peel_seed=0x38c822e7 graph_sha256=02be7720c560b4b4a12387aa65fef5bc60b381f87e436c36297f0761e518d49b trace_sha256=256cb0d03e840ad3c63c6f1cee264444cb66d28cf8548fb80473e8cd26598695 packet_prefix_sha256=${rhs_tiny_prefix_sha256}.*payload_sha256=a1a4f5721c1c4610af7f71078f3a68c330536d679803b0e0507ee8dc10c5dfca.*output_validation=exact-all-zero-full-scan-v1.*preflight_output_all_zero=1 preflight_output_sha256=7b4fc1a8dbe6b6121f16ada516e2ac27e02964716bacea5fb7d07cf30595948e.*preflight_packet_rows=6.*preflight_q=8 preflight_heavy_gain=8 preflight_unused_binary_rows=5 preflight_rhs_init_destination_bytes=320" OR
+   NOT rhs_paired MATCHES
+       "periodic,7,0,0x86f76d76ed8265af,0x38c822e7.*exact-all-zero-full-scan-v1,1,common-success")
+    message(FATAL_ERROR
+        "generic RHS paired-prefix fixture failed\n"
+        "${rhs_paired}\n${rhs_paired_err}")
+endif()
+
+run_bench(rhs_q0_result rhs_q0 rhs_q0_err rhstiming
+    --N 2 --bb 64 --overhead 18 --expect-q 0
+    --overhead-stream paired --evict-bytes 4096 --cache-state warm
+    --cycle-index 0 --loss 0 --seed 4660 --schedule adversarial)
+string(REGEX MATCHALL
+    "\n2,64,18,0,paired,adversarial,4660,0,warm,0,"
+    rhs_q0_rows "${rhs_q0}")
+list(LENGTH rhs_q0_rows rhs_q0_row_count)
+if(NOT rhs_q0_result EQUAL 0 OR rhs_q0_err OR
+   NOT rhs_q0_row_count EQUAL 8 OR NOT rhs_q0 MATCHES
+       "N=2 bb=64 overhead=18 expect_q=0 overhead_stream=paired loss=0 seed=4660 schedule=adversarial.*selected_attempt=7 preflight_packet_seed_attempt=0 matrix_seed=0x86f76d76ed8265af peel_seed=0x38c822e7 graph_sha256=8c41f84fcb24af38110561eeb2af15ca8bc567e2b21e628a25dd277a5782e8ad trace_sha256=e56dee48aa9fc672c3f3561095926a0849d57d484d56ca35a8c5f1736b6a632a packet_prefix_sha256=${rhs_tiny_prefix_sha256}.*payload_sha256=bfe492baf731a0dbf6e1e050f5bc3fe8c1b049383194dcdf82f023bfa409f462.*output_validation=exact-all-zero-full-scan-v1.*preflight_output_all_zero=1 preflight_output_sha256=7b4fc1a8dbe6b6121f16ada516e2ac27e02964716bacea5fb7d07cf30595948e.*preflight_packet_rows=20.*preflight_q=0 preflight_heavy_gain=0 preflight_unused_binary_rows=12 preflight_rhs_init_destination_bytes=768" OR
+   NOT rhs_q0 MATCHES
+       "periodic,7,0,0x86f76d76ed8265af,0x38c822e7.*exact-all-zero-full-scan-v1,1,common-success")
+    message(FATAL_ERROR
+        "generic RHS paired-prefix/q=0 fixture failed\n"
+        "${rhs_q0}\n${rhs_q0_err}")
+endif()
+
+run_bench(rhs_wide_result rhs_wide rhs_wide_err rhstiming
+    --N 2 --bb 4096 --overhead 0 --expect-q 12
+    --overhead-stream paired --evict-bytes 4096 --cache-state warm
+    --cycle-index 0 --loss 0.5 --seed 4660 --schedule adversarial)
+string(REGEX MATCHALL
+    "\n2,4096,0,12,paired,adversarial,4660,0.5,warm,0,"
+    rhs_wide_rows "${rhs_wide}")
+list(LENGTH rhs_wide_rows rhs_wide_row_count)
+if(NOT rhs_wide_result EQUAL 0 OR rhs_wide_err OR
+   NOT rhs_wide_row_count EQUAL 8 OR NOT rhs_wide MATCHES
+       "N=2 bb=4096 overhead=0 expect_q=12 overhead_stream=paired.*selected_attempt=1 preflight_packet_seed_attempt=0 matrix_seed=0x5b2a54350aac7870 peel_seed=0x5bbca5ec graph_sha256=6180b90940563a2949f1340a50b56564bdb5501977ba0f314acce97e582c560b trace_sha256=aa9ee2ebea46b2adfb537d49c90ed1fe34accce52a5a1ec0e2d3a06098444bd9 packet_prefix_sha256=${rhs_tiny_prefix_sha256}.*payload_sha256=9f1dcbc35c350d6027f98be0f5c8b43b42ca52b7604459c0c42be3aa88913d47.*output_validation=exact-all-zero-full-scan-v1.*preflight_output_all_zero=1 preflight_output_sha256=96c94d0826105fe47c587fd79e8869ce5edbfbacdddab9f4f30c5fecba2ca6a3.*preflight_packet_rows=2.*preflight_q=12 preflight_heavy_gain=12 preflight_unused_binary_rows=4 preflight_rhs_init_destination_bytes=16384" OR
+   NOT rhs_wide MATCHES
+       "periodic,1,0,0x5b2a54350aac7870,0x5bbca5ec.*exact-all-zero-full-scan-v1,1,common-success")
+    message(FATAL_ERROR
+        "generic RHS bb4096 quotient fixture failed\n"
+        "${rhs_wide}\n${rhs_wide_err}")
+endif()
+endif()
+
+expect_failure("requires --N" rhstiming)
+expect_failure("argument domain mismatch" rhstiming
+    --N 128 --bb 64 --overhead 0 --expect-q 13
+    --overhead-stream paired --evict-bytes 4096 --cache-state warm
+    --loss 0.5 --seed 4660 --schedule adversarial)
+expect_failure("overhead-stream must be paired or salted" rhstiming
+    --N 128 --bb 64 --overhead 0 --expect-q 12
+    --overhead-stream drifting --evict-bytes 4096 --cache-state warm
+    --loss 0.5 --seed 4660 --schedule adversarial)
+expect_failure("bad --expect-q value" rhstiming
+    --N 128 --bb 64 --overhead 0 --expect-q 012
+    --overhead-stream paired --evict-bytes 4096 --cache-state warm
+    --loss 0.5 --seed 4660 --schedule adversarial)
+expect_failure("argument domain mismatch" rhstiming
+    --N 128 --bb 128 --overhead 0 --expect-q 12
+    --overhead-stream paired --evict-bytes 4096 --cache-state warm
+    --loss 0.5 --seed 4660 --schedule adversarial)
+expect_failure("argument domain mismatch" rhstiming
+    --N 128 --bb 64 --overhead 0 --expect-q 12
+    --overhead-stream paired --evict-bytes 4096 --cache-state warm
+    --cycle-index 4 --loss 0.5 --seed 4660 --schedule adversarial)
+expect_failure("--evict-bytes exceeds frozen maximum 1073741824" rhstiming
+    --N 128 --bb 64 --overhead 0 --expect-q 12
+    --overhead-stream paired --evict-bytes 18446744073709551615
+    --cache-state warm --loss 0.5 --seed 4660 --schedule adversarial)
+run_bench(rhs_q_result rhs_q_out rhs_q_err rhstiming
+    --N 128 --bb 64 --overhead 0 --expect-q 11
+    --overhead-stream paired --evict-bytes 4096 --cache-state warm
+    --cycle-index 0 --loss 0.5 --seed 4660 --schedule adversarial)
+if(NOT rhs_q_result EQUAL 2 OR rhs_q_out OR NOT rhs_q_err MATCHES
+   "expected q mismatch: expected=11 control=12 candidate=12")
+    message(FATAL_ERROR
+        "rhstiming q mismatch gate failed\n${rhs_q_out}\n${rhs_q_err}")
+endif()
 
 run_bench(route_result route_mixed route_err preferredattempt --mode route
     --N 3,4096 --bb-list 64
