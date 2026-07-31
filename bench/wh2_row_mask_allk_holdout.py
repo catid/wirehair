@@ -16,10 +16,13 @@ seeds and schedules of the finalists campaign; NO new independent seeds are
 used.  The 16 development hard cells (the finalist field-shortfall union that
 selected the survivor masks) were selection material: the reducer reports
 them separately as fix-confirmation and EXCLUDES them from the headline
-holdout comparison.  Acceptance per survivor: it must improve the raw
-field-shortfall count of its comparator, with zero introductions on headline
-cells and paired XOR/GF-muladd cost ratios on common successes within the
-sealed tolerance; zero codec errors are required everywhere.
+holdout comparison.  Acceptance per survivor requires a lower raw
+field-shortfall count and a lower raw total failure count; on headline cells
+it also requires a lower total
+failure count, at least one actual repair, and zero introductions.  Paired
+XOR/GF-muladd cost ratios on common headline successes must remain within the
+sealed tolerance, at least one panel source field-shortfall must be genuinely
+fixed rather than relabeled, and zero codec errors are required everywhere.
 
 The preparation path is intentionally separate from execution.  It freezes a
 freshly built clean-commit test-hook benchmark, the sole CPU/DIMM thermal
@@ -35,12 +38,18 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import csv
+import fcntl
 import hashlib
 import io
 import json
+import math
 import os
 import re
+import select
+import shlex
 import shutil
+import signal
+import stat
 import subprocess
 import sys
 import tarfile
@@ -65,8 +74,230 @@ SOURCE_SUMMARY_SHA256 = (
 )
 SOURCE_SUMMARY_NAME = "validated_summary.json"
 SAMPLER_NAME = "wirehair_expo_thermal_sampler.py"
+SAMPLER_SHA256 = "2b84efa91375a96a4a64e09ce5bfd7cba0b85b75028f5a93470cd4ae58aadb01"
 BINARY_NAME = "wirehair_v2_bench"
 CONTROLLER_NAME = "wh2_row_mask_allk_holdout.py"
+DIMM_I2C_DEVICES = (Path("/dev/i2c-1"), Path("/dev/i2c-2"))
+SUDO_PATH = Path("/usr/bin/sudo")
+FUSER_PATH = Path("/usr/bin/fuser")
+KILL_PATH = Path("/usr/bin/kill")
+CAT_PATH = Path("/usr/bin/cat")
+PYTHON_PATH = Path("/usr/bin/python3.12")
+I2C_INSPECTION_TIMEOUT_SECONDS = 5.0
+I2C_RECHECK_INTERVAL_SECONDS = 1.0
+JOB_TIMEOUT_SECONDS = 900.0
+PRIVILEGED_PIDFD_SIGNAL_CODE = r"""
+import os
+import signal
+import sys
+
+pid = int(sys.argv[1])
+expected_start = int(sys.argv[2])
+expected_cmdline = bytes.fromhex(sys.argv[3])
+signum = {"TERM": signal.SIGTERM, "KILL": signal.SIGKILL}[sys.argv[4]]
+try:
+    pidfd = os.pidfd_open(pid, 0)
+except ProcessLookupError:
+    raise SystemExit(4)
+try:
+    try:
+        with open("/proc/{}/stat".format(pid), "rb") as stream:
+            stat_raw = stream.read()
+        with open("/proc/{}/cmdline".format(pid), "rb") as stream:
+            cmdline_raw = stream.read()
+        observed_start = int(stat_raw.rsplit(b") ", 1)[1].split()[19])
+    except (FileNotFoundError, ProcessLookupError):
+        raise SystemExit(4)
+    except (IndexError, OSError, ValueError):
+        raise SystemExit(5)
+    if observed_start != expected_start or cmdline_raw != expected_cmdline:
+        raise SystemExit(3)
+    try:
+        signal.pidfd_send_signal(pidfd, signum)
+    except ProcessLookupError:
+        raise SystemExit(4)
+finally:
+    os.close(pidfd)
+"""
+PDEATH_EXEC_CODE = r"""
+import ctypes
+import os
+import signal
+import sys
+
+expected_parent = int(sys.argv[1])
+expected_parent_start = int(sys.argv[2])
+command = sys.argv[3:]
+if not command:
+    raise SystemExit(126)
+libc = ctypes.CDLL(None, use_errno=True)
+if libc.prctl(1, signal.SIGKILL, 0, 0, 0) != 0:
+    raise SystemExit(126)
+# PR_SET_PDEATHSIG alone has a fork-to-prctl race.  Comparing the parent after
+# arming it closes that race: if the controller already died, never exec the
+# benchmark.
+try:
+    with open("/proc/{}/stat".format(expected_parent), "rb") as stream:
+        parent_stat = stream.read()
+    parent_start = int(parent_stat.rsplit(b") ", 1)[1].split()[19])
+except (FileNotFoundError, IndexError, OSError, ValueError):
+    raise SystemExit(125)
+if os.getppid() != expected_parent or parent_start != expected_parent_start:
+    raise SystemExit(125)
+os.execv(command[0], command)
+"""
+PRIVILEGED_SAMPLER_SUPERVISOR_CODE = r"""
+import os
+import select
+import signal
+import subprocess
+import sys
+import time
+
+controller_pid = int(sys.argv[1])
+controller_start = int(sys.argv[2])
+pdeath_code = bytes.fromhex(sys.argv[3]).decode("utf-8")
+command = sys.argv[4:]
+if not command:
+    raise SystemExit(126)
+
+try:
+    controller_pidfd = os.pidfd_open(controller_pid, 0)
+    with open("/proc/{}/stat".format(controller_pid), "rb") as stream:
+        raw = stream.read()
+    observed_start = int(raw.rsplit(b") ", 1)[1].split()[19])
+except (FileNotFoundError, IndexError, OSError, ProcessLookupError, ValueError):
+    raise SystemExit(125)
+if observed_start != controller_start:
+    os.close(controller_pidfd)
+    raise SystemExit(125)
+
+poller = select.poll()
+poller.register(
+    controller_pidfd, select.POLLIN | select.POLLHUP | select.POLLERR)
+stopping = False
+
+def request_stop(_signum, _frame):
+    global stopping
+    stopping = True
+
+signal.signal(signal.SIGTERM, request_stop)
+signal.signal(signal.SIGINT, request_stop)
+
+def controller_alive():
+    return not poller.poll(0)
+
+def group_alive(pgid):
+    try:
+        os.killpg(pgid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+def observe_group_gone(pgid, timeout):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not group_alive(pgid):
+            return True
+        time.sleep(0.05)
+    return not group_alive(pgid)
+
+def leader_ready(poller, timeout):
+    return bool(poller.poll(max(0, int(timeout * 1000))))
+
+def stop_child(child, child_poller):
+    # start_new_session=True makes child.pid the owned process-group ID.
+    # Keep the leader unreaped until the final group signal: its process ID
+    # pins the PGID and prevents any unrelated group from reusing that number.
+    # The pinned sampler is single-process, while the final pre-reap SIGKILL
+    # also cleans up any unexpected same-group descendant.
+    if child.returncode is not None:
+        if not observe_group_gone(child.pid, 5.0):
+            raise RuntimeError("reaped sampler left a live process group")
+        return child.returncode
+    try:
+        os.killpg(child.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    leader_ready(child_poller, 15.0)
+    # Always issue the last group signal before wait()/poll() can reap the
+    # leader.  SIGKILL is harmless to an already-dead unreaped leader.
+    try:
+        os.killpg(child.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    if not leader_ready(child_poller, 5.0):
+        raise RuntimeError("sampler leader did not stop")
+    returncode = child.wait(timeout=5.0)
+    if not observe_group_gone(child.pid, 5.0):
+        raise RuntimeError("sampler process group did not stop")
+    return returncode
+
+def force_child_without_pidfd(child):
+    # The direct child is still unreaped here, so child.pid cannot be reused.
+    if child.returncode is not None:
+        if not observe_group_gone(child.pid, 5.0):
+            raise RuntimeError(
+                "reaped unbound sampler left a live process group")
+        return child.returncode
+    try:
+        os.killpg(child.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    returncode = child.wait(timeout=5.0)
+    if not observe_group_gone(child.pid, 5.0):
+        raise RuntimeError("unbound sampler process group did not stop")
+    return returncode
+
+child = None
+child_pidfd = None
+child_poller = None
+child_cleaned = False
+try:
+    if stopping or not controller_alive():
+        raise SystemExit(125)
+    with open("/proc/self/stat", "rb") as stream:
+        own_stat = stream.read()
+    own_start = int(own_stat.rsplit(b") ", 1)[1].split()[19])
+    if stopping or not controller_alive():
+        raise SystemExit(125)
+    child = subprocess.Popen([
+        sys.executable, "-I", "-c", pdeath_code,
+        str(os.getpid()), str(own_start), *command,
+    ], start_new_session=True)
+    try:
+        child_pidfd = os.pidfd_open(child.pid, 0)
+    except (OSError, ProcessLookupError):
+        force_child_without_pidfd(child)
+        child_cleaned = True
+        raise SystemExit(126)
+    child_poller = select.poll()
+    child_poller.register(
+        child_pidfd, select.POLLIN | select.POLLHUP | select.POLLERR)
+    # Close controller-death races on both sides of child creation.
+    if stopping or not controller_alive():
+        stop_child(child, child_poller)
+        child_cleaned = True
+        raise SystemExit(125)
+    while not leader_ready(child_poller, 0) and not stopping and \
+            controller_alive():
+        child_poller.poll(200)
+    returncode = stop_child(child, child_poller)
+    child_cleaned = True
+    raise SystemExit(returncode)
+finally:
+    if child is not None and not child_cleaned:
+        if child_poller is None:
+            force_child_without_pidfd(child)
+        else:
+            stop_child(child, child_poller)
+    if child_pidfd is not None:
+        os.close(child_pidfd)
+    os.close(controller_pidfd)
+"""
+BENCHMARK_EXEC_READY_TIMEOUT_SECONDS = 5.0
 
 SEEDS = (
     "0xd1b54a32d192ed03",
@@ -121,7 +352,12 @@ THERMAL_MAX_GAP_SECONDS = Decimal("2.5")
 THERMAL_READY_SAMPLES = 2
 THERMAL_READY_TIMEOUT_SECONDS = 12.0
 THERMAL_END_TIMEOUT_SECONDS = 5.0
+MIN_PLAUSIBLE_CPU_C = Decimal("0")
+MAX_PLAUSIBLE_CPU_C = Decimal("130")
+MIN_PLAUSIBLE_DIMM_C = Decimal("0")
+MAX_PLAUSIBLE_DIMM_C = Decimal("130")
 OWNER_MARKER_PATH = Path("/tmp/wirehair-environment-owner.json")
+OWNER_LOCK_PATH = Path("/tmp/wirehair-environment-owner.lock")
 OWNER_MARKER_SCHEMA = "wirehair.environment_owner.v1"
 BOOT_ID_PATH = Path("/proc/sys/kernel/random/boot_id")
 DEFAULT_OWNER_TTL_HOURS = 168
@@ -151,6 +387,17 @@ CSV_FIELDS = (
     "mixed_joint_marginal_copies_mu", "mixed_joint_active_deltas_mu",
     "mixed_joint_scratch_bytes_mu", "mixed_dual_source_columns_mu",
 )
+CSV_TIMING_MILLI_FIELDS = (
+    "solve_ms_mu", "build_ms_mu", "peel_ms_mu", "project_ms_mu",
+    "residual_ms_mu", "backsub_ms_mu",
+)
+CSV_COUNTER_MU_FIELDS = (
+    "block_xors_mu", "block_muladds_mu", "mixed_joint_source_xors_mu",
+    "mixed_joint_marginal_xors_mu", "mixed_joint_marginal_copies_mu",
+    "mixed_joint_active_deltas_mu", "mixed_joint_scratch_bytes_mu",
+    "mixed_dual_source_columns_mu",
+)
+CSV_MILLI_FIELDS = CSV_TIMING_MILLI_FIELDS + CSV_COUNTER_MU_FIELDS
 THERMAL_FIELDS = (
     "utc", "monotonic_s", "cpu_busy_pct", "cpu_avg_mhz", "cpu_tctl_c",
     "dimm_i2c1_50_c", "dimm_i2c1_51_c", "dimm_i2c1_52_c",
@@ -158,6 +405,20 @@ THERMAL_FIELDS = (
     "dimm_i2c2_52_c", "dimm_i2c2_53_c", "dimm_read_errors",
     "load1", "load5", "load15", "edac_ce", "edac_ue",
 )
+RUNTIME_DIRECTORY_NAMES = (
+    "raw", "stderr", "exit", "thermal", "segments", "attempts",
+    "job_receipts",
+)
+STOPPED_PROCESS_ACTIONS = {"already_exited", "terminated", "killed"}
+# A start-time mismatch proves that the originally captured process object is
+# gone even if its numeric PID has already been reused.  Command-identity loss
+# with the same start time is not proof of cleanup and is deliberately absent.
+DISCOVERY_PROVED_GONE_ACTIONS = STOPPED_PROCESS_ACTIONS | {"identity_reused"}
+# Linux exposes process IDs through a signed pid_t to kill(2)/pidfd_open(2).
+# The configured pid_max is normally far lower, but this architectural bound
+# prevents untrusted receipts from reaching those APIs as unrepresentable
+# Python integers.
+MAX_PROCESS_PID = (1 << 31) - 1
 
 
 class CampaignError(RuntimeError):
@@ -185,6 +446,35 @@ def sha256_file(path: Path) -> str:
         for block in iter(lambda: stream.read(1 << 20), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def verify_safe_directory(path: Path, label: str) -> None:
+    """Reject indirect, foreign-owned, or writable campaign directories."""
+    try:
+        identity = path.lstat()
+    except OSError as exc:
+        die("{} directory is unavailable: {}".format(label, exc))
+    if not stat.S_ISDIR(identity.st_mode) or identity.st_uid != os.getuid() or \
+            identity.st_mode & 0o022:
+        die("{} directory is indirect or unsafe: {}".format(label, path))
+
+
+def verify_runtime_directories(root: Path) -> None:
+    verify_safe_directory(root, "campaign root")
+    for name in RUNTIME_DIRECTORY_NAMES:
+        verify_safe_directory(root / name, name)
+
+
+def make_private_directory(
+    path: Path,
+    *,
+    parents: bool = False,
+    exist_ok: bool = False,
+) -> None:
+    path.mkdir(mode=0o700, parents=parents, exist_ok=exist_ok)
+    # Be explicit even if an unusual platform or pre-existing test fixture
+    # ignored the requested creation mode.
+    os.chmod(path, 0o700)
 
 
 def write_once(path: Path, data: bytes) -> None:
@@ -219,10 +509,37 @@ def json_lines(values: Iterable[object]) -> bytes:
     return b"".join(canonical_json(value) for value in values)
 
 
+def strict_json_loads(raw: str) -> object:
+    """Decode standards-only JSON while rejecting ambiguous object keys."""
+    def reject_constant(token: str) -> object:
+        raise ValueError("non-standard JSON constant {!r}".format(token))
+
+    def parse_finite_float(token: str) -> float:
+        value = float(token)
+        if not math.isfinite(value):
+            raise ValueError("non-finite JSON number {!r}".format(token))
+        return value
+
+    def unique_object(pairs: Sequence[Tuple[str, object]]) -> Dict[str, object]:
+        result: Dict[str, object] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate JSON key {!r}".format(key))
+            result[key] = value
+        return result
+
+    return json.loads(
+        raw,
+        parse_constant=reject_constant,
+        parse_float=parse_finite_float,
+        object_pairs_hook=unique_object,
+    )
+
+
 def load_json(path: Path) -> Dict[str, object]:
     try:
-        value = json.loads(path.read_text(encoding="ascii"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        value = strict_json_loads(path.read_text(encoding="ascii"))
+    except (OSError, UnicodeError, ValueError) as exc:
         die("cannot read {}: {}".format(path, exc))
     if not isinstance(value, dict):
         die("{} is not a JSON object".format(path))
@@ -326,11 +643,11 @@ def fresh_build_binary(repo: Path, frozen: Path, workers: int) -> Dict[str, obje
     source_record = dict(before)
     source_record["source_archive_sha256"] = sha256_bytes(archive)
     build_evidence = frozen / "build"
-    build_evidence.mkdir()
+    make_private_directory(build_evidence)
     (build_evidence / "source_tree.txt").write_bytes(manifest)
     with tempfile.TemporaryDirectory(prefix="wirehair-allk-holdout-build-") as temporary:
         source = Path(temporary) / "source"
-        source.mkdir()
+        make_private_directory(source)
         with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as stream:
             stream.extractall(path=source, filter="data")
         build = Path(temporary) / "build"
@@ -710,22 +1027,92 @@ def decimal_field(row: Mapping[str, str], key: str) -> Decimal:
     return value
 
 
-def classify(row: Mapping[str, str]) -> str:
-    try:
-        success, rank_fail, error = (
-            int(row[key]) for key in ("success", "rank_fail", "error")
-        )
-    except (KeyError, TypeError, ValueError) as exc:
-        die("invalid benchmark outcome field: {}".format(exc))
-    if any(value not in (0, 1) for value in (success, rank_fail, error)) or \
+def benchmark_uint(row: Mapping[str, str], key: str) -> int:
+    text = row.get(key)
+    if not isinstance(text, str) or \
+            re.fullmatch(r"0|[1-9][0-9]*", text) is None:
+        die("invalid unsigned benchmark field {}".format(key))
+    value = int(text)
+    if value >= 1 << 64:
+        die("unsigned benchmark field {} exceeds u64".format(key))
+    return value
+
+
+def benchmark_milli(row: Mapping[str, str], key: str) -> Decimal:
+    text = row.get(key)
+    if not isinstance(text, str) or \
+            re.fullmatch(r"(?:0|[1-9][0-9]*)\.[0-9]{3}", text) is None:
+        die("invalid fixed-milli benchmark field {}".format(key))
+    value = Decimal(text)
+    scaled = value * 1000
+    if scaled >= 1 << 64:
+        die("fixed-milli benchmark field {} exceeds scaled u64".format(key))
+    return value
+
+
+def benchmark_counter_mu(row: Mapping[str, str], key: str) -> int:
+    text = row.get(key)
+    if not isinstance(text, str) or \
+            re.fullmatch(r"(?:0|[1-9][0-9]*)\.000", text) is None:
+        die("invalid single-trial counter mean {}".format(key))
+    value = int(text[:-4])
+    if value >= 1 << 64:
+        die("single-trial counter mean {} exceeds u64".format(key))
+    return value
+
+
+def validate_single_trial_semantics(
+    row: Mapping[str, str],
+) -> Tuple[int, int, int]:
+    success, rank_fail, error = (
+        benchmark_uint(row, key)
+        for key in ("success", "rank_fail", "error")
+    )
+    if any(value not in (0, 1) for value in (
+            success, rank_fail, error)) or \
             success + rank_fail + error != 1 or error:
         die("invalid benchmark outcome")
+
+    inactivated = benchmark_uint(row, "inact_max")
+    binary_deficit = benchmark_uint(row, "binary_def_max")
+    heavy_gain = benchmark_uint(row, "heavy_gain_min")
+    heavy_shortfall = benchmark_uint(row, "heavy_shortfall")
+    if any(value >= 1 << 32 for value in (
+            inactivated, binary_deficit, heavy_gain)) or \
+            heavy_shortfall > 1 or binary_deficit > inactivated or \
+            heavy_gain > binary_deficit or \
+            (success and (
+                binary_deficit > 12 or heavy_gain != binary_deficit)) or \
+            (rank_fail and (
+                (binary_deficit <= 12 and heavy_gain >= binary_deficit) or
+                (binary_deficit > 12 and heavy_gain != 0))):
+        die("single-trial rank/deficit/gain semantics mismatch")
+    expected_shortfall = (
+        1 if rank_fail and binary_deficit <= 12 and
+        heavy_gain < binary_deficit else 0)
+    expected = {
+        "fail_rate": "1.00000000" if rank_fail else "0.00000000",
+        "inact_mu": "{}.000".format(inactivated),
+        "binary_def_mu": "{}.000".format(binary_deficit),
+        "heavy_gain_mu": "{}.000".format(heavy_gain),
+        "heavy_shortfall": str(expected_shortfall),
+        "first_rank_fail": "0" if rank_fail else "-1",
+        "binary_def_hist": "{}:1".format(binary_deficit),
+        "heavy_gain_hist": "{}:1".format(heavy_gain),
+        "failure_trials": "0" if rank_fail else "",
+    }
+    if any(row.get(key) != value for key, value in expected.items()):
+        die("single-trial aggregate semantics mismatch")
+    return success, rank_fail, error
+
+
+def classify(row: Mapping[str, str]) -> str:
+    success, _, _ = validate_single_trial_semantics(row)
     if success:
         return "success"
-    try:
-        return "q>H" if int(row["binary_def_max"]) > 12 else "field_shortfall"
-    except (KeyError, TypeError, ValueError) as exc:
-        die("invalid benchmark binary deficit: {}".format(exc))
+    return (
+        "q>H" if benchmark_uint(row, "binary_def_max") > 12
+        else "field_shortfall")
 
 
 def parse_benchmark_csv(data: bytes, task: Mapping[str, object]) -> List[Dict[str, str]]:
@@ -745,10 +1132,12 @@ def parse_benchmark_csv(data: bytes, task: Mapping[str, object]) -> List[Dict[st
     if tuple(reader.fieldnames or ()) != CSV_FIELDS:
         die("benchmark CSV header mismatch")
     rows = list(reader)
-    try:
-        observed_Ks = [int(row["N"]) for row in rows]
-    except (KeyError, TypeError, ValueError) as exc:
-        die("benchmark CSV has an invalid K ledger: {}".format(exc))
+    if any(
+            None in row or tuple(row) != CSV_FIELDS or
+            any(value is None for value in row.values())
+            for row in rows):
+        die("benchmark CSV row width changed")
+    observed_Ks = [benchmark_uint(row, "N") for row in rows]
     if observed_Ks != list(task["Ks"]):
         die("benchmark CSV K ledger mismatch")
     fixed = {
@@ -758,13 +1147,19 @@ def parse_benchmark_csv(data: bytes, task: Mapping[str, object]) -> List[Dict[st
     for row in rows:
         if any(row.get(key) != value for key, value in fixed.items()):
             die("benchmark fixed CSV field mismatch")
+        if benchmark_uint(row, "seed_attempt") >= 1 << 8:
+            die("benchmark seed attempt exceeds the codec u8 receipt")
+        for key in CSV_TIMING_MILLI_FIELDS:
+            benchmark_milli(row, key)
+        for key in CSV_COUNTER_MU_FIELDS:
+            benchmark_counter_mu(row, key)
         classify(row)
     return rows
 
 
 def smoke_frozen_binary(binary: Path, frozen: Path) -> Dict[str, object]:
     smoke_dir = frozen / "smoke"
-    smoke_dir.mkdir()
+    make_private_directory(smoke_dir)
     records: List[dict] = []
     for index, (period, rows, mask) in enumerate(SMOKE_CASES):
         task = {
@@ -856,11 +1251,60 @@ def read_boot_id(boot_id_path: Path = BOOT_ID_PATH) -> Optional[str]:
         return None
 
 
+def valid_segment_boot_id(value: object) -> bool:
+    return isinstance(value, str) and re.fullmatch(
+        r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+        r"[0-9a-f]{4}-[0-9a-f]{12}",
+        value,
+    ) is not None
+
+
+def required_boot_id() -> str:
+    value = read_boot_id()
+    if not valid_segment_boot_id(value):
+        die("cannot bind campaign process identities to the current boot")
+    assert value is not None
+    return value
+
+
 def owner_protected_entry(role: str, pid: int) -> Dict[str, object]:
     start_ticks = process_start_ticks(pid)
     if start_ticks is None:
         die("cannot bind protected PID {} to its start time".format(pid))
     return {"role": str(role), "pid": int(pid), "start_ticks": int(start_ticks)}
+
+
+def validate_owner_protected(
+    protected: object,
+    *,
+    require_nonempty: bool,
+) -> List[dict]:
+    if not isinstance(protected, (list, tuple)) or \
+            (require_nonempty and not protected):
+        die("environment-owner marker has invalid protected identities")
+    entries: List[dict] = []
+    seen: Set[Tuple[int, int]] = set()
+    for entry in protected:
+        if not isinstance(entry, Mapping) or \
+                set(entry) != {"role", "pid", "start_ticks"} or \
+                not isinstance(entry.get("role"), str) or not entry["role"] or \
+                not isinstance(entry.get("pid"), int) or \
+                isinstance(entry.get("pid"), bool) or int(entry["pid"]) <= 1 or \
+                int(entry["pid"]) > MAX_PROCESS_PID or \
+                not isinstance(entry.get("start_ticks"), int) or \
+                isinstance(entry.get("start_ticks"), bool) or \
+                int(entry["start_ticks"]) < 0:
+            die("malformed environment-owner protected entry")
+        identity = (int(entry["pid"]), int(entry["start_ticks"]))
+        if identity in seen:
+            die("environment-owner marker repeats a protected identity")
+        seen.add(identity)
+        entries.append({
+            "role": str(entry["role"]),
+            "pid": identity[0],
+            "start_ticks": identity[1],
+        })
+    return entries
 
 
 def write_owner_marker(
@@ -878,17 +1322,8 @@ def write_owner_marker(
         die("unknown environment-owner phase {}".format(phase))
     if not isinstance(ttl_hours, int) or isinstance(ttl_hours, bool) or ttl_hours <= 0:
         die("environment-owner TTL must be a positive integer hour count")
-    entries: List[dict] = []
-    for entry in protected:
-        if not isinstance(entry, Mapping) or set(entry) != {"role", "pid", "start_ticks"} or \
-                not isinstance(entry.get("role"), str) or \
-                not isinstance(entry.get("pid"), int) or isinstance(entry.get("pid"), bool) or \
-                not isinstance(entry.get("start_ticks"), int) or \
-                isinstance(entry.get("start_ticks"), bool) or \
-                int(entry["pid"]) <= 1 or int(entry["start_ticks"]) < 0:
-            die("malformed environment-owner protected entry")
-        entries.append({"role": entry["role"], "pid": entry["pid"],
-                        "start_ticks": entry["start_ticks"]})
+    entries = validate_owner_protected(
+        list(protected), require_nonempty=phase == "executing")
     created = datetime.now(timezone.utc) if now is None else now
     marker = {
         "schema": OWNER_MARKER_SCHEMA,
@@ -899,9 +1334,16 @@ def write_owner_marker(
         "expires_utc": owner_time(created + timedelta(hours=ttl_hours)),
         "protected": entries,
     }
-    scratch = marker_path.with_name(marker_path.name + ".partial")
+    scratch = marker_path.with_name(
+        marker_path.name + ".part.{}.{}".format(
+            os.getpid(), threading.get_ident()))
+    scratch_created = False
     try:
-        with scratch.open("wb") as stream:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | \
+            getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(str(scratch), flags, 0o644)
+        scratch_created = True
+        with os.fdopen(descriptor, "wb") as stream:
             stream.write(canonical_json(marker))
             stream.flush()
             os.fsync(stream.fileno())
@@ -909,10 +1351,11 @@ def write_owner_marker(
     except OSError as exc:
         die("cannot publish environment-owner marker: {}".format(exc))
     finally:
-        try:
-            scratch.unlink()
-        except FileNotFoundError:
-            pass
+        if scratch_created:
+            try:
+                scratch.unlink()
+            except FileNotFoundError:
+                pass
     return marker
 
 
@@ -930,27 +1373,96 @@ def load_active_owner_marker(
     boot are inert and return None.
     """
     try:
-        raw = marker_path.read_text(encoding="ascii")
+        identity = marker_path.stat(follow_symlinks=False)
     except FileNotFoundError:
         return None
+    except OSError as exc:
+        die("environment-owner marker cannot be inspected: {}".format(exc))
+    if not stat.S_ISREG(identity.st_mode) or identity.st_uid != os.getuid() or \
+            identity.st_nlink != 1 or identity.st_mode & 0o022:
+        die("environment-owner marker is not a safe owned regular file")
+    try:
+        raw = marker_path.read_text(encoding="ascii")
     except (OSError, UnicodeError) as exc:
         die("environment-owner marker is unreadable: {}".format(exc))
     try:
-        marker = json.loads(raw)
-    except json.JSONDecodeError:
-        die("environment-owner marker is malformed JSON")
-    if not isinstance(marker, dict) or marker.get("schema") != OWNER_MARKER_SCHEMA:
+        marker = strict_json_loads(raw)
+    except ValueError as exc:
+        die("environment-owner marker is malformed JSON: {}".format(exc))
+    if not isinstance(marker, dict) or \
+            marker.get("schema") != OWNER_MARKER_SCHEMA:
         die("environment-owner marker has an unknown schema")
-    if marker.get("phase") == "complete":
+    if marker.get("phase") not in ("executing", "complete") or \
+            not isinstance(marker.get("campaign_root"), str) or \
+            not str(marker["campaign_root"]).startswith("/") or \
+            not isinstance(marker.get("protected"), list) or \
+            marker.get("boot_id") is not None and (
+                not isinstance(marker.get("boot_id"), str) or
+                not marker["boot_id"]):
+        die("environment-owner marker has malformed ownership fields")
+    marker["protected"] = validate_owner_protected(
+        marker["protected"], require_nonempty=marker["phase"] == "executing")
+    created = marker.get("created_utc")
+    expires = marker.get("expires_utc")
+    timestamp_pattern = (
+        r"[0-9]{4}-[0-9]{2}-[0-9]{2}T"
+        r"[0-9]{2}:[0-9]{2}:[0-9]{2}\+00:00")
+    if not isinstance(created, str) or not isinstance(expires, str) or \
+            re.fullmatch(timestamp_pattern, created) is None or \
+            re.fullmatch(timestamp_pattern, expires) is None:
+        die("environment-owner marker has malformed timestamps")
+    try:
+        created_time = datetime.strptime(created, "%Y-%m-%dT%H:%M:%S%z")
+        expires_time = datetime.strptime(expires, "%Y-%m-%dT%H:%M:%S%z")
+    except ValueError as exc:
+        die("environment-owner marker has invalid timestamps: {}".format(exc))
+    if created_time.utcoffset() != timedelta(0) or \
+            expires_time.utcoffset() != timedelta(0) or \
+            expires_time < created_time:
+        die("environment-owner marker timestamp interval is invalid")
+    if marker["phase"] == "complete":
         return None
     boot_id = read_boot_id(boot_id_path)
     if boot_id is not None and marker.get("boot_id") not in (None, boot_id):
         return None
-    expires = marker.get("expires_utc")
     current = owner_time(datetime.now(timezone.utc) if now is None else now)
-    if isinstance(expires, str) and expires < current:
+    if expires < current:
         return None
     return marker
+
+
+def acquire_environment_lock(
+    lock_path: Path = OWNER_LOCK_PATH,
+) -> Optional[int]:
+    """Acquire the cross-controller launch mutex without following links."""
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | \
+        getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(str(lock_path), flags, 0o600)
+    except OSError as exc:
+        die("cannot open environment-owner lock: {}".format(exc))
+    try:
+        identity = os.fstat(descriptor)
+        path_identity = lock_path.stat(follow_symlinks=False)
+        if not stat.S_ISREG(identity.st_mode) or identity.st_nlink != 1 or \
+                identity.st_uid != os.getuid() or identity.st_mode & 0o077 or \
+                (identity.st_dev, identity.st_ino) != \
+                (path_identity.st_dev, path_identity.st_ino):
+            die("environment-owner lock is not a safe regular file")
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(descriptor)
+            return None
+        except OSError as exc:
+            die("cannot acquire environment-owner lock: {}".format(exc))
+        return descriptor
+    except BaseException:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise
 
 
 def command_prepare(args: argparse.Namespace) -> None:
@@ -970,18 +1482,22 @@ def command_prepare(args: argparse.Namespace) -> None:
     for path, label in ((sampler, "sampler"), (controller, "controller")):
         if not path.is_file() or path.is_symlink():
             die("{} is not a regular file: {}".format(label, path))
+    if sha256_file(sampler) != SAMPLER_SHA256:
+        die("thermal sampler hash does not match the hardened pinned worker")
     if not isinstance(args.owner_ttl_hours, int) or args.owner_ttl_hours <= 0:
         die("owner TTL must be a positive integer hour count")
     try:
-        staging.mkdir(parents=True)
+        make_private_directory(staging, parents=True)
         for directory in (
                 "frozen", "raw", "stderr", "exit", "thermal", "segments",
                 "attempts", "job_receipts"):
-            (staging / directory).mkdir()
+            make_private_directory(staging / directory)
         frozen = staging / "frozen"
         shutil.copyfile(str(controller), str(frozen / CONTROLLER_NAME))
         shutil.copyfile(str(sampler), str(frozen / SAMPLER_NAME))
         shutil.copyfile(str(source_path), str(frozen / SOURCE_SUMMARY_NAME))
+        if sha256_file(frozen / SOURCE_SUMMARY_NAME) != SOURCE_SUMMARY_SHA256:
+            die("copied all-K validated summary changed during preparation")
         for name in (CONTROLLER_NAME, SAMPLER_NAME):
             os.chmod(str(frozen / name), 0o555)
 
@@ -1006,6 +1522,7 @@ def command_prepare(args: argparse.Namespace) -> None:
             "git_tree_oid": build["source"]["tree_oid"],
             "build_receipt_sha256": sha256_file(frozen / "build_receipt.json"),
             "binary_sha256": build["binary_sha256"],
+            "sampler_sha256": SAMPLER_SHA256,
             "binary_smoke_sha256": sha256_file(frozen / "binary_smoke.json"),
             "codec_implementation_head": CODEC_IMPLEMENTATION_HEAD,
             "source_head": SOURCE_HEAD,
@@ -1021,9 +1538,13 @@ def command_prepare(args: argparse.Namespace) -> None:
                 "from the headline holdout comparison"),
             "acceptance_gate": (
                 "candidate raw field-shortfall count strictly below its "
-                "comparator, zero introductions on headline cells, and "
-                "paired XOR/muladd cost ratios on headline common successes "
-                "within the sealed tolerance; zero codec errors"),
+                "comparator and raw total failures strictly below its "
+                "comparator; on headline cells, total failures strictly "
+                "below the comparator with at least one actual repair and "
+                "zero introductions; paired XOR/muladd cost ratios on common "
+                "headline successes within the sealed tolerance; at least "
+                "one panel source field-shortfall genuinely fixed; zero "
+                "codec errors"),
             "cost_ratio_max": str(COST_RATIO_MAX),
             "hard_cells": len(plan["hard"]),
             "seeds": list(SEEDS), "schedules": list(SCHEDULES),
@@ -1037,6 +1558,10 @@ def command_prepare(args: argparse.Namespace) -> None:
             "task_count": len(plan["tasks"]),
             "hard_task_count": hard_task_count,
             "chunk_max": CHUNK_MAX,
+            "job_timeout_seconds": JOB_TIMEOUT_SECONDS,
+            "benchmark_parent_death_signal": "SIGKILL",
+            "thermal_controller_supervision":
+                "pidfd+start_ticks+boot_id+ancestry",
             "stage_order": ["hard", "control"],
             "worker_count": args.workers, "thermal_single_sampler_required": True,
             "thermal_cpu_busy_floor_pct": str(CPU_BUSY_FLOOR),
@@ -1085,8 +1610,8 @@ def read_jsonl(path: Path) -> List[dict]:
         if not raw.endswith(b"\n"):
             die("{} line {} lacks LF".format(path, index + 1))
         try:
-            value = json.loads(raw.decode("ascii"))
-        except (UnicodeError, json.JSONDecodeError) as exc:
+            value = strict_json_loads(raw.decode("ascii"))
+        except (UnicodeError, ValueError) as exc:
             die("bad JSONL {} line {}: {}".format(path, index + 1, exc))
         if not isinstance(value, dict) or canonical_json(value) != raw:
             die("noncanonical JSONL {} line {}".format(path, index + 1))
@@ -1100,6 +1625,12 @@ def verify_root(
     *,
     runtime_tolerant: bool = False,
 ) -> Tuple[dict, List[dict]]:
+    verify_runtime_directories(root)
+    for path, label in (
+            (root / "frozen", "frozen"),
+            (root / "frozen" / "build", "frozen build"),
+            (root / "frozen" / "smoke", "frozen smoke")):
+        verify_safe_directory(path, label)
     receipt_path = root / "prelaunch_receipts.json"
     if not re.fullmatch(r"[0-9a-f]{64}", expected_receipts or ""):
         die("expected receipt hash must be 64 lowercase hex digits")
@@ -1119,15 +1650,38 @@ def verify_root(
             die("artifact is not a regular file: {}".format(key))
         if sha256_file(expected_path) != record.get("sha256"):
             die("artifact hash mismatch: {}".format(key))
+    controller_record = artifacts["controller"]
+    current_controller_path = Path(__file__)
+    current_controller = current_controller_path.resolve()
+    if current_controller_path.is_symlink() or not current_controller.is_file() or \
+            sha256_file(current_controller) != controller_record.get("sha256"):
+        die("executing controller differs from the sealed controller artifact")
+    expected_frozen_files = {
+        CONTROLLER_NAME, BINARY_NAME, SAMPLER_NAME, SOURCE_SUMMARY_NAME,
+        "build_receipt.json", "binary_smoke.json",
+    }
+    frozen_entries = list((root / "frozen").iterdir())
+    if {path.name for path in frozen_entries} != \
+            expected_frozen_files | {"build", "smoke"} or any(
+                path.is_symlink() or (
+                    not path.is_file()
+                    if path.name in expected_frozen_files else not path.is_dir())
+                for path in frozen_entries):
+        die("frozen top-level inventory mismatch")
     design = load_json(root / "design.json")
     if design.get("schema") != SCHEMA + ".design" or design.get("root") != str(root):
         die("design identity mismatch")
     if design.get("codec_implementation_head") != CODEC_IMPLEMENTATION_HEAD or \
             design.get("source_head") != SOURCE_HEAD or \
             design.get("source_summary_sha256") != SOURCE_SUMMARY_SHA256 or \
+            design.get("sampler_sha256") != SAMPLER_SHA256 or \
             design.get("source_arm_failures") != dict(SOURCE_ARM_FAILURES) or \
             design.get("cost_ratio_max") != str(COST_RATIO_MAX) or \
             design.get("chunk_max") != CHUNK_MAX or \
+            design.get("job_timeout_seconds") != JOB_TIMEOUT_SECONDS or \
+            design.get("benchmark_parent_death_signal") != "SIGKILL" or \
+            design.get("thermal_controller_supervision") != \
+                "pidfd+start_ticks+boot_id+ancestry" or \
             design.get("K_range") != [K_LO, K_HI] or \
             design.get("hard_cells") != HARD_CELL_COUNT or \
             design.get("stage_order") != ["hard", "control"] or \
@@ -1147,6 +1701,8 @@ def verify_root(
             design.get("retry_policy") != \
                 "stage-atomic non-selective retry after failed/interrupted segment":
         die("design trust anchor mismatch")
+    if sha256_file(root / "frozen" / SAMPLER_NAME) != SAMPLER_SHA256:
+        die("frozen thermal sampler does not match the pinned hardened worker")
     build = load_json(root / "frozen" / "build_receipt.json")
     smoke = load_json(root / "frozen" / "binary_smoke.json")
     source = build.get("source")
@@ -1221,6 +1777,9 @@ def verify_root(
         if record.get("outcome") != classify(parsed[0]):
             die("bounded holdout smoke outcome receipt mismatch")
     summary = load_json(root / "frozen" / SOURCE_SUMMARY_NAME)
+    if sha256_file(root / "frozen" / SOURCE_SUMMARY_NAME) != \
+            SOURCE_SUMMARY_SHA256:
+        die("frozen all-K validated-summary hash mismatch")
     plan = plan_from_summary(summary, str(root / "frozen" / BINARY_NAME))
     expected_files = {
         root / "hard_keys.jsonl": json_lines(plan["hard"]),
@@ -1282,9 +1841,13 @@ def completed_jobs(root: Path, tasks: Sequence[dict]) -> Set[int]:
             if not paths[0].stat().st_size or paths[1].stat().st_size or \
                     paths[2].read_text(encoding="ascii") != "0\n" or \
                     receipt.get("schema") != SCHEMA + ".job" or \
+                    not isinstance(receipt.get("job"), int) or \
+                    isinstance(receipt.get("job"), bool) or \
                     receipt.get("job") != task["job"] or \
                     receipt.get("stage") != task["stage"] or \
                     receipt.get("output_name") != name or \
+                    not isinstance(receipt.get("returncode"), int) or \
+                    isinstance(receipt.get("returncode"), bool) or \
                     receipt.get("returncode") != 0 or \
                     receipt.get("stdout_sha256") != sha256_file(paths[0]) or \
                     receipt.get("stderr_sha256") != sha256_file(paths[1]) or \
@@ -1306,9 +1869,12 @@ def process_state(pid: int) -> Optional[str]:
     try:
         raw = path.read_bytes()
     except PermissionError:
+        validate_trusted_root_tool(SUDO_PATH)
+        validate_trusted_root_tool(CAT_PATH)
         result = subprocess.run(
-            ["sudo", "-n", "cat", str(path)], stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            [str(SUDO_PATH), "-n", str(CAT_PATH), str(path)],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            timeout=I2C_INSPECTION_TIMEOUT_SECONDS,
         )
         if result.returncode:
             return None
@@ -1326,9 +1892,12 @@ def process_start_ticks(pid: int) -> Optional[int]:
     try:
         raw = path.read_bytes()
     except PermissionError:
+        validate_trusted_root_tool(SUDO_PATH)
+        validate_trusted_root_tool(CAT_PATH)
         result = subprocess.run(
-            ["sudo", "-n", "cat", str(path)], stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            [str(SUDO_PATH), "-n", str(CAT_PATH), str(path)],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            timeout=I2C_INSPECTION_TIMEOUT_SECONDS,
         )
         if result.returncode:
             return None
@@ -1343,9 +1912,37 @@ def process_start_ticks(pid: int) -> Optional[int]:
         return None
 
 
+def process_parent_pid(pid: int) -> Optional[int]:
+    path = Path("/proc") / str(pid) / "stat"
+    try:
+        raw = path.read_bytes()
+    except PermissionError:
+        validate_trusted_root_tool(SUDO_PATH)
+        validate_trusted_root_tool(CAT_PATH)
+        result = subprocess.run(
+            [str(SUDO_PATH), "-n", str(CAT_PATH), str(path)],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            timeout=I2C_INSPECTION_TIMEOUT_SECONDS,
+        )
+        if result.returncode:
+            return None
+        raw = result.stdout
+    except OSError:
+        return None
+    try:
+        # After PID and comm, field 3 (state) is index 0 and PPID is index 1.
+        return int(raw.rsplit(b") ", 1)[1].split()[1])
+    except (IndexError, ValueError):
+        return None
+
+
 def process_alive(pid: int) -> bool:
+    if not isinstance(pid, int) or isinstance(pid, bool):
+        die("process PID is malformed")
     if pid <= 1:
         return False
+    if pid > MAX_PROCESS_PID:
+        die("process PID is out of range")
     try:
         os.kill(pid, 0)
         return process_state(pid) != "Z"
@@ -1354,10 +1951,17 @@ def process_alive(pid: int) -> bool:
     except PermissionError:
         # Root-owned samplers return EPERM to a non-root kill(2).  A plain
         # exception must never be interpreted as process death.
-        result = subprocess.run(
-            ["sudo", "-n", "kill", "-0", str(pid)],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
+        validate_trusted_root_tool(SUDO_PATH)
+        validate_trusted_root_tool(KILL_PATH)
+        try:
+            result = subprocess.run(
+                [str(SUDO_PATH), "-n", str(KILL_PATH), "-0", str(pid)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=I2C_INSPECTION_TIMEOUT_SECONDS,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            die("cannot inspect permission-protected PID {}: {}".format(
+                pid, exc))
         if result.returncode == 0:
             return process_state(pid) != "Z"
         if (Path("/proc") / str(pid)).exists():
@@ -1370,9 +1974,12 @@ def process_tokens(pid: int) -> Optional[List[str]]:
     try:
         raw = path.read_bytes()
     except PermissionError:
+        validate_trusted_root_tool(SUDO_PATH)
+        validate_trusted_root_tool(CAT_PATH)
         result = subprocess.run(
-            ["sudo", "-n", "cat", str(path)], stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            [str(SUDO_PATH), "-n", str(CAT_PATH), str(path)],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            timeout=I2C_INSPECTION_TIMEOUT_SECONDS,
         )
         if result.returncode:
             return None
@@ -1382,19 +1989,214 @@ def process_tokens(pid: int) -> Optional[List[str]]:
     return [token.decode("utf-8", "replace") for token in raw.split(b"\0") if token]
 
 
+def active_owner_live_identities(
+    marker: Mapping[str, object],
+    *,
+    alive_probe: Optional[Any] = None,
+    start_ticks_probe: Optional[Any] = None,
+) -> List[dict]:
+    """Validate an executing marker and return identities still provably live."""
+    if marker.get("phase") != "executing":
+        die("live-owner inspection requires an executing marker")
+    protected = validate_owner_protected(
+        marker.get("protected"), require_nonempty=True)
+    alive = process_alive if alive_probe is None else alive_probe
+    start_ticks = (
+        process_start_ticks if start_ticks_probe is None else start_ticks_probe)
+    identities: List[dict] = []
+    for entry in protected:
+        identity = (int(entry["pid"]), int(entry["start_ticks"]))
+        if not alive(identity[0]):
+            continue
+        observed_start = start_ticks(identity[0])
+        if observed_start is None:
+            die("cannot inspect a live protected process identity")
+        if int(observed_start) == identity[1]:
+            identities.append({
+                "role": str(entry["role"]),
+                "pid": identity[0],
+                "start_ticks": identity[1],
+            })
+    return identities
+
+
+def assert_current_controller_owner(root: Path) -> None:
+    marker = load_active_owner_marker()
+    if marker is None or marker.get("campaign_root") != str(root):
+        die("campaign lost its active environment ownership")
+    live = active_owner_live_identities(marker)
+    current_start = process_start_ticks(os.getpid())
+    if current_start is None or not any(
+            entry["role"] == "controller" and
+            entry["pid"] == os.getpid() and
+            entry["start_ticks"] == current_start
+            for entry in live):
+        die("campaign controller is not the protected environment owner")
+
+
+def parse_fuser_i2c_result(
+    device: Path,
+    returncode: int,
+    stdout: bytes,
+    stderr: bytes,
+) -> Tuple[int, ...]:
+    """Strictly parse one bounded privileged fuser invocation."""
+    if returncode == 1:
+        if stdout or stderr:
+            die("I2C no-reader result contains diagnostic output")
+        return ()
+    if returncode != 0:
+        die("cannot inspect I2C reader ownership")
+    if re.fullmatch(rb"(?: +[1-9][0-9]*)+", stdout) is None:
+        die("I2C reader output is noncanonical or empty")
+    label = re.escape(os.fsencode(str(device))) + rb":[ ]*\n"
+    if re.fullmatch(label, stderr) is None:
+        die("I2C reader label output is noncanonical")
+    return tuple(sorted(set(int(value) for value in stdout.split())))
+
+
+def validate_trusted_root_tool(path: Path) -> None:
+    try:
+        identity = path.stat(follow_symlinks=False)
+    except OSError as exc:
+        die("trusted root tool is unavailable: {}".format(exc))
+    if not stat.S_ISREG(identity.st_mode) or identity.st_uid != 0 or \
+            identity.st_mode & 0o022:
+        die("trusted root tool is not root-owned and immutable: {}".format(path))
+
+
+def live_i2c_holders(excluded_pids: Iterable[int] = ()) -> Dict[int, List[str]]:
+    """Return processes observed holding a DIMM I2C bus, including renamed readers.
+
+    The sampler opens its I2C buses once and retains those descriptors for its
+    lifetime.  Inspecting descriptors is therefore a semantic guard rather
+    than a filename convention.  The campaign already requires passwordless
+    sudo to launch the sampler; use the same authority to inspect root-owned
+    sampler descriptors.  A PID observed by fuser remains evidence even if
+    that reader exits before command inspection.
+    """
+    excluded = {os.getpid(), *excluded_pids}
+    validate_trusted_root_tool(SUDO_PATH)
+    validate_trusted_root_tool(FUSER_PATH)
+    inventory: Dict[int, Set[str]] = defaultdict(set)
+    for device in DIMM_I2C_DEVICES:
+        if device.is_symlink() or not device.is_char_device():
+            die("required I2C device is missing or unsafe: {}".format(device))
+        try:
+            result = subprocess.run(
+                [str(SUDO_PATH), "-n", str(FUSER_PATH), str(device)],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                timeout=I2C_INSPECTION_TIMEOUT_SECONDS,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            die("cannot inspect live I2C readers: {}".format(exc))
+        for pid in parse_fuser_i2c_result(
+                device, result.returncode, result.stdout, result.stderr):
+            inventory[pid].add(str(device))
+    return {
+        pid: sorted(devices) for pid, devices in sorted(inventory.items())
+        if pid not in excluded
+    }
+
+
+def validate_sole_sampler_inventory(
+    inventory: Mapping[int, Sequence[str]],
+    sampled_pid: int,
+    wrapper_pid: int,
+) -> Dict[int, List[str]]:
+    """Require the launched sampler on both buses and return every competitor."""
+    expected = sorted(str(device) for device in DIMM_I2C_DEVICES)
+    observed = list(inventory.get(sampled_pid, ()))
+    if observed != expected:
+        die("launched sampler does not hold the complete DIMM I2C inventory")
+    # Only the process named by the sampler's own PID receipt opens the I2C
+    # descriptors.  The sudo wrapper is not an I2C owner and must not be
+    # excluded: its PID could have been recycled by a foreign reader.
+    owned = {int(sampled_pid)}
+    return {
+        int(pid): list(devices)
+        for pid, devices in sorted(inventory.items())
+        if int(pid) not in owned
+    }
+
+
+def sole_sampler_competitors(
+    sampled_pid: int,
+    wrapper_pid: int,
+) -> Dict[int, List[str]]:
+    return validate_sole_sampler_inventory(
+        live_i2c_holders(), sampled_pid, wrapper_pid)
+
+
+def is_wirehair_sampler_command(tokens: Sequence[str]) -> bool:
+    """Recognize the known sampler family before it has opened its buses."""
+    if tokens and Path(tokens[0]).name in ("sh", "bash", "dash"):
+        try:
+            command_index = list(tokens).index("-c") + 1
+            nested = shlex.split(tokens[command_index])
+        except (ValueError, IndexError):
+            nested = []
+        if nested and is_wirehair_sampler_command(nested):
+            return True
+
+    def sampler_name(token: str) -> bool:
+        name = Path(token).name
+        return name == SAMPLER_NAME or (
+            name.startswith("wirehair_expo_thermal_sampler") and
+            name.endswith(".py"))
+
+    has_sampler_script = False
+    for index, token in enumerate(tokens):
+        if not sampler_name(token):
+            continue
+        if index == 0:
+            has_sampler_script = True
+            break
+        python_indices = [
+            prior for prior in range(index)
+            if re.fullmatch(r"python(?:[0-9]+(?:\.[0-9]+)*)?",
+                            Path(tokens[prior]).name)
+        ]
+        if python_indices:
+            interpreter = python_indices[-1]
+            if not any(
+                    Path(tokens[prior]).name.endswith(".py")
+                    for prior in range(interpreter + 1, index)):
+                has_sampler_script = True
+                break
+    # Both options are required by every sampler in this family.  Requiring
+    # them avoids treating a short-lived editor, hasher, or reviewer that
+    # merely names the sampler source file as an active hardware reader.
+    has_csv = any(
+        token == "--csv" or token.startswith("--csv=") for token in tokens)
+    has_pid_file = any(
+        token == "--pid-file" or token.startswith("--pid-file=")
+        for token in tokens)
+    return has_sampler_script and has_csv and has_pid_file
+
+
 def other_samplers(excluded_pids: Iterable[int] = ()) -> List[dict]:
     excluded = {os.getpid(), *excluded_pids}
-    found: List[dict] = []
+    found: Dict[int, dict] = {}
+    for pid, devices in live_i2c_holders(excluded).items():
+        tokens = process_tokens(pid)
+        found[pid] = {
+            "pid": pid,
+            "command": (
+                " ".join(tokens) if tokens is not None else "<unreadable>"),
+            "i2c_devices": devices,
+        }
     for proc in Path("/proc").iterdir():
         if not proc.name.isdigit() or int(proc.name) in excluded:
             continue
         pid = int(proc.name)
         tokens = process_tokens(pid)
-        if tokens is not None and any(
-                Path(token).name == SAMPLER_NAME for token in tokens) and \
-                process_alive(pid):
-            found.append({"pid": pid, "command": " ".join(tokens)})
-    return sorted(found, key=lambda item: item["pid"])
+        if tokens is not None and is_wirehair_sampler_command(tokens) and \
+                process_alive(pid) and pid not in found:
+            found[pid] = {
+                "pid": pid, "command": " ".join(tokens), "i2c_devices": [],
+            }
+    return [found[pid] for pid in sorted(found)]
 
 
 def atomic_result(path: Path, data: bytes) -> None:
@@ -1414,16 +2216,28 @@ def segment_path(root: Path, segment: int, kind: str) -> Path:
 
 
 def segment_indices(root: Path) -> List[int]:
+    verify_runtime_directories(root)
     indices: Set[int] = set()
     patterns = (
-        (root / "segments", re.compile(r"segment([0-9]{3})\.(?:intent|ready|final)\.json$")),
-        (root / "thermal", re.compile(r"segment([0-9]{3})\.(?:csv|pid|stderr)$")),
-        (root / "attempts", re.compile(r"segment([0-9]{3})$")),
+        (root / "segments",
+         re.compile(r"segment([0-9]{3})\.(?:intent|ready|final)\.json$"),
+         "file"),
+        (root / "thermal",
+         re.compile(r"segment([0-9]{3})\.(?:csv|pid|stderr)$"),
+         "file"),
+        (root / "attempts", re.compile(r"segment([0-9]{3})$"), "directory"),
     )
-    for directory, pattern in patterns:
+    for directory, pattern, expected_kind in patterns:
         for path in directory.iterdir():
             match = pattern.fullmatch(path.name)
             if match:
+                valid = (
+                    not path.is_symlink() and
+                    (path.is_file() if expected_kind == "file" else path.is_dir())
+                )
+                if not valid:
+                    die("campaign segment evidence has the wrong file type: {}"
+                        .format(path))
                 indices.add(int(match.group(1)))
     ordered = sorted(indices)
     if ordered and ordered != list(range(ordered[-1] + 1)):
@@ -1450,120 +2264,575 @@ def segment_jobs(intent: Mapping[str, object], tasks: Sequence[dict]) -> List[di
     return selected
 
 
-def terminate_verified_process(pid: int, expected: Sequence[str]) -> str:
-    if not process_alive(pid):
+def terminate_verified_process(
+    pid: int,
+    expected_start_ticks: int,
+    expected: Sequence[str],
+    *,
+    alive_probe: Optional[Any] = None,
+    start_ticks_probe: Optional[Any] = None,
+    tokens_probe: Optional[Any] = None,
+    signal_sender: Optional[Any] = None,
+) -> str:
+    """Stop one owned identity without ever signaling a reused PID."""
+    if not isinstance(expected_start_ticks, int) or \
+            isinstance(expected_start_ticks, bool) or expected_start_ticks < 0:
+        die("termination requires a valid expected process start time")
+    alive = process_alive if alive_probe is None else alive_probe
+    start_ticks = (
+        process_start_ticks if start_ticks_probe is None else start_ticks_probe)
+    read_tokens = process_tokens if tokens_probe is None else tokens_probe
+
+    def identity_state() -> str:
+        if not alive(pid):
+            return "exited"
+        observed_start = start_ticks(pid)
+        if observed_start is None:
+            die("cannot re-prove live process start identity")
+        if int(observed_start) != expected_start_ticks:
+            return "reused"
+        observed_tokens = read_tokens(pid)
+        if observed_tokens is None:
+            die("cannot re-prove live process command identity")
+        if observed_tokens != list(expected):
+            return "changed"
+        return "match"
+
+    def send(signal_name: str) -> bool:
+        if signal_sender is not None:
+            result = signal_sender(signal_name)
+            return True if result is None else bool(result)
+        validate_trusted_root_tool(SUDO_PATH)
+        validate_trusted_root_tool(PYTHON_PATH)
+        expected_cmdline = (
+            b"\0".join(os.fsencode(token) for token in expected) + b"\0")
+        try:
+            result = subprocess.run(
+                [
+                    str(SUDO_PATH), "-n", str(PYTHON_PATH), "-I", "-c",
+                    PRIVILEGED_PIDFD_SIGNAL_CODE, str(pid),
+                    str(expected_start_ticks), expected_cmdline.hex(),
+                    signal_name,
+                ],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                timeout=I2C_INSPECTION_TIMEOUT_SECONDS,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            die("privileged pidfd signal helper failed: {}".format(exc))
+        if result.returncode in (3, 4) and not result.stdout and not result.stderr:
+            return False
+        if result.returncode or result.stdout or result.stderr:
+            die("privileged pidfd signal helper failed closed")
+        return True
+
+    def classify_nonmatch(state: str, exited_action: str) -> str:
+        if state == "exited":
+            return exited_action
+        if state == "reused":
+            return "identity_reused"
+        if state == "changed":
+            return "identity_changed"
+        die("process identity unexpectedly remained matched")
+
+    initial = identity_state()
+    if initial == "exited":
         return "already_exited"
-    tokens = process_tokens(pid)
-    if tokens != list(expected):
-        die("refusing to terminate PID {} with changed command identity".format(pid))
-    subprocess.run(
-        ["sudo", "-n", "kill", "-TERM", str(pid)],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
-    )
+    if initial != "match":
+        return "identity_" + initial
+    # Re-prove in the caller, then let the privileged helper bind a pidfd and
+    # repeat the start/cmdline proof before signaling that process object.
+    state = identity_state()
+    if state != "match":
+        return classify_nonmatch(state, "already_exited")
+    if not send("TERM"):
+        return classify_nonmatch(identity_state(), "terminated")
     deadline = time.monotonic() + 10.0
-    while time.monotonic() < deadline and process_alive(pid):
+    while time.monotonic() < deadline:
+        state = identity_state()
+        if state != "match":
+            return classify_nonmatch(state, "terminated")
         time.sleep(0.05)
-    if process_alive(pid):
-        subprocess.run(
-            ["sudo", "-n", "kill", "-KILL", str(pid)],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
-        )
-        deadline = time.monotonic() + 5.0
-        while time.monotonic() < deadline and process_alive(pid):
-            time.sleep(0.05)
-        if process_alive(pid):
-            die("verified owned process {} did not stop".format(pid))
+    state = identity_state()
+    if state != "match":
+        return classify_nonmatch(state, "terminated")
+    if not send("KILL"):
+        return classify_nonmatch(identity_state(), "killed")
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        state = identity_state()
+        if state != "match":
+            return classify_nonmatch(state, "killed")
+        time.sleep(0.05)
+    state = identity_state()
+    if state == "match":
+        die("verified owned process {} did not stop".format(pid))
+    return classify_nonmatch(state, "killed")
+
+
+def assert_process_identity(
+    pid: int,
+    expected_start_ticks: int,
+    expected_tokens: Sequence[str],
+    label: str,
+) -> None:
+    if not process_alive(pid):
+        die("{} exited".format(label))
+    observed_start = process_start_ticks(pid)
+    observed_tokens = process_tokens(pid)
+    if observed_start != expected_start_ticks or \
+            observed_tokens != list(expected_tokens):
+        die("{} identity changed".format(label))
+
+
+def terminate_direct_child_by_pidfd(
+    process: subprocess.Popen,
+    pidfd: int,
+) -> str:
+    """Boundedly stop a directly spawned user process without PID reuse risk."""
+    if process.poll() is not None:
+        return "already_exited"
+    try:
+        signal.pidfd_send_signal(pidfd, signal.SIGTERM, None, 0)
+    except ProcessLookupError:
+        process.wait(timeout=5.0)
+        return "already_exited"
+    try:
+        process.wait(timeout=10.0)
+        return "terminated"
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        signal.pidfd_send_signal(pidfd, signal.SIGKILL, None, 0)
+    except ProcessLookupError:
+        process.wait(timeout=5.0)
+        return "terminated"
+    try:
+        process.wait(timeout=5.0)
+    except subprocess.TimeoutExpired:
+        die("direct child did not stop after pidfd SIGKILL")
+    return "killed"
+
+
+def terminate_direct_unreaped_child(process: subprocess.Popen) -> str:
+    """Stop a Popen child before wait/reap allows its PID to be reused."""
+    if process.poll() is not None:
+        return "already_exited"
+    process.terminate()
+    try:
+        process.wait(timeout=10.0)
+        return "terminated"
+    except subprocess.TimeoutExpired:
+        process.kill()
+        try:
+            process.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            die("direct unreaped child did not stop after SIGKILL")
         return "killed"
-    return "terminated"
 
 
-def terminate_owned_segment_processes(root: Path, segment: int, tasks: Sequence[dict]) -> List[dict]:
+def terminate_privileged_direct_unreaped_child(
+    process: subprocess.Popen,
+) -> str:
+    """Stop our unreaped privileged Popen child with fixed, bounded tools."""
+    if process.poll() is not None:
+        return "already_exited"
+    validate_trusted_root_tool(SUDO_PATH)
+    validate_trusted_root_tool(KILL_PATH)
+
+    def send(signal_name: str) -> None:
+        try:
+            result = subprocess.run(
+                [str(SUDO_PATH), "-n", str(KILL_PATH),
+                 "-{}".format(signal_name), str(process.pid)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=I2C_INSPECTION_TIMEOUT_SECONDS,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            die("cannot stop privileged direct child: {}".format(exc))
+        if result.returncode and process.poll() is None:
+            die("cannot signal privileged direct child")
+
+    send("TERM")
+    try:
+        process.wait(timeout=10.0)
+        return "terminated"
+    except subprocess.TimeoutExpired:
+        send("KILL")
+        try:
+            process.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            die("privileged direct child did not stop after SIGKILL")
+        return "killed"
+
+
+def require_stopped_action(action: str, label: str) -> None:
+    if action not in STOPPED_PROCESS_ACTIONS:
+        die("{} cleanup lost process identity: {}".format(label, action))
+
+
+def attempt_all_cleanups(
+    entries: Sequence[Tuple[int, Any]],
+    cleanup: Any,
+) -> Tuple[List[Tuple[int, Any, Optional[str]]], List[str]]:
+    """Run every cleanup leg even when an earlier identity fails."""
+    results: List[Tuple[int, Any, Optional[str]]] = []
+    errors: List[str] = []
+    for job, process in entries:
+        try:
+            results.append((job, process, cleanup(job, process)))
+        except BaseException as exc:
+            errors.append("job{}:{!r}".format(job, exc))
+    return results, errors
+
+
+def campaign_sampled_command(
+    sampler_path: Path,
+    csv_path: Path,
+    pid_file: Path,
+) -> List[str]:
+    return [
+        str(PYTHON_PATH), "-I", str(sampler_path),
+        "--csv", str(csv_path), "--pid-file", str(pid_file),
+        "--interval", str(THERMAL_INTERVAL_SECONDS),
+        "--dimm-attempts", "5", "--dimm-retry-delay", "0.01",
+    ]
+
+
+def campaign_sampler_supervisor_commands(
+    sampler_path: Path,
+    csv_path: Path,
+    pid_file: Path,
+    controller_identity: Tuple[int, int],
+) -> Tuple[List[str], List[str]]:
+    controller_pid, controller_start = controller_identity
+    sampled = campaign_sampled_command(sampler_path, csv_path, pid_file)
+    supervisor = [
+        str(PYTHON_PATH), "-I", "-c", PRIVILEGED_SAMPLER_SUPERVISOR_CODE,
+        str(controller_pid), str(controller_start),
+        PDEATH_EXEC_CODE.encode("utf-8").hex(), *sampled,
+    ]
+    return supervisor, [str(SUDO_PATH), "-n", *supervisor]
+
+
+def campaign_sampler_command_matches(
+    tokens: Sequence[str],
+    sampler_path: Path,
+    csv_path: Path,
+    pid_file: Path,
+    controller_identity: Tuple[int, int],
+) -> bool:
+    """Match only the controller-bound sudo/supervisor command.
+
+    The sampled child loses the controller identity from its argv after exec.
+    It is therefore signalable only through a durable PID/start receipt, not
+    merely because an unrelated process happens to use the same sampler paths.
+    """
+    supervisor, sudo_wrapper = campaign_sampler_supervisor_commands(
+        sampler_path, csv_path, pid_file, controller_identity)
+    return list(tokens) in (supervisor, sudo_wrapper)
+
+
+def benchmark_command_matches(
+    tokens: Sequence[str],
+    expected: Sequence[str],
+    controller_identity: Optional[Tuple[int, int]] = None,
+) -> bool:
+    if list(tokens) == list(expected):
+        # Exec removes the controller identity from argv.  Exact bare commands
+        # are useful for observation, but are not signal authority during
+        # crash reconciliation.
+        return controller_identity is None
+    prefix = [str(PYTHON_PATH), "-I", "-c", PDEATH_EXEC_CODE]
+    if not (len(tokens) == len(prefix) + 2 + len(expected) and
+            list(tokens[:len(prefix)]) == prefix and
+            str(tokens[len(prefix)]).isdigit() and
+            str(tokens[len(prefix) + 1]).isdigit() and
+            list(tokens[len(prefix) + 2:]) == list(expected)):
+        return False
+    return controller_identity is None or (
+        int(tokens[len(prefix)]) == controller_identity[0] and
+        int(tokens[len(prefix) + 1]) == controller_identity[1])
+
+
+def discover_owned_processes(
+    matchers: Sequence[Tuple[str, Any]],
+) -> List[Tuple[str, int, int, List[str]]]:
+    """Capture current start/cmdline identities for uniquely matched commands."""
+    found: List[Tuple[str, int, int, List[str]]] = []
+    for proc in Path("/proc").iterdir():
+        if not proc.name.isdigit():
+            continue
+        pid = int(proc.name)
+        if pid == os.getpid():
+            continue
+        tokens = process_tokens(pid)
+        if tokens is None:
+            continue
+        labels = [label for label, matcher in matchers if matcher(tokens)]
+        if not labels:
+            continue
+        if len(labels) != 1:
+            die("owned process matches more than one sealed command")
+        if not process_alive(pid):
+            continue
+        start_ticks = process_start_ticks(pid)
+        rebound_tokens = process_tokens(pid)
+        if start_ticks is None or rebound_tokens is None:
+            die("cannot bind discovered owned process identity")
+        if rebound_tokens != tokens:
+            # A sudo/Python wrapper may legitimately exec between reads.  The
+            # bounded caller rescans and binds its post-exec identity.
+            continue
+        found.append((labels[0], pid, start_ticks, rebound_tokens))
+    return sorted(found, key=lambda item: (item[1], item[0]))
+
+
+def terminate_discovered_owned_processes(
+    matchers: Sequence[Tuple[str, Any]],
+) -> List[dict]:
+    """Reconcile spawn-to-receipt crashes by exact unique command identity."""
     actions: List[dict] = []
+    empty_observations = 0
+    for _ in range(12):
+        identities = discover_owned_processes(matchers)
+        if not identities:
+            empty_observations += 1
+            if empty_observations >= 2:
+                return actions
+            time.sleep(0.05)
+            continue
+        empty_observations = 0
+        cleanup_errors: List[str] = []
+        for label, pid, start_ticks, tokens in identities:
+            try:
+                action = terminate_verified_process(
+                    pid, start_ticks, tokens)
+                if action not in DISCOVERY_PROVED_GONE_ACTIONS:
+                    die("discovered owned process cleanup lost identity: {}"
+                        .format(action))
+                actions.append({
+                    "kind": label, "pid": pid, "action": action,
+                })
+            except BaseException as exc:
+                # Continue through the whole captured set so one fault cannot
+                # strand later children.  Any error still leaves the segment
+                # incomplete and prevents receipt publication.
+                cleanup_errors.append(
+                    "{}:pid{}:{!r}".format(label, pid, exc))
+        if cleanup_errors:
+            die("discovered owned process cleanup failed closed: {}".format(
+                "; ".join(cleanup_errors)))
+    die("exact owned command remains live after bounded reconciliation")
+
+
+def terminate_owned_segment_processes(
+    root: Path,
+    segment: int,
+    tasks: Sequence[dict],
+    controller_identity: Optional[Tuple[int, int]] = None,
+) -> List[dict]:
+    verify_runtime_directories(root)
+    if controller_identity is None:
+        die("segment reconciliation requires the original controller identity")
+    actions: List[dict] = []
+    cleanup_errors: List[str] = []
     thermal_pid = root / "thermal" / "segment{:03d}.pid".format(segment)
     thermal_csv = root / "thermal" / "segment{:03d}.csv".format(segment)
-    if thermal_pid.is_symlink():
-        die("owned thermal PID file is a symlink")
-    if thermal_pid.exists():
+    sampler_path = root / "frozen" / SAMPLER_NAME
+    sampler_matchers: List[Tuple[str, Any]] = [(
+        "thermal",
+        lambda tokens: campaign_sampler_command_matches(
+            tokens, sampler_path, thermal_csv, thermal_pid,
+            controller_identity),
+    )]
+    benchmark_matchers: List[Tuple[str, Any]] = [
+        (
+            "benchmark_job_{}".format(int(task["job"])),
+            lambda tokens, expected=list(task["argv"]):
+                benchmark_command_matches(
+                    tokens, expected, controller_identity),
+        )
+        for task in tasks
+    ]
+    task_by_job = {int(task["job"]): task for task in tasks}
+    attempt_dir = root / "attempts" / "segment{:03d}".format(segment)
+
+    # Crash cleanup is best-effort exhaustive but fail-closed: try both
+    # independently identifiable wrapper categories before consulting any
+    # potentially corrupt receipt, then try every remaining safe leg.  One
+    # malformed sampler artifact must never strand benchmark children (or
+    # vice versa).
+    for label, matchers in (
+            ("thermal_wrapper_discovery", sampler_matchers),
+            ("benchmark_wrapper_discovery", benchmark_matchers)):
         try:
-            pid = int(thermal_pid.read_text(encoding="ascii").strip())
-        except (OSError, ValueError):
-            die("malformed owned thermal PID file for segment {}".format(segment))
-        ready_path = segment_path(root, segment, "ready")
-        expected_start: Optional[int] = None
-        if ready_path.is_file() and not ready_path.is_symlink():
-            ready = load_json(ready_path)
-            if ready.get("sampler_pid") == pid and \
-                    isinstance(ready.get("sampler_start_ticks"), int) and \
-                    not isinstance(ready.get("sampler_start_ticks"), bool):
-                expected_start = int(ready["sampler_start_ticks"])
-        if process_alive(pid) and expected_start is not None and \
-                process_start_ticks(pid) != expected_start:
-            actions.append({"kind": "thermal", "pid": pid,
-                            "action": "stale_reused_pid"})
+            actions.extend(terminate_discovered_owned_processes(matchers))
+        except BaseException as exc:
+            cleanup_errors.append("{}:{!r}".format(label, exc))
+
+    try:
+        if thermal_pid.is_symlink():
+            die("owned thermal PID file is a symlink")
+        if thermal_pid.exists():
             try:
-                thermal_pid.unlink()
-            except FileNotFoundError:
-                pass
-            pid = -1
-        tokens = process_tokens(pid) if process_alive(pid) else None
-        if process_alive(pid) and tokens is None:
-            die("cannot inspect the live owned thermal sampler")
-        if tokens is not None:
-            frozen_sampler = str(root / "frozen" / SAMPLER_NAME)
-            if frozen_sampler not in tokens or str(thermal_csv) not in tokens:
-                actions.append({"kind": "thermal", "pid": pid,
-                                "action": "stale_changed_command"})
+                pid = int(thermal_pid.read_text(encoding="ascii").strip())
+            except (OSError, ValueError):
+                die("malformed owned thermal PID file for segment {}"
+                    .format(segment))
+            if pid <= 1 or pid > MAX_PROCESS_PID:
+                die("owned thermal PID is out of range for segment {}"
+                    .format(segment))
+            expected_thermal_start: Optional[int] = None
+            ready_path = segment_path(root, segment, "ready")
+            if ready_path.is_file() and not ready_path.is_symlink():
+                ready = load_json(ready_path)
+                if ready.get("sampler_pid") == pid and \
+                        isinstance(ready.get("sampler_start_ticks"), int) and \
+                        not isinstance(
+                            ready.get("sampler_start_ticks"), bool):
+                    expected_thermal_start = int(
+                        ready["sampler_start_ticks"])
+            receipt_stale = False
+            owned_stopped = False
+            initially_alive = process_alive(pid)
+            if initially_alive:
+                observed_start = process_start_ticks(pid)
+                if observed_start is None:
+                    die("cannot inspect a live thermal PID start identity")
+                if expected_thermal_start is None:
+                    die("unbound pre-ready thermal PID remains live; refusing "
+                        "command-only signal authority")
+                if observed_start != expected_thermal_start:
+                    actions.append({
+                        "kind": "thermal", "pid": pid,
+                        "action": "stale_reused_pid",
+                    })
+                    receipt_stale = True
+                else:
+                    expected_tokens = campaign_sampled_command(
+                        sampler_path, thermal_csv, thermal_pid)
+                    tokens = process_tokens(pid)
+                    if tokens is None:
+                        die("cannot inspect a live thermal PID command")
+                    if tokens != expected_tokens:
+                        die("live receipted thermal PID changed command")
+                    action = terminate_verified_process(
+                        pid, expected_thermal_start, expected_tokens)
+                    actions.append({
+                        "kind": "thermal", "pid": pid, "action": action,
+                    })
+                    require_stopped_action(
+                        action, "receipted thermal reconciliation")
+                    owned_stopped = True
+            still_alive = process_alive(pid)
+            if still_alive and process_start_ticks(pid) is None:
+                die("cannot re-prove a live thermal PID start identity")
+            if still_alive and not initially_alive:
+                actions.append({
+                    "kind": "thermal", "pid": pid,
+                    "action": "stale_reused_pid",
+                })
+                receipt_stale = True
+            if not still_alive or receipt_stale or owned_stopped:
                 try:
                     thermal_pid.unlink()
                 except FileNotFoundError:
                     pass
-                tokens = None
-        if tokens is not None:
-            actions.append({"kind": "thermal", "pid": pid,
-                            "action": terminate_verified_process(pid, tokens)})
+    except BaseException as exc:
+        cleanup_errors.append("thermal_receipt:{!r}".format(exc))
+
+    try:
+        unreceipted_samplers = discover_owned_processes([(
+            "unreceipted_thermal",
+            lambda tokens: list(tokens) == campaign_sampled_command(
+                sampler_path, thermal_csv, thermal_pid),
+        )])
+        if unreceipted_samplers:
+            die("unreceipted direct sampler command remains live; refusing "
+                "command-only signal authority")
+    except BaseException as exc:
+        cleanup_errors.append("thermal_direct_blocker:{!r}".format(exc))
+
+    def cleanup_benchmark_receipt(pid_path: Path) -> None:
+        if pid_path.is_symlink() or not pid_path.is_file():
+            die("benchmark PID receipt is indirect")
+        match = re.fullmatch(r"job([0-9]{5})\.pid", pid_path.name)
+        if not match:
+            die("malformed benchmark PID receipt")
+        job = int(match.group(1))
+        if job not in task_by_job:
+            die("benchmark PID receipt names an unknown job")
+        identity = load_json(pid_path)
+        pid = identity.get("pid")
+        start_ticks = identity.get("start_ticks")
+        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 1 or \
+                pid > MAX_PROCESS_PID or \
+                not isinstance(start_ticks, int) or \
+                isinstance(start_ticks, bool) or start_ticks < 0:
+            die("malformed benchmark PID identity")
         if not process_alive(pid):
-            try:
-                thermal_pid.unlink()
-            except FileNotFoundError:
-                pass
-    task_by_job = {int(task["job"]): task for task in tasks}
-    attempt_dir = root / "attempts" / "segment{:03d}".format(segment)
-    if attempt_dir.is_dir():
-        for pid_path in sorted(attempt_dir.glob("job*.pid")):
-            if pid_path.is_symlink() or not pid_path.is_file():
-                die("benchmark PID receipt is indirect")
-            match = re.fullmatch(r"job([0-9]{5})\.pid", pid_path.name)
-            if not match:
-                die("malformed benchmark PID receipt")
-            job = int(match.group(1))
-            if job not in task_by_job:
-                die("benchmark PID receipt names an unknown job")
-            identity = load_json(pid_path)
-            pid = identity.get("pid")
-            start_ticks = identity.get("start_ticks")
-            if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 1 or \
-                    not isinstance(start_ticks, int) or isinstance(start_ticks, bool) or \
-                    start_ticks < 0:
-                die("malformed benchmark PID identity")
-            if not process_alive(pid):
-                continue
-            if process_start_ticks(pid) != start_ticks:
-                actions.append({"kind": "benchmark", "job": job, "pid": pid,
-                                "action": "stale_reused_pid"})
-                continue
-            tokens = process_tokens(pid)
-            if tokens is None:
-                die("cannot inspect a live owned benchmark PID")
-            if tokens != task_by_job[job]["argv"]:
-                actions.append({"kind": "benchmark", "job": job, "pid": pid,
-                                "action": "stale_changed_command"})
-                continue
-            actions.append({"kind": "benchmark", "job": job, "pid": pid,
-                            "action": terminate_verified_process(pid, tokens)})
+            return
+        observed_start = process_start_ticks(pid)
+        if observed_start is None:
+            die("cannot inspect a live owned benchmark start identity")
+        if observed_start != start_ticks:
+            actions.append({
+                "kind": "benchmark", "job": job, "pid": pid,
+                "action": "stale_reused_pid",
+            })
+            return
+        tokens = process_tokens(pid)
+        if tokens is None:
+            die("cannot inspect a live owned benchmark PID")
+        if tokens != task_by_job[job]["argv"]:
+            die("live owned benchmark PID changed command")
+        action = terminate_verified_process(pid, start_ticks, tokens)
+        actions.append({
+            "kind": "benchmark", "job": job, "pid": pid,
+            "action": action,
+        })
+        require_stopped_action(
+            action, "benchmark reconciliation job {}".format(job))
+
+    receipt_paths: List[Path] = []
+    try:
+        if attempt_dir.exists() or attempt_dir.is_symlink():
+            if attempt_dir.is_symlink() or not attempt_dir.is_dir():
+                die("benchmark attempt directory is indirect")
+            receipt_paths = sorted(attempt_dir.glob("*.pid"))
+    except BaseException as exc:
+        cleanup_errors.append("benchmark_receipts:{!r}".format(exc))
+    for pid_path in receipt_paths:
+        try:
+            cleanup_benchmark_receipt(pid_path)
+        except BaseException as exc:
+            cleanup_errors.append(
+                "benchmark_receipt_{}:{!r}".format(
+                    pid_path.name, exc))
+
+    try:
+        unreceipted_benchmarks = discover_owned_processes([
+            (
+                "unreceipted_benchmark_job_{}".format(int(task["job"])),
+                lambda tokens, expected=list(task["argv"]):
+                    list(tokens) == expected,
+            )
+            for task in tasks
+        ])
+        if unreceipted_benchmarks:
+            die("unreceipted direct benchmark command remains live; refusing "
+                "command-only signal authority")
+    except BaseException as exc:
+        cleanup_errors.append("benchmark_direct_blocker:{!r}".format(exc))
+
+    if cleanup_errors:
+        die("segment process cleanup failed closed: {}".format(
+            "; ".join(cleanup_errors)))
     return actions
 
 
 def rollback_segment_outputs(root: Path, selected: Sequence[dict]) -> List[int]:
+    verify_runtime_directories(root)
     rolled_back: List[int] = []
     for task in selected:
         job = int(task["job"])
@@ -1589,17 +2858,49 @@ def rollback_segment_outputs(root: Path, selected: Sequence[dict]) -> List[int]:
     return rolled_back
 
 
-def seal_attempt_manifest(root: Path, segment: int) -> Tuple[str, int]:
+def seal_attempt_manifest(
+    root: Path,
+    segment: int,
+    allowed_jobs: Set[int],
+    *,
+    require_complete: bool,
+) -> Tuple[str, int]:
     directory = root / "attempts" / "segment{:03d}".format(segment)
     if not directory.exists():
-        directory.mkdir()
+        make_private_directory(directory)
     if directory.is_symlink() or not directory.is_dir():
         die("attempt evidence directory is indirect")
     for partial in directory.glob("*.part.*"):
         partial.unlink()
-    files = sorted(path for path in directory.iterdir() if path.is_file())
-    if any(path.is_symlink() for path in files):
-        die("attempt evidence contains a symlink")
+    files = sorted(directory.iterdir())
+    if any(path.is_symlink() or not path.is_file() for path in files):
+        die("attempt evidence contains an indirect entry")
+    pattern = re.compile(r"job([0-9]{5})\.(pid|stdout|stderr|exit)$")
+    matches = [pattern.fullmatch(path.name) for path in files]
+    if any(match is None for match in matches):
+        die("attempt evidence contains an unexpected file")
+    observed = {
+        (int(match.group(1)), match.group(2))
+        for match in matches if match is not None
+    }
+    if any(job not in allowed_jobs for job, _ in observed):
+        die("attempt evidence references a job outside the segment")
+    groups: Dict[int, Set[str]] = defaultdict(set)
+    for job, suffix in observed:
+        groups[job].add(suffix)
+    valid_prefixes = (
+        {"pid"},
+        {"pid", "stdout"},
+        {"pid", "stdout", "stderr"},
+        {"pid", "stdout", "stderr", "exit"},
+    )
+    if any(suffixes not in valid_prefixes for suffixes in groups.values()):
+        die("attempt evidence is not an atomic output prefix")
+    if require_complete and observed != {
+            (job, suffix)
+            for job in allowed_jobs
+            for suffix in ("pid", "stdout", "stderr", "exit")}:
+        die("successful segment attempt evidence is incomplete")
     data = b"".join(
         "{}  {}\n".format(sha256_file(path), path.relative_to(root)).encode("ascii")
         for path in files
@@ -1623,7 +2924,13 @@ def write_segment_final(
 ) -> Dict[str, object]:
     thermal_csv = root / "thermal" / "segment{:03d}.csv".format(segment)
     thermal_stderr = root / "thermal" / "segment{:03d}.stderr".format(segment)
-    attempts_sha256, attempt_file_count = seal_attempt_manifest(root, segment)
+    raw_jobs = intent.get("jobs")
+    if not isinstance(raw_jobs, list) or any(
+            not isinstance(job, int) or isinstance(job, bool)
+            for job in raw_jobs):
+        die("segment final lacks a valid intent job ledger")
+    attempts_sha256, attempt_file_count = seal_attempt_manifest(
+        root, segment, set(raw_jobs), require_complete=state == "success")
     record = {
         "schema": SCHEMA + ".segment_final", "segment": segment,
         "state": state, "stage": intent.get("stage"),
@@ -1654,6 +2961,7 @@ def write_segment_final(
 
 def reconcile_incomplete_segments(root: Path, tasks: Sequence[dict]) -> List[dict]:
     reconciled: List[dict] = []
+    current_boot_id = required_boot_id()
     for segment in segment_indices(root):
         intent_path = segment_path(root, segment, "intent")
         final_path = segment_path(root, segment, "final")
@@ -1664,11 +2972,47 @@ def reconcile_incomplete_segments(root: Path, tasks: Sequence[dict]) -> List[dic
         if not intent_path.exists():
             die("campaign segment artifacts lack an immutable intent")
         intent = load_json(intent_path)
+        controller_pid = intent.get("controller_pid")
+        controller_start = intent.get("controller_start_ticks")
+        segment_boot_id = intent.get("boot_id")
         if intent.get("schema") != SCHEMA + ".segment_intent" or \
-                intent.get("segment") != segment:
+                not isinstance(intent.get("segment"), int) or \
+                isinstance(intent.get("segment"), bool) or \
+                intent.get("segment") != segment or \
+                not valid_segment_boot_id(segment_boot_id) or \
+                not isinstance(controller_pid, int) or \
+                isinstance(controller_pid, bool) or controller_pid <= 1 or \
+                controller_pid > MAX_PROCESS_PID or \
+                not isinstance(controller_start, int) or \
+                isinstance(controller_start, bool) or controller_start < 0:
             die("incomplete segment intent is malformed")
         selected = segment_jobs(intent, tasks)
-        actions = terminate_owned_segment_processes(root, segment, selected)
+        if segment_boot_id == current_boot_id:
+            actions = terminate_owned_segment_processes(
+                root, segment, selected,
+                (controller_pid, controller_start))
+        else:
+            # Linux start ticks are boot-relative.  A boot change proves every
+            # old process object is gone, but forbids interpreting any current
+            # PID/cmdline collision as signal authority.
+            current_samplers = other_samplers()
+            if current_samplers:
+                die("prior-boot reconciliation is blocked by current "
+                    "sampler(s): {}".format(json.dumps(
+                        current_samplers, sort_keys=True)))
+            actions = [{
+                "kind": "segment", "action": "boot_changed",
+                "from_boot_id": segment_boot_id,
+                "to_boot_id": current_boot_id,
+            }]
+            try:
+                (root / "thermal" /
+                 "segment{:03d}.pid".format(segment)).unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                die("cannot remove stale prior-boot thermal PID receipt: {}"
+                    .format(exc))
         rolled_back = rollback_segment_outputs(root, selected)
         final = write_segment_final(
             root, segment, intent, "interrupted", failures=[],
@@ -1703,12 +3047,145 @@ def sampler_identity(pid_file: Path, sampler_path: Path, csv_path: Path) -> Opti
         pid = int(pid_file.read_text(encoding="ascii").strip())
     except (OSError, ValueError):
         die("thermal sampler PID file is malformed")
+    if pid <= 1 or pid > MAX_PROCESS_PID:
+        die("thermal sampler PID is out of range")
     if not process_alive(pid):
         return None
     tokens = process_tokens(pid)
-    if tokens is None or str(sampler_path) not in tokens or str(csv_path) not in tokens:
+    if tokens != campaign_sampled_command(sampler_path, csv_path, pid_file):
         die("thermal sampler PID is not bound to this segment")
     return pid
+
+
+def pidfd_has_exited(pidfd: int) -> bool:
+    poller = select.poll()
+    poller.register(pidfd, select.POLLIN | select.POLLHUP | select.POLLERR)
+    return bool(poller.poll(0))
+
+
+def bind_sampler_identity(
+    pid_file: Path,
+    sampler_path: Path,
+    csv_path: Path,
+    controller_identity: Tuple[int, int],
+    wrapper_identity: Tuple[int, int, Sequence[str]],
+) -> Optional[Tuple[int, int, List[str]]]:
+    """Bind sampled child -> supervisor -> this unreaped sudo Popen."""
+    if pid_file.is_symlink():
+        die("thermal sampler PID file is a symlink")
+    if not pid_file.is_file():
+        return None
+    try:
+        pid_text = pid_file.read_text(encoding="ascii")
+        pid = int(pid_text.strip())
+    except (OSError, ValueError):
+        die("thermal sampler PID file is malformed")
+    if pid <= 1 or pid > MAX_PROCESS_PID:
+        die("thermal sampler PID is out of range")
+    wrapper_pid, expected_wrapper_start, expected_wrapper_tokens = \
+        wrapper_identity
+    exact_supervisor, exact_sudo_wrapper = \
+        campaign_sampler_supervisor_commands(
+            sampler_path, csv_path, pid_file, controller_identity)
+    expected_wrapper_tokens = list(expected_wrapper_tokens)
+    if not isinstance(wrapper_pid, int) or isinstance(wrapper_pid, bool) or \
+            wrapper_pid <= 1 or wrapper_pid > MAX_PROCESS_PID or \
+            not isinstance(expected_wrapper_start, int) or \
+            isinstance(expected_wrapper_start, bool) or \
+            expected_wrapper_start < 0 or \
+            expected_wrapper_tokens not in (
+                exact_supervisor, exact_sudo_wrapper):
+        die("thermal sampler wrapper identity is malformed")
+    child_pidfd: Optional[int] = None
+    supervisor_pidfd: Optional[int] = None
+    wrapper_pidfd: Optional[int] = None
+    try:
+        try:
+            wrapper_pidfd = os.pidfd_open(wrapper_pid, 0)
+        except ProcessLookupError:
+            die("thermal sampler wrapper exited during identity binding")
+        if pidfd_has_exited(wrapper_pidfd):
+            die("thermal sampler wrapper exited during identity binding")
+        wrapper_start = process_start_ticks(wrapper_pid)
+        wrapper_tokens = process_tokens(wrapper_pid)
+        if wrapper_start != expected_wrapper_start or \
+                wrapper_tokens not in (
+                    exact_supervisor, exact_sudo_wrapper):
+            die("thermal sampler wrapper identity changed")
+        try:
+            child_pidfd = os.pidfd_open(pid, 0)
+        except ProcessLookupError:
+            return None
+        if pidfd_has_exited(child_pidfd):
+            return None
+        expected_child = campaign_sampled_command(
+            sampler_path, csv_path, pid_file)
+        child_start = process_start_ticks(pid)
+        child_parent = process_parent_pid(pid)
+        child_tokens = process_tokens(pid)
+        if child_start is None or child_parent is None or child_parent <= 1 or \
+                child_tokens != expected_child:
+            die("cannot bind exact live thermal sampler identity")
+        supervisor_pid = child_parent
+        if supervisor_pid == wrapper_pid:
+            supervisor_pidfd = wrapper_pidfd
+        else:
+            try:
+                supervisor_pidfd = os.pidfd_open(supervisor_pid, 0)
+            except ProcessLookupError:
+                die("thermal sampler supervisor exited during identity binding")
+        supervisor_start = process_start_ticks(supervisor_pid)
+        supervisor_tokens = process_tokens(supervisor_pid)
+        supervisor_parent = process_parent_pid(supervisor_pid)
+        if supervisor_start is None or supervisor_tokens != exact_supervisor:
+            die("thermal sampler parent is not the controller-bound supervisor")
+        if supervisor_pid == wrapper_pid:
+            # sudo may exec directly.  Permit only its exact one-way argv
+            # transition to the supervisor command in the same PID/start.
+            if wrapper_tokens != exact_supervisor or \
+                    expected_wrapper_tokens not in (
+                        exact_sudo_wrapper, exact_supervisor):
+                die("thermal sampler direct supervisor topology is invalid")
+        elif wrapper_tokens != exact_sudo_wrapper or \
+                expected_wrapper_tokens != exact_sudo_wrapper or \
+                supervisor_parent != wrapper_pid:
+            die("thermal sampler forked supervisor topology is invalid")
+        # Repeat every numeric-PID and ancestry proof while all object handles
+        # are held.  sudo forks a monitor on this host, so the supported shape
+        # is wrapper -> supervisor -> sampled child; direct sudo exec remains
+        # safe when wrapper == supervisor.
+        if pid_file.read_text(encoding="ascii") != pid_text or \
+                process_start_ticks(pid) != child_start or \
+                process_parent_pid(pid) != supervisor_pid or \
+                process_tokens(pid) != expected_child or \
+                process_start_ticks(supervisor_pid) != supervisor_start or \
+                process_tokens(supervisor_pid) != exact_supervisor or \
+                (supervisor_pid != wrapper_pid and
+                 process_parent_pid(supervisor_pid) != wrapper_pid) or \
+                process_start_ticks(wrapper_pid) != expected_wrapper_start or \
+                process_tokens(wrapper_pid) != wrapper_tokens or \
+                pidfd_has_exited(child_pidfd) or \
+                pidfd_has_exited(supervisor_pidfd) or \
+                pidfd_has_exited(wrapper_pidfd):
+            die("thermal sampler identity changed during stable binding")
+        return pid, child_start, expected_child
+    except OSError as exc:
+        die("cannot bind thermal sampler identity: {}".format(exc))
+    finally:
+        descriptors: List[int] = []
+        for descriptor in (
+                supervisor_pidfd, child_pidfd, wrapper_pidfd):
+            if descriptor is not None and descriptor not in descriptors:
+                descriptors.append(descriptor)
+        close_errors: List[str] = []
+        for descriptor in descriptors:
+            try:
+                os.close(descriptor)
+            except OSError as exc:
+                close_errors.append("{}:{!r}".format(descriptor, exc))
+        if close_errors:
+            die("thermal sampler pidfd cleanup failed: {}".format(
+                "; ".join(close_errors)))
 
 
 def wait_sampler_ready(
@@ -1716,12 +3193,23 @@ def wait_sampler_ready(
     pid_file: Path,
     sampler_path: Path,
     csv_path: Path,
+    controller_identity: Tuple[int, int],
+    wrapper_identity: Tuple[int, int, Sequence[str]],
+    identity_sink: List[Tuple[int, int, List[str]]],
 ) -> Tuple[int, List[Dict[str, str]]]:
     deadline = time.monotonic() + THERMAL_READY_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
         if sampler.poll() is not None:
             die("thermal sampler exited before readiness")
-        pid = sampler_identity(pid_file, sampler_path, csv_path)
+        identity = bind_sampler_identity(
+            pid_file, sampler_path, csv_path, controller_identity,
+            wrapper_identity)
+        pid = None if identity is None else identity[0]
+        if identity is not None:
+            if identity_sink and identity_sink[0] != identity:
+                die("launched thermal sampler identity changed before readiness")
+            if not identity_sink:
+                identity_sink.append(identity)
         if pid is not None and csv_path.is_file():
             rows = read_thermal_rows(csv_path)
             if len(rows) >= THERMAL_READY_SAMPLES:
@@ -1755,33 +3243,108 @@ def stop_launched_sampler(
     pid_file: Path,
     sampler_path: Path,
     csv_path: Path,
+    sampled_identity: Optional[Tuple[int, int, Sequence[str]]],
 ) -> Tuple[Optional[int], List[dict]]:
     actions: List[dict] = []
-    pid = sampler_identity(pid_file, sampler_path, csv_path)
-    if pid is None and sampler.poll() is None:
-        tokens = process_tokens(sampler.pid)
-        if tokens is None or str(sampler_path) not in tokens or str(csv_path) not in tokens:
-            die("cannot prove ownership of launched thermal sampler")
-        pid = sampler.pid
-    if pid is not None:
-        tokens = process_tokens(pid) if process_alive(pid) else None
-        if tokens is not None:
-            actions.append({"kind": "thermal", "pid": pid,
-                            "action": terminate_verified_process(pid, tokens)})
+    cleanup_errors: List[str] = []
+    if sampled_identity is not None:
+        pid, start_ticks, tokens = sampled_identity
+        try:
+            action = terminate_verified_process(pid, start_ticks, tokens)
+            actions.append({
+                "kind": "thermal", "pid": pid,
+                "action": action,
+            })
+            if action not in STOPPED_PROCESS_ACTIONS:
+                cleanup_errors.append("thermal:{}".format(action))
+        except BaseException as exc:
+            cleanup_errors.append("thermal_exception:{!r}".format(exc))
+    returncode: Optional[int] = None
     try:
         returncode = sampler.wait(timeout=15.0)
     except subprocess.TimeoutExpired:
-        tokens = process_tokens(sampler.pid)
-        if tokens is None:
-            die("launched sampler wrapper did not exit and cannot be inspected")
-        actions.append({"kind": "thermal_wrapper", "pid": sampler.pid,
-                        "action": terminate_verified_process(sampler.pid, tokens)})
-        returncode = sampler.wait(timeout=5.0)
+        try:
+            action = terminate_privileged_direct_unreaped_child(sampler)
+            actions.append({
+                "kind": "thermal_wrapper", "pid": sampler.pid,
+                "action": action,
+            })
+            if action not in STOPPED_PROCESS_ACTIONS:
+                cleanup_errors.append(
+                    "thermal_wrapper:{}".format(action))
+        except BaseException as exc:
+            cleanup_errors.append(
+                "thermal_wrapper_exception:{!r}".format(exc))
+        try:
+            returncode = sampler.wait(timeout=5.0)
+        except BaseException as exc:
+            cleanup_errors.append(
+                "thermal_wrapper_wait_exception:{!r}".format(exc))
+    except BaseException as exc:
+        cleanup_errors.append("thermal_wrapper_wait_exception:{!r}".format(exc))
+        try:
+            action = terminate_privileged_direct_unreaped_child(sampler)
+            actions.append({
+                "kind": "thermal_wrapper", "pid": sampler.pid,
+                "action": action,
+            })
+            if action not in STOPPED_PROCESS_ACTIONS:
+                cleanup_errors.append(
+                    "thermal_wrapper:{}".format(action))
+        except BaseException as cleanup_exc:
+            cleanup_errors.append(
+                "thermal_wrapper_exception:{!r}".format(cleanup_exc))
+    # If readiness never captured the child, refuse to bless a PID read only
+    # during cleanup.  It may already have been reused; never signal it.
+    if sampled_identity is None:
+        try:
+            unknown_pid = sampler_identity(pid_file, sampler_path, csv_path)
+            if unknown_pid is not None:
+                cleanup_errors.append(
+                    "uncaptured_live_sampler:{}".format(unknown_pid))
+        except BaseException as exc:
+            cleanup_errors.append(
+                "uncaptured_sampler_inspection:{!r}".format(exc))
+    remaining_readers: Optional[List[dict]] = None
     try:
-        pid_file.unlink()
-    except FileNotFoundError:
-        pass
+        remaining_readers = other_samplers()
+        if remaining_readers:
+            cleanup_errors.append(
+                "remaining_i2c_readers:{}".format(json.dumps(
+                    remaining_readers, sort_keys=True)))
+    except BaseException as exc:
+        cleanup_errors.append("post_shutdown_i2c_check:{!r}".format(exc))
+    if remaining_readers == [] and not cleanup_errors:
+        try:
+            pid_file.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            cleanup_errors.append("pid_file_cleanup:{!r}".format(exc))
+    if cleanup_errors:
+        die("campaign sampler shutdown failed closed: {}".format(
+            "; ".join(cleanup_errors)))
     return returncode, actions
+
+
+def cleanup_failed_sampler_binding(sampler: subprocess.Popen) -> None:
+    """Best-effort all cleanup legs after wrapper identity capture fails."""
+    errors: List[str] = []
+    try:
+        action = terminate_privileged_direct_unreaped_child(sampler)
+        require_stopped_action(action, "sampler wrapper binding")
+    except BaseException as exc:
+        errors.append("wrapper_stop:{!r}".format(exc))
+    try:
+        remaining_readers = other_samplers()
+        if remaining_readers:
+            errors.append("remaining_i2c_readers:{}".format(json.dumps(
+                remaining_readers, sort_keys=True)))
+    except BaseException as exc:
+        errors.append("post_shutdown_i2c_check:{!r}".format(exc))
+    if errors:
+        die("failed sampler binding cleanup was not proved: {}".format(
+            "; ".join(errors)))
 
 
 def run_segment(
@@ -1794,11 +3357,17 @@ def run_segment(
 ) -> Dict[str, object]:
     indices = segment_indices(root)
     segment = indices[-1] + 1 if indices else 0
+    controller_start_ticks = process_start_ticks(os.getpid())
+    if controller_start_ticks is None:
+        die("cannot bind campaign controller start identity")
     jobs = sorted(int(task["job"]) for task in tasks)
     intent = {
         "schema": SCHEMA + ".segment_intent", "segment": segment,
+        "boot_id": required_boot_id(),
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "created_monotonic_s": time.monotonic(),
+        "controller_pid": os.getpid(),
+        "controller_start_ticks": controller_start_ticks,
         "stage": stage, "jobs": jobs,
         "jobs_sha256": sha256_bytes(json_lines(jobs)),
         "workers": design["worker_count"], "previously_complete": previously_complete,
@@ -1807,18 +3376,23 @@ def run_segment(
     }
     write_once(segment_path(root, segment, "intent"), canonical_json(intent))
     attempt_dir = root / "attempts" / "segment{:03d}".format(segment)
-    attempt_dir.mkdir()
+    make_private_directory(attempt_dir)
     thermal_csv = root / "thermal" / "segment{:03d}.csv".format(segment)
     thermal_pid = root / "thermal" / "segment{:03d}.pid".format(segment)
     thermal_stderr = root / "thermal" / "segment{:03d}.stderr".format(segment)
     sampler_path = root / "frozen" / SAMPLER_NAME
     sampler_error = thermal_stderr.open("xb")
+    sampled_command = campaign_sampled_command(
+        sampler_path, thermal_csv, thermal_pid)
     sampler_command = [
-        "sudo", "-n", sys.executable, str(sampler_path),
-        "--csv", str(thermal_csv), "--pid-file", str(thermal_pid),
-        "--interval", str(THERMAL_INTERVAL_SECONDS),
-        "--dimm-attempts", "5", "--dimm-retry-delay", "0.01",
+        str(SUDO_PATH), "-n", str(PYTHON_PATH), "-I", "-c",
+        PRIVILEGED_SAMPLER_SUPERVISOR_CODE,
+        str(os.getpid()), str(controller_start_ticks),
+        PDEATH_EXEC_CODE.encode("utf-8").hex(),
+        *sampled_command,
     ]
+    validate_trusted_root_tool(SUDO_PATH)
+    validate_trusted_root_tool(PYTHON_PATH)
     try:
         sampler = subprocess.Popen(
             sampler_command, stdout=subprocess.DEVNULL, stderr=sampler_error,
@@ -1831,74 +3405,336 @@ def run_segment(
             rolled_back=[], process_actions=[], jobs_ended_monotonic_s=None,
             sampler_returncode=None,
         )
+    binding_error: Optional[BaseException] = None
+    sampler_wrapper_start: Optional[int] = None
+    sampler_wrapper_tokens: Optional[List[str]] = None
+    try:
+        sampler_wrapper_start = process_start_ticks(sampler.pid)
+        sampler_wrapper_tokens = process_tokens(sampler.pid)
+    except BaseException as exc:
+        binding_error = exc
+    if binding_error is None and (
+            sampler_wrapper_start is None or not sampler_wrapper_tokens):
+        binding_error = CampaignError(
+            "cannot bind launched sampler wrapper identity")
+    if binding_error is not None:
+        try:
+            cleanup_failed_sampler_binding(sampler)
+        finally:
+            sampler_error.close()
+        raise binding_error
+    assert sampler_wrapper_start is not None
+    assert sampler_wrapper_tokens is not None
+    sampled_identities: List[Tuple[int, int, List[str]]] = []
     abort = threading.Event()
-    active: Dict[int, subprocess.Popen] = {}
+    # The registry owns every direct benchmark child's pidfd from immediately
+    # after spawn until wait/poll proves that child exited.  A worker exception
+    # must never discard the coordinator's last safe cleanup handle.
+    active: Dict[
+        int, Tuple[subprocess.Popen, Optional[int], threading.Lock]
+    ] = {}
+    emergency_active: List[Tuple[int, subprocess.Popen]] = []
     active_lock = threading.Lock()
     failures: List[dict] = []
     process_actions: List[dict] = []
+    jobs_started: Optional[float] = None
     jobs_ended: Optional[float] = None
     sampler_returncode: Optional[int] = None
     ready_written = False
+    sampler_cleanup_proved = False
+
+    def register_active(
+        job: int,
+        process: subprocess.Popen,
+    ) -> threading.Lock:
+        lease = threading.Lock()
+        with active_lock:
+            if job in active:
+                die("benchmark job is already registered active")
+            active[job] = (process, None, lease)
+        return lease
+
+    def attach_active_pidfd(
+        job: int,
+        process: subprocess.Popen,
+        pidfd: int,
+    ) -> None:
+        with active_lock:
+            current = active.get(job)
+            if current is None or current[0] is not process or \
+                    current[1] is not None:
+                die("benchmark active-registry identity changed")
+            active[job] = (process, pidfd, current[2])
+
+    def release_stopped_active(
+        job: int,
+        process: subprocess.Popen,
+        lease: threading.Lock,
+        *,
+        lease_held: bool = False,
+    ) -> bool:
+        """Drop one registry entry only after its child has been reaped."""
+        def release() -> bool:
+            owned_pidfd: Optional[int] = None
+            with active_lock:
+                current = active.get(job)
+                if current is None:
+                    # Registry removal is allowed only after a successful
+                    # cleanup/reap while holding this same lease.
+                    return process.returncode is not None
+                if current[0] is not process or current[2] is not lease:
+                    die("benchmark active-registry process changed")
+                if process.returncode is None:
+                    return False
+                _, owned_pidfd, _ = active.pop(job)
+            if owned_pidfd is not None:
+                os.close(owned_pidfd)
+            return True
+
+        if lease_held:
+            return release()
+        with lease:
+            return release()
+
+    def terminate_registered(
+        job: int,
+        process: subprocess.Popen,
+    ) -> Optional[str]:
+        """Attempt one lease without removing it on any cleanup failure."""
+        duplicate: Optional[int] = None
+        with active_lock:
+            current = active.get(job)
+            if current is None:
+                if process.returncode is None:
+                    die("live benchmark lost its active-registry lease")
+                return None
+            if current[0] is not process:
+                die("benchmark active-registry process changed")
+            lease = current[2]
+        with lease:
+            with active_lock:
+                current = active.get(job)
+                if current is None:
+                    if process.returncode is None:
+                        die("live benchmark lost its active-registry lease")
+                    return None
+                if current[0] is not process or current[2] is not lease:
+                    die("benchmark active-registry process changed")
+                if current[1] is None:
+                    # This window exists only between registry publication and
+                    # pidfd attachment (or after pidfd_open failed).  Hold
+                    # both locks across PID signaling/reap so the worker
+                    # cannot attach or publish a reused numeric identity.
+                    action = terminate_direct_unreaped_child(process)
+                    require_stopped_action(
+                        action, "active benchmark job {}".format(job))
+                    if process.returncode is None:
+                        die("benchmark cleanup action did not prove child exit")
+                    active.pop(job)
+                    return action
+                duplicate = os.dup(current[1])
+            try:
+                action = terminate_direct_child_by_pidfd(process, duplicate)
+                require_stopped_action(
+                    action, "active benchmark job {}".format(job))
+                if process.returncode is None:
+                    die("benchmark cleanup action did not prove child exit")
+                if not release_stopped_active(
+                        job, process, lease, lease_held=True):
+                    die("benchmark cleanup could not release stopped lease")
+                return action
+            finally:
+                os.close(duplicate)
 
     def terminate_active() -> None:
+        """Try every current child; retain failed leases and aggregate errors."""
         with active_lock:
-            snapshot = list(active.items())
-        for job, process in snapshot:
-            if process.poll() is not None:
-                continue
-            tokens = process_tokens(process.pid)
-            if tokens is None:
-                try:
-                    process.terminate()
-                    action = "terminated_via_owned_popen"
-                except ProcessLookupError:
-                    action = "already_exited"
+            snapshot = [
+                (job, process) for job, (process, _, _) in active.items()
+            ]
+            emergency_snapshot = list(emergency_active)
+        results, cleanup_errors = attempt_all_cleanups(
+            snapshot, terminate_registered)
+        for job, process, action in results:
+            if action is not None:
                 process_actions.append({
                     "kind": "benchmark", "job": job, "pid": process.pid,
                     "action": action,
                 })
-                continue
+
+        def terminate_emergency(
+            job: int,
+            process: subprocess.Popen,
+        ) -> str:
+            action = terminate_direct_unreaped_child(process)
+            require_stopped_action(
+                action, "emergency benchmark job {}".format(job))
+            if process.returncode is None:
+                die("emergency benchmark cleanup did not prove child exit")
+            with active_lock:
+                try:
+                    emergency_active.remove((job, process))
+                except ValueError:
+                    die("emergency benchmark registry changed")
+            return action
+
+        emergency_results, emergency_errors = attempt_all_cleanups(
+            emergency_snapshot, terminate_emergency)
+        for job, process, action in emergency_results:
             process_actions.append({
-                "kind": "benchmark", "job": job, "pid": process.pid,
-                "action": terminate_verified_process(process.pid, tokens),
+                "kind": "benchmark_emergency", "job": job,
+                "pid": process.pid, "action": action,
             })
+        cleanup_errors.extend(
+            "emergency_{}".format(error) for error in emergency_errors)
+        if cleanup_errors:
+            die("benchmark cleanup failed closed: {}".format(
+                "; ".join(cleanup_errors)))
 
     def run_one(task: dict) -> dict:
         job = int(task["job"])
         if abort.is_set():
             return {"job": job, "status": "cancelled_before_start"}
         started_monotonic = time.monotonic()
+        wrapper_argv = [
+            str(PYTHON_PATH), "-I", "-c", PDEATH_EXEC_CODE,
+            str(os.getpid()), str(controller_start_ticks), *task["argv"],
+        ]
         try:
             process = subprocess.Popen(
-                task["argv"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                wrapper_argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 start_new_session=True,
             )
         except OSError as exc:
             return {"job": job, "status": "spawn_error", "detail": str(exc)}
-        start_ticks = process_start_ticks(process.pid)
-        if start_ticks is None:
-            process.terminate()
-            process.wait()
-            return {"job": job, "status": "pid_identity_error"}
-        atomic_result(
-            attempt_dir / "job{:05d}.pid".format(job),
-            canonical_json({"pid": process.pid, "start_ticks": start_ticks}),
-        )
-        with active_lock:
-            active[job] = process
-        if abort.is_set() and process.poll() is None:
-            tokens = process_tokens(process.pid)
-            if tokens is not None:
-                terminate_verified_process(process.pid, tokens)
-            else:
-                process.terminate()
-        stdout, stderr = process.communicate()
-        with active_lock:
-            active.pop(job, None)
+        try:
+            lease = register_active(job, process)
+        except BaseException as registration_error:
+            try:
+                action = terminate_direct_unreaped_child(process)
+                require_stopped_action(
+                    action, "failed benchmark registration job {}"
+                    .format(job))
+            except BaseException as cleanup_error:
+                with active_lock:
+                    emergency_active.append((job, process))
+                raise CampaignError(
+                    "benchmark registration and fallback cleanup failed: "
+                    "registration={!r}; cleanup={!r}".format(
+                        registration_error, cleanup_error)
+                ) from cleanup_error
+            raise
+        timed_out = False
+        stdout = stderr = b""
+        try:
+            # The lease serializes exec/start/cmdline proof and receipt
+            # publication against every cleanup path.  The child stays
+            # unreaped while the pidfd and repeated /proc proofs bind the
+            # numeric PID to the exact exec'd benchmark object.
+            with lease:
+                with active_lock:
+                    current = active.get(job)
+                    if current is None or current[0] is not process or \
+                            current[1] is not None or \
+                            current[2] is not lease or \
+                            process.returncode is not None:
+                        die("benchmark stopped before pidfd binding")
+                try:
+                    pidfd = os.pidfd_open(process.pid, 0)
+                except (OSError, ProcessLookupError) as exc:
+                    die("cannot bind benchmark pidfd: {}".format(exc))
+                try:
+                    attach_active_pidfd(job, process, pidfd)
+                except BaseException:
+                    os.close(pidfd)
+                    raise
+                deadline = (
+                    time.monotonic() + BENCHMARK_EXEC_READY_TIMEOUT_SECONDS)
+                start_ticks: Optional[int] = None
+                while time.monotonic() < deadline:
+                    if pidfd_has_exited(pidfd):
+                        die("benchmark wrapper exited before exec")
+                    observed_start = process_start_ticks(process.pid)
+                    tokens = process_tokens(process.pid)
+                    if observed_start is not None and tokens == task["argv"]:
+                        start_ticks = observed_start
+                        break
+                    if tokens and tokens != wrapper_argv:
+                        die("benchmark wrapper changed command unexpectedly")
+                    if abort.is_set():
+                        die("benchmark launch aborted before exec")
+                    time.sleep(0.005)
+                else:
+                    die("benchmark wrapper did not exec before timeout")
+                assert start_ticks is not None
+                with active_lock:
+                    current = active.get(job)
+                    if current is None or current[0] is not process or \
+                            current[1] != pidfd or current[2] is not lease:
+                        die("benchmark active identity changed before receipt")
+                if pidfd_has_exited(pidfd) or \
+                        process_start_ticks(process.pid) != start_ticks or \
+                        process_tokens(process.pid) != task["argv"]:
+                    die("benchmark identity changed before PID receipt")
+                atomic_result(
+                    attempt_dir / "job{:05d}.pid".format(job),
+                    canonical_json({
+                        "pid": process.pid, "start_ticks": start_ticks,
+                    }),
+                )
+            if abort.is_set():
+                action = terminate_registered(job, process)
+                if action is not None:
+                    process_actions.append({
+                        "kind": "benchmark", "job": job, "pid": process.pid,
+                        "action": action,
+                    })
+            try:
+                stdout, stderr = process.communicate(
+                    timeout=JOB_TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                action = terminate_registered(job, process)
+                if action is not None:
+                    process_actions.append({
+                        "kind": "benchmark", "job": job, "pid": process.pid,
+                        "action": action,
+                    })
+                stdout, stderr = process.communicate(timeout=15.0)
+        except BaseException as original:
+            cleanup_error: Optional[BaseException] = None
+            try:
+                action = terminate_registered(job, process)
+                if action is not None:
+                    process_actions.append({
+                        "kind": "benchmark", "job": job,
+                        "pid": process.pid, "action": action,
+                    })
+            except BaseException as exc:
+                cleanup_error = exc
+            if process.returncode is not None:
+                try:
+                    process.communicate(timeout=15.0)
+                except (OSError, subprocess.TimeoutExpired) as exc:
+                    if cleanup_error is None:
+                        cleanup_error = exc
+            if cleanup_error is not None:
+                raise CampaignError(
+                    "benchmark job {} failed and cleanup was not proved: "
+                    "original={!r}; cleanup={!r}".format(
+                        job, original, cleanup_error)) from cleanup_error
+            raise
+        finally:
+            release_stopped_active(job, process, lease)
         ended_monotonic = time.monotonic()
         exit_bytes = (str(process.returncode) + "\n").encode("ascii")
         for suffix, data in (("stdout", stdout), ("stderr", stderr), ("exit", exit_bytes)):
             atomic_result(attempt_dir / "job{:05d}.{}".format(job, suffix), data)
+        if timed_out:
+            return {
+                "job": job, "status": "timeout",
+                "timeout_seconds": JOB_TIMEOUT_SECONDS,
+            }
         if process.returncode != 0:
             return {"job": job, "status": "exit", "returncode": process.returncode}
         try:
@@ -1933,10 +3769,27 @@ def run_segment(
     try:
         sampled_pid, ready_rows = wait_sampler_ready(
             sampler, thermal_pid, sampler_path, thermal_csv,
+            (os.getpid(), controller_start_ticks),
+            (sampler.pid, sampler_wrapper_start, sampler_wrapper_tokens),
+            sampled_identities,
         )
-        sampled_start_ticks = process_start_ticks(sampled_pid)
-        if sampled_start_ticks is None:
-            die("cannot bind thermal sampler to its process start time")
+        if len(sampled_identities) != 1 or \
+                sampled_identities[0][0] != sampled_pid:
+            die("thermal sampler readiness lacks one captured identity")
+        _, sampled_start_ticks, sampled_tokens = sampled_identities[0]
+        validate_thermal_rows(ready_rows, segment=segment)
+
+        def check_owned_sampler() -> Dict[int, List[str]]:
+            assert_process_identity(
+                sampled_pid, sampled_start_ticks, sampled_tokens,
+                "launched thermal sampler")
+            return sole_sampler_competitors(sampled_pid, sampler.pid)
+
+        competitors = check_owned_sampler()
+        if competitors:
+            die("another I2C reader appeared during sampler startup: {}".format(
+                json.dumps(competitors, sort_keys=True)))
+        assert_current_controller_owner(root)
         jobs_started = time.monotonic()
         ready = {
             "schema": SCHEMA + ".segment_ready", "segment": segment,
@@ -1960,10 +3813,25 @@ def run_segment(
             int(design["owner_ttl_hours"]),
         )
         future_results: List[dict] = []
+        next_i2c_check = time.monotonic()
         with concurrent.futures.ThreadPoolExecutor(
                 max_workers=int(design["worker_count"])) as pool:
             pending = {pool.submit(run_one, task) for task in tasks}
             while pending:
+                now = time.monotonic()
+                if now >= next_i2c_check and not abort.is_set():
+                    readers = check_owned_sampler()
+                    validate_thermal_rows(
+                        read_thermal_rows(thermal_csv), segment=segment)
+                    if readers:
+                        failures.append({
+                            "status": "concurrent_i2c_reader",
+                            "readers": readers,
+                        })
+                        abort.set()
+                        terminate_active()
+                    assert_current_controller_owner(root)
+                    next_i2c_check = now + I2C_RECHECK_INTERVAL_SECONDS
                 if sampler.poll() is not None and not abort.is_set():
                     failures.append({"status": "sampler_exited", "returncode": sampler.returncode})
                     abort.set()
@@ -1993,28 +3861,82 @@ def run_segment(
                 if result.get("status") != "success" and result not in failures:
                     failures.append(result)
         jobs_ended = time.monotonic()
+        if not failures:
+            check_owned_sampler()
         if not failures and not wait_thermal_coverage(sampler, thermal_csv, jobs_ended):
             failures.append({"status": "thermal_end_coverage_failed"})
+        if not failures:
+            readers = check_owned_sampler()
+            final_rows = read_thermal_rows(thermal_csv)
+            final_thermal = validate_thermal_rows(
+                final_rows, segment=segment)
+            assert jobs_started is not None and jobs_ended is not None
+            validate_successful_thermal_coverage(
+                final_rows, final_thermal,
+                start=Decimal(str(jobs_started)),
+                end=Decimal(str(jobs_ended)),
+                stage=stage, segment=segment)
+            if readers:
+                failures.append({
+                    "status": "concurrent_i2c_reader",
+                    "readers": readers,
+                })
+            assert_current_controller_owner(root)
         if not failures:
             state = "success"
     except BaseException as exc:
         caught = exc
         abort.set()
-        terminate_active()
+        try:
+            terminate_active()
+        except BaseException as cleanup_exc:
+            failures.append({
+                "status": "benchmark_stop_error",
+                "detail": repr(cleanup_exc),
+            })
         failures.append({"status": "launcher_exception", "detail": repr(exc)})
         jobs_ended = time.monotonic() if ready_written else None
     finally:
         try:
             sampler_returncode, sampler_actions = stop_launched_sampler(
                 sampler, thermal_pid, sampler_path, thermal_csv,
+                sampled_identities[0] if sampled_identities else None,
             )
             process_actions.extend(sampler_actions)
+            sampler_cleanup_proved = True
         except BaseException as exc:
             if caught is None:
                 caught = exc
             failures.append({"status": "sampler_stop_error", "detail": repr(exc)})
             state = "failed"
         sampler_error.close()
+    try:
+        terminate_active()
+    except BaseException as exc:
+        if caught is None:
+            caught = exc
+        failures.append({
+            "status": "benchmark_stop_error", "detail": repr(exc),
+        })
+        state = "failed"
+    with active_lock:
+        unresolved_benchmarks = [
+            {"job": job, "pid": process.pid}
+            for job, (process, _, _) in active.items()
+        ]
+        unresolved_benchmarks.extend(
+            {"job": job, "pid": process.pid, "emergency": True}
+            for job, process in emergency_active
+        )
+    if unresolved_benchmarks:
+        rollback_segment_outputs(root, tasks)
+        die("benchmark cleanup was not proved; segment remains incomplete: {}"
+            .format(json.dumps(unresolved_benchmarks, sort_keys=True)))
+    if not sampler_cleanup_proved:
+        rollback_segment_outputs(root, tasks)
+        if caught is not None:
+            raise caught
+        die("campaign sampler cleanup was not proved")
     if sampler_returncode != 0:
         failures.append({"status": "sampler_returncode", "returncode": sampler_returncode})
         state = "failed"
@@ -2037,10 +3959,32 @@ def run_segment(
 
 def command_launch(args: argparse.Namespace) -> None:
     root = Path(args.root).resolve()
+    lock_descriptor = acquire_environment_lock()
+    if lock_descriptor is None:
+        if args.preflight_only:
+            print(json.dumps({
+                "status": "BLOCKED_ACTIVE_CAMPAIGN_CONTROLLER",
+                "root": str(root),
+                "requested_stage": args.stage,
+            }, indent=2, sort_keys=True))
+            return
+        die("another campaign controller holds the environment-owner lock")
+    try:
+        command_launch_locked(args, root)
+    finally:
+        os.close(lock_descriptor)
+
+
+def command_launch_locked(args: argparse.Namespace, root: Path) -> None:
     design, tasks = verify_root(
         root, args.expected_receipts_sha256, runtime_tolerant=True,
     )
     owner = load_active_owner_marker()
+    owner_live = (
+        active_owner_live_identities(owner) if owner is not None else [])
+    same_root_owner = (
+        owner if owner is not None and owner.get("campaign_root") == str(root)
+        else None)
     foreign_owner = (
         owner if owner is not None and owner.get("campaign_root") != str(root)
         else None)
@@ -2057,15 +4001,35 @@ def command_launch(args: argparse.Namespace) -> None:
         if not segment_path(root, segment, "final").is_file()
     ]
     needs_reconciliation = bool(incomplete or receipt_partials)
+    live_controller = any(
+        entry["role"] == "controller" for entry in owner_live)
+    orphan_reader_resume = bool(
+        same_root_owner is not None and args.resume and needs_reconciliation and
+        owner_live and not live_controller and
+        all(entry["role"] == "reader" for entry in owner_live))
     if args.preflight_only:
         samplers = other_samplers()
         complete_count: Optional[int] = None
         if not needs_reconciliation:
             complete_count = len(completed_jobs(root, tasks))
+        owner_scope = (
+            "same_root" if same_root_owner is not None
+            else "foreign" if foreign_owner is not None else None)
         print(json.dumps({
             "status": (
-                "RESUME_RECONCILIATION_REQUIRED" if needs_reconciliation
+                "RESUME_ORPHAN_RECONCILIATION_REQUIRED"
+                if orphan_reader_resume
+                else "BLOCKED_SAME_ROOT_LIVE_OWNER"
+                if same_root_owner is not None and owner_live
+                else "BLOCKED_FOREIGN_LIVE_OWNER"
+                if foreign_owner is not None and owner_live
                 else "BLOCKED_FOREIGN_ENVIRONMENT_OWNER" if foreign_owner
+                else "RESUME_STALE_OWNER_REQUIRED"
+                if same_root_owner is not None and not args.resume
+                else "RESUME_RECONCILIATION_REQUIRED"
+                if needs_reconciliation and not args.resume
+                else "RESUME_EXISTING_HISTORY_REQUIRED"
+                if indices and not args.resume
                 else "BLOCKED_CONCURRENT_SAMPLER" if samplers
                 else "READY_NOT_LAUNCHED"),
             "root": str(root), "tasks": len(tasks), "complete": complete_count,
@@ -2077,26 +4041,42 @@ def command_launch(args: argparse.Namespace) -> None:
                     "campaign_root": owner.get("campaign_root"),
                     "phase": owner.get("phase"),
                     "expires_utc": owner.get("expires_utc"),
+                    "scope": owner_scope,
+                    "live_protected": owner_live,
                 }),
             "incomplete_segments": incomplete,
             "orphan_receipt_partials": [str(path.relative_to(root)) for path in receipt_partials],
         }, indent=2, sort_keys=True))
         return
+    if owner_live and not orphan_reader_resume:
+        die("environment is owned by live protected process(es): {}".format(
+            json.dumps({
+                "campaign_root": owner.get("campaign_root") if owner else None,
+                "live_protected": owner_live,
+            }, sort_keys=True)))
     if foreign_owner is not None:
         die("environment is owned by another campaign: {}".format(
             json.dumps({
                 "campaign_root": foreign_owner.get("campaign_root"),
                 "expires_utc": foreign_owner.get("expires_utc"),
             }, sort_keys=True)))
+    if same_root_owner is not None and not args.resume:
+        die("stale same-root owner requires explicit --resume")
     if needs_reconciliation and not args.resume:
         die("interrupted segment(s) require --resume reconciliation")
     if indices and not args.resume:
         die("existing campaign segment history requires --resume")
     reconciled: List[dict] = []
     if args.resume:
-        for path in receipt_partials:
-            path.unlink()
         reconciled = reconcile_incomplete_segments(root, tasks)
+        # Reconciliation must consume every live-process identity before any
+        # fsynced partial receipt is discarded.  Attempt PID partials are
+        # removed by the segment sealer only after exact-command cleanup.
+        for path in receipt_partials:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
     design, tasks = verify_root(root, args.expected_receipts_sha256)
     complete = completed_jobs(root, tasks)
     remaining = [task for task in tasks if int(task["job"]) not in complete]
@@ -2111,6 +4091,29 @@ def command_launch(args: argparse.Namespace) -> None:
     if complete and not args.resume:
         die("outputs already exist; inspect then pass --resume")
     if not remaining:
+        terminal_owner = load_active_owner_marker()
+        terminal_owner_live = (
+            active_owner_live_identities(terminal_owner)
+            if terminal_owner is not None else [])
+        if terminal_owner is not None and \
+                terminal_owner.get("campaign_root") != str(root):
+            die("environment owner changed during complete-ledger recovery")
+        if terminal_owner is not None and terminal_owner_live:
+            die("complete-ledger recovery still has live protected processes")
+        if terminal_owner is not None and args.resume:
+            # The controller may have died after the last successful segment
+            # final but before replacing its executing owner marker.  Re-prove
+            # the complete terminal ledger and the empty sampler inventory,
+            # then finish that one missing lifecycle transition.
+            validate_thermal(root, design, tasks)
+            write_owner_marker(
+                root, "complete", [], int(design["owner_ttl_hours"]))
+            print(json.dumps({
+                "status": "ALREADY_COMPLETE_OWNER_FINALIZED",
+                "root": str(root), "tasks": len(tasks),
+                "reconciled_segments": len(reconciled),
+            }, indent=2, sort_keys=True))
+            return
         die("campaign ledger is already complete")
     hard_incomplete = bool(by_stage["hard"])
     if args.stage == "control" and hard_incomplete:
@@ -2125,11 +4128,13 @@ def command_launch(args: argparse.Namespace) -> None:
         [owner_protected_entry("controller", os.getpid())],
         int(design["owner_ttl_hours"]),
     )
+    assert_current_controller_owner(root)
     launched: List[dict] = []
     for stage in requested_stages:
         stage_tasks = by_stage[stage]
         if not stage_tasks:
             continue
+        assert_current_controller_owner(root)
         # Recheck immediately before each privileged I2C sampler launch.
         samplers = other_samplers()
         if samplers:
@@ -2146,6 +4151,7 @@ def command_launch(args: argparse.Namespace) -> None:
             raise SystemExit(1)
         complete.update(int(task["job"]) for task in stage_tasks)
     # Seal: no owned processes remain after a fully successful launch pass.
+    assert_current_controller_owner(root)
     write_owner_marker(root, "complete", [], int(design["owner_ttl_hours"]))
     print(json.dumps({
         "status": "LAUNCH_OK", "reconciled_segments": len(reconciled),
@@ -2185,20 +4191,38 @@ def validate_attempt_manifest(
             identity = load_json(path)
             value = identity.get("pid")
             start_ticks = identity.get("start_ticks")
-            if not isinstance(value, int) or isinstance(value, bool) or value <= 1 or \
+            if set(identity) != {"pid", "start_ticks"} or \
+                    path.read_bytes() != canonical_json(identity) or \
+                    not isinstance(value, int) or isinstance(value, bool) or value <= 1 or \
+                    value > MAX_PROCESS_PID or \
                     not isinstance(start_ticks, int) or isinstance(start_ticks, bool) or \
                     start_ticks < 0:
                 die("segment attempt PID receipt is out of range")
     complete_suffixes = {"pid", "stdout", "stderr", "exit"}
+    valid_prefixes = (
+        {"pid"},
+        {"pid", "stdout"},
+        {"pid", "stdout", "stderr"},
+        complete_suffixes,
+    )
     for job, suffixes in groups.items():
-        if suffixes != {"pid"} and suffixes != complete_suffixes:
-            die("segment attempt contains a partial completed artifact set")
-        if suffixes == complete_suffixes:
+        # A controller crash can interrupt the three atomic output writes
+        # after the PID receipt.  Preserve and authenticate any such prefix;
+        # only a successful segment requires the complete four-file set.
+        if suffixes not in valid_prefixes:
+            die("segment attempt is not an atomic output prefix")
+        if "exit" in suffixes:
             exit_path = attempt_dir / "job{:05d}.exit".format(job)
             try:
-                int(exit_path.read_text(encoding="ascii").strip())
-            except (OSError, ValueError):
+                exit_bytes = exit_path.read_bytes()
+            except OSError:
                 die("segment attempt exit receipt is malformed")
+            if re.fullmatch(rb"(?:0|[1-9][0-9]*|-[1-9][0-9]*)\n",
+                            exit_bytes) is None:
+                die("segment attempt exit receipt is malformed")
+            exit_value = int(exit_bytes[:-1])
+            if exit_value < -(signal.NSIG - 1) or exit_value > 255:
+                die("segment attempt exit receipt is out of range")
     if require_complete and (set(groups) != allowed_jobs or
                              any(value != complete_suffixes for value in groups.values())):
         die("successful segment lacks complete attempt evidence for every job")
@@ -2210,6 +4234,8 @@ def validate_attempt_manifest(
     if not manifest.is_file() or manifest.is_symlink() or manifest.read_bytes() != data or \
             final.get("attempt_manifest") != manifest.name or \
             final.get("attempt_manifest_sha256") != sha256_bytes(data) or \
+            not isinstance(final.get("attempt_file_count"), int) or \
+            isinstance(final.get("attempt_file_count"), bool) or \
             final.get("attempt_file_count") != len(files):
         die("segment attempt manifest mismatch")
 
@@ -2229,13 +4255,25 @@ def validate_thermal_rows(
     }
     utc_previous: Optional[datetime] = None
     for row in rows:
+        utc_text = row.get("utc")
+        if not isinstance(utc_text, str) or re.fullmatch(
+                r"[0-9]{4}-[0-9]{2}-[0-9]{2}T"
+                r"[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z",
+                utc_text) is None:
+            die("thermal UTC timestamp is not in sampler format")
         try:
-            utc = datetime.fromisoformat(row["utc"].replace("Z", "+00:00"))
+            utc = datetime.fromisoformat(utc_text.replace("Z", "+00:00"))
         except (KeyError, ValueError) as exc:
             die("invalid thermal UTC timestamp: {}".format(exc))
-        if utc.tzinfo is None or (utc_previous is not None and utc <= utc_previous):
+        if utc.utcoffset() != timedelta(0) or \
+                (utc_previous is not None and utc <= utc_previous):
             die("thermal UTC timestamps are not strictly increasing")
         utc_previous = utc
+        monotonic_text = row.get("monotonic_s")
+        if not isinstance(monotonic_text, str) or re.fullmatch(
+                r"(?:0|[1-9][0-9]*)\.[0-9]{6}",
+                monotonic_text) is None:
+            die("thermal monotonic timestamp is not in sampler format")
         current = decimal_field(row, "monotonic_s")
         if monotonic and current <= monotonic[-1]:
             die("thermal monotonic timestamps are not strictly increasing")
@@ -2244,30 +4282,80 @@ def validate_thermal_rows(
                 THERMAL_MAX_GAP_SECONDS):
             die("thermal cadence gap is outside policy in segment {}".format(segment))
         monotonic.append(current)
-        if row["cpu_busy_pct"]:
-            value = decimal_field(row, "cpu_busy_pct")
-            if value < 0 or value > 100:
-                die("thermal CPU busy percentage is out of range")
-            busy.append(value)
+        if not row["cpu_busy_pct"]:
+            die("thermal row lacks CPU busy utilization")
+        value = decimal_field(row, "cpu_busy_pct")
+        if value.is_signed() or value > 100:
+            die("thermal CPU busy percentage is out of range")
+        busy.append(value)
+        for key in ("cpu_avg_mhz", "load1", "load5", "load15"):
+            if not row[key]:
+                die("thermal row lacks {}".format(key))
+            auxiliary = decimal_field(row, key)
+            if auxiliary.is_signed() or \
+                    (key == "cpu_avg_mhz" and auxiliary == 0):
+                die("thermal auxiliary metric {} is out of range".format(key))
         if not row["cpu_tctl_c"]:
             die("thermal row lacks CPU Tctl")
-        cpu.append(decimal_field(row, "cpu_tctl_c"))
+        cpu_temperature = decimal_field(row, "cpu_tctl_c")
+        if not MIN_PLAUSIBLE_CPU_C < cpu_temperature < MAX_PLAUSIBLE_CPU_C:
+            die("thermal CPU Tctl is physically implausible")
+        cpu.append(cpu_temperature)
         for key in THERMAL_FIELDS[5:13]:
             if not row[key]:
                 die("thermal row lacks DIMM field {}".format(key))
-            dimm_by_field[key].append(decimal_field(row, key))
-        try:
-            dimm_errors = int(row["dimm_read_errors"])
-            edac_ce = int(row["edac_ce"])
-            edac_ue = int(row["edac_ue"])
-        except (KeyError, ValueError) as exc:
-            die("invalid thermal hardware counter: {}".format(exc))
-        if dimm_errors != 0 or edac_ce != 0 or edac_ue != 0:
+            dimm_temperature = decimal_field(row, key)
+            if not MIN_PLAUSIBLE_DIMM_C < dimm_temperature < \
+                    MAX_PLAUSIBLE_DIMM_C:
+                die("thermal DIMM temperature is physically implausible")
+            dimm_by_field[key].append(dimm_temperature)
+        if any(row.get(key) != "0" for key in (
+                "dimm_read_errors", "edac_ce", "edac_ue")):
             die("thermal hardware error receipt is nonzero")
     return {
         "samples": len(rows), "monotonic": monotonic, "busy": busy,
         "cpu": cpu, "dimm_by_field": dimm_by_field,
     }
+
+
+def validate_successful_thermal_coverage(
+    rows: Sequence[Mapping[str, str]],
+    thermal: Mapping[str, object],
+    *,
+    start: Decimal,
+    end: Decimal,
+    stage: str,
+    segment: int,
+) -> List[Tuple[Decimal, Decimal]]:
+    monotonic = thermal["monotonic"]
+    if not isinstance(monotonic, list) or not monotonic or \
+            end <= start or monotonic[0] > start or monotonic[-1] < end:
+        die("successful thermal segment lacks full launch start/end coverage")
+    # Each sampler row's cpu_busy_pct is the /proc/stat delta for the interval
+    # ending at that row.  Weight only the overlap of interval (i-1, i] with
+    # the benchmark window; an arithmetic row mean lets long low-utilization
+    # gaps hide behind short high-utilization intervals.
+    coverage_busy: List[Tuple[Decimal, Decimal]] = []
+    for index in range(1, len(monotonic)):
+        left = max(monotonic[index - 1], start)
+        right = min(monotonic[index], end)
+        if right <= left:
+            continue
+        coverage_busy.append((
+            decimal_field(rows[index], "cpu_busy_pct"),
+            right - left,
+        ))
+    covered_duration = sum(
+        (duration for _, duration in coverage_busy), Decimal(0))
+    if not coverage_busy or covered_duration != end - start:
+        die("successful thermal segment has an interval coverage gap")
+    weighted_mean = sum(
+        (value * duration for value, duration in coverage_busy), Decimal(0)
+    ) / covered_duration
+    if stage in CPU_BUSY_FLOOR_STAGES and weighted_mean < CPU_BUSY_FLOOR:
+        die("successful segment {} CPU busy mean is below the sealed floor"
+            .format(segment))
+    return coverage_busy
 
 
 def validate_thermal(root: Path, design: Mapping[str, object], tasks: Sequence[dict]) -> Dict[str, object]:
@@ -2278,7 +4366,7 @@ def validate_thermal(root: Path, design: Mapping[str, object], tasks: Sequence[d
     successful_jobs: Set[int] = set()
     successful_segments = failed_segments = interrupted_segments = 0
     samples = 0
-    all_busy: List[Decimal] = []
+    all_busy: List[Tuple[Decimal, Decimal]] = []
     all_cpu: List[Decimal] = []
     dimm_maxima: Dict[str, Decimal] = {}
     seen_control_success = False
@@ -2307,15 +4395,39 @@ def validate_thermal(root: Path, design: Mapping[str, object], tasks: Sequence[d
             for task in tasks
         )
         if intent.get("schema") != SCHEMA + ".segment_intent" or \
+                not isinstance(intent.get("segment"), int) or \
+                isinstance(intent.get("segment"), bool) or \
                 intent.get("segment") != segment or \
+                not valid_segment_boot_id(intent.get("boot_id")) or \
+                not isinstance(intent.get("controller_pid"), int) or \
+                isinstance(intent.get("controller_pid"), bool) or \
+                intent["controller_pid"] <= 1 or \
+                intent["controller_pid"] > MAX_PROCESS_PID or \
+                not isinstance(intent.get("controller_start_ticks"), int) or \
+                isinstance(intent.get("controller_start_ticks"), bool) or \
+                intent["controller_start_ticks"] < 0 or \
+                not isinstance(intent.get("workers"), int) or \
+                isinstance(intent.get("workers"), bool) or \
                 intent.get("workers") != design.get("worker_count") or \
+                not isinstance(intent.get("previously_complete"), int) or \
+                isinstance(intent.get("previously_complete"), bool) or \
                 intent.get("previously_complete") != len(successful_jobs) or \
                 jobs != expected_jobs or (stage == "control" and hard_remaining) or \
                 intent.get("retry_policy") != "stage-atomic non-selective retry" or \
                 final.get("schema") != SCHEMA + ".segment_final" or \
+                not isinstance(final.get("segment"), int) or \
+                isinstance(final.get("segment"), bool) or \
                 final.get("segment") != segment or \
+                final.get("stage") != stage or \
                 final.get("intent_sha256") != sha256_file(intent_path) or \
-                final.get("jobs") != jobs or final.get("jobs_sha256") != intent.get("jobs_sha256"):
+                not isinstance(final.get("jobs"), list) or \
+                any(not isinstance(job, int) or isinstance(job, bool)
+                    for job in final.get("jobs", [])) or \
+                final.get("jobs") != jobs or \
+                final.get("jobs_sha256") != intent.get("jobs_sha256") or \
+                final.get("retry_policy") != (
+                    "entire stage segment; no successful survivor is retained "
+                    "on failure"):
             die("segment intent/final binding mismatch")
         state = final.get("state")
         if state not in ("success", "failed", "interrupted"):
@@ -2327,6 +4439,8 @@ def validate_thermal(root: Path, design: Mapping[str, object], tasks: Sequence[d
                 any(not isinstance(job, int) or isinstance(job, bool) or job not in jobs
                     for job in rolled_back) or rolled_back != sorted(set(rolled_back)) or \
                 not isinstance(published, list) or \
+                any(not isinstance(job, int) or isinstance(job, bool)
+                    for job in published) or \
                 not isinstance(failures, list):
             die("segment terminal retry ledger is malformed")
         validate_attempt_manifest(
@@ -2340,6 +4454,8 @@ def validate_thermal(root: Path, design: Mapping[str, object], tasks: Sequence[d
             ready = load_json(ready_path)
             samples_at_ready = ready.get("samples_at_ready")
             if ready.get("schema") != SCHEMA + ".segment_ready" or \
+                    not isinstance(ready.get("segment"), int) or \
+                    isinstance(ready.get("segment"), bool) or \
                     ready.get("segment") != segment or \
                     ready.get("intent_sha256") != sha256_file(intent_path) or \
                     final.get("ready_sha256") != sha256_file(ready_path) or \
@@ -2347,6 +4463,7 @@ def validate_thermal(root: Path, design: Mapping[str, object], tasks: Sequence[d
                     samples_at_ready < THERMAL_READY_SAMPLES or \
                     not isinstance(ready.get("sampler_pid"), int) or \
                     isinstance(ready.get("sampler_pid"), bool) or ready["sampler_pid"] <= 1 or \
+                    ready["sampler_pid"] > MAX_PROCESS_PID or \
                     not isinstance(ready.get("sampler_start_ticks"), int) or \
                     isinstance(ready.get("sampler_start_ticks"), bool) or \
                     ready["sampler_start_ticks"] < 0 or \
@@ -2408,24 +4525,9 @@ def validate_thermal(root: Path, design: Mapping[str, object], tasks: Sequence[d
                 die("successful segment terminal receipt is incomplete")
             start = Decimal(str(ready["jobs_started_monotonic_s"]))
             end = Decimal(str(final["jobs_ended_monotonic_s"]))
-            monotonic = thermal["monotonic"]
-            if end < start or monotonic[0] > start or monotonic[-1] < end:
-                die("successful thermal segment lacks full launch start/end coverage")
-            # Include the first sample at/after the end boundary and the sample
-            # immediately before start, since CPU busy is interval-derived.
-            first_after_end = next(index for index, value in enumerate(monotonic) if value >= end)
-            first_after_start = next(index for index, value in enumerate(monotonic) if value >= start)
-            coverage_set = set(range(max(0, first_after_start - 1), first_after_end + 1))
-            coverage_busy = [
-                decimal_field(rows[index], "cpu_busy_pct")
-                for index in sorted(coverage_set)
-                if rows[index]["cpu_busy_pct"]
-            ]
-            if not coverage_busy:
-                die("successful segment has no CPU busy coverage")
-            if stage in CPU_BUSY_FLOOR_STAGES and \
-                    sum(coverage_busy) / len(coverage_busy) < CPU_BUSY_FLOOR:
-                die("successful segment CPU busy mean is below the sealed floor")
+            coverage_busy = validate_successful_thermal_coverage(
+                rows, thermal, start=start, end=end, stage=stage,
+                segment=segment)
             all_busy.extend(coverage_busy)
             if intent.get("stage") == "control":
                 seen_control_success = True
@@ -2493,11 +4595,18 @@ def validate_thermal(root: Path, design: Mapping[str, object], tasks: Sequence[d
         die("job receipt inventory mismatch")
     if not all_busy:
         die("campaign has no successful thermal load samples")
+    busy_duration = sum(
+        (duration for _, duration in all_busy), Decimal(0))
+    if busy_duration <= 0:
+        die("campaign has no positive successful thermal load duration")
+    successful_busy_mean = sum(
+        (value * duration for value, duration in all_busy), Decimal(0)
+    ) / busy_duration
     return {
         "segments": len(indices), "successful_segments": successful_segments,
         "failed_segments": failed_segments,
         "interrupted_segments": interrupted_segments, "samples": samples,
-        "successful_busy_mean": str(sum(all_busy) / len(all_busy)),
+        "successful_busy_mean": str(successful_busy_mean),
         "cpu_max_c": str(max(all_cpu)) if all_cpu else None,
         "dimm_max_c_by_field": {
             key: str(dimm_maxima[key]) for key in sorted(dimm_maxima)
@@ -2525,8 +4634,10 @@ def reduce_outcomes(
     ``outcomes`` maps ``(arm, stage, K, seed_index, schedule)`` to a parsed
     cell record.  The 16 development hard cells are scored separately as
     fix-confirmation and excluded from the headline holdout comparison; the
-    acceptance gate is raw field-shortfall improvement with zero headline
-    introductions and paired cost ratios within the sealed tolerance.
+    acceptance gate requires raw field-shortfall and raw total-recovery
+    improvement, strict headline total-recovery improvement, at least one
+    actual headline repair, zero headline introductions, a genuine panel
+    source field-shortfall fix, and paired cost ratios within tolerance.
     """
     arms = arms_catalog()
     by_name = {arm["name"]: arm for arm in arms}
@@ -2548,6 +4659,25 @@ def reduce_outcomes(
             cell_tuple(row) for row in rows
             if row.get("cause") == "field_shortfall"
         }
+
+    def validate_reduced_cell(record: object, label: str) -> Mapping[str, object]:
+        if not isinstance(record, Mapping):
+            die("{} is not a reduced cell record".format(label))
+        if record.get("outcome") not in ("success", "field_shortfall", "q>H"):
+            die("{} has an unknown reduced outcome".format(label))
+        for field in ("xors", "muladds"):
+            value = record.get(field)
+            if not isinstance(value, Decimal) or not value.is_finite() or \
+                    value.is_signed():
+                die("{} has an invalid nonnegative work metric {}".format(
+                    label, field))
+        for field in ("seed_attempt", "inactivated", "binary_deficit"):
+            value = record.get(field)
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                die("{} has an invalid nonnegative integer receipt {}".format(
+                    label, field))
+        return record
+
     arm_failures: Dict[str, Dict[Tuple[int, int, str], str]] = {}
     for arm in arms:
         failure_map: Dict[Tuple[int, int, str], str] = {}
@@ -2555,9 +4685,9 @@ def reduce_outcomes(
             record = outcomes.get((arm["name"], "control", *key))
             if record is None:
                 die("missing control cell {} for arm {}".format(key, arm["name"]))
+            record = validate_reduced_cell(
+                record, "{} control {}".format(arm["name"], key))
             outcome = record["outcome"]
-            if outcome not in ("success", "field_shortfall", "q>H"):
-                die("unknown reduced outcome {}".format(outcome))
             if outcome != "success":
                 failure_map[key] = str(outcome)
         arm_failures[arm["name"]] = failure_map
@@ -2583,6 +4713,8 @@ def reduce_outcomes(
             record = outcomes.get((arm["name"], "hard", *key))
             if record is None:
                 die("missing hard replay cell {} for arm {}".format(key, arm["name"]))
+            record = validate_reduced_cell(
+                record, "{} hard {}".format(arm["name"], key))
             if record["outcome"] != failure_map.get(key, "success"):
                 die("hard-stage replay diverged from the all-K sweep for {} {}"
                     .format(arm["name"], key))
@@ -2674,6 +4806,18 @@ def reduce_outcomes(
             candidate_work[1] / comparator_work[1] if comparator_work[1] else None)
         candidate_fs = arm_summaries[arm["name"]]["field_shortfalls"]
         comparator_fs = arm_summaries[comparator["name"]]["field_shortfalls"]
+        candidate_raw_failures = len(candidate_map)
+        comparator_raw_failures = len(comparator_map)
+        candidate_headline_fs = sum(
+            cause == "field_shortfall" and key not in hard_set
+            for key, cause in candidate_map.items())
+        comparator_headline_fs = sum(
+            cause == "field_shortfall" and key not in hard_set
+            for key, cause in comparator_map.items())
+        candidate_headline_failures = sum(
+            key not in hard_set for key in candidate_map)
+        comparator_headline_failures = sum(
+            key not in hard_set for key in comparator_map)
         fix_rows: List[dict] = []
         fixed = residual = 0
         for key in hard_keys:
@@ -2696,13 +4840,33 @@ def reduce_outcomes(
         cost_within = (
             xor_ratio is not None and muladd_ratio is not None and
             xor_ratio <= COST_RATIO_MAX and muladd_ratio <= COST_RATIO_MAX)
+        fix_confirmed = fixed > 0
         improved = candidate_fs < comparator_fs
+        raw_recovery_improved = (
+            candidate_raw_failures < comparator_raw_failures)
+        recovery_improved = (
+            candidate_headline_failures < comparator_headline_failures and
+            bool(headline_repairs))
         no_new = not headline_introductions
         acceptance = {
             "raw_field_shortfalls": {
                 "candidate": candidate_fs, "comparator": comparator_fs,
             },
+            "headline_field_shortfalls": {
+                "candidate": candidate_headline_fs,
+                "comparator": comparator_headline_fs,
+            },
             "gate_field_shortfall_improved": improved,
+            "raw_total_failures": {
+                "candidate": candidate_raw_failures,
+                "comparator": comparator_raw_failures,
+            },
+            "gate_raw_total_recovery_improved": raw_recovery_improved,
+            "headline_total_failures": {
+                "candidate": candidate_headline_failures,
+                "comparator": comparator_headline_failures,
+            },
+            "gate_actual_recovery_improved": recovery_improved,
             "headline_introductions": len(headline_introductions),
             "gate_zero_headline_introductions": no_new,
             "cost_ratio_max": str(COST_RATIO_MAX),
@@ -2711,7 +4875,11 @@ def reduce_outcomes(
             "common_success_muladd_ratio": (
                 None if muladd_ratio is None else str(muladd_ratio)),
             "gate_cost_within_tolerance": cost_within,
-            "accepted": improved and no_new and cost_within,
+            "panel_source_failures_fixed": fixed,
+            "gate_dev_fix_confirmed": fix_confirmed,
+            "accepted": (
+                improved and raw_recovery_improved and recovery_improved and
+                no_new and cost_within and fix_confirmed),
         }
         candidates[arm["name"]] = {
             "comparator": comparator["name"],
@@ -2781,7 +4949,15 @@ def command_reduce(args: argparse.Namespace) -> None:
                 sha256_file(path), path.relative_to(root)).encode("ascii"))
         rows = parse_benchmark_csv(raw_path.read_bytes(), task)
         for row in rows:
-            key = (str(task["arm"]), str(task["stage"]), int(row["N"]),
+            try:
+                K = int(row["N"])
+                seed_attempt = int(row["seed_attempt"])
+                inactivated = int(row["inact_max"])
+                binary_deficit = int(row["binary_def_max"])
+            except (KeyError, TypeError, ValueError) as exc:
+                die("benchmark integer result field is malformed: {}".format(
+                    exc))
+            key = (str(task["arm"]), str(task["stage"]), K,
                    int(task["seed_index"]), str(task["schedule"]))
             if key in outcomes:
                 die("duplicate Cartesian cell {}".format(key))
@@ -2789,9 +4965,9 @@ def command_reduce(args: argparse.Namespace) -> None:
                 "outcome": classify(row),
                 "xors": decimal_field(row, "block_xors_mu"),
                 "muladds": decimal_field(row, "block_muladds_mu"),
-                "seed_attempt": int(row["seed_attempt"]),
-                "inactivated": int(row["inact_max"]),
-                "binary_deficit": int(row["binary_def_max"]),
+                "seed_attempt": seed_attempt,
+                "inactivated": inactivated,
+                "binary_deficit": binary_deficit,
             }
     if len(outcomes) != int(design["total_cells"]):
         die("Cartesian result count mismatch")
@@ -2809,10 +4985,6 @@ def command_reduce(args: argparse.Namespace) -> None:
         "thermal": thermal, "reduction": reduction,
     }
     write_once(root / "validated_summary.json", canonical_json(summary))
-    # Seal the environment-ownership marker if this campaign still holds it.
-    marker = load_active_owner_marker()
-    if marker is not None and marker.get("campaign_root") == str(root):
-        write_owner_marker(root, "complete", [], int(design["owner_ttl_hours"]))
     print(json.dumps({
         "status": "VALIDATION_OK", "cells": len(outcomes),
         "accepted": reduction["accepted"],
@@ -2831,6 +5003,10 @@ def make_thermal_bytes(
     edac_ce: str = "0",
     blank_dimm: bool = False,
     busy: str = "99.5",
+    cpu_temperature: str = "60",
+    dimm_temperature: str = "45",
+    blank_busy_indices: Sequence[int] = (),
+    row_overrides: Optional[Mapping[str, str]] = None,
 ) -> bytes:
     output = io.StringIO(newline="")
     writer = csv.DictWriter(output, fieldnames=THERMAL_FIELDS, lineterminator="\n")
@@ -2839,15 +5015,20 @@ def make_thermal_bytes(
         row = {key: "0" for key in THERMAL_FIELDS}
         row.update({
             "utc": "2026-07-21T00:00:{:02d}.000Z".format(index),
-            "monotonic_s": monotonic_value, "cpu_busy_pct": busy,
-            "cpu_avg_mhz": "5000", "cpu_tctl_c": "60",
+            "monotonic_s": "{:.6f}".format(Decimal(monotonic_value)),
+            "cpu_busy_pct": busy,
+            "cpu_avg_mhz": "5000", "cpu_tctl_c": cpu_temperature,
             "dimm_read_errors": "0", "load1": "128", "load5": "128",
             "load15": "128", "edac_ce": edac_ce, "edac_ue": "0",
         })
+        if index in blank_busy_indices:
+            row["cpu_busy_pct"] = ""
         for key in THERMAL_FIELDS[5:13]:
-            row[key] = "45"
+            row[key] = dimm_temperature
         if blank_dimm:
             row[THERMAL_FIELDS[5]] = ""
+        if row_overrides:
+            row.update(row_overrides)
         writer.writerow(row)
     return output.getvalue().encode("ascii")
 
@@ -2859,21 +5040,23 @@ def make_success_fixture(
     busy: str = "99.5",
 ) -> Tuple[List[dict], dict]:
     """Synthesize one finalized successful segment for validator selftests."""
-    for directory in (
-            "raw", "stderr", "exit", "thermal", "segments",
-            "attempts", "job_receipts"):
-        (root / directory).mkdir(parents=True, exist_ok=True)
+    make_private_directory(root, parents=True, exist_ok=True)
+    for directory in RUNTIME_DIRECTORY_NAMES:
+        make_private_directory(root / directory, parents=True, exist_ok=True)
     task = {"job": 0, "stage": stage, "output_name": "job.csv", "argv": ["/bin/true"]}
     intent = {
         "schema": SCHEMA + ".segment_intent", "segment": 0,
+        "boot_id": required_boot_id(),
         "created_utc": "2026-07-21T00:00:00+00:00",
-        "created_monotonic_s": 99.5, "stage": stage, "jobs": [0],
+        "created_monotonic_s": 99.5,
+        "controller_pid": 99999998, "controller_start_ticks": 1,
+        "stage": stage, "jobs": [0],
         "jobs_sha256": sha256_bytes(json_lines([0])), "workers": 1,
         "previously_complete": 0, "resume": False,
         "retry_policy": "stage-atomic non-selective retry",
     }
     write_once(segment_path(root, 0, "intent"), canonical_json(intent))
-    (root / "attempts" / "segment000").mkdir()
+    make_private_directory(root / "attempts" / "segment000")
     (root / "attempts" / "segment000" / "job00000.pid").write_bytes(
         canonical_json({"pid": 99999999, "start_ticks": 1}))
     ready = {
@@ -2882,7 +5065,7 @@ def make_success_fixture(
         "ready_utc": "2026-07-21T00:00:00+00:00",
         "jobs_started_monotonic_s": 101.1, "sampler_pid": 99999999,
         "sampler_start_ticks": 1,
-        "samples_at_ready": 2, "last_sample_monotonic_s": "101.0",
+        "samples_at_ready": 2, "last_sample_monotonic_s": "101.000000",
     }
     write_once(segment_path(root, 0, "ready"), canonical_json(ready))
     thermal_csv = root / "thermal" / "segment000.csv"
@@ -2935,16 +5118,17 @@ def synthetic_reduction_fixture(
 ) -> Tuple[Dict[Tuple[str, str, int, int, str], dict], List[dict], Dict[str, List[dict]]]:
     """Build a small internally consistent accept-path reduction fixture.
 
-    Comparators fail their panel field-shortfall cells plus one shared q>H
-    cell; the P48 candidate repairs one of two panel cells (one residual)
-    and the P32 candidate repairs both, so both survivors satisfy the
-    acceptance gate exactly as sealed.
+    Every comparator field shortfall is one of its panel's development cells,
+    matching the real sealed source.  Each comparator also has an independent
+    headline q>H failure which its candidate repairs, so the fixture proves
+    raw field-shortfall fix-confirmation and independent headline recovery.
     """
     h1 = (3, 0, "burst")
     h2 = (5, 1, "adversarial")
     h3 = (7, 2, "repair-only")
     h4 = (9, 0, "burst")
     q1 = (11, 1, "burst")
+    q2 = (12, 2, "repair-only")
     source_records = {
         "p48_r3": [
             {**cell_record(h1), "cause": "field_shortfall"},
@@ -2954,7 +5138,7 @@ def synthetic_reduction_fixture(
         "p32_r7": [
             {**cell_record(h3), "cause": "field_shortfall"},
             {**cell_record(h4), "cause": "field_shortfall"},
-            {**cell_record(q1), "cause": "q>H"},
+            {**cell_record(q2), "cause": "q>H"},
         ],
     }
     hard = [
@@ -2965,10 +5149,14 @@ def synthetic_reduction_fixture(
         }.items())
     ]
     failure_maps = {
-        "p48_r3_sfx380": {h1: "field_shortfall", h2: "field_shortfall", q1: "q>H"},
-        "p48_r3_pfx007": {h2: "field_shortfall", q1: "q>H"},
-        "p32_r7_sfx3f8": {h3: "field_shortfall", h4: "field_shortfall", q1: "q>H"},
-        "p32_r7_pfx07f": {q1: "q>H"},
+        "p48_r3_sfx380": {
+            h1: "field_shortfall", h2: "field_shortfall",
+            q1: "q>H"},
+        "p48_r3_pfx007": {h2: "field_shortfall"},
+        "p32_r7_sfx3f8": {
+            h3: "field_shortfall", h4: "field_shortfall",
+            q2: "q>H"},
+        "p32_r7_pfx07f": {},
     }
     outcomes: Dict[Tuple[str, str, int, int, str], dict] = {}
     hard_keys = [cell_tuple(cell) for cell in hard]
@@ -3034,6 +5222,116 @@ def command_selftest(_: argparse.Namespace) -> None:
         lambda: parse_preamble("# precodefail: duplicate=1 duplicate=2"),
         "duplicate preamble",
     )
+    single_trial = {
+        "success": "1", "rank_fail": "0", "error": "0",
+        "fail_rate": "0.00000000",
+        "inact_mu": "12.000", "inact_max": "12",
+        "binary_def_mu": "12.000", "binary_def_max": "12",
+        "heavy_gain_mu": "12.000", "heavy_gain_min": "12",
+        "heavy_shortfall": "0", "first_rank_fail": "-1",
+        "binary_def_hist": "12:1", "heavy_gain_hist": "12:1",
+        "failure_trials": "",
+    }
+    if classify(single_trial) != "success":
+        die("single-trial success semantics selftest failed")
+    forged_trial = dict(single_trial)
+    forged_trial.update({
+        "inact_mu": "13.000", "inact_max": "13",
+        "binary_def_mu": "13.000", "binary_def_max": "13",
+        "binary_def_hist": "13:1",
+    })
+    expect_reject(
+        lambda: classify(forged_trial),
+        "single-trial contradictory success",
+    )
+
+    # The launch guard must identify renamed I2C readers from their retained
+    # device descriptors, and recognize wrapped known samplers before their
+    # descriptors are open without classifying unrelated Python commands.
+    if parse_fuser_i2c_result(
+            Path("/dev/i2c-1"), 0, b" 41 17 41",
+            b"/dev/i2c-1:         \n") != (17, 41) or \
+            parse_fuser_i2c_result(
+                Path("/dev/i2c-2"), 1, b"", b"") != ():
+        die("I2C reader parser selftest failed")
+    expect_reject(
+        lambda: parse_fuser_i2c_result(
+            Path("/dev/i2c-1"), 0, b"41\n",
+            b"/dev/i2c-1:         \n"),
+        "malformed I2C reader output",
+    )
+    expect_reject(
+        lambda: parse_fuser_i2c_result(
+            Path("/dev/i2c-1"), 1, b"", b"warning\n"),
+        "diagnostic I2C no-reader output",
+    )
+    expected_inventory = {
+        71: ["/dev/i2c-1", "/dev/i2c-2"],
+    }
+    if validate_sole_sampler_inventory(
+            expected_inventory, 71, 70) != {} or \
+            validate_sole_sampler_inventory({
+                **expected_inventory, 91: ["/dev/i2c-1"]}, 71, 70) != \
+                {91: ["/dev/i2c-1"]}:
+        die("sole sampler inventory selftest failed")
+    expect_reject(
+        lambda: validate_sole_sampler_inventory(
+            {71: ["/dev/i2c-1"]}, 71, 70),
+        "incomplete owned I2C inventory",
+    )
+    if not is_wirehair_sampler_command([
+            "sudo", "-n", "python3",
+            "/tmp/wirehair_expo_thermal_sampler_hardened.py",
+            "--csv", "/tmp/thermal.csv", "--pid-file", "/tmp/thermal.pid",
+    ]) or not is_wirehair_sampler_command([
+            "python3", "/tmp/wirehair_expo_thermal_sampler.py",
+            "--csv=/tmp/thermal.csv", "--pid-file=/tmp/thermal.pid",
+    ]) or not is_wirehair_sampler_command([
+            "bash", "-c",
+            "python3 /tmp/wirehair_expo_thermal_sampler_hardened.py "
+            "--csv /tmp/thermal.csv --pid-file /tmp/thermal.pid",
+    ]) or is_wirehair_sampler_command([
+            "python3", "/tmp/unrelated_csv_worker.py",
+            "--csv", "/tmp/output.csv", "--pid-file", "/tmp/worker.pid",
+    ]) or is_wirehair_sampler_command([
+            "python3", "/tmp/review.py",
+            "/tmp/wirehair_expo_thermal_sampler.py",
+            "--csv", "notes", "--pid-file", "fixture",
+    ]) or is_wirehair_sampler_command([
+            "rg", "read_spd5118_temperature",
+            "/tmp/wirehair_expo_thermal_sampler.py",
+    ]):
+        die("sampler command recognition selftest failed")
+
+    # A process that exits and has its PID reused after TERM must never receive
+    # the later KILL.  The identity transition is injected deterministically.
+    termination_state = {"start_ticks": 99}
+    sent_signals: List[str] = []
+
+    def simulated_signal(signal_name: str) -> None:
+        sent_signals.append(signal_name)
+        if signal_name == "TERM":
+            termination_state["start_ticks"] = 100
+
+    action = terminate_verified_process(
+        1234, 99, ["owned", "worker"],
+        alive_probe=lambda _: True,
+        start_ticks_probe=lambda _: termination_state["start_ticks"],
+        tokens_probe=lambda _: ["owned", "worker"],
+        signal_sender=simulated_signal,
+    )
+    if action != "identity_reused" or sent_signals != ["TERM"]:
+        die("PID-reuse-safe termination selftest failed")
+    sent_signals.clear()
+    action = terminate_verified_process(
+        1234, 99, ["owned", "worker"],
+        alive_probe=lambda _: True,
+        start_ticks_probe=lambda _: 99,
+        tokens_probe=lambda _: ["foreign", "worker"],
+        signal_sender=simulated_signal,
+    )
+    if action != "identity_changed" or sent_signals:
+        die("changed-command termination selftest failed")
 
     # Task-ledger identity, cardinality, chunking, and argv shape.
     _, hard, _ = synthetic_reduction_fixture()
@@ -3079,8 +5377,12 @@ def command_selftest(_: argparse.Namespace) -> None:
     if not reduction["accepted"] or reduction["codec_errors"] != 0 or \
             p48["acceptance"]["raw_field_shortfalls"] != {"candidate": 1, "comparator": 2} or \
             p32["acceptance"]["raw_field_shortfalls"] != {"candidate": 0, "comparator": 2} or \
-            p48["repairs_vs_comparator"] != 1 or p48["introductions_vs_comparator"] != 0 or \
-            p32["repairs_vs_comparator"] != 2 or \
+            p48["acceptance"]["headline_field_shortfalls"] != \
+                {"candidate": 0, "comparator": 0} or \
+            not p48["acceptance"]["gate_actual_recovery_improved"] or \
+            not p48["acceptance"]["gate_raw_total_recovery_improved"] or \
+            p48["repairs_vs_comparator"] != 2 or p48["introductions_vs_comparator"] != 0 or \
+            p32["repairs_vs_comparator"] != 3 or \
             p48["fix_confirmation"]["panel_source_failures_fixed"] != 1 or \
             p48["fix_confirmation"]["panel_source_failures_residual"] != 1 or \
             p48["acceptance"]["common_success_xor_ratio"] != "1" or \
@@ -3103,9 +5405,58 @@ def command_selftest(_: argparse.Namespace) -> None:
     if verdict["accepted"] or \
             verdict["candidates"]["p48_r3_pfx007"]["acceptance"]["gate_cost_within_tolerance"]:
         die("reducer cost rejection selftest failed")
+    relabeled = dict(outcomes)
+    hard_key_set = {cell_tuple(cell) for cell in hard}
+    for key in domain_iter(2, 13):
+        comparator = relabeled[("p48_r3_sfx380", "control", *key)]
+        relabeled[("p48_r3_pfx007", "control", *key)] = dict(comparator)
+        if key in hard_key_set:
+            relabeled[("p48_r3_pfx007", "hard", *key)] = dict(comparator)
+        if comparator["outcome"] != "field_shortfall":
+            continue
+        relabeled[("p48_r3_pfx007", "control", *key)] = synth_cell("q>H")
+        if key in hard_key_set:
+            relabeled[("p48_r3_pfx007", "hard", *key)] = synth_cell("q>H")
+    verdict = reduce_outcomes(relabeled, hard, source_records, k_lo=2, k_hi=13)
+    if verdict["accepted"] or \
+            verdict["candidates"]["p48_r3_pfx007"]["acceptance"][
+                "gate_actual_recovery_improved"]:
+        die("reducer cause-relabel rejection selftest failed")
+    relabeled_with_repair = dict(outcomes)
+    panel_keys = {
+        cell_tuple(record)
+        for record in source_records["p48_r3"]
+        if record["cause"] == "field_shortfall"
+    }
+    for key in panel_keys:
+        relabeled_with_repair[
+            ("p48_r3_pfx007", "control", *key)] = synth_cell("q>H")
+        relabeled_with_repair[
+            ("p48_r3_pfx007", "hard", *key)] = synth_cell("q>H")
+    verdict = reduce_outcomes(
+        relabeled_with_repair, hard, source_records, k_lo=2, k_hi=13)
+    relabel_acceptance = verdict["candidates"]["p48_r3_pfx007"]["acceptance"]
+    if verdict["accepted"] or \
+            not relabel_acceptance["gate_actual_recovery_improved"] or \
+            relabel_acceptance["gate_dev_fix_confirmed"]:
+        die("reducer hard-relabel fix-confirmation selftest failed")
+    raw_gain_erased = dict(outcomes)
+    for key in ((7, 2, "repair-only"), (9, 0, "burst")):
+        raw_gain_erased[
+            ("p48_r3_pfx007", "control", *key)] = synth_cell("q>H")
+        raw_gain_erased[
+            ("p48_r3_pfx007", "hard", *key)] = synth_cell("q>H")
+    verdict = reduce_outcomes(
+        raw_gain_erased, hard, source_records, k_lo=2, k_hi=13)
+    raw_acceptance = verdict["candidates"]["p48_r3_pfx007"]["acceptance"]
+    if verdict["accepted"] or \
+            not raw_acceptance["gate_actual_recovery_improved"] or \
+            not raw_acceptance["gate_dev_fix_confirmed"] or \
+            raw_acceptance["gate_raw_total_recovery_improved"]:
+        die("reducer raw-total recovery rejection selftest failed")
     tied = dict(outcomes)
-    tied[("p48_r3_pfx007", "control", 3, 0, "burst")] = synth_cell("field_shortfall")
-    tied[("p48_r3_pfx007", "hard", 3, 0, "burst")] = synth_cell("field_shortfall")
+    tied[("p48_r3_pfx007", "control", 4, 2, "adversarial")] = \
+        synth_cell("field_shortfall")
     verdict = reduce_outcomes(tied, hard, source_records, k_lo=2, k_hi=13)
     if verdict["accepted"] or \
             verdict["candidates"]["p48_r3_pfx007"]["acceptance"]["gate_field_shortfall_improved"]:
@@ -3161,6 +5512,13 @@ def command_selftest(_: argparse.Namespace) -> None:
             marker_path=marker_path, boot_id_path=boot_path, now=moment)
         if active is None or active.get("campaign_root") != "/tmp/example-root":
             die("owner marker active-load selftest failed")
+        if active_owner_live_identities(
+                active, alive_probe=lambda pid: pid == 1234,
+                start_ticks_probe=lambda pid: 99) != [entry] or \
+                active_owner_live_identities(
+                    active, alive_probe=lambda pid: pid == 1234,
+                    start_ticks_probe=lambda pid: 100):
+            die("owner protected-identity selftest failed")
         if load_active_owner_marker(
                 marker_path=marker_path, boot_id_path=boot_path,
                 now=moment + timedelta(hours=49)) is not None:
@@ -3176,6 +5534,20 @@ def command_selftest(_: argparse.Namespace) -> None:
         if load_active_owner_marker(
                 marker_path=marker_path, boot_id_path=boot_path, now=moment) is not None:
             die("owner marker completion selftest failed")
+        marker_path.write_bytes(canonical_json({
+            "schema": OWNER_MARKER_SCHEMA,
+            "campaign_root": "/tmp/example-root",
+            "phase": "complete",
+            "boot_id": "boot-1",
+            "created_utc": "2026-07-21T00:00:00+00:00",
+            "expires_utc": "2026-07-23T00:00:00+00:00",
+            "protected": [{"role": "reader", "pid": True, "start_ticks": 1}],
+        }))
+        expect_reject(
+            lambda: load_active_owner_marker(
+                marker_path=marker_path, boot_id_path=boot_path, now=moment),
+            "malformed complete owner marker",
+        )
         marker_path.write_text("{malformed", encoding="ascii")
         expect_reject(
             lambda: load_active_owner_marker(
@@ -3189,6 +5561,20 @@ def command_selftest(_: argparse.Namespace) -> None:
                 marker_path=marker_path, boot_id_path=boot_path, now=moment),
             "malformed protected entry",
         )
+
+        lock_path = Path(temporary) / "owner.lock"
+        first_lock = acquire_environment_lock(lock_path)
+        if first_lock is None:
+            die("environment lock acquisition selftest failed")
+        second_lock = acquire_environment_lock(lock_path)
+        if second_lock is not None:
+            os.close(second_lock)
+            die("environment lock exclusion selftest failed")
+        os.close(first_lock)
+        third_lock = acquire_environment_lock(lock_path)
+        if third_lock is None:
+            die("environment lock release selftest failed")
+        os.close(third_lock)
 
         # Thermal receipt validation: acceptance, tampering, and the
         # control-stage-only CPU busy floor scoping.
@@ -3224,6 +5610,38 @@ def command_selftest(_: argparse.Namespace) -> None:
         expect_reject(
             lambda: validate_thermal(dimm, fixture_design, fixture_tasks),
             "missing DIMM",
+        )
+
+        impossible_cpu = tampered_copy("impossible-cpu")
+        impossible_cpu_csv = impossible_cpu / "thermal" / "segment000.csv"
+        impossible_cpu_csv.write_bytes(make_thermal_bytes(
+            ("100.0", "101.0", "102.0"), cpu_temperature="9999"))
+        impossible_cpu_final = load_json(
+            segment_path(impossible_cpu, 0, "final"))
+        impossible_cpu_final["thermal_csv_sha256"] = sha256_file(
+            impossible_cpu_csv)
+        segment_path(impossible_cpu, 0, "final").write_bytes(
+            canonical_json(impossible_cpu_final))
+        expect_reject(
+            lambda: validate_thermal(
+                impossible_cpu, fixture_design, fixture_tasks),
+            "implausible CPU temperature",
+        )
+
+        impossible_dimm = tampered_copy("impossible-dimm")
+        impossible_dimm_csv = impossible_dimm / "thermal" / "segment000.csv"
+        impossible_dimm_csv.write_bytes(make_thermal_bytes(
+            ("100.0", "101.0", "102.0"), dimm_temperature="-9999"))
+        impossible_dimm_final = load_json(
+            segment_path(impossible_dimm, 0, "final"))
+        impossible_dimm_final["thermal_csv_sha256"] = sha256_file(
+            impossible_dimm_csv)
+        segment_path(impossible_dimm, 0, "final").write_bytes(
+            canonical_json(impossible_dimm_final))
+        expect_reject(
+            lambda: validate_thermal(
+                impossible_dimm, fixture_design, fixture_tasks),
+            "implausible DIMM temperature",
         )
 
         edac = tampered_copy("edac")
@@ -3284,19 +5702,20 @@ def command_selftest(_: argparse.Namespace) -> None:
         )
 
         interrupted = Path(temporary) / "interrupted"
-        for directory in (
-                "raw", "stderr", "exit", "thermal", "segments",
-                "attempts", "job_receipts"):
-            (interrupted / directory).mkdir(parents=True, exist_ok=True)
+        make_private_directory(interrupted)
+        for directory in RUNTIME_DIRECTORY_NAMES:
+            make_private_directory(interrupted / directory)
         retry_task = {"job": 0, "stage": "hard", "output_name": "retry.csv", "argv": ["/bin/true"]}
         retry_intent = {
             "schema": SCHEMA + ".segment_intent", "segment": 0,
+            "boot_id": required_boot_id(),
+            "controller_pid": 99999998, "controller_start_ticks": 1,
             "stage": "hard", "jobs": [0],
             "jobs_sha256": sha256_bytes(json_lines([0])), "workers": 1,
             "retry_policy": "stage-atomic non-selective retry",
         }
         write_once(segment_path(interrupted, 0, "intent"), canonical_json(retry_intent))
-        (interrupted / "attempts" / "segment000").mkdir()
+        make_private_directory(interrupted / "attempts" / "segment000")
         (interrupted / "raw" / "retry.csv").write_bytes(b"failed output\n")
         (interrupted / "stderr" / "retry.csv.stderr").write_bytes(b"failure\n")
         (interrupted / "exit" / "retry.csv.exit").write_bytes(b"1\n")
