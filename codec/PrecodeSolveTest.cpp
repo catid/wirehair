@@ -2505,6 +2505,19 @@ bool CheckPackedBinaryResidualOracle()
     return true;
 }
 
+bool CheckMixedRhsFusionOracle()
+{
+    if (!wirehair_v2::CheckMixedRhsFusionOracleForTesting())
+    {
+        std::fprintf(stderr,
+            "solve: mixed RHS initialization fusion oracle failed\n");
+        return false;
+    }
+    std::printf(
+        "mixed q=0..16 pivot/residual RHS fusion oracle: PASS\n");
+    return true;
+}
+
 bool CheckMixedNullWitnessCanonicalization()
 {
     if (!wirehair_v2::CheckMixedNullWitnessCanonicalizationForTesting())
@@ -3599,6 +3612,11 @@ int main(int argc, char** argv)
     {
         return CheckMixedProjectionResidueBucketsOracle() ? 0 : 1;
     }
+    if (argc == 2 &&
+        std::strcmp(argv[1], "--mixed-rhs-fusion-oracle") == 0)
+    {
+        return CheckMixedRhsFusionOracle() ? 0 : 1;
+    }
     if (argc == 3 &&
         std::strcmp(argv[1], "--recovery-benchmark") == 0)
     {
@@ -3811,6 +3829,7 @@ int main(int argc, char** argv)
     ok = CheckBinaryPeelLowDegreeXorOracle() && ok;
     ok = CheckMixedSystematicSolve() && ok;
     ok = CheckPackedBinaryResidualOracle() && ok;
+    ok = CheckMixedRhsFusionOracle() && ok;
     ok = CheckMixedNullWitnessCanonicalization() && ok;
     ok = CheckMixedQuotientRankFirstOracles() && ok;
     ok = CheckMixDomainValidation() && ok;
