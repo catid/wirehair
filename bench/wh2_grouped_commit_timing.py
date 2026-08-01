@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Sealed cross-binary timing for the WH2 grouped decoder commit delta.
 
-This formal campaign compares the exact schedule-cache and RHS-fusion codec
-parents.  Each parent is built with the same measurement-only ``groupedtiming``
-overlay from commit 243f8ed, then run with the same P48/r3 graph, packet trace,
-payload, allocator policy, and CPU placement.  Each cell launches the binaries
+This formal campaign compares the exact schedule-cache baseline and the
+production-only combined RHS-fusion rescue.  Each parent is built with the
+same measurement-only ``groupedtiming`` overlay from commit d6ab1a6, then run
+with the same P48/r3 graph, packet trace, payload, allocator policy, and CPU
+placement.  Each cell launches the binaries
 in an outer ABBABAAB order.  Every launch in turn runs the codec's four-cycle
 inner ABBABAAB fixture; inner cycle zero is discarded.  Thus process-start
 drift and within-process drift are both balanced without timing system
@@ -22,6 +23,7 @@ No command writes a production profile or changes the caller's worktree.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import csv
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -50,10 +52,10 @@ import wh2_timing_evidence_io as evidence_io
 sys.dont_write_bytecode = True
 
 BASE_COMMIT = "48d14bc77e3f9e98605fca4d226aa218d7d03a0d"
-CANDIDATE_COMMIT = "c7203519b4ef42a3d5b7bd5073152a04f89eb9d3"
-MEASUREMENT_OVERLAY_COMMIT = "3eb1eaf41ded5031393ac84200a62e3c0a0b5456"
+CANDIDATE_COMMIT = "be0bc94b97d03d6ddbc23db3b7058aa7f575b5cd"
+MEASUREMENT_OVERLAY_COMMIT = "d6ab1a65c9864ad97ef06c4b88c2917cb387c0be"
 MEASUREMENT_OVERLAY_PARENT_COMMIT = \
-    "243f8ed86b7bf102fa1cb7156a481c170935e57b"
+    "3a659aeb132e6cf5e5e68d88094af8402cdb0e47"
 MEASUREMENT_OVERLAY_FILES = (
     "codec/WirehairV2Bench.cpp",
     "codec/V2BenchCliTest.cmake",
@@ -76,19 +78,57 @@ INNER_ORDER = "ABBABAAB"
 ARCHITECTURE = {"period": 48, "grouped_rows": 3, "buckets": "auto"}
 BINARY_NAMES = {"base": "wirehair_v2_bench.A", "candidate": "wirehair_v2_bench.B"}
 THERMAL_SAMPLER_NAME = "wirehair_expo_thermal_sampler.py"
+PREPARED_CAMPAIGN_DIRECTORIES = (
+    "frozen", "provenance", "raw", "stderr", "exit", "receipts",
+    "task_receipts", "contamination", "failure",
+)
 OVERHEAD = 4
 LOSS_TEXT = "0.5"
 MALLOC_MMAP_THRESHOLD = "1073741824"
 MALLOC_TRIM_THRESHOLD = "-1"
 MAX_ENVIRONMENTAL_ATTEMPTS = 10
 MAX_MINOR_FAULTS = 64
-SIBLING_PREFLIGHT_WINDOW_NS = 250_000_000
-SIBLING_PREFLIGHT_MAX_BUSY_TICKS = 1
-SIBLING_PREFLIGHT_MAX_SCHED_RUNTIME_NS = 0
-SIBLING_PREFLIGHT_MAX_SCHED_PCOUNT = 0
+SIBLING_PREFLIGHT_WINDOW_NS = 5_000_000_000
+SIBLING_PREFLIGHT_MAX_BUSY_TICKS = 0
 SIBLING_ACCEPTED_EXECUTION_MAX_BUSY_TICKS = 0
-SIBLING_ACCEPTED_EXECUTION_MAX_SCHED_RUNTIME_NS = 0
-SIBLING_ACCEPTED_EXECUTION_MAX_SCHED_PCOUNT = 0
+SIBLING_SCHED_RUNTIME_MAX_PPM = 50
+SIBLING_SCHED_PCOUNT_WINDOW_NS = 1_000_000_000
+DEVICE_SOFTIRQ_VECTORS = frozenset((
+    "HI", "NET_TX", "NET_RX", "BLOCK", "IRQ_POLL", "TASKLET",
+))
+EXPECTED_SOFTIRQ_VECTORS = (
+    "HI", "TIMER", "NET_TX", "NET_RX", "BLOCK", "IRQ_POLL", "TASKLET",
+    "SCHED", "HRTIMER", "RCU",
+)
+GLOBAL_HARDIRQ_VECTORS = frozenset(("ERR", "MIS"))
+MANAGED_NVME_IRQ_WHITELIST = (
+    (103, "IR-PCI-MSIX-0000:a9:00.0 9-edge nvme2q9",
+     "nvme2q9", "8", "8"),
+    (107, "IR-PCI-MSIX-0000:d1:00.0 2-edge nvme0q2",
+     "nvme0q2", "5-9,69-72", "72"),
+    (134, "IR-PCI-MSIX-0000:d2:00.0 14-edge nvme1q14",
+     "nvme1q14", "60-63,124-127", "126"),
+    (176, "IR-PCI-MSIX-0000:aa:00.0 9-edge nvme3q9",
+     "nvme3q9", "8", "8"),
+    (257, "IR-PCI-MSIX-0000:a9:00.0 73-edge nvme2q73",
+     "nvme2q73", "72", "72"),
+    (304, "IR-PCI-MSIX-0000:aa:00.0 73-edge nvme3q73",
+     "nvme3q73", "72", "72"),
+    (365, "IR-PCI-MSIX-0000:a9:00.0 127-edge nvme2q127",
+     "nvme2q127", "126", "126"),
+    (390, "IR-PCI-MSIX-0000:aa:00.0 127-edge nvme3q127",
+     "nvme3q127", "126", "126"),
+)
+IRQ30_IDENTITY = "IOMMU-MSI 376-edge AMD-Vi0-PPR"
+GUARDED_IRQ_IDENTITIES = {
+    30: IRQ30_IDENTITY,
+    **{
+        irq: identity
+        for irq, identity, _handler, _requested, _effective
+        in MANAGED_NVME_IRQ_WHITELIST
+    },
+}
+TMPFS_MAGIC = 0x01021994
 SIBLING_CAMPAIGN_MAX_BUSY_PPM = 50
 SIBLING_CAMPAIGN_MIN_BUSY_TICKS = 1
 CLOCK_TICKS_PER_SECOND = int(os.sysconf("SC_CLK_TCK"))
@@ -101,7 +141,9 @@ SCHEDSTAT_DOMAIN_FIELD_COUNT = 36
 SCHEDSTAT_RUNTIME_FIELD = 7
 SCHEDSTAT_PCOUNT_FIELD = 9
 SIBLING_IDLE_POLICY = {
-    "accounting_sources": ["/proc/stat", "/proc/schedstat"],
+    "accounting_sources": [
+        "/proc/stat", "/proc/schedstat", "/proc/interrupts",
+        "/proc/softirqs"],
     "clock_ticks_per_second": CLOCK_TICKS_PER_SECOND,
     "schedstat_version": SCHEDSTAT_VERSION,
     "schedstat_runtime_field": SCHEDSTAT_RUNTIME_FIELD,
@@ -109,23 +151,36 @@ SIBLING_IDLE_POLICY = {
     "schedstat_sched_schedstats_sysctl_required": False,
     "preflight_window_ns": SIBLING_PREFLIGHT_WINDOW_NS,
     "preflight_max_busy_ticks": SIBLING_PREFLIGHT_MAX_BUSY_TICKS,
-    "preflight_max_sched_runtime_ns":
-        SIBLING_PREFLIGHT_MAX_SCHED_RUNTIME_NS,
-    "preflight_max_sched_pcount": SIBLING_PREFLIGHT_MAX_SCHED_PCOUNT,
+    "preflight_max_sched_runtime_ppm": SIBLING_SCHED_RUNTIME_MAX_PPM,
+    "preflight_max_sched_pcount_per_window": 1,
+    "preflight_sched_pcount_window_ns": SIBLING_SCHED_PCOUNT_WINDOW_NS,
     "accepted_execution_max_busy_ticks":
         SIBLING_ACCEPTED_EXECUTION_MAX_BUSY_TICKS,
-    "accepted_execution_max_sched_runtime_ns":
-        SIBLING_ACCEPTED_EXECUTION_MAX_SCHED_RUNTIME_NS,
-    "accepted_execution_max_sched_pcount":
-        SIBLING_ACCEPTED_EXECUTION_MAX_SCHED_PCOUNT,
+    "accepted_execution_max_sched_runtime_ppm":
+        SIBLING_SCHED_RUNTIME_MAX_PPM,
+    "accepted_execution_max_sched_pcount_per_window": 1,
+    "accepted_execution_sched_pcount_window_ns":
+        SIBLING_SCHED_PCOUNT_WINDOW_NS,
     "accepted_execution_min_duration_ns":
         SIBLING_ACCEPTED_EXECUTION_MIN_DURATION_NS,
     "accepted_execution_hybrid_proof":
         "at-least-one-USER_HZ-tick with zero proc-stat busy ticks, "
-        "schedstat runtime ns, and schedstat pcount delta",
+        "at most 50-ppm schedstat runtime, and at most one schedstat "
+        "pcount per started one-second window",
     "campaign_max_busy_ppm": SIBLING_CAMPAIGN_MAX_BUSY_PPM,
     "campaign_min_busy_ticks": SIBLING_CAMPAIGN_MIN_BUSY_TICKS,
     "campaign_max_sched_runtime_ppm": SIBLING_CAMPAIGN_MAX_BUSY_PPM,
+    "numeric_hardirq_target_delta": 0,
+    "managed_numeric_irq_whitelist": [
+        {"irq": irq, "handler": handler, "requested": requested,
+         "effective": effective}
+        for irq, _identity, handler, requested, effective
+        in MANAGED_NVME_IRQ_WHITELIST
+    ],
+    "device_softirq_timing_cpu_delta": 0,
+    "global_hardirq_delta": 0,
+    "named_hardirq_and_other_softirq_activity":
+        "explicitly classified and receipted",
 }
 MAX_CPU_TEMP_C = 85.0
 MAX_DIMM_TEMP_C = 90.0
@@ -142,6 +197,7 @@ MAX_THERMAL_CSV_BYTES = 256 * 1024 * 1024
 MAX_SIGNED_COUNTER = (1 << 63) - 1
 MAX_UNSIGNED_COUNTER = (1 << 64) - 1
 MAX_CPU_ID = (1 << 31) - 1
+MAX_CPU_LIST_CARDINALITY = 1 << 16
 MAX_PROCESS_PID = (1 << 31) - 1
 EXEC_BIND_TIMEOUT_S = 5.0
 MAX_BENCHMARK_TIMEOUT_S = 24.0 * 60.0 * 60.0
@@ -300,7 +356,10 @@ EXECUTION_RECEIPT_FIELDS = frozenset((
     "row_count", "timed_row_count", "process_identity", "cleanup_action",
     "sibling_ticks_before", "sibling_ticks_after", "sibling_busy_ticks",
     "sibling_schedstat_before", "sibling_schedstat_after",
-    "sibling_sched_runtime_ns", "sibling_sched_pcount",
+    "sibling_sched_runtime_ns", "sibling_sched_runtime_limit_ns",
+    "sibling_sched_pcount", "sibling_sched_pcount_limit",
+    "target_irq_snapshot_before", "target_irq_snapshot_after",
+    "target_irq_delta",
 ))
 FAILURE_RECEIPT_FIELDS = frozenset((
     "schema", "self_sha256_excluding_field", "job", "task_id",
@@ -312,15 +371,22 @@ FAILURE_RECEIPT_FIELDS = frozenset((
     "cleanup_action", "cleanup_error",
     "sibling_ticks_before", "sibling_ticks_after", "sibling_busy_ticks",
     "sibling_schedstat_before", "sibling_schedstat_after",
-    "sibling_sched_runtime_ns", "sibling_sched_pcount",
+    "sibling_sched_runtime_ns", "sibling_sched_runtime_limit_ns",
+    "sibling_sched_pcount", "sibling_sched_pcount_limit",
+    "target_irq_snapshot_before", "target_irq_snapshot_after",
+    "target_irq_delta",
 ))
 CONTAMINATION_RECEIPT_FIELDS = frozenset((
     "schema", "self_sha256_excluding_field", "name", "attempt", "argv",
-    "start_monotonic_ns", "end_monotonic_ns", "stdout_name",
+    "process_identity", "cleanup_action",
+    "start_monotonic_ns", "end_monotonic_ns", "duration_ns", "stdout_name",
     "stdout_sha256", "stderr_name", "stderr_sha256", "contaminations",
     "sibling_ticks_before", "sibling_ticks_after", "sibling_busy_ticks",
     "sibling_schedstat_before", "sibling_schedstat_after",
-    "sibling_sched_runtime_ns", "sibling_sched_pcount",
+    "sibling_sched_runtime_ns", "sibling_sched_runtime_limit_ns",
+    "sibling_sched_pcount", "sibling_sched_pcount_limit",
+    "target_irq_snapshot_before", "target_irq_snapshot_after",
+    "target_irq_delta",
 ))
 TASK_RECEIPT_FIELDS = frozenset((
     "schema", "self_sha256_excluding_field", "job", "task_id", "task_sha256",
@@ -348,14 +414,66 @@ LAUNCH_RECEIPT_FIELDS = frozenset((
     "sibling_ticks_after", "sibling_busy_ticks", "preflight_quiet_core_ticks",
     "preflight_quiet_sibling_ticks", "sibling_busy_limit_ticks",
     "sibling_attempt_busy_ticks", "sibling_gap_busy_ticks",
+    "preflight_core_ticks_before", "preflight_core_ticks_after",
+    "preflight_sibling_ticks_before", "preflight_sibling_ticks_after",
     "preflight_sibling_schedstat_before",
     "preflight_sibling_schedstat_after",
-    "preflight_sibling_sched_runtime_ns", "preflight_sibling_sched_pcount",
+    "preflight_start_monotonic_ns", "preflight_end_monotonic_ns",
+    "preflight_duration_ns", "preflight_sibling_sched_runtime_ns",
+    "preflight_sibling_sched_runtime_limit_ns",
+    "preflight_sibling_sched_pcount", "preflight_sibling_sched_pcount_limit",
     "sibling_schedstat_before", "sibling_schedstat_after",
     "sibling_sched_runtime_ns", "sibling_sched_runtime_limit_ns",
     "sibling_sched_pcount", "sibling_attempt_sched_runtime_ns",
     "sibling_gap_sched_runtime_ns", "sibling_attempt_sched_pcount",
-    "sibling_gap_sched_pcount",
+    "sibling_gap_sched_pcount", "runtime_isolation_snapshot_start",
+    "runtime_isolation_snapshot_start_sha256", "runtime_isolation_snapshot_end",
+    "runtime_isolation_snapshot_end_sha256",
+    "preflight_target_irq_snapshot_before",
+    "preflight_target_irq_snapshot_after", "preflight_target_irq_delta",
+    "campaign_target_irq_snapshot_before",
+    "campaign_target_irq_snapshot_after", "campaign_target_irq_delta",
+    "result_tmpfs_binding", "thermal_csv_tmpfs_binding",
+    "thermal_pid_tmpfs_binding", "prepared_tree_tmpfs_bindings",
+))
+
+RUNTIME_ISOLATION_SNAPSHOT_FIELDS = frozenset((
+    "schema", "capture_start_monotonic_ns", "capture_end_monotonic_ns",
+    "capture_duration_ns", "self_cgroup", "expected_isolated_cpus",
+    "kernel_isolated_cpu_list", "kernel_isolated_cpus",
+    "cgroup_cpu_list", "cgroup_cpus", "cgroup_effective_cpu_list",
+    "cgroup_effective_cpus", "cgroup_exclusive_cpu_list",
+    "cgroup_exclusive_cpus", "cgroup_exclusive_effective_cpu_list",
+    "cgroup_exclusive_effective_cpus", "cgroup_partition",
+    "irq_effective_affinities", "irq30_exception",
+    "managed_nvme_exceptions",
+))
+IRQ_EFFECTIVE_AFFINITY_FIELDS = frozenset((
+    "irq", "effective_affinity_list", "effective_cpus",
+))
+IRQ30_EXCEPTION_FIELDS = frozenset((
+    "irq", "identity", "handler_directories", "requested_affinity_list",
+    "requested_cpus", "effective_affinity_list", "effective_cpus",
+    "global_interrupt_count",
+))
+MANAGED_IRQ_EXCEPTION_FIELDS = frozenset((
+    "irq", "identity", "handler_directories", "requested_affinity_list",
+    "requested_cpus", "effective_affinity_list", "effective_cpus",
+))
+TARGET_IRQ_SNAPSHOT_FIELDS = frozenset((
+    "schema", "capture_start_monotonic_ns", "capture_end_monotonic_ns",
+    "capture_duration_ns", "target_cpus", "cpu_ids", "hardirq_rows",
+    "hardirq_sha256", "softirq_rows", "softirq_sha256",
+))
+TARGET_IRQ_DELTA_FIELDS = frozenset((
+    "schema", "target_cpus", "hardirq_before_sha256",
+    "hardirq_after_sha256", "softirq_before_sha256",
+    "softirq_after_sha256", "hardirq_deltas", "softirq_deltas",
+    "classifications", "contaminations",
+))
+TMPFS_BINDING_FIELDS = frozenset((
+    "schema", "path", "device", "inode", "mode", "uid", "gid", "nlink", "kind",
+    "filesystem_magic",
 ))
 
 
@@ -1125,12 +1243,987 @@ def parse_cpu_list(text: str) -> Tuple[int, ...]:
             high = parse_uint(parts[1], "CPU-list high", (1 << 31) - 1)
             if low >= high:
                 raise TimingError("CPU-list range is not increasing")
+            if high - low + 1 > MAX_CPU_LIST_CARDINALITY - len(values):
+                raise TimingError("CPU-list expands beyond its cardinality bound")
             values.extend(range(low, high + 1))
         else:
+            if len(values) >= MAX_CPU_LIST_CARDINALITY:
+                raise TimingError("CPU-list expands beyond its cardinality bound")
             values.append(parse_uint(token, "CPU-list value", (1 << 31) - 1))
     if values != sorted(set(values)):
         raise TimingError("CPU-list is duplicate or nonascending")
     return tuple(values)
+
+
+def _bounded_kernel_bytes(path: Path, maximum: int = MAX_JSON_EVIDENCE_BYTES) -> bytes:
+    """Read one procfs/sysfs pseudo-file without trusting its zero st_size."""
+    if (not isinstance(maximum, int) or isinstance(maximum, bool) or
+            maximum <= 0):
+        raise TimingError("kernel pseudo-file byte limit is malformed")
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+    descriptor = -1
+    try:
+        descriptor = os.open(str(path), flags)
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise TimingError("kernel evidence path is not a plain file: %s" % path)
+        blocks = []
+        total = 0
+        while True:
+            block = os.read(descriptor, min(64 * 1024, maximum - total + 1))
+            if not block:
+                break
+            total += len(block)
+            if total > maximum:
+                raise TimingError("kernel evidence exceeds byte limit: %s" % path)
+            blocks.append(block)
+        after = os.fstat(descriptor)
+        named = os.stat(str(path), follow_symlinks=False)
+        identity = lambda value: (
+            value.st_dev, value.st_ino, value.st_mode, value.st_uid,
+            value.st_gid)
+        if identity(before) != identity(after) or identity(after) != identity(named):
+            raise TimingError("kernel evidence identity changed: %s" % path)
+        return b"".join(blocks)
+    except OSError as exc:
+        raise TimingError("cannot read kernel evidence: %s" % path) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _kernel_ascii_line(
+    path: Path, context: str, *, allow_empty: bool = False,
+) -> str:
+    raw = _bounded_kernel_bytes(path, 4096)
+    try:
+        text = raw.decode("ascii", "strict")
+    except UnicodeDecodeError as exc:
+        raise TimingError("%s is not ASCII" % context) from exc
+    if (not isinstance(allow_empty, bool) or not text.endswith("\n") or
+            "\n" in text[:-1] or (not allow_empty and not text[:-1])):
+        raise TimingError("%s is not one canonical line" % context)
+    return text[:-1]
+
+
+def _validate_tmpfs_binding_record(
+    record: object, expected_path: Path, expected_kind: str, context: str,
+) -> Dict[str, object]:
+    expected = str(expected_path.resolve())
+    if (not isinstance(record, dict) or set(record) != TMPFS_BINDING_FIELDS or
+            record.get("schema") != "wirehair.wh2.tmpfs_binding.v1" or
+            record.get("path") != expected or
+            record.get("kind") != expected_kind or
+            expected_kind not in ("directory", "regular") or
+            record.get("filesystem_magic") != TMPFS_MAGIC):
+        raise TimingError("%s tmpfs binding is malformed" % context)
+    for field in ("device", "inode", "mode", "uid", "gid", "nlink"):
+        value = record.get(field)
+        if (not isinstance(value, int) or isinstance(value, bool) or value < 0):
+            raise TimingError("%s tmpfs binding is malformed" % context)
+    if (record["inode"] <= 0 or record["mode"] > 0o7777 or
+            record["nlink"] <= 0 or
+            (expected_kind == "regular" and record["nlink"] != 1)):
+        raise TimingError("%s tmpfs binding is malformed" % context)
+    return record
+
+
+def validate_tmpfs_binding(
+    record: object, expected_path: Path, expected_kind: str, context: str,
+) -> Dict[str, object]:
+    """Replay one binding against the currently named inode and filesystem."""
+    checked = _validate_tmpfs_binding_record(
+        record, expected_path, expected_kind, context)
+    current = capture_tmpfs_binding(expected_path, expected_kind, context)
+    if current != checked:
+        raise TimingError("%s live tmpfs binding changed" % context)
+    return checked
+
+
+def capture_tmpfs_binding(
+    path: Path, expected_kind: str, context: str,
+) -> Dict[str, object]:
+    """Bind one exact inode to Linux tmpfs without launching a helper."""
+    resolved = path.resolve()
+    if path != resolved or expected_kind not in ("directory", "regular"):
+        raise TimingError("%s path is not canonical" % context)
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+    if expected_kind == "directory":
+        flags |= os.O_DIRECTORY
+    descriptor = -1
+    try:
+        descriptor = os.open(str(resolved), flags)
+        before = os.fstat(descriptor)
+        expected_type = stat.S_ISDIR if expected_kind == "directory" \
+            else stat.S_ISREG
+        if not expected_type(before.st_mode):
+            raise TimingError("%s has the wrong inode type" % context)
+        if expected_kind == "regular" and before.st_nlink != 1:
+            raise TimingError("%s link policy changed" % context)
+        buffer = ctypes.create_string_buffer(256)
+        libc = ctypes.CDLL(None, use_errno=True)
+        fstatfs = libc.fstatfs
+        fstatfs.argtypes = (ctypes.c_int, ctypes.c_void_p)
+        fstatfs.restype = ctypes.c_int
+        ctypes.set_errno(0)
+        if fstatfs(descriptor, ctypes.byref(buffer)) != 0:
+            raise OSError(ctypes.get_errno(), "fstatfs")
+        filesystem_magic = ctypes.c_long.from_buffer(buffer).value
+        after = os.fstat(descriptor)
+        named = os.stat(str(resolved), follow_symlinks=False)
+        identity = lambda value: (
+            value.st_dev, value.st_ino, value.st_mode, value.st_uid,
+            value.st_gid, value.st_nlink)
+        if identity(before) != identity(after) or identity(after) != identity(named):
+            raise TimingError("%s inode identity changed" % context)
+        if filesystem_magic != TMPFS_MAGIC:
+            raise TimingError("%s must reside on tmpfs" % context)
+        record = {
+            "schema": "wirehair.wh2.tmpfs_binding.v1",
+            "path": str(resolved), "device": before.st_dev,
+            "inode": before.st_ino, "mode": stat.S_IMODE(before.st_mode),
+            "uid": before.st_uid, "gid": before.st_gid,
+            "nlink": before.st_nlink,
+            "kind": expected_kind, "filesystem_magic": filesystem_magic,
+        }
+        return _validate_tmpfs_binding_record(
+            record, resolved, expected_kind, context)
+    except OSError as exc:
+        raise TimingError("cannot bind %s to tmpfs" % context) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _prepared_campaign_binding_paths(
+    root: Path, design: Mapping[str, object],
+) -> Tuple[Tuple[Path, str], ...]:
+    immutable = design.get("immutable_files")
+    if not isinstance(immutable, dict):
+        raise TimingError("prepared tmpfs inventory ledger is malformed")
+    relative_files = {
+        "design.json", "prepare_receipt.json", "tasks_manifest.jsonl",
+        *immutable.keys(),
+    }
+    if any(
+            not isinstance(relative, str) or not relative or
+            Path(relative).is_absolute() or ".." in Path(relative).parts or
+            str(Path(relative)) != relative
+            for relative in relative_files):
+        raise TimingError("prepared tmpfs file path is malformed")
+    entries = [(root, "directory")]
+    entries.extend(
+        (root / relative, "directory")
+        for relative in PREPARED_CAMPAIGN_DIRECTORIES)
+    entries.extend(
+        (root / relative, "regular") for relative in sorted(relative_files))
+    return tuple(entries)
+
+
+def capture_prepared_tree_tmpfs_bindings(
+    root: Path, design: Mapping[str, object],
+) -> List[Dict[str, object]]:
+    """Capture every prepared input and writable output-directory mount."""
+    bindings = [
+        capture_tmpfs_binding(path, kind, "prepared campaign tree")
+        for path, kind in _prepared_campaign_binding_paths(root, design)
+    ]
+    if (not bindings or
+            any(binding["device"] != bindings[0]["device"]
+                for binding in bindings[1:])):
+        raise TimingError("prepared campaign tree spans filesystems")
+    return bindings
+
+
+def validate_prepared_tree_tmpfs_bindings(
+    records: object, root: Path, design: Mapping[str, object],
+) -> List[Dict[str, object]]:
+    expected = _prepared_campaign_binding_paths(root, design)
+    if not isinstance(records, list) or len(records) != len(expected):
+        raise TimingError("prepared campaign tmpfs ledger is malformed")
+    checked = [
+        validate_tmpfs_binding(record, path, kind, "prepared campaign tree")
+        for record, (path, kind) in zip(records, expected)
+    ]
+    if (not checked or
+            any(binding["device"] != checked[0]["device"]
+                for binding in checked[1:])):
+        raise TimingError("prepared campaign tmpfs ledger spans filesystems")
+    return checked
+
+
+def require_live_tmpfs_tree(
+    root: Path, expected_device: int, context: str,
+) -> None:
+    """Reject nested mounts and non-regular objects anywhere in a result tree."""
+    if (not isinstance(expected_device, int) or
+            isinstance(expected_device, bool) or expected_device <= 0):
+        raise TimingError("%s tmpfs device is malformed" % context)
+    paths = [root, *sorted(root.rglob("*"), key=lambda path: str(path))]
+    if len(paths) > MAX_CPU_LIST_CARDINALITY:
+        raise TimingError("%s tmpfs tree exceeds its entry bound" % context)
+    for path in paths:
+        if path.is_symlink():
+            raise TimingError("%s tmpfs tree contains a symlink" % context)
+        if path.is_dir():
+            kind = "directory"
+        elif path.is_file():
+            kind = "regular"
+        else:
+            raise TimingError("%s tmpfs tree contains a special file" % context)
+        binding = capture_tmpfs_binding(
+            path.resolve(), kind, "%s tmpfs tree" % context)
+        if binding["device"] != expected_device:
+            raise TimingError("%s tmpfs tree spans filesystems" % context)
+
+
+def _parse_guarded_irq_rows(
+    raw: bytes, expected_identities: Mapping[int, str],
+) -> Dict[int, Dict[str, object]]:
+    """Parse exact identities and global counts for guarded numeric IRQs."""
+    if (not isinstance(raw, bytes) or not raw.endswith(b"\n") or
+            len(raw) > MAX_JSON_EVIDENCE_BYTES or b"\r" in raw or b"\0" in raw or
+            not isinstance(expected_identities, Mapping) or
+            not expected_identities or
+            any(not isinstance(irq, int) or isinstance(irq, bool) or
+                not 0 <= irq <= MAX_CPU_ID or
+                not isinstance(identity, str) or not identity
+                for irq, identity in expected_identities.items())):
+        raise TimingError("guarded interrupt evidence is malformed")
+    lines = raw.splitlines()
+    if not lines:
+        raise TimingError("guarded interrupt evidence is empty")
+    header = lines[0].split()
+    if (not header or len(header) > MAX_CPU_LIST_CARDINALITY or
+            any(re.fullmatch(rb"CPU(0|[1-9][0-9]*)", token) is None
+                for token in header)):
+        raise TimingError("guarded interrupt CPU header is malformed")
+    cpu_ids = [parse_uint(
+        token[3:].decode("ascii"), "guarded interrupt CPU", MAX_CPU_ID)
+        for token in header]
+    if cpu_ids != sorted(set(cpu_ids)):
+        raise TimingError("guarded interrupt CPU header is unordered")
+    rows: Dict[int, List[bytes]] = {}
+    for line in lines[1:]:
+        match = re.fullmatch(rb"[ \t]*(0|[1-9][0-9]*):[ \t]*(.*)", line)
+        if match is None:
+            continue
+        irq = parse_uint(
+            match.group(1).decode("ascii"), "guarded IRQ", MAX_CPU_ID)
+        if irq in expected_identities:
+            if irq in rows:
+                raise TimingError("guarded interrupt row is ambiguous")
+            rows[irq] = match.group(2).split()
+    if set(rows) != set(expected_identities):
+        raise TimingError("guarded interrupt row is missing")
+    result: Dict[int, Dict[str, object]] = {}
+    for irq in sorted(rows):
+        tokens = rows[irq]
+        if len(tokens) <= len(header):
+            raise TimingError("guarded interrupt row is malformed")
+        try:
+            counters = [parse_uint(
+                token.decode("ascii", "strict"),
+                "guarded interrupt counter", MAX_UNSIGNED_COUNTER)
+                for token in tokens[:len(header)]]
+            identity = b" ".join(tokens[len(header):]).decode("ascii", "strict")
+        except UnicodeDecodeError as exc:
+            raise TimingError("guarded interrupt row is not ASCII") from exc
+        total = sum(counters)
+        if total > MAX_UNSIGNED_COUNTER:
+            raise TimingError("guarded interrupt count exceeds its domain")
+        if identity != expected_identities[irq]:
+            raise TimingError("guarded interrupt identity changed")
+        result[irq] = {
+            "identity": identity, "total_count": total,
+            "cpu_ids": cpu_ids, "counters": counters,
+        }
+    return result
+
+
+def _target_cpu_tuple(target_cpus: Sequence[int], context: str) -> Tuple[int, ...]:
+    try:
+        target = tuple(target_cpus)
+    except TypeError as exc:
+        raise TimingError("%s target CPUs are malformed" % context) from exc
+    if (len(target) != 3 or len(set(target)) != 3 or
+            any(not isinstance(cpu, int) or isinstance(cpu, bool) or
+                not 0 <= cpu <= MAX_CPU_ID for cpu in target)):
+        raise TimingError("%s target CPUs are malformed" % context)
+    return target
+
+
+def _parse_target_counter_rows(
+    raw: bytes, target_cpus: Sequence[int], source: str,
+) -> Tuple[List[int], List[List[object]]]:
+    target = _target_cpu_tuple(target_cpus, source)
+    if (not isinstance(raw, bytes) or not raw.endswith(b"\n") or
+            len(raw) > MAX_JSON_EVIDENCE_BYTES or b"\r" in raw or b"\0" in raw or
+            source not in ("hardirq", "softirq")):
+        raise TimingError("%s counter source is malformed" % source)
+    lines = raw.splitlines()
+    if len(lines) < 2:
+        raise TimingError("%s counter source is empty" % source)
+    header = lines[0].split()
+    if (not header or len(header) > MAX_CPU_LIST_CARDINALITY or
+            any(re.fullmatch(rb"CPU(0|[1-9][0-9]*)", token) is None
+                for token in header)):
+        raise TimingError("%s CPU header is malformed" % source)
+    cpu_ids = [parse_uint(
+        token[3:].decode("ascii"), "%s CPU" % source, MAX_CPU_ID)
+        for token in header]
+    if cpu_ids != sorted(set(cpu_ids)) or not set(target) <= set(cpu_ids):
+        raise TimingError("%s CPU topology changed" % source)
+    target_columns = [cpu_ids.index(cpu) for cpu in target]
+    rows: List[List[object]] = []
+    seen = set()
+    numeric_phase = True
+    previous_numeric = -1
+    for raw_line in lines[1:]:
+        match = re.fullmatch(rb"[ \t]*([^:\s]+):[ \t]*(.*)", raw_line)
+        if match is None:
+            raise TimingError("%s counter row is malformed" % source)
+        try:
+            vector = match.group(1).decode("ascii", "strict")
+        except UnicodeDecodeError as exc:
+            raise TimingError("%s vector is not ASCII" % source) from exc
+        numeric = UINT_RE.fullmatch(vector) is not None
+        if numeric:
+            number = parse_uint(vector, "hardirq vector", MAX_CPU_ID)
+            if not numeric_phase or number <= previous_numeric:
+                raise TimingError("hardirq numeric topology is unordered")
+            previous_numeric = number
+            kind = "numeric"
+        else:
+            numeric_phase = False
+            if re.fullmatch(r"[A-Z][A-Z0-9_]*", vector) is None:
+                raise TimingError("%s named vector is malformed" % source)
+            kind = "named"
+        if vector in seen:
+            raise TimingError("%s vector is duplicated" % source)
+        seen.add(vector)
+        tokens = match.group(2).split()
+        if source == "hardirq" and vector in GLOBAL_HARDIRQ_VECTORS:
+            if len(tokens) != 1:
+                raise TimingError("global hardirq row width changed")
+            try:
+                counter = parse_uint(
+                    tokens[0].decode("ascii", "strict"),
+                    "global hardirq counter", MAX_UNSIGNED_COUNTER)
+            except UnicodeDecodeError as exc:
+                raise TimingError("hardirq counter is not ASCII") from exc
+            rows.append([vector, "global", counter])
+            continue
+        if len(tokens) < len(header) or (
+                source == "softirq" and len(tokens) != len(header)):
+            raise TimingError("%s counter row width changed" % source)
+        counters = []
+        try:
+            for token in tokens[:len(header)]:
+                counters.append(parse_uint(
+                    token.decode("ascii", "strict"),
+                    "%s counter" % source, MAX_UNSIGNED_COUNTER))
+        except UnicodeDecodeError as exc:
+            raise TimingError("%s counter is not ASCII" % source) from exc
+        selected = [counters[index] for index in target_columns]
+        if source == "hardirq":
+            if not numeric and vector in GLOBAL_HARDIRQ_VECTORS:
+                raise TimingError("global hardirq kind changed")
+            suffix = tokens[len(header):]
+            if not suffix:
+                raise TimingError("hardirq identity is missing")
+            try:
+                identity = b" ".join(suffix).decode("ascii", "strict")
+            except UnicodeDecodeError as exc:
+                raise TimingError("hardirq identity is not ASCII") from exc
+            rows.append([vector, kind, identity, *selected])
+        else:
+            if numeric:
+                raise TimingError("softirq vector must be named")
+            rows.append([vector, *selected])
+    if not rows:
+        raise TimingError("%s counter rows are empty" % source)
+    if source == "hardirq" and not GLOBAL_HARDIRQ_VECTORS <= seen:
+        raise TimingError("global hardirq rows are missing")
+    if source == "softirq" and [row[0] for row in rows] != \
+            list(EXPECTED_SOFTIRQ_VECTORS):
+        raise TimingError("softirq vector topology changed")
+    return cpu_ids, rows
+
+
+def _target_rows_sha256(
+    source: str, target_cpus: Sequence[int], cpu_ids: Sequence[int],
+    rows: Sequence[object],
+) -> str:
+    return sha256_bytes(canonical_json({
+        "schema": "wirehair.wh2.%s_target_columns.v2" % source,
+        "target_cpus": list(target_cpus), "cpu_ids": list(cpu_ids),
+        "rows": list(rows),
+    }))
+
+
+def validate_target_irq_snapshot(
+    snapshot: object, target_cpus: Sequence[int], context: str,
+) -> Dict[str, object]:
+    target = _target_cpu_tuple(target_cpus, context)
+    if (not isinstance(snapshot, dict) or
+            set(snapshot) != TARGET_IRQ_SNAPSHOT_FIELDS or
+            snapshot.get("schema") != "wirehair.wh2.target_irq_snapshot.v2" or
+            snapshot.get("target_cpus") != list(target)):
+        raise TimingError("%s IRQ snapshot is malformed" % context)
+    checked_attempt_duration_ns(
+        snapshot.get("capture_start_monotonic_ns"),
+        snapshot.get("capture_end_monotonic_ns"),
+        snapshot.get("capture_duration_ns"), "%s IRQ capture" % context)
+    for field in ("hardirq_sha256", "softirq_sha256"):
+        require_sha256(snapshot.get(field), "%s %s" % (context, field))
+    cpu_ids = snapshot.get("cpu_ids")
+    if (not isinstance(cpu_ids, list) or not cpu_ids or
+            len(cpu_ids) > MAX_CPU_LIST_CARDINALITY or
+            any(not isinstance(cpu, int) or isinstance(cpu, bool) or
+                not 0 <= cpu <= MAX_CPU_ID for cpu in cpu_ids) or
+            cpu_ids != sorted(set(cpu_ids)) or not set(target) <= set(cpu_ids)):
+        raise TimingError("%s IRQ CPU topology is malformed" % context)
+    hardirq_rows = snapshot.get("hardirq_rows")
+    softirq_rows = snapshot.get("softirq_rows")
+    if (not isinstance(hardirq_rows, list) or not hardirq_rows or
+            len(hardirq_rows) > MAX_CPU_LIST_CARDINALITY or
+            not isinstance(softirq_rows, list) or not softirq_rows or
+            len(softirq_rows) > MAX_CPU_LIST_CARDINALITY):
+        raise TimingError("%s IRQ snapshot rows are malformed" % context)
+    previous_numeric = -1
+    numeric_phase = True
+    hard_seen = set()
+    for row in hardirq_rows:
+        if not isinstance(row, list) or len(row) < 2:
+            raise TimingError("%s hardirq row is malformed" % context)
+        kind = row[1]
+        if (((kind in ("numeric", "named") and
+              len(row) != 3 + len(target)) or
+             (kind == "global" and len(row) != 3) or
+             kind not in ("numeric", "named", "global")) or
+                not isinstance(row[0], str) or
+                (kind in ("numeric", "named") and
+                 (not isinstance(row[2], str) or not row[2] or
+                  not row[2].isascii() or
+                  " ".join(row[2].split()) != row[2])) or
+                any(not isinstance(value, int) or isinstance(value, bool) or
+                    not 0 <= value <= MAX_UNSIGNED_COUNTER
+                    for value in row[2 if kind == "global" else 3:])):
+            raise TimingError("%s hardirq row is malformed" % context)
+        vector = row[0]
+        numeric = UINT_RE.fullmatch(vector) is not None
+        if numeric:
+            number = parse_uint(
+                vector, "%s hardirq vector" % context, MAX_CPU_ID)
+        if ((numeric and kind != "numeric") or
+                (not numeric and kind not in ("named", "global")) or
+                (vector in GLOBAL_HARDIRQ_VECTORS and kind != "global") or
+                (kind == "global" and vector not in GLOBAL_HARDIRQ_VECTORS) or
+                vector in hard_seen):
+            raise TimingError("%s hardirq identity is malformed" % context)
+        hard_seen.add(vector)
+        if numeric:
+            if not numeric_phase or number <= previous_numeric:
+                raise TimingError("%s hardirq order is malformed" % context)
+            previous_numeric = number
+        else:
+            numeric_phase = False
+            if re.fullmatch(r"[A-Z][A-Z0-9_]*", vector) is None:
+                raise TimingError("%s hardirq name is malformed" % context)
+    if not GLOBAL_HARDIRQ_VECTORS <= hard_seen:
+        raise TimingError("%s global hardirq rows are missing" % context)
+    soft_seen = set()
+    for row in softirq_rows:
+        if (not isinstance(row, list) or len(row) != 1 + len(target) or
+                not isinstance(row[0], str) or
+                re.fullmatch(r"[A-Z][A-Z0-9_]*", row[0]) is None or
+                row[0] in soft_seen or
+                any(not isinstance(value, int) or isinstance(value, bool) or
+                    not 0 <= value <= MAX_UNSIGNED_COUNTER for value in row[1:])):
+            raise TimingError("%s softirq row is malformed" % context)
+        soft_seen.add(row[0])
+    if [row[0] for row in softirq_rows] != list(EXPECTED_SOFTIRQ_VECTORS):
+        raise TimingError("%s softirq topology is malformed" % context)
+    if (snapshot["hardirq_sha256"] != _target_rows_sha256(
+            "hardirq", target, cpu_ids, hardirq_rows) or
+            snapshot["softirq_sha256"] != _target_rows_sha256(
+                "softirq", target, cpu_ids, softirq_rows)):
+        raise TimingError("%s IRQ target-column hash mismatch" % context)
+    return snapshot
+
+
+def parse_target_irq_snapshot(
+    interrupts_raw: bytes, softirqs_raw: bytes,
+    target_cpus: Sequence[int], capture_start_ns: int, capture_end_ns: int,
+) -> Dict[str, object]:
+    target = _target_cpu_tuple(target_cpus, "captured IRQ")
+    hardirq_cpu_ids, hardirq_rows = _parse_target_counter_rows(
+        interrupts_raw, target, "hardirq")
+    softirq_cpu_ids, softirq_rows = _parse_target_counter_rows(
+        softirqs_raw, target, "softirq")
+    if hardirq_cpu_ids != softirq_cpu_ids:
+        raise TimingError("hardirq/softirq CPU topology changed during capture")
+    duration_ns = checked_attempt_duration_ns(
+        capture_start_ns, capture_end_ns, capture_end_ns - capture_start_ns,
+        "captured IRQ")
+    snapshot = {
+        "schema": "wirehair.wh2.target_irq_snapshot.v2",
+        "capture_start_monotonic_ns": capture_start_ns,
+        "capture_end_monotonic_ns": capture_end_ns,
+        "capture_duration_ns": duration_ns,
+        "target_cpus": list(target),
+        "cpu_ids": hardirq_cpu_ids,
+        "hardirq_rows": hardirq_rows,
+        "hardirq_sha256": _target_rows_sha256(
+            "hardirq", target, hardirq_cpu_ids, hardirq_rows),
+        "softirq_rows": softirq_rows,
+        "softirq_sha256": _target_rows_sha256(
+            "softirq", target, softirq_cpu_ids, softirq_rows),
+    }
+    return validate_target_irq_snapshot(snapshot, target, "captured IRQ")
+
+
+def capture_target_irq_snapshot(
+    target_cpus: Sequence[int], *, proc_root: Path = Path("/proc"),
+) -> Dict[str, object]:
+    capture_start_ns = time.monotonic_ns()
+    interrupts_raw = _bounded_kernel_bytes(proc_root / "interrupts")
+    softirqs_raw = _bounded_kernel_bytes(proc_root / "softirqs")
+    capture_end_ns = time.monotonic_ns()
+    return parse_target_irq_snapshot(
+        interrupts_raw, softirqs_raw, target_cpus,
+        capture_start_ns, capture_end_ns)
+
+
+def checked_target_irq_delta(
+    before: object, after: object, target_cpus: Sequence[int], context: str,
+) -> Dict[str, object]:
+    target = _target_cpu_tuple(target_cpus, context)
+    before_record = validate_target_irq_snapshot(
+        before, target, "%s before" % context)
+    after_record = validate_target_irq_snapshot(
+        after, target, "%s after" % context)
+    hard_before = before_record["hardirq_rows"]
+    hard_after = after_record["hardirq_rows"]
+    soft_before = before_record["softirq_rows"]
+    soft_after = after_record["softirq_rows"]
+    if (before_record["capture_end_monotonic_ns"] >
+            after_record["capture_start_monotonic_ns"] or
+            before_record["cpu_ids"] != after_record["cpu_ids"] or
+            [row[:2] if row[1] == "global" else row[:3]
+             for row in hard_before] !=
+            [row[:2] if row[1] == "global" else row[:3]
+             for row in hard_after] or
+            [row[:1] for row in soft_before] != [row[:1] for row in soft_after]):
+        raise TimingError("%s IRQ vector topology changed" % context)
+    hardirq_deltas = []
+    softirq_deltas = []
+    classifications = []
+    contaminations = []
+    for left, right in zip(hard_before, hard_after):
+        if left[1] == "global":
+            if right[2] < left[2]:
+                raise TimingError("%s hardirq counter reset" % context)
+            delta = right[2] - left[2]
+            hardirq_deltas.append([left[0], "global", delta])
+            if delta:
+                classification = "global-hardirq:%s:%d" % (left[0], delta)
+                classifications.append(classification)
+                contaminations.append(classification)
+            continue
+        deltas = []
+        for index, cpu in enumerate(target):
+            before_count = left[index + 3]
+            after_count = right[index + 3]
+            if after_count < before_count:
+                raise TimingError("%s hardirq counter reset" % context)
+            delta = after_count - before_count
+            deltas.append(delta)
+            if not delta:
+                continue
+            classification = "%s-hardirq:%s:cpu%d:%d" % (
+                left[1], left[0], cpu, delta)
+            classifications.append(classification)
+            if left[1] == "numeric":
+                contaminations.append(classification)
+        hardirq_deltas.append([left[0], left[1], *deltas])
+    for left, right in zip(soft_before, soft_after):
+        deltas = []
+        for index, cpu in enumerate(target):
+            before_count = left[index + 1]
+            after_count = right[index + 1]
+            if after_count < before_count:
+                raise TimingError("%s softirq counter reset" % context)
+            delta = after_count - before_count
+            deltas.append(delta)
+            if not delta:
+                continue
+            classification = "softirq:%s:cpu%d:%d" % (left[0], cpu, delta)
+            classifications.append(classification)
+            if index < 2 and left[0] in DEVICE_SOFTIRQ_VECTORS:
+                contaminations.append(classification)
+        softirq_deltas.append([left[0], *deltas])
+    return {
+        "schema": "wirehair.wh2.target_irq_delta.v2",
+        "target_cpus": list(target),
+        "hardirq_before_sha256": before_record["hardirq_sha256"],
+        "hardirq_after_sha256": after_record["hardirq_sha256"],
+        "softirq_before_sha256": before_record["softirq_sha256"],
+        "softirq_after_sha256": after_record["softirq_sha256"],
+        "hardirq_deltas": hardirq_deltas,
+        "softirq_deltas": softirq_deltas,
+        "classifications": classifications,
+        "contaminations": contaminations,
+    }
+
+
+def validate_target_irq_delta(
+    delta: object, before: object, after: object,
+    target_cpus: Sequence[int], context: str,
+) -> Dict[str, object]:
+    if not isinstance(delta, dict) or set(delta) != TARGET_IRQ_DELTA_FIELDS:
+        raise TimingError("%s IRQ delta is malformed" % context)
+    expected = checked_target_irq_delta(before, after, target_cpus, context)
+    if delta != expected:
+        raise TimingError("%s IRQ delta does not replay" % context)
+    return delta
+
+
+def require_target_irq_contained_interval(
+    before: Mapping[str, object], after: Mapping[str, object],
+    start_ns: int, end_ns: int, context: str,
+) -> None:
+    """Require two ordered captures to live wholly inside one interval."""
+    if (not isinstance(start_ns, int) or isinstance(start_ns, bool) or
+            not isinstance(end_ns, int) or isinstance(end_ns, bool) or
+            not 0 <= start_ns < end_ns <= MAX_UNSIGNED_COUNTER or
+            before.get("capture_start_monotonic_ns") < start_ns or
+            after.get("capture_end_monotonic_ns") > end_ns):
+        raise TimingError("%s IRQ capture interval is malformed" % context)
+
+
+def require_target_irq_bracketing_interval(
+    before: Mapping[str, object], after: Mapping[str, object],
+    start_ns: int, end_ns: int, context: str,
+) -> None:
+    """Require captures to end before and start after the measured interval."""
+    if (not isinstance(start_ns, int) or isinstance(start_ns, bool) or
+            not isinstance(end_ns, int) or isinstance(end_ns, bool) or
+            not 0 <= start_ns < end_ns <= MAX_UNSIGNED_COUNTER or
+            before.get("capture_end_monotonic_ns") > start_ns or
+            after.get("capture_start_monotonic_ns") < end_ns):
+        raise TimingError("%s IRQ capture bracket is malformed" % context)
+
+
+def _snapshot_cpu_list(
+    value: object, parsed: object, context: str, *, allow_empty: bool = False,
+) -> Tuple[int, ...]:
+    if not isinstance(value, str):
+        raise TimingError("%s CPU-list receipt is malformed" % context)
+    if not value and allow_empty:
+        cpus: Tuple[int, ...] = ()
+    else:
+        cpus = parse_cpu_list(value)
+    if (not isinstance(parsed, list) or
+            any(not isinstance(cpu, int) or isinstance(cpu, bool)
+                for cpu in parsed) or list(cpus) != parsed):
+        raise TimingError("%s parsed CPU-list receipt changed" % context)
+    return cpus
+
+
+def validate_runtime_isolation_snapshot(
+    snapshot: object, expected_cpus: Sequence[int], context: str,
+) -> Dict[str, object]:
+    try:
+        expected = tuple(sorted(expected_cpus))
+    except (TypeError, ValueError) as exc:
+        raise TimingError("%s expected isolated CPUs are malformed" % context) \
+            from exc
+    if (not expected or len(expected) != len(set(expected)) or
+            any(not isinstance(cpu, int) or isinstance(cpu, bool) or
+                not 0 <= cpu <= MAX_CPU_ID for cpu in expected)):
+        raise TimingError("%s expected isolated CPUs are malformed" % context)
+    if (not isinstance(snapshot, dict) or
+            set(snapshot) != RUNTIME_ISOLATION_SNAPSHOT_FIELDS or
+            snapshot.get("schema") !=
+            "wirehair.wh2.runtime_isolation_snapshot.v2" or
+            snapshot.get("self_cgroup") != "/wh2-timing-v4" or
+            snapshot.get("expected_isolated_cpus") != list(expected) or
+            snapshot.get("cgroup_partition") != "isolated"):
+        raise TimingError("%s isolation snapshot is malformed" % context)
+    checked_attempt_duration_ns(
+        snapshot.get("capture_start_monotonic_ns"),
+        snapshot.get("capture_end_monotonic_ns"),
+        snapshot.get("capture_duration_ns"), "%s isolation capture" % context)
+    for text_field, parsed_field in (
+            ("kernel_isolated_cpu_list", "kernel_isolated_cpus"),
+            ("cgroup_cpu_list", "cgroup_cpus"),
+            ("cgroup_effective_cpu_list", "cgroup_effective_cpus"),
+            ("cgroup_exclusive_cpu_list", "cgroup_exclusive_cpus"),
+            ("cgroup_exclusive_effective_cpu_list",
+             "cgroup_exclusive_effective_cpus")):
+        if _snapshot_cpu_list(
+                snapshot.get(text_field), snapshot.get(parsed_field),
+                "%s %s" % (context, text_field)) != expected:
+            raise TimingError("%s isolated CPU set changed" % context)
+    affinities = snapshot.get("irq_effective_affinities")
+    if not isinstance(affinities, list) or not affinities:
+        raise TimingError("%s IRQ affinity inventory is malformed" % context)
+    previous_irq = -1
+    irq30_record: Optional[Dict[str, object]] = None
+    intersecting = []
+    affinity_by_irq = {}
+    for record in affinities:
+        if (not isinstance(record, dict) or
+                set(record) != IRQ_EFFECTIVE_AFFINITY_FIELDS):
+            raise TimingError("%s IRQ affinity record is malformed" % context)
+        irq = record.get("irq")
+        if (not isinstance(irq, int) or isinstance(irq, bool) or
+                not previous_irq < irq <= MAX_CPU_ID):
+            raise TimingError("%s IRQ affinity order is malformed" % context)
+        previous_irq = irq
+        effective = _snapshot_cpu_list(
+            record.get("effective_affinity_list"),
+            record.get("effective_cpus"),
+            "%s IRQ %d effective" % (context, irq), allow_empty=True)
+        overlap = tuple(sorted(set(effective).intersection(expected)))
+        if overlap:
+            intersecting.append(irq)
+        affinity_by_irq[irq] = record
+        if irq == 30:
+            irq30_record = record
+    exception = snapshot.get("irq30_exception")
+    managed = snapshot.get("managed_nvme_exceptions")
+    expected_intersecting = [30] + [
+        irq for irq, _identity, _handler, _requested, _effective
+        in MANAGED_NVME_IRQ_WHITELIST]
+    if intersecting != sorted(expected_intersecting) or exception is None or \
+            not isinstance(managed, list) or \
+            len(managed) != len(MANAGED_NVME_IRQ_WHITELIST):
+        raise TimingError("%s numeric IRQ reaches an isolated CPU" % context)
+    if (not isinstance(exception, dict) or
+            set(exception) != IRQ30_EXCEPTION_FIELDS or
+            exception.get("irq") != 30 or
+            exception.get("identity") != IRQ30_IDENTITY or
+            exception.get("handler_directories") != ["AMD-Vi0-PPR"] or
+            not isinstance(exception.get("global_interrupt_count"), int) or
+            isinstance(exception.get("global_interrupt_count"), bool) or
+            exception.get("global_interrupt_count") != 0 or
+            irq30_record is None):
+        raise TimingError("%s guarded IRQ30 identity/count is malformed" % context)
+    requested = _snapshot_cpu_list(
+        exception.get("requested_affinity_list"),
+        exception.get("requested_cpus"), "%s IRQ30 requested" % context)
+    effective = _snapshot_cpu_list(
+        exception.get("effective_affinity_list"),
+        exception.get("effective_cpus"), "%s IRQ30 effective" % context)
+    if (not requested or
+            exception.get("requested_affinity_list") != "0-127" or
+            list(requested) != list(range(128)) or
+            exception.get("effective_affinity_list") != "8" or
+            list(effective) != [8] or 8 not in expected or
+            exception.get("effective_affinity_list") !=
+            irq30_record.get("effective_affinity_list") or
+            list(effective) != irq30_record.get("effective_cpus") or
+            not set(effective).intersection(expected)):
+        raise TimingError("%s guarded IRQ30 affinity is malformed" % context)
+    for record, frozen in zip(managed, MANAGED_NVME_IRQ_WHITELIST):
+        irq, identity, handler, requested_text, effective_text = frozen
+        if (not isinstance(record, dict) or
+                set(record) != MANAGED_IRQ_EXCEPTION_FIELDS or
+                record.get("irq") != irq or
+                record.get("identity") != identity or
+                record.get("handler_directories") != [handler] or
+                record.get("requested_affinity_list") != requested_text or
+                record.get("effective_affinity_list") != effective_text or
+                irq not in affinity_by_irq):
+            raise TimingError(
+                "%s managed NVMe IRQ identity changed" % context)
+        requested_cpus = _snapshot_cpu_list(
+            record.get("requested_affinity_list"),
+            record.get("requested_cpus"),
+            "%s managed IRQ %d requested" % (context, irq))
+        effective_cpus = _snapshot_cpu_list(
+            record.get("effective_affinity_list"),
+            record.get("effective_cpus"),
+            "%s managed IRQ %d effective" % (context, irq))
+        frozen_effective = affinity_by_irq[irq]
+        if (not requested_cpus or not set(effective_cpus).intersection(expected) or
+                record.get("effective_affinity_list") !=
+                frozen_effective.get("effective_affinity_list") or
+                list(effective_cpus) != frozen_effective.get("effective_cpus")):
+            raise TimingError(
+                "%s managed NVMe IRQ affinity changed" % context)
+    return snapshot
+
+
+def capture_runtime_isolation_snapshot(
+    core: int, sibling: int, controller: int, *,
+    proc_root: Path = Path("/proc"),
+    cgroup_root: Path = Path("/sys/fs/cgroup"),
+) -> Dict[str, object]:
+    values = (core, sibling, controller)
+    if (any(not isinstance(cpu, int) or isinstance(cpu, bool) or
+            not 0 <= cpu <= MAX_CPU_ID for cpu in values) or
+            len(set(values)) != 3):
+        raise TimingError("runtime isolation CPUs are malformed or not distinct")
+    expected = tuple(sorted(values))
+    capture_start_ns = time.monotonic_ns()
+    self_cgroup = _kernel_ascii_line(
+        proc_root / "self/cgroup", "self cgroup membership")
+    if self_cgroup != "0::/wh2-timing-v4":
+        raise TimingError("campaign is not in cgroup /wh2-timing-v4")
+    group = cgroup_root / "wh2-timing-v4"
+
+    def cpu_list_record(
+        path: Path, context: str, *, allow_empty: bool = False,
+    ) -> Tuple[str, List[int]]:
+        text = _kernel_ascii_line(path, context, allow_empty=allow_empty)
+        return text, list(parse_cpu_list(text)) if text else []
+
+    kernel_text, kernel_cpus = cpu_list_record(
+        cgroup_root / "cpuset.cpus.isolated", "kernel isolated CPUs")
+    cpu_text, cpus = cpu_list_record(group / "cpuset.cpus", "cgroup CPUs")
+    effective_text, effective = cpu_list_record(
+        group / "cpuset.cpus.effective", "cgroup effective CPUs")
+    exclusive_text, exclusive = cpu_list_record(
+        group / "cpuset.cpus.exclusive", "cgroup exclusive CPUs")
+    exclusive_effective_text, exclusive_effective = cpu_list_record(
+        group / "cpuset.cpus.exclusive.effective",
+        "cgroup exclusive effective CPUs")
+    partition = _kernel_ascii_line(
+        group / "cpuset.cpus.partition", "cgroup partition")
+    guarded_before = _parse_guarded_irq_rows(
+        _bounded_kernel_bytes(proc_root / "interrupts"),
+        GUARDED_IRQ_IDENTITIES)
+    irq_root = proc_root / "irq"
+    try:
+        entries = list(irq_root.iterdir())
+    except OSError as exc:
+        raise TimingError("cannot enumerate numeric IRQs") from exc
+    irq_paths = []
+    for path in entries:
+        if UINT_RE.fullmatch(path.name) is None:
+            continue
+        if path.is_symlink() or not path.is_dir():
+            raise TimingError("numeric IRQ path is not a plain directory")
+        irq_paths.append((
+            parse_uint(path.name, "numeric IRQ", MAX_CPU_ID), path))
+    irq_paths.sort(key=lambda item: item[0])
+    if not irq_paths or len({irq for irq, _path in irq_paths}) != len(irq_paths):
+        raise TimingError("numeric IRQ inventory is empty or duplicated")
+    records = []
+    exception: Optional[Dict[str, object]] = None
+    managed_exceptions = []
+    managed_by_irq = {
+        irq: (identity, handler, requested, effective)
+        for irq, identity, handler, requested, effective
+        in MANAGED_NVME_IRQ_WHITELIST}
+    for irq, path in irq_paths:
+        affinity_text, affinity_cpus = cpu_list_record(
+            path / "effective_affinity_list",
+            "IRQ %d effective affinity" % irq, allow_empty=True)
+        record = {
+            "irq": irq, "effective_affinity_list": affinity_text,
+            "effective_cpus": affinity_cpus,
+        }
+        records.append(record)
+        if set(affinity_cpus).intersection(expected):
+            if irq != 30 and irq not in managed_by_irq:
+                raise TimingError(
+                    "numeric IRQ %d reaches an isolated timing CPU" % irq)
+            try:
+                handler_directories = sorted(
+                    child.name for child in path.iterdir()
+                    if child.is_dir() and not child.is_symlink())
+            except OSError as exc:
+                raise TimingError(
+                    "cannot enumerate IRQ %d handlers" % irq) from exc
+            requested_text, requested_cpus = cpu_list_record(
+                path / "smp_affinity_list",
+                "IRQ %d requested affinity" % irq)
+            if irq == 30:
+                exception = {
+                    "irq": 30, "identity": guarded_before[30]["identity"],
+                    "handler_directories": handler_directories,
+                    "requested_affinity_list": requested_text,
+                    "requested_cpus": requested_cpus,
+                    "effective_affinity_list": affinity_text,
+                    "effective_cpus": affinity_cpus,
+                    "global_interrupt_count":
+                        guarded_before[30]["total_count"],
+                }
+            else:
+                managed_exceptions.append({
+                    "irq": irq,
+                    "identity": guarded_before[irq]["identity"],
+                    "handler_directories": handler_directories,
+                    "requested_affinity_list": requested_text,
+                    "requested_cpus": requested_cpus,
+                    "effective_affinity_list": affinity_text,
+                    "effective_cpus": affinity_cpus,
+                })
+    guarded_after = _parse_guarded_irq_rows(
+        _bounded_kernel_bytes(proc_root / "interrupts"),
+        GUARDED_IRQ_IDENTITIES)
+    for irq in sorted(GUARDED_IRQ_IDENTITIES):
+        before_guard = guarded_before[irq]
+        after_guard = guarded_after[irq]
+        if (before_guard["identity"] != after_guard["identity"] or
+                before_guard["cpu_ids"] != after_guard["cpu_ids"] or
+                len(before_guard["counters"]) != len(after_guard["counters"]) or
+                any(right < left for left, right in zip(
+                    before_guard["counters"], after_guard["counters"]))):
+            raise TimingError("guarded IRQ topology/counter changed during capture")
+    if (guarded_before[30]["total_count"] != 0 or
+            guarded_after[30]["total_count"] != 0):
+        raise TimingError("guarded IRQ30 fired during isolation capture")
+    capture_end_ns = time.monotonic_ns()
+    snapshot = {
+        "schema": "wirehair.wh2.runtime_isolation_snapshot.v2",
+        "capture_start_monotonic_ns": capture_start_ns,
+        "capture_end_monotonic_ns": capture_end_ns,
+        "capture_duration_ns": capture_end_ns - capture_start_ns,
+        "self_cgroup": self_cgroup.split("::", 1)[1],
+        "expected_isolated_cpus": list(expected),
+        "kernel_isolated_cpu_list": kernel_text,
+        "kernel_isolated_cpus": kernel_cpus,
+        "cgroup_cpu_list": cpu_text, "cgroup_cpus": cpus,
+        "cgroup_effective_cpu_list": effective_text,
+        "cgroup_effective_cpus": effective,
+        "cgroup_exclusive_cpu_list": exclusive_text,
+        "cgroup_exclusive_cpus": exclusive,
+        "cgroup_exclusive_effective_cpu_list": exclusive_effective_text,
+        "cgroup_exclusive_effective_cpus": exclusive_effective,
+        "cgroup_partition": partition,
+        "irq_effective_affinities": records,
+        "irq30_exception": exception,
+        "managed_nvme_exceptions": managed_exceptions,
+    }
+    return validate_runtime_isolation_snapshot(
+        snapshot, expected, "captured runtime")
+
+
+def validate_runtime_isolation_transition(
+    start: object, end: object, expected_cpus: Sequence[int],
+) -> None:
+    start_record = validate_runtime_isolation_snapshot(
+        start, expected_cpus, "start runtime")
+    end_record = validate_runtime_isolation_snapshot(
+        end, expected_cpus, "end runtime")
+    invariant_fields = RUNTIME_ISOLATION_SNAPSHOT_FIELDS - {
+        "irq_effective_affinities", "capture_start_monotonic_ns",
+        "capture_end_monotonic_ns", "capture_duration_ns"}
+    for field in invariant_fields:
+        if start_record[field] != end_record[field]:
+            raise TimingError("runtime isolation state changed: %s" % field)
+
+
+def runtime_isolation_snapshot_sha256(snapshot: object) -> str:
+    if not isinstance(snapshot, dict):
+        raise TimingError("runtime isolation snapshot is malformed")
+    return sha256_bytes(canonical_json(snapshot))
 
 
 def topology_record(core: int, numa_node: int) -> Dict[str, object]:
@@ -2205,7 +3298,7 @@ def prepare_campaign(args: argparse.Namespace) -> None:
             "prepare_smoke": prepare_smoke,
         }
         design = sealed_record(
-            "wirehair.wh2.grouped_commit_timing.design.v2", design_payload)
+            "wirehair.wh2.grouped_commit_timing.design.v3", design_payload)
         design_path = staging / "design.json"
         write_new(design_path, canonical_json(design))
         receipt = sealed_record(
@@ -2264,7 +3357,7 @@ def require_frozen_sibling_idle_policy(value: object) -> None:
 def _load_design(root: Path) -> Dict[str, object]:
     design = load_canonical(root / "design.json", "timing design")
     verify_sealed_record(
-        design, "wirehair.wh2.grouped_commit_timing.design.v2", "timing design")
+        design, "wirehair.wh2.grouped_commit_timing.design.v3", "timing design")
     if design.get("root") != str(root.resolve()):
         raise TimingError("timing root moved after preparation")
     if design.get("base_commit") != BASE_COMMIT or \
@@ -2570,10 +3663,7 @@ def _require_external_prepare_anchor(
 
 
 def _verify_directory_inventory(root: Path) -> None:
-    expected_directories = {
-        "frozen", "provenance", "raw", "stderr", "exit", "receipts",
-        "task_receipts", "contamination", "failure",
-    }
+    expected_directories = set(PREPARED_CAMPAIGN_DIRECTORIES)
     actual_directories = {
         str(path.relative_to(root)) for path in root.rglob("*")
         if path.is_dir() and not path.is_symlink()
@@ -2773,6 +3863,22 @@ def _positive_duration_ns(value: object, context: str) -> int:
     return value
 
 
+def checked_attempt_duration_ns(
+    start_ns: object, end_ns: object, recorded_duration_ns: object,
+    context: str,
+) -> int:
+    if (not isinstance(start_ns, int) or isinstance(start_ns, bool) or
+            not isinstance(end_ns, int) or isinstance(end_ns, bool) or
+            not 0 <= start_ns < end_ns <= MAX_UNSIGNED_COUNTER):
+        raise TimingError("%s duration is malformed" % context)
+    duration_ns = end_ns - start_ns
+    if (not isinstance(recorded_duration_ns, int) or
+            isinstance(recorded_duration_ns, bool) or
+            recorded_duration_ns != duration_ns):
+        raise TimingError("%s duration receipt mismatch" % context)
+    return duration_ns
+
+
 def checked_campaign_interval(
     launch: Mapping[str, object],
 ) -> Tuple[float, float, float, int, int, int]:
@@ -2807,6 +3913,30 @@ def checked_campaign_interval(
             start_ns, end_ns, duration_ns)
 
 
+def checked_preflight_limits(
+    launch: Mapping[str, object], campaign_start_ns: int,
+) -> Tuple[int, int, int]:
+    if (not isinstance(campaign_start_ns, int) or
+            isinstance(campaign_start_ns, bool) or campaign_start_ns <= 0):
+        raise TimingError("launch preflight campaign boundary is malformed")
+    duration_ns = checked_attempt_duration_ns(
+        launch.get("preflight_start_monotonic_ns"),
+        launch.get("preflight_end_monotonic_ns"),
+        launch.get("preflight_duration_ns"), "launch preflight")
+    if (duration_ns < SIBLING_PREFLIGHT_WINDOW_NS or
+            launch["preflight_end_monotonic_ns"] > campaign_start_ns):
+        raise TimingError("launch preflight interval is malformed")
+    runtime_limit_ns = sibling_attempt_runtime_limit_ns(duration_ns)
+    pcount_limit = sibling_attempt_pcount_limit(duration_ns)
+    require_exact_counter(
+        launch.get("preflight_sibling_sched_runtime_limit_ns"),
+        runtime_limit_ns, "launch preflight sibling runtime limit")
+    require_exact_counter(
+        launch.get("preflight_sibling_sched_pcount_limit"), pcount_limit,
+        "launch preflight sibling pcount limit")
+    return duration_ns, runtime_limit_ns, pcount_limit
+
+
 def sibling_campaign_busy_limit_ns(duration_ns: int) -> int:
     """Return the whole-tick floor of the 50-ppm /proc/stat allowance."""
     duration_ns = _positive_duration_ns(duration_ns, "sibling campaign")
@@ -2823,19 +3953,43 @@ def sibling_campaign_runtime_limit_ns(duration_ns: int) -> int:
     return (duration_ns * SIBLING_CAMPAIGN_MAX_BUSY_PPM) // 1_000_000
 
 
+def sibling_attempt_runtime_limit_ns(duration_ns: int) -> int:
+    """Return the exact floor of the per-attempt 50-ppm schedstat bound."""
+    duration_ns = _positive_duration_ns(duration_ns, "sibling attempt")
+    return (duration_ns * SIBLING_SCHED_RUNTIME_MAX_PPM) // 1_000_000
+
+
+def sibling_attempt_pcount_limit(duration_ns: int) -> int:
+    """Allow one sibling schedule per started one-second attempt window."""
+    duration_ns = _positive_duration_ns(duration_ns, "sibling attempt")
+    return max(1, (duration_ns + SIBLING_SCHED_PCOUNT_WINDOW_NS - 1) //
+               SIBLING_SCHED_PCOUNT_WINDOW_NS)
+
+
 def _attempt_contaminations(
     parsed: ParsedOutput, sibling_busy: int, sibling_runtime_ns: int,
-    sibling_pcount: int,
+    sibling_pcount: int, duration_ns: int,
+    target_irq_delta: Mapping[str, object],
 ) -> Tuple[str, ...]:
     for value in (sibling_busy, sibling_runtime_ns, sibling_pcount):
         if (not isinstance(value, int) or isinstance(value, bool) or value < 0):
             raise TimingError("attempt sibling counters are malformed")
     result = list(parsed.contaminations)
+    if (not isinstance(target_irq_delta, dict) or
+            set(target_irq_delta) != TARGET_IRQ_DELTA_FIELDS or
+            not isinstance(target_irq_delta.get("contaminations"), list) or
+            any(not isinstance(value, str) or not value
+                for value in target_irq_delta["contaminations"])):
+        raise TimingError("attempt IRQ classification is malformed")
+    if target_irq_delta["contaminations"]:
+        raise TimingError("target IRQ contamination is campaign-fatal")
+    runtime_limit_ns = sibling_attempt_runtime_limit_ns(duration_ns)
+    pcount_limit = sibling_attempt_pcount_limit(duration_ns)
     if sibling_busy > SIBLING_ACCEPTED_EXECUTION_MAX_BUSY_TICKS:
         result.append("sibling-busy:%d" % sibling_busy)
-    if sibling_runtime_ns:
+    if sibling_runtime_ns > runtime_limit_ns:
         result.append("sibling-sched-runtime-ns:%d" % sibling_runtime_ns)
-    if sibling_pcount:
+    if sibling_pcount > pcount_limit:
         result.append("sibling-sched-pcount:%d" % sibling_pcount)
     return tuple(result)
 
@@ -3150,6 +4304,9 @@ def _execution_receipt(
     sibling_ticks_after: Sequence[int],
     sibling_schedstat_before: Mapping[str, object],
     sibling_schedstat_after: Mapping[str, object],
+    target_irq_snapshot_before: Mapping[str, object],
+    target_irq_snapshot_after: Mapping[str, object],
+    target_cpus: Sequence[int],
 ) -> Dict[str, object]:
     if (not isinstance(start_ns, int) or isinstance(start_ns, bool) or
             not isinstance(end_ns, int) or isinstance(end_ns, bool) or
@@ -3163,13 +4320,21 @@ def _execution_receipt(
     sibling_runtime_ns, sibling_pcount = checked_schedstat_delta(
         sibling_schedstat_before, sibling_schedstat_after,
         "accepted execution")
+    sibling_runtime_limit_ns = sibling_attempt_runtime_limit_ns(duration_ns)
+    sibling_pcount_limit = sibling_attempt_pcount_limit(duration_ns)
+    target_irq_delta = checked_target_irq_delta(
+        target_irq_snapshot_before, target_irq_snapshot_after, target_cpus,
+        "accepted execution")
+    require_target_irq_contained_interval(
+        target_irq_snapshot_before, target_irq_snapshot_after,
+        start_ns, end_ns, "accepted execution")
     if (sibling_busy > SIBLING_ACCEPTED_EXECUTION_MAX_BUSY_TICKS or
-            sibling_runtime_ns >
-            SIBLING_ACCEPTED_EXECUTION_MAX_SCHED_RUNTIME_NS or
-            sibling_pcount > SIBLING_ACCEPTED_EXECUTION_MAX_SCHED_PCOUNT):
+            sibling_runtime_ns > sibling_runtime_limit_ns or
+            sibling_pcount > sibling_pcount_limit or
+            target_irq_delta["contaminations"]):
         raise TimingError("accepted execution used the SMT sibling")
-    return sealed_record(
-        "wirehair.wh2.grouped_commit_timing.execution_receipt.v2", {
+    receipt = sealed_record(
+        "wirehair.wh2.grouped_commit_timing.execution_receipt.v4", {
             "job": task["job"], "task_id": task["task_id"],
             "task_sha256": sha256_bytes(canonical_json(task)),
             "outer_slot": slot, "outer_marker": OUTER_ORDER[slot],
@@ -3187,25 +4352,51 @@ def _execution_receipt(
             "sibling_schedstat_before": dict(sibling_schedstat_before),
             "sibling_schedstat_after": dict(sibling_schedstat_after),
             "sibling_sched_runtime_ns": sibling_runtime_ns,
+            "sibling_sched_runtime_limit_ns": sibling_runtime_limit_ns,
             "sibling_sched_pcount": sibling_pcount,
+            "sibling_sched_pcount_limit": sibling_pcount_limit,
+            "target_irq_snapshot_before": dict(target_irq_snapshot_before),
+            "target_irq_snapshot_after": dict(target_irq_snapshot_after),
+            "target_irq_delta": target_irq_delta,
             **_receipt_summary(parsed),
         })
+    if set(receipt) != EXECUTION_RECEIPT_FIELDS:
+        raise TimingError("execution receipt constructor/schema drift")
+    return receipt
 
 
 def _save_contamination(
     root: Path, name: str, attempt: int, raw: bytes, stderr: bytes,
-    parsed: ParsedOutput, command: Sequence[str], start_ns: int, end_ns: int,
+    parsed: ParsedOutput, command: Sequence[str],
+    process_identity: Mapping[str, object], cleanup_action: str,
+    start_ns: int, end_ns: int,
     sibling_ticks_before: Sequence[int], sibling_ticks_after: Sequence[int],
     sibling_schedstat_before: Mapping[str, object],
     sibling_schedstat_after: Mapping[str, object],
+    target_irq_snapshot_before: Mapping[str, object],
+    target_irq_snapshot_after: Mapping[str, object],
+    target_cpus: Sequence[int],
 ) -> str:
+    duration_ns = checked_attempt_duration_ns(
+        start_ns, end_ns, end_ns - start_ns, "contaminated execution")
+    if duration_ns < SIBLING_ACCEPTED_EXECUTION_MIN_DURATION_NS:
+        raise TimingError("contaminated execution is shorter than one USER_HZ tick")
     sibling_busy = checked_busy_tick_delta(
         sibling_ticks_before, sibling_ticks_after, "contaminated execution")
     sibling_runtime_ns, sibling_pcount = checked_schedstat_delta(
         sibling_schedstat_before, sibling_schedstat_after,
         "contaminated execution")
+    sibling_runtime_limit_ns = sibling_attempt_runtime_limit_ns(duration_ns)
+    sibling_pcount_limit = sibling_attempt_pcount_limit(duration_ns)
+    target_irq_delta = checked_target_irq_delta(
+        target_irq_snapshot_before, target_irq_snapshot_after, target_cpus,
+        "contaminated execution")
+    require_target_irq_contained_interval(
+        target_irq_snapshot_before, target_irq_snapshot_after,
+        start_ns, end_ns, "contaminated execution")
     contaminations = _attempt_contaminations(
-        parsed, sibling_busy, sibling_runtime_ns, sibling_pcount)
+        parsed, sibling_busy, sibling_runtime_ns, sibling_pcount, duration_ns,
+        target_irq_delta)
     if not contaminations:
         raise TimingError("cannot save an uncontaminated execution as contamination")
     prefix = "%s.attempt%d" % (name, attempt)
@@ -3214,9 +4405,12 @@ def _save_contamination(
     write_new(root / "contamination" / raw_name, raw)
     write_new(root / "contamination" / stderr_name, stderr)
     receipt = sealed_record(
-        "wirehair.wh2.grouped_commit_timing.contamination_receipt.v2", {
+        "wirehair.wh2.grouped_commit_timing.contamination_receipt.v4", {
             "name": name, "attempt": attempt, "argv": list(command),
+            "process_identity": dict(process_identity),
+            "cleanup_action": cleanup_action,
             "start_monotonic_ns": start_ns, "end_monotonic_ns": end_ns,
+            "duration_ns": duration_ns,
             "stdout_name": raw_name, "stdout_sha256": sha256_bytes(raw),
             "stderr_name": stderr_name, "stderr_sha256": sha256_bytes(stderr),
             "contaminations": list(contaminations),
@@ -3226,8 +4420,15 @@ def _save_contamination(
             "sibling_schedstat_before": dict(sibling_schedstat_before),
             "sibling_schedstat_after": dict(sibling_schedstat_after),
             "sibling_sched_runtime_ns": sibling_runtime_ns,
+            "sibling_sched_runtime_limit_ns": sibling_runtime_limit_ns,
             "sibling_sched_pcount": sibling_pcount,
+            "sibling_sched_pcount_limit": sibling_pcount_limit,
+            "target_irq_snapshot_before": dict(target_irq_snapshot_before),
+            "target_irq_snapshot_after": dict(target_irq_snapshot_after),
+            "target_irq_delta": target_irq_delta,
         })
+    if set(receipt) != CONTAMINATION_RECEIPT_FIELDS:
+        raise TimingError("contamination receipt constructor/schema drift")
     receipt_name = prefix + ".json"
     write_new(root / "contamination" / receipt_name, canonical_json(receipt))
     return sha256_file(root / "contamination" / receipt_name)
@@ -3243,12 +4444,25 @@ def _save_failure(
     sibling_ticks_after: Sequence[int],
     sibling_schedstat_before: Mapping[str, object],
     sibling_schedstat_after: Mapping[str, object],
+    target_irq_snapshot_before: Mapping[str, object],
+    target_irq_snapshot_after: Mapping[str, object],
+    target_cpus: Sequence[int],
 ) -> str:
+    duration_ns = checked_attempt_duration_ns(
+        start_ns, end_ns, end_ns - start_ns, "failed execution")
     sibling_busy = checked_busy_tick_delta(
         sibling_ticks_before, sibling_ticks_after, "failed execution")
     sibling_runtime_ns, sibling_pcount = checked_schedstat_delta(
         sibling_schedstat_before, sibling_schedstat_after,
         "failed execution")
+    sibling_runtime_limit_ns = sibling_attempt_runtime_limit_ns(duration_ns)
+    sibling_pcount_limit = sibling_attempt_pcount_limit(duration_ns)
+    target_irq_delta = checked_target_irq_delta(
+        target_irq_snapshot_before, target_irq_snapshot_after, target_cpus,
+        "failed execution")
+    require_target_irq_contained_interval(
+        target_irq_snapshot_before, target_irq_snapshot_after,
+        start_ns, end_ns, "failed execution")
     name = execution_name(task, slot, label)
     prefix = "%s.attempt%d" % (name, attempt)
     stdout_name = prefix + ".stdout"
@@ -3257,14 +4471,14 @@ def _save_failure(
     write_new(root / "failure" / stdout_name, stdout)
     write_new(root / "failure" / stderr_name, stderr)
     receipt = sealed_record(
-        "wirehair.wh2.grouped_commit_timing.failure_receipt.v2", {
+        "wirehair.wh2.grouped_commit_timing.failure_receipt.v4", {
             "job": task["job"], "task_id": task["task_id"],
             "task_sha256": sha256_bytes(canonical_json(task)),
             "outer_slot": slot, "outer_marker": OUTER_ORDER[slot],
             "binary_label": label, "binary_sha256": binary_sha256,
             "argv": list(command), "attempt": attempt,
             "started_utc": started_utc, "start_monotonic_ns": start_ns,
-            "end_monotonic_ns": end_ns, "duration_ns": end_ns - start_ns,
+            "end_monotonic_ns": end_ns, "duration_ns": duration_ns,
             "returncode": returncode, "error_type": type(error).__name__,
             "error_message": str(error), "stdout_name": stdout_name,
             "stdout_sha256": sha256_bytes(stdout),
@@ -3280,41 +4494,100 @@ def _save_failure(
             "sibling_schedstat_before": dict(sibling_schedstat_before),
             "sibling_schedstat_after": dict(sibling_schedstat_after),
             "sibling_sched_runtime_ns": sibling_runtime_ns,
+            "sibling_sched_runtime_limit_ns": sibling_runtime_limit_ns,
             "sibling_sched_pcount": sibling_pcount,
+            "sibling_sched_pcount_limit": sibling_pcount_limit,
+            "target_irq_snapshot_before": dict(target_irq_snapshot_before),
+            "target_irq_snapshot_after": dict(target_irq_snapshot_after),
+            "target_irq_delta": target_irq_delta,
         })
     if set(receipt) != FAILURE_RECEIPT_FIELDS:
         raise TimingError("failure receipt constructor/schema drift")
     write_new(root / "failure" / receipt_name, canonical_json(receipt))
-    replay_failure_receipt(root, receipt_name)
+    replay_failure_receipt(root, receipt_name, target_cpus)
     return sha256_file(root / "failure" / receipt_name)
 
 
-def replay_failure_receipt(root: Path, receipt_name: str) -> Dict[str, object]:
-    """Replay a terminal failure's bounded streams and isolation counters."""
+def replay_failure_receipt(
+    root: Path, receipt_name: str, target_cpus: Sequence[int],
+) -> Dict[str, object]:
+    """Replay a terminal failure's provenance, streams, and isolation proof."""
     if (not isinstance(receipt_name, str) or receipt_name in ("", ".", "..") or
             Path(receipt_name).name != receipt_name):
         raise TimingError("failure receipt name is malformed")
     receipt = load_canonical(
         root / "failure" / receipt_name, "failure receipt")
     verify_sealed_record(
-        receipt, "wirehair.wh2.grouped_commit_timing.failure_receipt.v2",
+        receipt, "wirehair.wh2.grouped_commit_timing.failure_receipt.v4",
         "failure receipt")
     if set(receipt) != FAILURE_RECEIPT_FIELDS:
         raise TimingError("failure receipt fields changed")
+    design = _load_design(root)
+    tasks = _load_tasks(root, design)
+    expected_target_cpus = (
+        int(design["core"]), int(design["topology"]["sibling"]),
+        int(design["controller_core"]),
+    )
+    if _target_cpu_tuple(target_cpus, "failure replay") != expected_target_cpus:
+        raise TimingError("failure replay target CPU scope changed")
+    job = receipt.get("job")
+    slot = receipt.get("outer_slot")
+    attempt = receipt.get("attempt")
+    if (not isinstance(job, int) or isinstance(job, bool) or
+            not 0 <= job < len(tasks) or
+            not isinstance(slot, int) or isinstance(slot, bool) or
+            not 0 <= slot < len(OUTER_ORDER) or
+            not isinstance(attempt, int) or isinstance(attempt, bool) or
+            not 0 <= attempt < MAX_ENVIRONMENTAL_ATTEMPTS):
+        raise TimingError("failure receipt coordinates are malformed")
+    task = tasks[job]
+    marker = OUTER_ORDER[slot]
+    label = "base" if marker == "A" else "candidate"
+    command = command_for(design, task, label)
+    binary = root / "frozen" / BINARY_NAMES[label]
+    prefix = "%s.attempt%d" % (execution_name(task, slot, label), attempt)
+    immutable = design.get("immutable_files")
+    if not isinstance(immutable, dict):
+        raise TimingError("failure immutable-file ledger is malformed")
+    expected_binary_sha256 = immutable.get("frozen/" + BINARY_NAMES[label])
+    if (receipt_name != prefix + ".json" or
+            receipt.get("task_id") != task["task_id"] or
+            receipt.get("task_sha256") != sha256_bytes(canonical_json(task)) or
+            receipt.get("outer_marker") != marker or
+            receipt.get("binary_label") != label or
+            receipt.get("binary_sha256") != expected_binary_sha256 or
+            receipt.get("argv") != command or
+            receipt.get("stdout_name") != prefix + ".stdout" or
+            receipt.get("stderr_name") != prefix + ".stderr"):
+        raise TimingError("failure receipt provenance binding mismatch")
+    require_sha256(receipt.get("binary_sha256"), "failure binary hash")
+    if sha256_file(binary) != expected_binary_sha256:
+        raise TimingError("failure frozen binary changed")
+    if (not isinstance(receipt.get("started_utc"), str) or
+            UTC_RE.fullmatch(receipt["started_utc"]) is None or
+            receipt.get("error_type") not in {"BoundCommandError", "TimingError"} or
+            not isinstance(receipt.get("error_message"), str) or
+            not 0 < len(receipt["error_message"]) <= 4096 or
+            "\0" in receipt["error_message"] or
+            (receipt.get("returncode") is not None and
+             (not isinstance(receipt["returncode"], int) or
+              isinstance(receipt["returncode"], bool) or
+              not -255 <= receipt["returncode"] <= 255))):
+        raise TimingError("failure receipt error metadata is malformed")
+    _validate_failure_process_identity_receipt(
+        receipt.get("process_identity"), receipt.get("cleanup_action"),
+        receipt.get("cleanup_error"), command, binary)
     start_ns = receipt.get("start_monotonic_ns")
     end_ns = receipt.get("end_monotonic_ns")
     duration_ns = receipt.get("duration_ns")
-    if (not isinstance(start_ns, int) or isinstance(start_ns, bool) or
-            not isinstance(end_ns, int) or isinstance(end_ns, bool) or
-            not isinstance(duration_ns, int) or isinstance(duration_ns, bool) or
-            not 0 <= start_ns < end_ns <= MAX_UNSIGNED_COUNTER or
-            duration_ns != end_ns - start_ns):
-        raise TimingError("failure duration receipt is malformed")
+    duration_ns = checked_attempt_duration_ns(
+        start_ns, end_ns, duration_ns, "failure")
     for stream, maximum in (("stdout", MAX_GROUPED_OUTPUT_BYTES),
                             ("stderr", MAX_BENCHMARK_STDERR_BYTES)):
         name = receipt.get(stream + "_name")
-        if (not isinstance(name, str) or name in ("", ".", "..") or
-                Path(name).name != name or
+        require_sha256(
+            receipt.get(stream + "_sha256"), "failure %s hash" % stream)
+        if (not isinstance(name, str) or
                 sha256_bytes(stable_bytes(
                     root / "failure" / name, max_bytes=maximum)) !=
                 receipt.get(stream + "_sha256")):
@@ -3334,11 +4607,30 @@ def replay_failure_receipt(root: Path, receipt_name: str) -> Dict[str, object]:
     require_exact_counter(
         receipt.get("sibling_sched_pcount"), pcount,
         "failed execution pcount")
+    require_exact_counter(
+        receipt.get("sibling_sched_runtime_limit_ns"),
+        sibling_attempt_runtime_limit_ns(duration_ns),
+        "failed execution runtime limit")
+    require_exact_counter(
+        receipt.get("sibling_sched_pcount_limit"),
+        sibling_attempt_pcount_limit(duration_ns),
+        "failed execution pcount limit")
+    validate_target_irq_delta(
+        receipt.get("target_irq_delta"),
+        receipt.get("target_irq_snapshot_before"),
+        receipt.get("target_irq_snapshot_after"), expected_target_cpus,
+        "failed execution")
+    require_target_irq_contained_interval(
+        receipt["target_irq_snapshot_before"],
+        receipt["target_irq_snapshot_after"], start_ns, end_ns,
+        "failed execution")
     return receipt
 
 
 def run_campaign(args: argparse.Namespace) -> None:
     root = Path(args.result_dir).resolve()
+    result_tmpfs_binding = capture_tmpfs_binding(
+        root, "directory", "campaign result root")
     _require_external_prepare_anchor(root, args.expected_prepare_sha256)
     design = _load_design(root)
     controller_core = int(design["controller_core"])
@@ -3349,32 +4641,25 @@ def run_campaign(args: argparse.Namespace) -> None:
     _verify_immutable(root, design)
     _validate_prepare_receipt(root, design)
     _fresh_output_preflight(root, design)
+    prepared_tree_tmpfs_bindings = capture_prepared_tree_tmpfs_bindings(
+        root, design)
+    if prepared_tree_tmpfs_bindings[0] != result_tmpfs_binding:
+        raise TimingError("campaign result-root tmpfs binding changed at preflight")
     if _filler_pids():
         raise TimingError("load filler workers are still running")
     topology = _validate_topology_again(design)
     core = int(design["core"])
     sibling = int(topology["sibling"])
-    before_core = cpu_ticks(core)
-    preflight_sibling_schedstat_before = schedstat_cpu(sibling)
-    before_sibling = cpu_ticks(sibling)
-    time.sleep(SIBLING_PREFLIGHT_WINDOW_NS / 1_000_000_000)
-    quiet_core = checked_busy_tick_delta(
-        before_core, cpu_ticks(core), "preflight timing core")
-    preflight_sibling_ticks_after = cpu_ticks(sibling)
-    preflight_sibling_schedstat_after = schedstat_cpu(sibling)
-    quiet_sibling = checked_busy_tick_delta(
-        before_sibling, preflight_sibling_ticks_after, "preflight sibling")
-    quiet_sibling_runtime_ns, quiet_sibling_pcount = checked_schedstat_delta(
-        preflight_sibling_schedstat_before,
-        preflight_sibling_schedstat_after, "preflight sibling")
-    if (quiet_core > SIBLING_PREFLIGHT_MAX_BUSY_TICKS or
-            quiet_sibling > SIBLING_PREFLIGHT_MAX_BUSY_TICKS or
-            quiet_sibling_runtime_ns >
-            SIBLING_PREFLIGHT_MAX_SCHED_RUNTIME_NS or
-            quiet_sibling_pcount > SIBLING_PREFLIGHT_MAX_SCHED_PCOUNT):
-        raise TimingError("timing core/sibling are not quiet before launch")
     thermal_csv = Path(args.thermal_csv).resolve()
     thermal_pid = Path(args.thermal_pid_file).resolve()
+    thermal_csv_tmpfs_binding = capture_tmpfs_binding(
+        thermal_csv, "regular", "thermal CSV")
+    thermal_pid_tmpfs_binding = capture_tmpfs_binding(
+        thermal_pid, "regular", "thermal PID file")
+    if not (result_tmpfs_binding["device"] ==
+            thermal_csv_tmpfs_binding["device"] ==
+            thermal_pid_tmpfs_binding["device"]):
+        raise TimingError("campaign artifacts and thermal evidence differ in tmpfs")
     thermal_reader, thermal_pidfd = _bind_thermal_reader(
         design, thermal_pid, thermal_csv)
     thermal_stat = thermal_csv.stat()
@@ -3384,18 +4669,68 @@ def run_campaign(args: argparse.Namespace) -> None:
     baseline_edac_ue = int(latest["edac_ue"])
     _validate_live_thermal_row(
         latest, time.monotonic(), baseline_edac_ce, baseline_edac_ue)
+    isolation_expected_cpus = (core, sibling, controller_core)
+    target_cpus = (core, sibling, controller_core)
+    preflight_start_monotonic_ns = time.monotonic_ns()
+    before_core = cpu_ticks(core)
+    preflight_sibling_schedstat_before = schedstat_cpu(sibling)
+    before_sibling = cpu_ticks(sibling)
+    preflight_target_irq_snapshot_before = capture_target_irq_snapshot(
+        target_cpus)
+    time.sleep(SIBLING_PREFLIGHT_WINDOW_NS / 1_000_000_000)
+    preflight_target_irq_snapshot_after = capture_target_irq_snapshot(
+        target_cpus)
+    preflight_core_ticks_after = cpu_ticks(core)
+    quiet_core = checked_busy_tick_delta(
+        before_core, preflight_core_ticks_after, "preflight timing core")
+    preflight_sibling_ticks_after = cpu_ticks(sibling)
+    preflight_sibling_schedstat_after = schedstat_cpu(sibling)
+    preflight_end_monotonic_ns = time.monotonic_ns()
+    preflight_duration_ns = checked_attempt_duration_ns(
+        preflight_start_monotonic_ns, preflight_end_monotonic_ns,
+        preflight_end_monotonic_ns - preflight_start_monotonic_ns,
+        "sibling preflight")
+    if preflight_duration_ns < SIBLING_PREFLIGHT_WINDOW_NS:
+        raise TimingError("sibling preflight was shorter than five seconds")
+    preflight_runtime_limit_ns = sibling_attempt_runtime_limit_ns(
+        preflight_duration_ns)
+    preflight_pcount_limit = sibling_attempt_pcount_limit(
+        preflight_duration_ns)
+    preflight_target_irq_delta = checked_target_irq_delta(
+        preflight_target_irq_snapshot_before,
+        preflight_target_irq_snapshot_after, target_cpus, "sibling preflight")
+    require_target_irq_contained_interval(
+        preflight_target_irq_snapshot_before,
+        preflight_target_irq_snapshot_after,
+        preflight_start_monotonic_ns, preflight_end_monotonic_ns,
+        "sibling preflight")
+    quiet_sibling = checked_busy_tick_delta(
+        before_sibling, preflight_sibling_ticks_after, "preflight sibling")
+    quiet_sibling_runtime_ns, quiet_sibling_pcount = checked_schedstat_delta(
+        preflight_sibling_schedstat_before,
+        preflight_sibling_schedstat_after, "preflight sibling")
+    if (quiet_core > SIBLING_PREFLIGHT_MAX_BUSY_TICKS or
+            quiet_sibling > SIBLING_PREFLIGHT_MAX_BUSY_TICKS or
+            quiet_sibling_runtime_ns > preflight_runtime_limit_ns or
+            quiet_sibling_pcount > preflight_pcount_limit or
+            preflight_target_irq_delta["contaminations"]):
+        raise TimingError("timing core/sibling are not quiet before launch")
+    runtime_isolation_snapshot_start = capture_runtime_isolation_snapshot(
+        core, sibling, controller_core)
+    campaign_target_irq_snapshot_before = capture_target_irq_snapshot(target_cpus)
     started_utc = utc_now()
+    campaign_start_ns = time.monotonic_ns()
+    campaign_start_s = campaign_start_ns / 1_000_000_000
     sibling_schedstat_before = schedstat_cpu(sibling)
     sibling_ticks_before = cpu_ticks(sibling)
     core_ticks_before = cpu_ticks(core)
-    campaign_start_ns = time.monotonic_ns()
-    campaign_start_s = campaign_start_ns / 1_000_000_000
     execution_hashes: List[Dict[str, object]] = []
     task_hashes: List[Dict[str, object]] = []
     retry_count = 0
     sibling_attempt_busy = 0
     sibling_attempt_runtime_ns = 0
     sibling_attempt_pcount = 0
+    previous_target_irq_snapshot = campaign_target_irq_snapshot_before
     immutable = design["immutable_files"]
     cross_cache: Dict[
         Tuple[object, ...], Dict[str, Dict[str, object]]
@@ -3413,17 +4748,29 @@ def run_campaign(args: argparse.Namespace) -> None:
                 immutable["frozen/" + BINARY_NAMES[label]])
             prior: List[Dict[str, object]] = []
             for attempt in range(MAX_ENVIRONMENTAL_ATTEMPTS):
-                attempt_sibling_schedstat_before = schedstat_cpu(sibling)
-                attempt_sibling_before = cpu_ticks(sibling)
                 attempt_utc = utc_now()
                 start_ns = time.monotonic_ns()
+                attempt_sibling_schedstat_before = schedstat_cpu(sibling)
+                attempt_sibling_before = cpu_ticks(sibling)
+                attempt_target_irq_snapshot_before = \
+                    capture_target_irq_snapshot(target_cpus)
+                gap_target_irq_delta = checked_target_irq_delta(
+                    previous_target_irq_snapshot,
+                    attempt_target_irq_snapshot_before, target_cpus,
+                    "pre-attempt campaign gap")
+                if gap_target_irq_delta["contaminations"]:
+                    raise TimingError(
+                        "campaign gap accumulated target device IRQ activity: %s" %
+                        ",".join(gap_target_irq_delta["contaminations"]))
                 try:
                     result = run_bound_command(
                         command, binary, python, args.timeout_seconds)
                 except BoundCommandError as exc:
-                    end_ns = time.monotonic_ns()
+                    attempt_target_irq_snapshot_after = \
+                        capture_target_irq_snapshot(target_cpus)
                     attempt_sibling_after = cpu_ticks(sibling)
                     attempt_sibling_schedstat_after = schedstat_cpu(sibling)
+                    end_ns = time.monotonic_ns()
                     _save_failure(
                         root, task, slot, label, command, attempt, attempt_utc,
                         start_ns, end_ns, exc.stdout, exc.stderr,
@@ -3432,11 +4779,15 @@ def run_campaign(args: argparse.Namespace) -> None:
                         exc.cleanup_error, attempt_sibling_before,
                         attempt_sibling_after,
                         attempt_sibling_schedstat_before,
-                        attempt_sibling_schedstat_after)
+                        attempt_sibling_schedstat_after,
+                        attempt_target_irq_snapshot_before,
+                        attempt_target_irq_snapshot_after, target_cpus)
                     raise
-                end_ns = time.monotonic_ns()
+                attempt_target_irq_snapshot_after = \
+                    capture_target_irq_snapshot(target_cpus)
                 attempt_sibling_after = cpu_ticks(sibling)
                 attempt_sibling_schedstat_after = schedstat_cpu(sibling)
+                end_ns = time.monotonic_ns()
                 attempt_sibling_delta = checked_busy_tick_delta(
                     attempt_sibling_before, attempt_sibling_after,
                     "timing attempt")
@@ -3447,6 +4798,11 @@ def run_campaign(args: argparse.Namespace) -> None:
                 sibling_attempt_busy += attempt_sibling_delta
                 sibling_attempt_runtime_ns += attempt_sibling_runtime_ns
                 sibling_attempt_pcount += attempt_sibling_pcount
+                attempt_target_irq_delta = checked_target_irq_delta(
+                    attempt_target_irq_snapshot_before,
+                    attempt_target_irq_snapshot_after, target_cpus,
+                    "timing attempt")
+                previous_target_irq_snapshot = attempt_target_irq_snapshot_after
                 try:
                     if result.returncode != 0 or result.stderr:
                         raise TimingError(
@@ -3468,18 +4824,39 @@ def run_campaign(args: argparse.Namespace) -> None:
                         result.process_identity, result.cleanup_action, None,
                         attempt_sibling_before, attempt_sibling_after,
                         attempt_sibling_schedstat_before,
-                        attempt_sibling_schedstat_after)
+                        attempt_sibling_schedstat_after,
+                        attempt_target_irq_snapshot_before,
+                        attempt_target_irq_snapshot_after, target_cpus)
                     raise
+                if attempt_target_irq_delta["contaminations"]:
+                    exc = TimingError(
+                        "timing attempt accumulated campaign-fatal target IRQ: %s" %
+                        ",".join(attempt_target_irq_delta["contaminations"]))
+                    _save_failure(
+                        root, task, slot, label, command, attempt, attempt_utc,
+                        start_ns, end_ns, result.stdout, result.stderr,
+                        result.returncode, exc, binary_sha256,
+                        result.process_identity, result.cleanup_action, None,
+                        attempt_sibling_before, attempt_sibling_after,
+                        attempt_sibling_schedstat_before,
+                        attempt_sibling_schedstat_after,
+                        attempt_target_irq_snapshot_before,
+                        attempt_target_irq_snapshot_after, target_cpus)
+                    raise exc
                 contaminations = _attempt_contaminations(
                     parsed, attempt_sibling_delta,
-                    attempt_sibling_runtime_ns, attempt_sibling_pcount)
+                    attempt_sibling_runtime_ns, attempt_sibling_pcount,
+                    end_ns - start_ns, attempt_target_irq_delta)
                 if contaminations:
                     digest = _save_contamination(
                         root, name, attempt, result.stdout, result.stderr,
-                        parsed, command, start_ns, end_ns,
+                        parsed, command, result.process_identity,
+                        result.cleanup_action, start_ns, end_ns,
                         attempt_sibling_before, attempt_sibling_after,
                         attempt_sibling_schedstat_before,
-                        attempt_sibling_schedstat_after)
+                        attempt_sibling_schedstat_after,
+                        attempt_target_irq_snapshot_before,
+                        attempt_target_irq_snapshot_after, target_cpus)
                     prior.append({"attempt": attempt, "receipt_sha256": digest})
                     retry_count += 1
                     if attempt + 1 == MAX_ENVIRONMENTAL_ATTEMPTS:
@@ -3501,7 +4878,9 @@ def run_campaign(args: argparse.Namespace) -> None:
                     result.cleanup_action, attempt_sibling_before,
                     attempt_sibling_after,
                     attempt_sibling_schedstat_before,
-                    attempt_sibling_schedstat_after)
+                    attempt_sibling_schedstat_after,
+                    attempt_target_irq_snapshot_before,
+                    attempt_target_irq_snapshot_after, target_cpus)
                 write_new(receipt_path, canonical_json(receipt))
                 receipt_hash = sha256_file(receipt_path)
                 record = {"name": name, "receipt_sha256": receipt_hash}
@@ -3586,14 +4965,18 @@ def run_campaign(args: argparse.Namespace) -> None:
             print("progress=%d/%d retries=%d" %
                   (int(task["job"]) + 1, len(tasks), retry_count), flush=True)
     _validate_cross_cache_ledger(cross_cache)
-    campaign_end_ns = time.monotonic_ns()
-    campaign_end_s = campaign_end_ns / 1_000_000_000
     # Seal CPU isolation immediately after the final task.  Thermal identity
     # verification and interval collection may launch helpers or wait for the
     # next sampler row; neither belongs in the timed sibling-idle interval.
     core_ticks_after = cpu_ticks(core)
     sibling_ticks_after = cpu_ticks(sibling)
     sibling_schedstat_after = schedstat_cpu(sibling)
+    campaign_end_ns = time.monotonic_ns()
+    campaign_end_s = campaign_end_ns / 1_000_000_000
+    campaign_target_irq_snapshot_after = capture_target_irq_snapshot(target_cpus)
+    final_gap_target_irq_delta = checked_target_irq_delta(
+        previous_target_irq_snapshot, campaign_target_irq_snapshot_after,
+        target_cpus, "final campaign gap")
     sibling_busy = checked_busy_tick_delta(
         sibling_ticks_before, sibling_ticks_after, "campaign sibling")
     duration_ns = campaign_end_ns - campaign_start_ns
@@ -3603,6 +4986,13 @@ def run_campaign(args: argparse.Namespace) -> None:
         sibling_schedstat_before, sibling_schedstat_after,
         "campaign sibling")
     sibling_runtime_limit_ns = sibling_campaign_runtime_limit_ns(duration_ns)
+    campaign_target_irq_delta = checked_target_irq_delta(
+        campaign_target_irq_snapshot_before,
+        campaign_target_irq_snapshot_after, target_cpus, "campaign")
+    require_target_irq_bracketing_interval(
+        campaign_target_irq_snapshot_before,
+        campaign_target_irq_snapshot_after,
+        campaign_start_ns, campaign_end_ns, "campaign")
     sibling_gap_busy = sibling_busy - sibling_attempt_busy
     sibling_gap_runtime_ns = sibling_runtime_ns - sibling_attempt_runtime_ns
     sibling_gap_pcount = sibling_pcount - sibling_attempt_pcount
@@ -3618,6 +5008,16 @@ def run_campaign(args: argparse.Namespace) -> None:
         raise TimingError(
             "SMT sibling accumulated %d scheduled ns during timing "
             "(limit=%d)" % (sibling_runtime_ns, sibling_runtime_limit_ns))
+    if (final_gap_target_irq_delta["contaminations"] or
+            campaign_target_irq_delta["contaminations"]):
+        raise TimingError(
+            "campaign accumulated target device IRQ activity: %s" %
+            ",".join(campaign_target_irq_delta["contaminations"]))
+    runtime_isolation_snapshot_end = capture_runtime_isolation_snapshot(
+        core, sibling, controller_core)
+    validate_runtime_isolation_transition(
+        runtime_isolation_snapshot_start, runtime_isolation_snapshot_end,
+        isolation_expected_cpus)
     thermal_reader_end = _thermal_reader(
         design, thermal_pid, thermal_csv, thermal_pidfd,
         int(thermal_reader["pid"]), int(thermal_reader["start_ticks"]))
@@ -3626,11 +5026,24 @@ def run_campaign(args: argparse.Namespace) -> None:
     thermal_stat_end = thermal_csv.stat()
     if (thermal_stat_end.st_dev, thermal_stat_end.st_ino) != thermal_identity:
         raise TimingError("thermal CSV inode changed during timing")
+    if (capture_tmpfs_binding(root, "directory", "campaign result root") !=
+            result_tmpfs_binding or
+            capture_tmpfs_binding(thermal_csv, "regular", "thermal CSV") !=
+            thermal_csv_tmpfs_binding or
+            capture_tmpfs_binding(thermal_pid, "regular", "thermal PID file") !=
+            thermal_pid_tmpfs_binding):
+        raise TimingError("campaign tmpfs binding changed during timing")
+    validated_prepared_bindings = validate_prepared_tree_tmpfs_bindings(
+        prepared_tree_tmpfs_bindings, root, design)
+    if validated_prepared_bindings[0] != result_tmpfs_binding:
+        raise TimingError("campaign prepared-tree tmpfs binding changed")
     thermal_raw, thermal_summary = collect_thermal_interval(
         thermal_csv, campaign_start_s, campaign_end_s)
     write_new(root / "thermal_interval.csv", thermal_raw)
+    require_live_tmpfs_tree(
+        root, int(result_tmpfs_binding["device"]), "completed campaign")
     launch = sealed_record(
-        "wirehair.wh2.grouped_commit_timing.launch_receipt.v2", {
+        "wirehair.wh2.grouped_commit_timing.launch_receipt.v5", {
             "started_utc": started_utc, "ended_utc": utc_now(),
             "start_monotonic_s": campaign_start_s,
             "end_monotonic_s": campaign_end_s,
@@ -3663,12 +5076,23 @@ def run_campaign(args: argparse.Namespace) -> None:
             "sibling_gap_busy_ticks": sibling_gap_busy,
             "preflight_quiet_core_ticks": quiet_core,
             "preflight_quiet_sibling_ticks": quiet_sibling,
+            "preflight_core_ticks_before": list(before_core),
+            "preflight_core_ticks_after": list(preflight_core_ticks_after),
+            "preflight_sibling_ticks_before": list(before_sibling),
+            "preflight_sibling_ticks_after":
+                list(preflight_sibling_ticks_after),
             "preflight_sibling_schedstat_before":
                 preflight_sibling_schedstat_before,
             "preflight_sibling_schedstat_after":
                 preflight_sibling_schedstat_after,
+            "preflight_start_monotonic_ns": preflight_start_monotonic_ns,
+            "preflight_end_monotonic_ns": preflight_end_monotonic_ns,
+            "preflight_duration_ns": preflight_duration_ns,
             "preflight_sibling_sched_runtime_ns": quiet_sibling_runtime_ns,
+            "preflight_sibling_sched_runtime_limit_ns":
+                preflight_runtime_limit_ns,
             "preflight_sibling_sched_pcount": quiet_sibling_pcount,
+            "preflight_sibling_sched_pcount_limit": preflight_pcount_limit,
             "sibling_schedstat_before": sibling_schedstat_before,
             "sibling_schedstat_after": sibling_schedstat_after,
             "sibling_sched_runtime_ns": sibling_runtime_ns,
@@ -3679,7 +5103,32 @@ def run_campaign(args: argparse.Namespace) -> None:
             "sibling_gap_sched_runtime_ns": sibling_gap_runtime_ns,
             "sibling_attempt_sched_pcount": sibling_attempt_pcount,
             "sibling_gap_sched_pcount": sibling_gap_pcount,
+            "runtime_isolation_snapshot_start":
+                runtime_isolation_snapshot_start,
+            "runtime_isolation_snapshot_start_sha256":
+                runtime_isolation_snapshot_sha256(
+                    runtime_isolation_snapshot_start),
+            "runtime_isolation_snapshot_end": runtime_isolation_snapshot_end,
+            "runtime_isolation_snapshot_end_sha256":
+                runtime_isolation_snapshot_sha256(
+                    runtime_isolation_snapshot_end),
+            "preflight_target_irq_snapshot_before":
+                preflight_target_irq_snapshot_before,
+            "preflight_target_irq_snapshot_after":
+                preflight_target_irq_snapshot_after,
+            "preflight_target_irq_delta": preflight_target_irq_delta,
+            "campaign_target_irq_snapshot_before":
+                campaign_target_irq_snapshot_before,
+            "campaign_target_irq_snapshot_after":
+                campaign_target_irq_snapshot_after,
+            "campaign_target_irq_delta": campaign_target_irq_delta,
+            "result_tmpfs_binding": result_tmpfs_binding,
+            "thermal_csv_tmpfs_binding": thermal_csv_tmpfs_binding,
+            "thermal_pid_tmpfs_binding": thermal_pid_tmpfs_binding,
+            "prepared_tree_tmpfs_bindings": prepared_tree_tmpfs_bindings,
         })
+    if set(launch) != LAUNCH_RECEIPT_FIELDS:
+        raise TimingError("launch receipt constructor/schema drift")
     write_new(root / "launch_receipt.json", canonical_json(launch))
     os.close(thermal_pidfd)
     print(json.dumps({
@@ -3690,12 +5139,112 @@ def run_campaign(args: argparse.Namespace) -> None:
     }, sort_keys=True), flush=True)
 
 
+def _validate_process_identity_receipt(
+    identity: object, cleanup_action: object, command: Sequence[str],
+    binary: Path, context: str,
+) -> Dict[str, object]:
+    binary_stat = binary.stat()
+    try:
+        binary_index = list(command).index(str(binary))
+    except ValueError as exc:
+        raise TimingError("%s command lacks the frozen binary" % context) from exc
+    if (not isinstance(identity, dict) or
+            set(identity) != {
+                "pid", "start_ticks", "executable", "argv", "boot_id",
+                "binding_observation"} or
+            not isinstance(identity.get("pid"), int) or
+            isinstance(identity.get("pid"), bool) or
+            not 1 < identity["pid"] <= MAX_PROCESS_PID or
+            not isinstance(identity.get("start_ticks"), int) or
+            isinstance(identity.get("start_ticks"), bool) or
+            identity["start_ticks"] <= 0 or
+            identity.get("argv") != list(command)[binary_index:] or
+            not isinstance(identity.get("boot_id"), str) or
+            BOOT_ID_RE.fullmatch(identity["boot_id"]) is None or
+            identity.get("binding_observation") not in {
+                "double-proc-snapshot",
+                "final-exec-handshake-terminal",
+            } or cleanup_action != "exited_group_swept"):
+        raise TimingError("%s process-identity receipt is malformed" % context)
+    executable = identity.get("executable")
+    if (not isinstance(executable, dict) or
+            set(executable) != {"path", "device", "inode"} or
+            executable.get("path") != str(binary) or
+            executable.get("device") != binary_stat.st_dev or
+            executable.get("inode") != binary_stat.st_ino):
+        raise TimingError("%s executable binding mismatch" % context)
+    return identity
+
+
+def _validate_failure_process_identity_receipt(
+    identity: object, cleanup_action: object, cleanup_error: object,
+    command: Sequence[str], binary: Path,
+) -> None:
+    allowed_cleanup_actions = {
+        "already_reaped", "exited_group_swept", "killed_group",
+        "exited_group_swept_without_pidfd", "killed_group_without_pidfd",
+        "cleanup_failed",
+    }
+    if cleanup_action not in allowed_cleanup_actions:
+        raise TimingError("failure cleanup action is malformed")
+    if (cleanup_error is not None and
+            (not isinstance(cleanup_error, str) or
+             not 0 < len(cleanup_error) <= 4096 or "\0" in cleanup_error)):
+        raise TimingError("failure cleanup error is malformed")
+    if cleanup_action == "cleanup_failed" and cleanup_error is None:
+        raise TimingError("failure cleanup error is missing")
+    if identity is None:
+        if cleanup_action not in {
+                "exited_group_swept_without_pidfd",
+                "killed_group_without_pidfd", "cleanup_failed"}:
+            raise TimingError("failure process identity is missing")
+        return
+    if (not isinstance(identity, dict) or
+            set(identity) != {
+                "pid", "start_ticks", "executable", "argv", "boot_id",
+                "binding_observation"} or
+            not isinstance(identity.get("pid"), int) or
+            isinstance(identity.get("pid"), bool) or
+            not 1 < identity["pid"] <= MAX_PROCESS_PID or
+            not isinstance(identity.get("start_ticks"), int) or
+            isinstance(identity.get("start_ticks"), bool) or
+            identity["start_ticks"] <= 0 or
+            not isinstance(identity.get("boot_id"), str) or
+            BOOT_ID_RE.fullmatch(identity["boot_id"]) is None):
+        raise TimingError("failure process identity is malformed")
+    observation = identity.get("binding_observation")
+    if observation == "direct-child-provisional":
+        if identity.get("executable") is not None or identity.get("argv") is not None:
+            raise TimingError("failure provisional process binding is malformed")
+        return
+    if observation not in {
+            "double-proc-snapshot", "final-exec-handshake-terminal"}:
+        raise TimingError("failure process binding observation is malformed")
+    if cleanup_action in {
+            "exited_group_swept_without_pidfd", "killed_group_without_pidfd"}:
+        raise TimingError("failure final binding claims pidfd-less cleanup")
+    try:
+        binary_index = list(command).index(str(binary))
+        binary_stat = binary.stat()
+    except (ValueError, OSError) as exc:
+        raise TimingError("failure frozen-binary binding is unavailable") from exc
+    executable = identity.get("executable")
+    if (identity.get("argv") != list(command)[binary_index:] or
+            not isinstance(executable, dict) or
+            set(executable) != {"path", "device", "inode"} or
+            executable.get("path") != str(binary) or
+            executable.get("device") != binary_stat.st_dev or
+            executable.get("inode") != binary_stat.st_ino):
+        raise TimingError("failure final process binding is malformed")
+
+
 def _validate_execution_receipt(
     root: Path, design: Mapping[str, object], task: Mapping[str, object],
     slot: int, not_before_ns: int, not_after_ns: int,
 ) -> Tuple[
     Dict[str, object], ParsedOutput, int, int, int,
     Sequence[int], Sequence[int], Mapping[str, object], Mapping[str, object],
+    Mapping[str, object], Mapping[str, object],
 ]:
     marker = OUTER_ORDER[slot]
     label = "base" if marker == "A" else "candidate"
@@ -3716,7 +5265,7 @@ def _validate_execution_receipt(
     path = root / "receipts" / (name + ".json")
     receipt = load_canonical(path, "execution receipt")
     verify_sealed_record(
-        receipt, "wirehair.wh2.grouped_commit_timing.execution_receipt.v2",
+        receipt, "wirehair.wh2.grouped_commit_timing.execution_receipt.v4",
         "execution receipt")
     if set(receipt) != EXECUTION_RECEIPT_FIELDS:
         raise TimingError("execution receipt fields changed")
@@ -3732,35 +5281,9 @@ def _validate_execution_receipt(
     identity = receipt.get("process_identity")
     cleanup_action = receipt.get("cleanup_action")
     binary = root / "frozen" / BINARY_NAMES[label]
-    binary_stat = binary.stat()
     command = command_for(design, task, label)
-    binary_index = command.index(str(binary))
-    if (not isinstance(identity, dict) or
-            set(identity) != {
-                "pid", "start_ticks", "executable", "argv", "boot_id",
-                "binding_observation"} or
-            not isinstance(identity.get("pid"), int) or
-            isinstance(identity.get("pid"), bool) or
-            not 1 < identity["pid"] <= MAX_PROCESS_PID or
-            not isinstance(identity.get("start_ticks"), int) or
-            isinstance(identity.get("start_ticks"), bool) or
-            identity["start_ticks"] <= 0 or
-            identity.get("argv") != command[binary_index:] or
-            not isinstance(identity.get("boot_id"), str) or
-            BOOT_ID_RE.fullmatch(identity["boot_id"]) is None or
-            identity.get("binding_observation") not in {
-                "double-proc-snapshot",
-                "final-exec-handshake-terminal",
-            } or
-            cleanup_action != "exited_group_swept"):
-        raise TimingError("execution process-identity receipt is malformed")
-    executable = identity.get("executable")
-    if (not isinstance(executable, dict) or
-            set(executable) != {"path", "device", "inode"} or
-            executable.get("path") != str(binary) or
-            executable.get("device") != binary_stat.st_dev or
-            executable.get("inode") != binary_stat.st_ino):
-        raise TimingError("execution process executable binding mismatch")
+    _validate_process_identity_receipt(
+        identity, cleanup_action, command, binary, "execution")
     expected_summary = _receipt_summary(parsed)
     if any(receipt.get(key) != value for key, value in expected_summary.items()):
         raise TimingError("execution receipt parsed summary mismatch")
@@ -3780,6 +5303,8 @@ def _validate_execution_receipt(
             not 0 <= attempt < MAX_ENVIRONMENTAL_ATTEMPTS or
             not isinstance(prior, list) or len(prior) != attempt):
         raise TimingError("execution timing/retry ledger mismatch")
+    duration_ns = checked_attempt_duration_ns(
+        start, end, receipt.get("duration_ns"), "accepted execution")
     if (not isinstance(receipt.get("started_utc"), str) or
             UTC_RE.fullmatch(receipt["started_utc"]) is None):
         raise TimingError("execution UTC receipt is malformed")
@@ -3807,11 +5332,31 @@ def _validate_execution_receipt(
     require_exact_counter(
         receipt.get("sibling_sched_pcount"), accepted_sibling_pcount,
         "accepted execution pcount")
-    if (accepted_sibling_runtime_ns >
-            SIBLING_ACCEPTED_EXECUTION_MAX_SCHED_RUNTIME_NS or
-            accepted_sibling_pcount >
-            SIBLING_ACCEPTED_EXECUTION_MAX_SCHED_PCOUNT):
+    accepted_runtime_limit_ns = sibling_attempt_runtime_limit_ns(duration_ns)
+    accepted_pcount_limit = sibling_attempt_pcount_limit(duration_ns)
+    require_exact_counter(
+        receipt.get("sibling_sched_runtime_limit_ns"),
+        accepted_runtime_limit_ns, "accepted execution runtime limit")
+    require_exact_counter(
+        receipt.get("sibling_sched_pcount_limit"), accepted_pcount_limit,
+        "accepted execution pcount limit")
+    if (accepted_sibling_runtime_ns > accepted_runtime_limit_ns or
+            accepted_sibling_pcount > accepted_pcount_limit):
         raise TimingError("accepted execution schedstat receipt mismatch")
+    target_cpus = (
+        int(design["core"]), int(design["topology"]["sibling"]),
+        int(design["controller_core"]))
+    accepted_target_irq_delta = validate_target_irq_delta(
+        receipt.get("target_irq_delta"),
+        receipt.get("target_irq_snapshot_before"),
+        receipt.get("target_irq_snapshot_after"), target_cpus,
+        "accepted execution")
+    require_target_irq_contained_interval(
+        receipt["target_irq_snapshot_before"],
+        receipt["target_irq_snapshot_after"], start, end,
+        "accepted execution")
+    if accepted_target_irq_delta["contaminations"]:
+        raise TimingError("accepted execution target IRQ receipt mismatch")
     attempt_sibling_busy = accepted_sibling_busy
     attempt_sibling_runtime_ns = accepted_sibling_runtime_ns
     attempt_sibling_pcount = accepted_sibling_pcount
@@ -3820,6 +5365,8 @@ def _validate_execution_receipt(
     first_sibling_before: Optional[Sequence[int]] = None
     previous_schedstat_after: Optional[Mapping[str, object]] = None
     first_schedstat_before: Optional[Mapping[str, object]] = None
+    previous_target_irq_after: Optional[Mapping[str, object]] = None
+    first_target_irq_before: Optional[Mapping[str, object]] = None
     for index, record in enumerate(prior):
         if (not isinstance(record, dict) or
                 set(record) != {"attempt", "receipt_sha256"} or
@@ -3835,7 +5382,7 @@ def _validate_execution_receipt(
         contamination = load_canonical(contamination_path, "contamination receipt")
         verify_sealed_record(
             contamination,
-            "wirehair.wh2.grouped_commit_timing.contamination_receipt.v2",
+            "wirehair.wh2.grouped_commit_timing.contamination_receipt.v4",
             "contamination receipt")
         expected_stdout_name = prefix + ".stdout"
         expected_stderr_name = prefix + ".stderr"
@@ -3848,6 +5395,10 @@ def _validate_execution_receipt(
                 contamination.get("stdout_name") != expected_stdout_name or
                 contamination.get("stderr_name") != expected_stderr_name):
             raise TimingError("contamination receipt coordinate mismatch")
+        _validate_process_identity_receipt(
+            contamination.get("process_identity"),
+            contamination.get("cleanup_action"), command, binary,
+            "contaminated execution")
         for stream in ("stdout", "stderr"):
             artifact = root / "contamination" / str(contamination[stream + "_name"])
             if sha256_file(artifact) != contamination.get(stream + "_sha256"):
@@ -3863,6 +5414,9 @@ def _validate_execution_receipt(
             max_bytes=MAX_BENCHMARK_STDERR_BYTES)
         contamination_start = contamination.get("start_monotonic_ns")
         contamination_end = contamination.get("end_monotonic_ns")
+        contamination_duration_ns = checked_attempt_duration_ns(
+            contamination_start, contamination_end,
+            contamination.get("duration_ns"), "contaminated execution")
         contamination_sibling_before = contamination.get(
             "sibling_ticks_before")
         contamination_sibling_after = contamination.get(
@@ -3878,16 +5432,37 @@ def _validate_execution_receipt(
             checked_schedstat_delta(
                 contamination_schedstat_before, contamination_schedstat_after,
                 "contaminated execution")
+        contamination_target_irq_delta = validate_target_irq_delta(
+            contamination.get("target_irq_delta"),
+            contamination.get("target_irq_snapshot_before"),
+            contamination.get("target_irq_snapshot_after"), target_cpus,
+            "contaminated execution")
+        require_target_irq_contained_interval(
+            contamination["target_irq_snapshot_before"],
+            contamination["target_irq_snapshot_after"],
+            contamination_start, contamination_end,
+            "contaminated execution")
+        if previous_target_irq_after is not None:
+            contamination_gap_delta = checked_target_irq_delta(
+                previous_target_irq_after,
+                contamination["target_irq_snapshot_before"], target_cpus,
+                "inter-attempt contamination gap")
+            if contamination_gap_delta["contaminations"]:
+                raise TimingError(
+                    "contamination gap contains target IRQ activity")
         expected_contaminations = _attempt_contaminations(
             contaminated, contamination_sibling_busy,
             contamination_sibling_runtime_ns,
-            contamination_sibling_pcount)
+            contamination_sibling_pcount, contamination_duration_ns,
+            contamination_target_irq_delta)
         if (contamination_stderr or
                 not isinstance(contamination_start, int) or
                 isinstance(contamination_start, bool) or
                 not isinstance(contamination_end, int) or
                 isinstance(contamination_end, bool) or
                 contamination_end <= contamination_start or
+                contamination_duration_ns <
+                SIBLING_ACCEPTED_EXECUTION_MIN_DURATION_NS or
                 contamination_start < not_before_ns or
                 (previous_contamination_end is not None and
                  contamination_start < previous_contamination_end) or
@@ -3921,13 +5496,26 @@ def _validate_execution_receipt(
         require_exact_counter(
             contamination.get("sibling_sched_pcount"),
             contamination_sibling_pcount, "contaminated execution pcount")
+        require_exact_counter(
+            contamination.get("sibling_sched_runtime_limit_ns"),
+            sibling_attempt_runtime_limit_ns(contamination_duration_ns),
+            "contaminated execution runtime limit")
+        require_exact_counter(
+            contamination.get("sibling_sched_pcount_limit"),
+            sibling_attempt_pcount_limit(contamination_duration_ns),
+            "contaminated execution pcount limit")
         previous_contamination_end = contamination_end
         if first_sibling_before is None:
             first_sibling_before = contamination_sibling_before
         if first_schedstat_before is None:
             first_schedstat_before = contamination_schedstat_before
+        if first_target_irq_before is None:
+            first_target_irq_before = contamination[
+                "target_irq_snapshot_before"]
         previous_sibling_after = contamination_sibling_after
         previous_schedstat_after = contamination_schedstat_after
+        previous_target_irq_after = contamination[
+            "target_irq_snapshot_after"]
         attempt_sibling_busy += contamination_sibling_busy
         attempt_sibling_runtime_ns += contamination_sibling_runtime_ns
         attempt_sibling_pcount += contamination_sibling_pcount
@@ -3939,14 +5527,24 @@ def _validate_execution_receipt(
         require_schedstat_snapshot_order(
             previous_schedstat_after, accepted_schedstat_before,
             "accepted execution")
+    if previous_target_irq_after is not None:
+        accepted_gap_delta = checked_target_irq_delta(
+            previous_target_irq_after,
+            receipt["target_irq_snapshot_before"], target_cpus,
+            "accepted execution gap")
+        if accepted_gap_delta["contaminations"]:
+            raise TimingError("accepted execution gap contains target IRQ activity")
     if first_sibling_before is None:
         first_sibling_before = accepted_sibling_before
     if first_schedstat_before is None:
         first_schedstat_before = accepted_schedstat_before
+    if first_target_irq_before is None:
+        first_target_irq_before = receipt["target_irq_snapshot_before"]
     return (
         receipt, parsed, attempt_sibling_busy, attempt_sibling_runtime_ns,
         attempt_sibling_pcount, first_sibling_before, accepted_sibling_after,
         first_schedstat_before, accepted_schedstat_after,
+        first_target_irq_before, receipt["target_irq_snapshot_after"],
     )
 
 
@@ -4120,7 +5718,7 @@ def replay_campaign(root: Path) -> Tuple[Dict[str, object], set[str]]:
     _validate_prepare_receipt(root, design)
     launch = load_canonical(root / "launch_receipt.json", "launch receipt")
     verify_sealed_record(
-        launch, "wirehair.wh2.grouped_commit_timing.launch_receipt.v2",
+        launch, "wirehair.wh2.grouped_commit_timing.launch_receipt.v5",
         "launch receipt")
     if set(launch) != LAUNCH_RECEIPT_FIELDS:
         raise TimingError("launch receipt fields changed")
@@ -4137,6 +5735,42 @@ def replay_campaign(root: Path) -> Tuple[Dict[str, object], set[str]]:
             launch.get("controller_core") != design.get("controller_core") or \
             launch.get("controller_affinity") != [design.get("controller_core")]:
         raise TimingError("launch isolation receipt mismatch")
+    result_tmpfs_binding = validate_tmpfs_binding(
+        launch.get("result_tmpfs_binding"), root, "directory",
+        "launch result root")
+    prepared_tree_tmpfs_bindings = validate_prepared_tree_tmpfs_bindings(
+        launch.get("prepared_tree_tmpfs_bindings"), root, design)
+    if prepared_tree_tmpfs_bindings[0] != result_tmpfs_binding:
+        raise TimingError("launch prepared-tree tmpfs binding mismatch")
+    require_live_tmpfs_tree(
+        root, int(result_tmpfs_binding["device"]), "replayed campaign")
+    isolation_expected_cpus = (
+        int(design["core"]), int(design["topology"]["sibling"]),
+        int(design["controller_core"]))
+    target_cpus = isolation_expected_cpus
+    validate_runtime_isolation_transition(
+        launch.get("runtime_isolation_snapshot_start"),
+        launch.get("runtime_isolation_snapshot_end"),
+        isolation_expected_cpus)
+    for phase in ("start", "end"):
+        hash_field = "runtime_isolation_snapshot_%s_sha256" % phase
+        require_sha256(launch.get(hash_field), hash_field)
+        if launch[hash_field] != runtime_isolation_snapshot_sha256(
+                launch["runtime_isolation_snapshot_%s" % phase]):
+            raise TimingError("runtime isolation snapshot hash mismatch")
+    preflight_target_irq_delta = validate_target_irq_delta(
+        launch.get("preflight_target_irq_delta"),
+        launch.get("preflight_target_irq_snapshot_before"),
+        launch.get("preflight_target_irq_snapshot_after"), target_cpus,
+        "launch preflight")
+    campaign_target_irq_delta = validate_target_irq_delta(
+        launch.get("campaign_target_irq_delta"),
+        launch.get("campaign_target_irq_snapshot_before"),
+        launch.get("campaign_target_irq_snapshot_after"), target_cpus,
+        "launch campaign")
+    if (preflight_target_irq_delta["contaminations"] or
+            campaign_target_irq_delta["contaminations"]):
+        raise TimingError("launch target device IRQ receipt is contaminated")
     if (not isinstance(launch.get("retry_count"), int) or
             isinstance(launch.get("retry_count"), bool) or
             not 0 <= launch["retry_count"] <=
@@ -4162,6 +5796,18 @@ def replay_campaign(root: Path) -> Tuple[Dict[str, object], set[str]]:
             not isinstance(thermal_reader.get("cpus_allowed_list"), str) or
             len(parse_cpu_list(thermal_reader["cpus_allowed_list"])) != 1):
         raise TimingError("launch thermal-reader receipt is malformed")
+    thermal_csv_tmpfs_binding = validate_tmpfs_binding(
+        launch.get("thermal_csv_tmpfs_binding"),
+        Path(str(thermal_reader["thermal_csv"])), "regular",
+        "launch thermal CSV")
+    thermal_pid_tmpfs_binding = validate_tmpfs_binding(
+        launch.get("thermal_pid_tmpfs_binding"),
+        Path(str(thermal_reader["pid_file"])), "regular",
+        "launch thermal PID file")
+    if not (result_tmpfs_binding["device"] ==
+            thermal_csv_tmpfs_binding["device"] ==
+            thermal_pid_tmpfs_binding["device"]):
+        raise TimingError("launch tmpfs devices do not match")
     expected_sampler = (
         root / "frozen" / THERMAL_SAMPLER_NAME)
     argv = thermal_reader.get("argv")
@@ -4185,12 +5831,21 @@ def replay_campaign(root: Path) -> Tuple[Dict[str, object], set[str]]:
         value = launch.get(field)
         if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
             raise TimingError("launch thermal source identity is malformed")
+    if (launch["thermal_source_device"] !=
+            thermal_csv_tmpfs_binding["device"] or
+            launch["thermal_source_inode"] !=
+            thermal_csv_tmpfs_binding["inode"]):
+        raise TimingError("launch thermal tmpfs/source identity mismatch")
     thermal_raw = stable_bytes(
         root / "thermal_interval.csv", max_bytes=MAX_THERMAL_CSV_BYTES)
     if sha256_bytes(thermal_raw) != launch.get("thermal_interval_sha256"):
         raise TimingError("thermal interval hash mismatch")
     (start_s, end_s, _duration_s, start_ns, end_ns, duration_ns) = \
         checked_campaign_interval(launch)
+    require_target_irq_bracketing_interval(
+        launch["campaign_target_irq_snapshot_before"],
+        launch["campaign_target_irq_snapshot_after"],
+        start_ns, end_ns, "launch campaign")
     thermal_summary = validate_sealed_thermal_interval(
         thermal_raw, float(start_s), float(end_s))
     if launch.get("thermal_summary") != thermal_summary:
@@ -4228,14 +5883,35 @@ def replay_campaign(root: Path) -> Tuple[Dict[str, object], set[str]]:
         sibling_runtime_limit_ns, "launch sibling runtime limit")
     if sibling_runtime_ns > sibling_runtime_limit_ns:
         raise TimingError("launch sibling schedstat receipt mismatch")
-    if (not isinstance(launch.get("preflight_quiet_core_ticks"), int) or
-            isinstance(launch.get("preflight_quiet_core_ticks"), bool) or
-            not 0 <= launch["preflight_quiet_core_ticks"] <=
-            SIBLING_PREFLIGHT_MAX_BUSY_TICKS or
-            not isinstance(launch.get("preflight_quiet_sibling_ticks"), int) or
-            isinstance(launch.get("preflight_quiet_sibling_ticks"), bool) or
-            not 0 <= launch["preflight_quiet_sibling_ticks"] <=
-            SIBLING_PREFLIGHT_MAX_BUSY_TICKS):
+    (preflight_duration_ns, preflight_runtime_limit_ns,
+     preflight_pcount_limit) = checked_preflight_limits(launch, start_ns)
+    require_target_irq_contained_interval(
+        launch["preflight_target_irq_snapshot_before"],
+        launch["preflight_target_irq_snapshot_after"],
+        launch["preflight_start_monotonic_ns"],
+        launch["preflight_end_monotonic_ns"], "launch preflight")
+    isolation_start = launch["runtime_isolation_snapshot_start"]
+    isolation_end = launch["runtime_isolation_snapshot_end"]
+    if (isolation_start["capture_start_monotonic_ns"] <
+            launch["preflight_end_monotonic_ns"] or
+            isolation_start["capture_end_monotonic_ns"] > start_ns or
+            isolation_end["capture_start_monotonic_ns"] < end_ns):
+        raise TimingError("runtime isolation capture order is malformed")
+    preflight_quiet_core = checked_busy_tick_delta(
+        launch.get("preflight_core_ticks_before"),
+        launch.get("preflight_core_ticks_after"), "launch preflight core")
+    preflight_quiet_sibling = checked_busy_tick_delta(
+        launch.get("preflight_sibling_ticks_before"),
+        launch.get("preflight_sibling_ticks_after"),
+        "launch preflight sibling")
+    require_exact_counter(
+        launch.get("preflight_quiet_core_ticks"), preflight_quiet_core,
+        "launch preflight core busy ticks")
+    require_exact_counter(
+        launch.get("preflight_quiet_sibling_ticks"), preflight_quiet_sibling,
+        "launch preflight sibling busy ticks")
+    if (preflight_quiet_core > SIBLING_PREFLIGHT_MAX_BUSY_TICKS or
+            preflight_quiet_sibling > SIBLING_PREFLIGHT_MAX_BUSY_TICKS):
         raise TimingError("launch preflight quiet receipt mismatch")
     preflight_sibling_runtime_ns, preflight_sibling_pcount = \
         checked_schedstat_delta(
@@ -4248,13 +5924,18 @@ def replay_campaign(root: Path) -> Tuple[Dict[str, object], set[str]]:
     require_exact_counter(
         launch.get("preflight_sibling_sched_pcount"),
         preflight_sibling_pcount, "launch preflight sibling pcount")
-    if (preflight_sibling_runtime_ns >
-            SIBLING_PREFLIGHT_MAX_SCHED_RUNTIME_NS or
-            preflight_sibling_pcount > SIBLING_PREFLIGHT_MAX_SCHED_PCOUNT):
+    if (preflight_sibling_runtime_ns > preflight_runtime_limit_ns or
+            preflight_sibling_pcount > preflight_pcount_limit):
         raise TimingError("launch preflight schedstat receipt mismatch")
     require_schedstat_snapshot_order(
         launch["preflight_sibling_schedstat_after"],
         sibling_schedstat_before, "preflight-to-campaign sibling")
+    require_tick_snapshot_order(
+        launch["preflight_sibling_ticks_after"],
+        launch["sibling_ticks_before"], "preflight-to-campaign sibling")
+    require_tick_snapshot_order(
+        launch["preflight_core_ticks_after"], launch["core_ticks_before"],
+        "preflight-to-campaign timing core")
     for field in ("sibling_attempt_busy_ticks", "sibling_gap_busy_ticks"):
         value = launch.get(field)
         if (not isinstance(value, int) or isinstance(value, bool) or value < 0):
@@ -4285,6 +5966,7 @@ def replay_campaign(root: Path) -> Tuple[Dict[str, object], set[str]]:
     replay_sibling_attempt_pcount = 0
     previous_sibling_attempt_after = launch["sibling_ticks_before"]
     previous_sibling_schedstat_after = sibling_schedstat_before
+    previous_target_irq_after = launch["campaign_target_irq_snapshot_before"]
     previous_execution_end = start_ns
     campaign_end_ns = end_ns
     for task in tasks:
@@ -4295,7 +5977,9 @@ def replay_campaign(root: Path) -> Tuple[Dict[str, object], set[str]]:
              attempt_sibling_runtime_ns, attempt_sibling_pcount,
              attempt_sibling_before, attempt_sibling_after,
              attempt_sibling_schedstat_before,
-             attempt_sibling_schedstat_after) = \
+             attempt_sibling_schedstat_after,
+             attempt_target_irq_before,
+             attempt_target_irq_after) = \
                 _validate_execution_receipt(
                     root, design, task, slot, previous_execution_end,
                     campaign_end_ns)
@@ -4309,6 +5993,13 @@ def replay_campaign(root: Path) -> Tuple[Dict[str, object], set[str]]:
             previous_sibling_attempt_after = attempt_sibling_after
             previous_sibling_schedstat_after = \
                 attempt_sibling_schedstat_after
+            target_gap_delta = checked_target_irq_delta(
+                previous_target_irq_after, attempt_target_irq_before,
+                target_cpus, "cross-execution target IRQ")
+            if target_gap_delta["contaminations"]:
+                raise TimingError(
+                    "cross-execution gap contains target IRQ activity")
+            previous_target_irq_after = attempt_target_irq_after
             replay_sibling_attempt_busy += attempt_sibling_busy
             replay_sibling_attempt_runtime_ns += attempt_sibling_runtime_ns
             replay_sibling_attempt_pcount += attempt_sibling_pcount
@@ -4413,6 +6104,12 @@ def replay_campaign(root: Path) -> Tuple[Dict[str, object], set[str]]:
     require_schedstat_snapshot_order(
         previous_sibling_schedstat_after, sibling_schedstat_after,
         "campaign-final sibling")
+    final_target_gap_delta = checked_target_irq_delta(
+        previous_target_irq_after,
+        launch["campaign_target_irq_snapshot_after"], target_cpus,
+        "campaign-final target IRQ")
+    if final_target_gap_delta["contaminations"]:
+        raise TimingError("campaign-final gap contains target IRQ activity")
     expected_files.update(contamination_expected)
     if launch.get("execution_receipts") != execution_ledger or \
             launch.get("task_receipts") != task_ledger:
@@ -4472,6 +6169,20 @@ def replay_campaign(root: Path) -> Tuple[Dict[str, object], set[str]]:
         "timing_promotional": True,
         "sibling_idle": {
             "policy": design["sibling_idle_policy"],
+            "accepted_execution_dynamic_limits_replayed": True,
+            "preflight": {
+                "duration_ns": preflight_duration_ns,
+                "timing_core_busy_ticks": preflight_quiet_core,
+                "sibling_busy_ticks": preflight_quiet_sibling,
+                "sibling_scheduled_runtime_ns":
+                    preflight_sibling_runtime_ns,
+                "sibling_scheduled_runtime_limit_ns":
+                    preflight_runtime_limit_ns,
+                "sibling_pcount": preflight_sibling_pcount,
+                "sibling_pcount_limit": preflight_pcount_limit,
+                "target_irq_classifications":
+                    preflight_target_irq_delta["classifications"],
+            },
             "busy_ticks": sibling_busy,
             "busy_limit_ticks": sibling_busy_limit,
             "attempt_busy_ticks": replay_sibling_attempt_busy,
@@ -4484,6 +6195,26 @@ def replay_campaign(root: Path) -> Tuple[Dict[str, object], set[str]]:
             "gap_scheduled_runtime_ns": replay_sibling_gap_runtime_ns,
             "attempt_pcount": replay_sibling_attempt_pcount,
             "gap_pcount": replay_sibling_gap_pcount,
+            "campaign_target_irq_classifications":
+                campaign_target_irq_delta["classifications"],
+        },
+        "runtime_isolation": {
+            "expected_cpus": list(sorted(isolation_expected_cpus)),
+            "self_cgroup": isolation_start["self_cgroup"],
+            "start_snapshot_sha256":
+                launch["runtime_isolation_snapshot_start_sha256"],
+            "end_snapshot_sha256":
+                launch["runtime_isolation_snapshot_end_sha256"],
+            "start_numeric_irq_count": len(
+                isolation_start["irq_effective_affinities"]),
+            "end_numeric_irq_count": len(
+                isolation_end["irq_effective_affinities"]),
+            "guarded_irq30_unchanged":
+                isolation_start["irq30_exception"] ==
+                isolation_end["irq30_exception"],
+            "managed_nvme_whitelist_unchanged":
+                isolation_start["managed_nvme_exceptions"] ==
+                isolation_end["managed_nvme_exceptions"],
         },
         "thermal_interval_sha256": sha256_bytes(thermal_raw),
         "thermal_summary": thermal_summary,
@@ -4559,7 +6290,7 @@ def reduce_campaign(args: argparse.Namespace) -> None:
     _require_external_prepare_anchor(root, args.expected_prepare_sha256)
     payload, expected = replay_campaign(root)
     summary = sealed_record(
-        "wirehair.wh2.grouped_commit_timing.validated_summary.v1", payload)
+        "wirehair.wh2.grouped_commit_timing.validated_summary.v2", payload)
     summary_path = root / "validated_summary.json"
     publication = {
         "validated_summary.json": _publish_or_verify_reduction_artifact(
@@ -4594,10 +6325,10 @@ def verify_campaign(args: argparse.Namespace) -> None:
     payload, expected = replay_campaign(root)
     summary = load_canonical(root / "validated_summary.json", "validated summary")
     verify_sealed_record(
-        summary, "wirehair.wh2.grouped_commit_timing.validated_summary.v1",
+        summary, "wirehair.wh2.grouped_commit_timing.validated_summary.v2",
         "validated summary")
     expected_summary = sealed_record(
-        "wirehair.wh2.grouped_commit_timing.validated_summary.v1", payload)
+        "wirehair.wh2.grouped_commit_timing.validated_summary.v2", payload)
     if summary != expected_summary:
         raise TimingError("validated summary does not reproduce")
     expected.add("validated_summary.json")

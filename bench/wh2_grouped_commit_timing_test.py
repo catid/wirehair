@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import csv
+import copy
 import io
 import os
 from pathlib import Path
@@ -137,6 +138,104 @@ def schedstat_text(records=((0, 1000, 10), (1, 2000, 20))):
         lines.append("domain0 00000001 " + " ".join(
             "0" for _index in range(timing.SCHEDSTAT_DOMAIN_FIELD_COUNT)))
     return ("\n".join(lines) + "\n").encode("ascii")
+
+
+def isolation_snapshot(start_ns=100, end_ns=120):
+    expected = [8, 72, 126]
+    affinity_records = [
+        {"irq": 30, "effective_affinity_list": "8",
+         "effective_cpus": [8]},
+        {"irq": 31, "effective_affinity_list": "0-7",
+         "effective_cpus": list(range(8))},
+    ]
+    managed = []
+    for irq, identity, handler, requested, effective in \
+            timing.MANAGED_NVME_IRQ_WHITELIST:
+        affinity_records.append({
+            "irq": irq, "effective_affinity_list": effective,
+            "effective_cpus": list(timing.parse_cpu_list(effective)),
+        })
+        managed.append({
+            "irq": irq, "identity": identity,
+            "handler_directories": [handler],
+            "requested_affinity_list": requested,
+            "requested_cpus": list(timing.parse_cpu_list(requested)),
+            "effective_affinity_list": effective,
+            "effective_cpus": list(timing.parse_cpu_list(effective)),
+        })
+    affinity_records.sort(key=lambda value: value["irq"])
+    return {
+        "schema": "wirehair.wh2.runtime_isolation_snapshot.v2",
+        "capture_start_monotonic_ns": start_ns,
+        "capture_end_monotonic_ns": end_ns,
+        "capture_duration_ns": end_ns - start_ns,
+        "self_cgroup": "/wh2-timing-v4",
+        "expected_isolated_cpus": expected,
+        "kernel_isolated_cpu_list": "8,72,126",
+        "kernel_isolated_cpus": expected,
+        "cgroup_cpu_list": "8,72,126", "cgroup_cpus": expected,
+        "cgroup_effective_cpu_list": "8,72,126",
+        "cgroup_effective_cpus": expected,
+        "cgroup_exclusive_cpu_list": "8,72,126",
+        "cgroup_exclusive_cpus": expected,
+        "cgroup_exclusive_effective_cpu_list": "8,72,126",
+        "cgroup_exclusive_effective_cpus": expected,
+        "cgroup_partition": "isolated",
+        "irq_effective_affinities": affinity_records,
+        "irq30_exception": {
+            "irq": 30, "identity": timing.IRQ30_IDENTITY,
+            "handler_directories": ["AMD-Vi0-PPR"],
+            "requested_affinity_list": "0-127",
+            "requested_cpus": list(range(128)),
+            "effective_affinity_list": "8", "effective_cpus": [8],
+            "global_interrupt_count": 0,
+        },
+        "managed_nvme_exceptions": managed,
+    }
+
+
+def target_irq_snapshot(
+        hard=None, soft=None, global_hard=None,
+        start_ns=100, end_ns=110, cpu_ids=(8, 72, 126)):
+    hard = hard or {}
+    soft = soft or {}
+    global_hard = global_hard or {}
+    hard_vectors = (("30", timing.IRQ30_IDENTITY),
+                    ("103", timing.GUARDED_IRQ_IDENTITIES[103]),
+                    ("NMI", "Non-maskable interrupts"),
+                    ("LOC", "Local timer interrupts"))
+    interrupts = [" " + " ".join("CPU%d" % cpu for cpu in cpu_ids)]
+    for vector, suffix in hard_vectors:
+        counts = hard.get(vector, (0, 0, 0))
+        by_cpu = dict(zip((8, 72, 126), counts))
+        interrupts.append(" %s: %s %s" % (
+            vector, " ".join(str(by_cpu.get(cpu, 0)) for cpu in cpu_ids),
+            suffix))
+    for vector in ("ERR", "MIS"):
+        interrupts.append(" %s: %d" % (vector, global_hard.get(vector, 0)))
+    softirqs = [" " + " ".join("CPU%d" % cpu for cpu in cpu_ids)]
+    for vector in timing.EXPECTED_SOFTIRQ_VECTORS:
+        counts = soft.get(vector, (0, 0, 0))
+        by_cpu = dict(zip((8, 72, 126), counts))
+        softirqs.append(" %s: %s" % (
+            vector, " ".join(str(by_cpu.get(cpu, 0)) for cpu in cpu_ids)))
+    return timing.parse_target_irq_snapshot(
+        ("\n".join(interrupts) + "\n").encode("ascii"),
+        ("\n".join(softirqs) + "\n").encode("ascii"),
+        (8, 72, 126), start_ns, end_ns)
+
+
+def zero_irq_arguments(start_ns=10, end_ns=None):
+    if end_ns is None:
+        end_ns = start_ns + timing.SIBLING_ACCEPTED_EXECUTION_MIN_DURATION_NS
+    step = (end_ns - start_ns) // 5
+    if step <= 0:
+        raise AssertionError("fixture IRQ interval is too short")
+    before = target_irq_snapshot(
+        start_ns=start_ns + step, end_ns=start_ns + 2 * step)
+    after = target_irq_snapshot(
+        start_ns=start_ns + 3 * step, end_ns=start_ns + 4 * step)
+    return before, after, (8, 72, 126)
 
 
 class TaskLedgerTests(unittest.TestCase):
@@ -332,6 +431,138 @@ class ReceiptAndThermalTests(unittest.TestCase):
         with self.assertRaisesRegex(timing.TimingError, "self-hash mismatch"):
             timing.verify_sealed_record(value, "example.v1", "fixture")
 
+    def test_tmpfs_binding_is_live_exact_and_tamper_evident(self):
+        with tempfile.TemporaryDirectory(dir="/dev/shm") as temporary:
+            root = Path(temporary).resolve()
+            sample = root / "sample"
+            sample.write_bytes(b"fixture")
+            directory = timing.capture_tmpfs_binding(
+                root, "directory", "fixture directory")
+            regular = timing.capture_tmpfs_binding(
+                sample, "regular", "fixture file")
+            self.assertEqual(directory["filesystem_magic"], timing.TMPFS_MAGIC)
+            self.assertEqual(directory["device"], regular["device"])
+            timing.validate_tmpfs_binding(
+                directory, root, "directory", "fixture directory")
+            for field, value in (
+                    ("filesystem_magic", 0),
+                    ("device", regular["device"] + 1),
+                    ("inode", regular["inode"] + 1),
+                    ("mode", regular["mode"] ^ 0o100),
+                    ("uid", regular["uid"] + 1),
+                    ("gid", regular["gid"] + 1),
+                    ("nlink", 2)):
+                tampered = {**regular, field: value}
+                with self.subTest(tmpfs_field=field):
+                    with self.assertRaises(timing.TimingError):
+                        timing.validate_tmpfs_binding(
+                            tampered, sample, "regular", "fixture file")
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            with self.assertRaisesRegex(
+                    timing.TimingError, "must reside on tmpfs"):
+                timing.capture_tmpfs_binding(
+                    Path(temporary).resolve(), "directory",
+                    "non-tmpfs fixture")
+
+    def test_prepared_tmpfs_ledger_covers_every_input_and_output_directory(self):
+        with tempfile.TemporaryDirectory(dir="/dev/shm") as temporary:
+            root = Path(temporary).resolve()
+            for relative in timing.PREPARED_CAMPAIGN_DIRECTORIES:
+                (root / relative).mkdir(mode=0o700)
+            immutable_name = "frozen/fixture"
+            for relative in (
+                    "design.json", "prepare_receipt.json",
+                    "tasks_manifest.jsonl", immutable_name):
+                path = root / relative
+                path.write_bytes(b"fixture")
+            design = {"immutable_files": {immutable_name: "0" * 64}}
+            bindings = timing.capture_prepared_tree_tmpfs_bindings(root, design)
+            self.assertEqual(
+                len(bindings),
+                1 + len(timing.PREPARED_CAMPAIGN_DIRECTORIES) + 4)
+            self.assertEqual(
+                timing.validate_prepared_tree_tmpfs_bindings(
+                    bindings, root, design), bindings)
+            timing.require_live_tmpfs_tree(
+                root, int(bindings[0]["device"]), "fixture")
+
+            real_capture = timing.capture_tmpfs_binding
+
+            def forged_device(path, kind, context):
+                binding = real_capture(path, kind, context)
+                if Path(path).name == "raw":
+                    return {**binding, "device": int(binding["device"]) + 1}
+                return binding
+
+            with mock.patch.object(
+                    timing, "capture_tmpfs_binding",
+                    side_effect=forged_device):
+                with self.assertRaisesRegex(
+                        timing.TimingError, "spans filesystems"):
+                    timing.capture_prepared_tree_tmpfs_bindings(root, design)
+            link = root / "nested-link"
+            link.symlink_to(root / "design.json")
+            with self.assertRaisesRegex(timing.TimingError, "symlink"):
+                timing.require_live_tmpfs_tree(
+                    root, int(bindings[0]["device"]), "fixture")
+
+    def test_target_irq_capture_intervals_are_ordered_and_bound(self):
+        before = target_irq_snapshot(start_ns=100, end_ns=110)
+        after = target_irq_snapshot(start_ns=120, end_ns=130)
+        timing.checked_target_irq_delta(
+            before, after, (8, 72, 126), "fixture")
+        timing.require_target_irq_contained_interval(
+            before, after, 90, 140, "fixture")
+        with self.assertRaisesRegex(timing.TimingError, "capture interval"):
+            timing.require_target_irq_contained_interval(
+                before, after, 105, 140, "fixture")
+        with self.assertRaisesRegex(timing.TimingError, "topology changed"):
+            timing.checked_target_irq_delta(
+                before,
+                target_irq_snapshot(start_ns=105, end_ns=115),
+                (8, 72, 126), "fixture")
+        outer_before = target_irq_snapshot(start_ns=70, end_ns=80)
+        outer_after = target_irq_snapshot(start_ns=150, end_ns=160)
+        timing.require_target_irq_bracketing_interval(
+            outer_before, outer_after, 90, 140, "fixture")
+        with self.assertRaisesRegex(timing.TimingError, "capture bracket"):
+            timing.require_target_irq_bracketing_interval(
+                before, outer_after, 105, 140, "fixture")
+
+    def test_target_irq_contamination_is_never_retryable(self):
+        task = one_task()
+        parsed = timing.parse_grouped_output(
+            grouped_stdout("base", task), "base", task, 4096, 8)
+        before = target_irq_snapshot(start_ns=100, end_ns=110)
+        after = target_irq_snapshot(
+            hard={"103": (1, 0, 0)}, start_ns=120, end_ns=130)
+        delta = timing.checked_target_irq_delta(
+            before, after, (8, 72, 126), "fixture")
+        with self.assertRaisesRegex(timing.TimingError, "campaign-fatal"):
+            timing._attempt_contaminations(
+                parsed, 0, 0, 0, 1_000_000, delta)
+
+    def test_process_identity_validator_binds_cleanup_and_frozen_inode(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            binary = Path(temporary) / "binary"
+            binary.write_bytes(b"fixture")
+            command = ["/usr/bin/env", str(binary), "arg"]
+            identity = {
+                "pid": 123, "start_ticks": 456,
+                "executable": {
+                    "path": str(binary), "device": binary.stat().st_dev,
+                    "inode": binary.stat().st_ino,
+                },
+                "argv": [str(binary), "arg"],
+                "boot_id": "1788608a-7aa1-48de-8f7c-848485be3cc3",
+                "binding_observation": "double-proc-snapshot",
+            }
+            timing._validate_process_identity_receipt(
+                identity, "exited_group_swept", command, binary, "fixture")
+            with self.assertRaisesRegex(timing.TimingError, "process-identity"):
+                timing._validate_process_identity_receipt(
+                    identity, "terminated_group", command, binary, "fixture")
+
     def test_execution_receipt_schema_matches_constructor(self):
         task = one_task()
         parsed = timing.parse_grouped_output(
@@ -352,13 +583,17 @@ class ReceiptAndThermalTests(unittest.TestCase):
             }, "exited_group_swept",
             (0, 0, 0, 10, 0), (0, 0, 0, 11, 0),
             {"runtime_ns": 100, "pcount": 5},
-            {"runtime_ns": 100, "pcount": 5})
+            {"runtime_ns": 100, "pcount": 5}, *zero_irq_arguments())
         self.assertEqual(set(receipt), timing.EXECUTION_RECEIPT_FIELDS)
         self.assertEqual(receipt["timed_phase_ns"], parsed.timed_phase_ns)
         self.assertEqual(receipt["all_phase_ns"], parsed.all_phase_ns)
         self.assertEqual(receipt["sibling_busy_ticks"], 0)
         self.assertEqual(receipt["sibling_sched_runtime_ns"], 0)
         self.assertEqual(receipt["sibling_sched_pcount"], 0)
+        self.assertEqual(
+            receipt["sibling_sched_runtime_limit_ns"],
+            timing.sibling_attempt_runtime_limit_ns(end_ns - start_ns))
+        self.assertEqual(receipt["sibling_sched_pcount_limit"], 1)
 
     def test_execution_receipt_rejects_any_sibling_busy_tick(self):
         task = one_task()
@@ -381,23 +616,39 @@ class ReceiptAndThermalTests(unittest.TestCase):
                 }, "exited_group_swept",
                 (0, 0, 0, 10, 0), (1, 0, 0, 11, 0),
                 {"runtime_ns": 100, "pcount": 5},
-                {"runtime_ns": 100, "pcount": 5})
+                {"runtime_ns": 100, "pcount": 5}, *zero_irq_arguments())
 
-    def test_execution_receipt_rejects_subtick_schedstat_activity_and_short_run(self):
+    def test_execution_receipt_uses_exact_schedstat_limits_and_rejects_short_run(self):
         task = one_task()
         parsed = timing.parse_grouped_output(
             grouped_stdout("base", task), "base", task, 4096, 8)
+        duration_ns = timing.SIBLING_ACCEPTED_EXECUTION_MIN_DURATION_NS
+        runtime_limit = timing.sibling_attempt_runtime_limit_ns(duration_ns)
         arguments = (
             task, 0, "base", ["example"], 0,
             "2026-07-18T00:00:00.000Z", 10,
-            10 + timing.SIBLING_ACCEPTED_EXECUTION_MIN_DURATION_NS,
+            10 + duration_ns,
             parsed, b"", [], "c" * 64, {}, "exited_group_swept",
             (0, 0, 0, 10, 0), (0, 0, 0, 11, 0),
             {"runtime_ns": 100, "pcount": 5},
         )
+        accepted = timing._execution_receipt(
+            *arguments,
+            {"runtime_ns": 100 + runtime_limit, "pcount": 6},
+            *zero_irq_arguments())
+        self.assertEqual(
+            accepted["sibling_sched_runtime_limit_ns"], runtime_limit)
+        self.assertEqual(accepted["sibling_sched_pcount_limit"], 1)
         with self.assertRaisesRegex(timing.TimingError, "used the SMT sibling"):
             timing._execution_receipt(
-                *arguments, {"runtime_ns": 101, "pcount": 6})
+                *arguments,
+                {"runtime_ns": 101 + runtime_limit, "pcount": 6},
+                *zero_irq_arguments())
+        with self.assertRaisesRegex(timing.TimingError, "used the SMT sibling"):
+            timing._execution_receipt(
+                *arguments,
+                {"runtime_ns": 100 + runtime_limit, "pcount": 7},
+                *zero_irq_arguments())
         with self.assertRaisesRegex(timing.TimingError, "shorter"):
             timing._execution_receipt(
                 task, 0, "base", ["example"], 0,
@@ -406,7 +657,7 @@ class ReceiptAndThermalTests(unittest.TestCase):
                 parsed, b"", [], "c" * 64, {}, "exited_group_swept",
                 (0, 0, 0, 10, 0), (0, 0, 0, 11, 0),
                 {"runtime_ns": 100, "pcount": 5},
-                {"runtime_ns": 100, "pcount": 5})
+                {"runtime_ns": 100, "pcount": 5}, *zero_irq_arguments())
 
     def test_execution_receipt_replay_rejects_resealed_schedstat_tamper(self):
         task = one_task()
@@ -421,7 +672,8 @@ class ReceiptAndThermalTests(unittest.TestCase):
             binary.write_bytes(b"fixture")
             design = {
                 "root": str(root), "core": 8, "numa_node": 0,
-                "evict_bytes": 4096,
+                "evict_bytes": 4096, "controller_core": 126,
+                "topology": {"sibling": 72},
                 "tools": {
                     name: {"path": "/usr/bin/" + name}
                     for name in ("env", "taskset", "numactl")
@@ -433,14 +685,29 @@ class ReceiptAndThermalTests(unittest.TestCase):
             }
             command = timing.command_for(design, task, "base")
             name = timing.execution_name(task, 0, "base")
+            contamination_start = 10
+            contamination_end = contamination_start + \
+                timing.SIBLING_ACCEPTED_EXECUTION_MIN_DURATION_NS
             contamination_digest = timing._save_contamination(
-                root, name, 0, raw, b"", parsed, command, 10, 20,
+                root, name, 0, raw, b"", parsed, command,
+                {
+                    "pid": 122, "start_ticks": 455,
+                    "executable": {
+                        "path": str(binary), "device": binary.stat().st_dev,
+                        "inode": binary.stat().st_ino,
+                    },
+                    "argv": command[command.index(str(binary)):],
+                    "boot_id": "1788608a-7aa1-48de-8f7c-848485be3cc3",
+                    "binding_observation": "double-proc-snapshot",
+                }, "exited_group_swept",
+                contamination_start, contamination_end,
                 (0, 0, 0, 10, 0), (3, 0, 0, 11, 0),
                 {"runtime_ns": 100, "pcount": 5},
-                {"runtime_ns": 140, "pcount": 6})
+                {"runtime_ns": 140, "pcount": 6},
+                *zero_irq_arguments(contamination_start, contamination_end))
             binary_index = command.index(str(binary))
             binary_stat = binary.stat()
-            start_ns = 100
+            start_ns = contamination_end + 100
             end_ns = start_ns + \
                 timing.SIBLING_ACCEPTED_EXECUTION_MIN_DURATION_NS
             receipt = timing._execution_receipt(
@@ -461,7 +728,8 @@ class ReceiptAndThermalTests(unittest.TestCase):
                 }, "exited_group_swept",
                 (3, 0, 0, 20, 0), (3, 0, 0, 21, 0),
                 {"runtime_ns": 200, "pcount": 10},
-                {"runtime_ns": 200, "pcount": 10})
+                {"runtime_ns": 200, "pcount": 10},
+                *zero_irq_arguments(start_ns, end_ns))
             (root / "raw" / name).write_bytes(raw)
             (root / "stderr" / (name + ".stderr")).write_bytes(b"")
             (root / "exit" / (name + ".exit")).write_bytes(b"0\n")
@@ -511,6 +779,21 @@ class ReceiptAndThermalTests(unittest.TestCase):
         self.assertEqual(
             timing.sibling_campaign_runtime_limit_ns(200_000_000_000),
             10_000_000)
+        self.assertEqual(timing.sibling_attempt_runtime_limit_ns(19_999), 0)
+        self.assertEqual(timing.sibling_attempt_runtime_limit_ns(20_000), 1)
+        self.assertEqual(timing.sibling_attempt_pcount_limit(1), 1)
+        self.assertEqual(
+            timing.sibling_attempt_pcount_limit(1_000_000_000), 1)
+        self.assertEqual(
+            timing.sibling_attempt_pcount_limit(1_000_000_001), 2)
+        self.assertEqual(
+            timing.sibling_attempt_pcount_limit(2_000_000_000), 2)
+        for malformed in (0, -1, True, 1.5):
+            with self.subTest(malformed=malformed):
+                with self.assertRaisesRegex(timing.TimingError, "duration"):
+                    timing.sibling_attempt_runtime_limit_ns(malformed)
+                with self.assertRaisesRegex(timing.TimingError, "duration"):
+                    timing.sibling_attempt_pcount_limit(malformed)
 
     def test_schedstat_v15_parser_is_strict_and_accepts_live_fields(self):
         raw = schedstat_text()
@@ -551,6 +834,164 @@ class ReceiptAndThermalTests(unittest.TestCase):
         with self.assertRaisesRegex(timing.TimingError, "counter receipt"):
             timing.require_exact_counter(True, 1, "tampered pcount")
 
+    def test_target_irq_parser_delta_classification_reset_and_topology(self):
+        before = target_irq_snapshot()
+        after = target_irq_snapshot(
+            hard={"LOC": (2, 0, 0)},
+            soft={"TIMER": (0, 1, 0), "RCU": (0, 0, 3)},
+            start_ns=120, end_ns=130)
+        delta = timing.checked_target_irq_delta(
+            before, after, (8, 72, 126), "fixture")
+        self.assertEqual(delta["contaminations"], [])
+        self.assertEqual(delta["classifications"], [
+            "named-hardirq:LOC:cpu8:2",
+            "softirq:TIMER:cpu72:1",
+            "softirq:RCU:cpu126:3",
+        ])
+        self.assertEqual(
+            timing.validate_target_irq_delta(
+                delta, before, after, (8, 72, 126), "fixture"), delta)
+
+        numeric = timing.checked_target_irq_delta(
+            before, target_irq_snapshot(
+                hard={"103": (1, 0, 0)}, start_ns=120, end_ns=130),
+            (8, 72, 126), "fixture")
+        self.assertEqual(
+            numeric["contaminations"], ["numeric-hardirq:103:cpu8:1"])
+        device_soft = timing.checked_target_irq_delta(
+            before,
+            target_irq_snapshot(
+                soft={"NET_RX": (0, 1, 1)}, start_ns=120, end_ns=130),
+            (8, 72, 126), "fixture")
+        self.assertEqual(
+            device_soft["contaminations"], ["softirq:NET_RX:cpu72:1"])
+        self.assertIn(
+            "softirq:NET_RX:cpu126:1", device_soft["classifications"])
+        global_hard = timing.checked_target_irq_delta(
+            before, target_irq_snapshot(
+                global_hard={"ERR": 1}, start_ns=120, end_ns=130),
+            (8, 72, 126), "fixture")
+        self.assertEqual(
+            global_hard["contaminations"], ["global-hardirq:ERR:1"])
+        self.assertIn(
+            ["ERR", "global", 1], global_hard["hardirq_deltas"])
+
+        with self.assertRaisesRegex(timing.TimingError, "counter reset"):
+            timing.checked_target_irq_delta(
+                target_irq_snapshot(
+                    hard={"103": (1, 0, 0)}, start_ns=80, end_ns=90),
+                before,
+                (8, 72, 126), "fixture")
+        with self.assertRaisesRegex(timing.TimingError, "counter reset"):
+            timing.checked_target_irq_delta(
+                target_irq_snapshot(
+                    global_hard={"MIS": 1}, start_ns=80, end_ns=90), before,
+                (8, 72, 126), "fixture")
+        changed_topology = copy.deepcopy(after)
+        changed_topology["hardirq_rows"].pop()
+        changed_topology["hardirq_sha256"] = timing._target_rows_sha256(
+            "hardirq", (8, 72, 126), changed_topology["cpu_ids"],
+            changed_topology["hardirq_rows"])
+        with self.assertRaises(timing.TimingError):
+            timing.checked_target_irq_delta(
+                before, changed_topology, (8, 72, 126), "fixture")
+        malformed_header = (
+            b" CPU8 CPU72\n 30: 0 0 AMD-Vi0-PPR\n")
+        with self.assertRaisesRegex(timing.TimingError, "topology changed"):
+            timing.parse_target_irq_snapshot(
+                malformed_header,
+                b" CPU8 CPU72\n TIMER: 0 0\n", (8, 72, 126), 100, 110)
+        tampered = copy.deepcopy(before)
+        tampered["hardirq_rows"][0][2] = True
+        with self.assertRaisesRegex(timing.TimingError, "hardirq row"):
+            timing.validate_target_irq_snapshot(
+                tampered, (8, 72, 126), "tampered")
+        non_ascii_identity = copy.deepcopy(before)
+        non_ascii_identity["hardirq_rows"][0][2] += "\N{SNOWMAN}"
+        non_ascii_identity["hardirq_sha256"] = timing._target_rows_sha256(
+            "hardirq", (8, 72, 126), non_ascii_identity["cpu_ids"],
+            non_ascii_identity["hardirq_rows"])
+        with self.assertRaisesRegex(timing.TimingError, "hardirq row"):
+            timing.validate_target_irq_snapshot(
+                non_ascii_identity, (8, 72, 126), "tampered")
+        for global_tamper in (
+                ["ERR", "global", 0, 0],
+                ["ERR", "named", "Error counters", 0, 0, 0],
+                ["103", "global", 0]):
+            tampered = copy.deepcopy(before)
+            index = next(
+                index for index, row in enumerate(tampered["hardirq_rows"])
+                if row[0] == "ERR")
+            tampered["hardirq_rows"][index] = global_tamper
+            tampered["hardirq_sha256"] = timing._target_rows_sha256(
+                "hardirq", (8, 72, 126), tampered["cpu_ids"],
+                tampered["hardirq_rows"])
+            with self.subTest(global_tamper=global_tamper):
+                with self.assertRaises(timing.TimingError):
+                    timing.validate_target_irq_snapshot(
+                        tampered, (8, 72, 126), "tampered")
+        malformed_global = (
+            b" CPU8 CPU72 CPU126\n ERR: 0 0\n")
+        with self.assertRaisesRegex(timing.TimingError, "width changed"):
+            timing.parse_target_irq_snapshot(
+                malformed_global,
+                b" CPU8 CPU72 CPU126\n TIMER: 0 0 0\n",
+                (8, 72, 126), 100, 110)
+        full_width_global = b" CPU8 CPU72 CPU126\n ERR: 0 0 0\n"
+        full_softirq = (
+            " CPU8 CPU72 CPU126\n" + "".join(
+                " %s: 0 0 0\n" % vector
+                for vector in timing.EXPECTED_SOFTIRQ_VECTORS)
+        ).encode("ascii")
+        with self.assertRaisesRegex(timing.TimingError, "global hardirq"):
+            timing.parse_target_irq_snapshot(
+                full_width_global, full_softirq,
+                (8, 72, 126), 100, 110)
+
+        missing_global = copy.deepcopy(before)
+        missing_global["hardirq_rows"] = [
+            row for row in missing_global["hardirq_rows"] if row[0] != "MIS"]
+        missing_global["hardirq_sha256"] = timing._target_rows_sha256(
+            "hardirq", (8, 72, 126), missing_global["cpu_ids"],
+            missing_global["hardirq_rows"])
+        with self.assertRaisesRegex(timing.TimingError, "global hardirq"):
+            timing.validate_target_irq_snapshot(
+                missing_global, (8, 72, 126), "tampered")
+
+        high_priority = timing.checked_target_irq_delta(
+            before, target_irq_snapshot(
+                soft={"HI": (1, 1, 0)}, start_ns=120, end_ns=130),
+            (8, 72, 126), "fixture")
+        self.assertEqual(high_priority["contaminations"], [
+            "softirq:HI:cpu8:1", "softirq:HI:cpu72:1"])
+
+        changed_header = target_irq_snapshot(
+            start_ns=120, end_ns=130, cpu_ids=(1, 8, 72, 126))
+        with self.assertRaisesRegex(timing.TimingError, "topology changed"):
+            timing.checked_target_irq_delta(
+                before, changed_header, (8, 72, 126), "fixture")
+
+        changed_identity = copy.deepcopy(after)
+        numeric_index = next(
+            index for index, row in enumerate(changed_identity["hardirq_rows"])
+            if row[0] == "103")
+        changed_identity["hardirq_rows"][numeric_index][2] = "foreign-device"
+        changed_identity["hardirq_sha256"] = timing._target_rows_sha256(
+            "hardirq", (8, 72, 126), changed_identity["cpu_ids"],
+            changed_identity["hardirq_rows"])
+        with self.assertRaisesRegex(timing.TimingError, "topology changed"):
+            timing.checked_target_irq_delta(
+                before, changed_identity, (8, 72, 126), "fixture")
+
+        missing_softirq = copy.deepcopy(before)
+        missing_softirq["softirq_rows"].pop(0)
+        missing_softirq["softirq_sha256"] = timing._target_rows_sha256(
+            "softirq", (8, 72, 126), missing_softirq["cpu_ids"],
+            missing_softirq["softirq_rows"])
+        with self.assertRaisesRegex(timing.TimingError, "softirq topology"):
+            timing.validate_target_irq_snapshot(
+                missing_softirq, (8, 72, 126), "tampered")
+
     def test_sibling_policy_and_launch_interval_reject_bool_or_nonfinite_aliases(self):
         timing.require_frozen_sibling_idle_policy(timing.SIBLING_IDLE_POLICY)
         changed = {
@@ -582,26 +1023,237 @@ class ReceiptAndThermalTests(unittest.TestCase):
                 with self.assertRaisesRegex(timing.TimingError, "interval"):
                     timing.checked_campaign_interval({**valid, field: value})
 
+    def test_five_second_preflight_limits_are_exact_and_tamper_evident(self):
+        duration_ns = timing.SIBLING_PREFLIGHT_WINDOW_NS
+        launch = {
+            "preflight_start_monotonic_ns": 100,
+            "preflight_end_monotonic_ns": 100 + duration_ns,
+            "preflight_duration_ns": duration_ns,
+            "preflight_sibling_sched_runtime_limit_ns":
+                timing.sibling_attempt_runtime_limit_ns(duration_ns),
+            "preflight_sibling_sched_pcount_limit":
+                timing.sibling_attempt_pcount_limit(duration_ns),
+        }
+        self.assertEqual(
+            timing.checked_preflight_limits(
+                launch, launch["preflight_end_monotonic_ns"]),
+            (duration_ns, 250_000, 5))
+        for field, value in (
+                ("preflight_duration_ns", duration_ns - 1),
+                ("preflight_sibling_sched_runtime_limit_ns", 250_001),
+                ("preflight_sibling_sched_pcount_limit", True)):
+            with self.subTest(field=field):
+                with self.assertRaises(timing.TimingError):
+                    timing.checked_preflight_limits(
+                        {**launch, field: value},
+                        launch["preflight_end_monotonic_ns"])
+        with self.assertRaisesRegex(timing.TimingError, "interval"):
+            timing.checked_preflight_limits(
+                launch, launch["preflight_end_monotonic_ns"] - 1)
+
+    def test_runtime_isolation_snapshot_transition_and_tamper_checks(self):
+        start = isolation_snapshot(100, 120)
+        end = isolation_snapshot(10_000, 10_030)
+        timing.validate_runtime_isolation_transition(
+            start, end, (8, 72, 126))
+        digest = timing.runtime_isolation_snapshot_sha256(start)
+        self.assertRegex(digest, r"^[0-9a-f]{64}$")
+        changed = copy.deepcopy(start)
+        changed["capture_end_monotonic_ns"] += 1
+        changed["capture_duration_ns"] += 1
+        self.assertNotEqual(
+            digest, timing.runtime_isolation_snapshot_sha256(changed))
+
+        malformed_cases = []
+        malformed = copy.deepcopy(start)
+        malformed["self_cgroup"] = "/"
+        malformed_cases.append(malformed)
+        malformed = copy.deepcopy(start)
+        del malformed["cgroup_partition"]
+        malformed_cases.append(malformed)
+        malformed = copy.deepcopy(start)
+        malformed["irq_effective_affinities"][1] = {
+            "irq": 31, "effective_affinity_list": "72",
+            "effective_cpus": [72],
+        }
+        malformed_cases.append(malformed)
+        malformed = copy.deepcopy(start)
+        malformed["irq30_exception"]["global_interrupt_count"] = True
+        malformed_cases.append(malformed)
+        malformed = copy.deepcopy(start)
+        malformed["irq30_exception"]["identity"] = \
+            "OTHER 999-edge AMD-Vi0-PPR"
+        malformed_cases.append(malformed)
+        malformed = copy.deepcopy(start)
+        malformed["irq30_exception"]["requested_affinity_list"] = "0-126"
+        malformed["irq30_exception"]["requested_cpus"] = list(range(127))
+        malformed_cases.append(malformed)
+        malformed = copy.deepcopy(start)
+        malformed["managed_nvme_exceptions"][0][
+            "handler_directories"] = ["nvme2q10"]
+        malformed_cases.append(malformed)
+        malformed = copy.deepcopy(start)
+        malformed["managed_nvme_exceptions"][0]["identity"] = \
+            "IR-PCI-MSIX-ffff:ff:ff.f 9-edge nvme2q9"
+        malformed_cases.append(malformed)
+        malformed = copy.deepcopy(start)
+        malformed["managed_nvme_exceptions"][0][
+            "requested_affinity_list"] = "8-9"
+        malformed["managed_nvme_exceptions"][0]["requested_cpus"] = [8, 9]
+        malformed_cases.append(malformed)
+        malformed = copy.deepcopy(start)
+        malformed["managed_nvme_exceptions"][0][
+            "effective_affinity_list"] = "72"
+        malformed["managed_nvme_exceptions"][0]["effective_cpus"] = [72]
+        malformed_cases.append(malformed)
+        malformed = copy.deepcopy(start)
+        malformed["managed_nvme_exceptions"].reverse()
+        malformed_cases.append(malformed)
+        malformed = copy.deepcopy(start)
+        malformed["capture_duration_ns"] += 1
+        malformed_cases.append(malformed)
+        for value in malformed_cases:
+            with self.subTest(value=value):
+                with self.assertRaises(timing.TimingError):
+                    timing.validate_runtime_isolation_snapshot(
+                        value, (8, 72, 126), "tampered")
+        with self.assertRaisesRegex(timing.TimingError, "cardinality"):
+            timing.parse_cpu_list("0-2147483647")
+
+    def test_runtime_isolation_capture_audits_cgroup_and_all_numeric_irqs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            proc = root / "proc"
+            cgroup = root / "cgroup"
+            (proc / "self").mkdir(parents=True)
+            (proc / "self/cgroup").write_text(
+                "0::/wh2-timing-v4\n", encoding="ascii")
+            irq30 = proc / "irq/30"
+            (irq30 / "AMD-Vi0-PPR").mkdir(parents=True)
+            (irq30 / "effective_affinity_list").write_text(
+                "8\n", encoding="ascii")
+            (irq30 / "smp_affinity_list").write_text(
+                "0-127\n", encoding="ascii")
+            for irq, _identity, handler, requested, effective in \
+                    timing.MANAGED_NVME_IRQ_WHITELIST:
+                path = proc / ("irq/%d" % irq)
+                (path / handler).mkdir(parents=True)
+                (path / "effective_affinity_list").write_text(
+                    effective + "\n", encoding="ascii")
+                (path / "smp_affinity_list").write_text(
+                    requested + "\n", encoding="ascii")
+            irq2 = proc / "irq/2"
+            irq2.mkdir(parents=True)
+            (irq2 / "effective_affinity_list").write_text(
+                "\n", encoding="ascii")
+            irq31 = proc / "irq/31"
+            irq31.mkdir(parents=True)
+            (irq31 / "effective_affinity_list").write_text(
+                "0-7\n", encoding="ascii")
+            interrupt_lines = [" CPU0 CPU1"] + [
+                " %d: 0 0 %s" % (irq, identity)
+                for irq, identity in sorted(
+                    timing.GUARDED_IRQ_IDENTITIES.items())
+            ]
+            (proc / "interrupts").write_text(
+                "\n".join(interrupt_lines) + "\n", encoding="ascii")
+            group = cgroup / "wh2-timing-v4"
+            group.mkdir(parents=True)
+            (cgroup / "cpuset.cpus.isolated").write_text(
+                "8,72,126\n", encoding="ascii")
+            for name in (
+                    "cpuset.cpus", "cpuset.cpus.effective",
+                    "cpuset.cpus.exclusive",
+                    "cpuset.cpus.exclusive.effective"):
+                (group / name).write_text("8,72,126\n", encoding="ascii")
+            (group / "cpuset.cpus.partition").write_text(
+                "isolated\n", encoding="ascii")
+            with mock.patch.object(
+                    timing.time, "monotonic_ns", side_effect=[100, 200]):
+                captured = timing.capture_runtime_isolation_snapshot(
+                    8, 72, 126, proc_root=proc, cgroup_root=cgroup)
+            self.assertEqual(captured["capture_duration_ns"], 100)
+            self.assertEqual(
+                captured["irq30_exception"]["global_interrupt_count"], 0)
+            self.assertEqual(
+                [item["irq"] for item in
+                 captured["irq_effective_affinities"]],
+                sorted([2, 30, 31] + [
+                    item[0] for item in timing.MANAGED_NVME_IRQ_WHITELIST]))
+            self.assertEqual(
+                captured["irq_effective_affinities"][0]["effective_cpus"], [])
+
+            (irq31 / "effective_affinity_list").write_text(
+                "72\n", encoding="ascii")
+            with self.assertRaisesRegex(timing.TimingError, "IRQ 31"):
+                timing.capture_runtime_isolation_snapshot(
+                    8, 72, 126, proc_root=proc, cgroup_root=cgroup)
+            (irq31 / "effective_affinity_list").write_text(
+                "0-7\n", encoding="ascii")
+            (proc / "interrupts").write_text(
+                " CPU0 CPU1\n"
+                " 30: 0 1 IOMMU-MSI 376-edge AMD-Vi0-PPR\n",
+                encoding="ascii")
+            with self.assertRaises(timing.TimingError):
+                timing.capture_runtime_isolation_snapshot(
+                    8, 72, 126, proc_root=proc, cgroup_root=cgroup)
+
+    def test_guarded_irq_parser_rejects_nonzero_identity_or_malformed_rows(self):
+        zero = (
+            b" CPU0 CPU1\n"
+            b" 30: 0 0 IOMMU-MSI 376-edge AMD-Vi0-PPR\n")
+        expected = {30: timing.IRQ30_IDENTITY}
+        self.assertEqual(
+            timing._parse_guarded_irq_rows(zero, expected)[30]["total_count"],
+            0)
+        self.assertEqual(timing._parse_guarded_irq_rows(
+            zero.replace(b"30: 0 0", b"30: 0 1"), expected
+        )[30]["total_count"], 1)
+        for malformed in (
+                zero[:-1],
+                zero.replace(b"CPU1", b"CPU0"),
+                zero + zero.splitlines(keepends=True)[1],
+                zero.replace(b"AMD-Vi0-PPR", b"other")):
+            with self.subTest(malformed=malformed):
+                with self.assertRaises(timing.TimingError):
+                    timing._parse_guarded_irq_rows(malformed, expected)
+
     def test_sibling_only_contamination_is_receipted_for_retry(self):
         task = one_task()
         parsed = timing.parse_grouped_output(
             grouped_stdout("base", task), "base", task, 4096, 8)
         self.assertEqual(parsed.contaminations, ())
+        duration_ns = timing.SIBLING_ACCEPTED_EXECUTION_MIN_DURATION_NS
+        runtime_limit = timing.sibling_attempt_runtime_limit_ns(duration_ns)
+        irq_before, irq_after, target_cpus = zero_irq_arguments()
+        irq_delta = timing.checked_target_irq_delta(
+            irq_before, irq_after, target_cpus, "fixture")
         self.assertEqual(
-            timing._attempt_contaminations(parsed, 0, 0, 0), ())
+            timing._attempt_contaminations(
+                parsed, 0, runtime_limit, 1, duration_ns, irq_delta), ())
         self.assertEqual(
-            timing._attempt_contaminations(parsed, 3, 40, 1),
-            ("sibling-busy:3", "sibling-sched-runtime-ns:40",
-             "sibling-sched-pcount:1"))
+            timing._attempt_contaminations(
+                parsed, 3, runtime_limit + 1, 2, duration_ns, irq_delta),
+            ("sibling-busy:3",
+             "sibling-sched-runtime-ns:%d" % (runtime_limit + 1),
+             "sibling-sched-pcount:2"))
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / "contamination").mkdir(mode=0o700)
             digest = timing._save_contamination(
                 root, "sample", 0, grouped_stdout("base", task), b"",
-                parsed, ["example"], 10, 20,
+                parsed, ["example"], {
+                    "pid": 123, "start_ticks": 456,
+                    "executable": {"path": "/example", "device": 7,
+                                   "inode": 8},
+                    "argv": ["/example"],
+                    "boot_id": "1788608a-7aa1-48de-8f7c-848485be3cc3",
+                    "binding_observation": "double-proc-snapshot",
+                }, "exited_group_swept", 10, 10 + duration_ns,
                 (0, 0, 0, 10, 0), (3, 0, 0, 11, 0),
                 {"runtime_ns": 100, "pcount": 5},
-                {"runtime_ns": 140, "pcount": 6})
+                {"runtime_ns": 101 + runtime_limit, "pcount": 7},
+                *zero_irq_arguments())
             receipt = timing.load_canonical(
                 root / "contamination" / "sample.attempt0.json",
                 "test contamination")
@@ -609,45 +1261,121 @@ class ReceiptAndThermalTests(unittest.TestCase):
         self.assertEqual(set(receipt), timing.CONTAMINATION_RECEIPT_FIELDS)
         self.assertEqual(receipt["schema"],
                          "wirehair.wh2.grouped_commit_timing."
-                         "contamination_receipt.v2")
+                         "contamination_receipt.v4")
         self.assertEqual(receipt["contaminations"], [
-            "sibling-busy:3", "sibling-sched-runtime-ns:40",
-            "sibling-sched-pcount:1"])
+            "sibling-busy:3",
+            "sibling-sched-runtime-ns:%d" % (runtime_limit + 1),
+            "sibling-sched-pcount:2"])
         self.assertEqual(receipt["sibling_busy_ticks"], 3)
-        self.assertEqual(receipt["sibling_sched_runtime_ns"], 40)
-        self.assertEqual(receipt["sibling_sched_pcount"], 1)
+        self.assertEqual(receipt["duration_ns"], duration_ns)
+        self.assertEqual(
+            receipt["sibling_sched_runtime_ns"], runtime_limit + 1)
+        self.assertEqual(receipt["sibling_sched_runtime_limit_ns"], runtime_limit)
+        self.assertEqual(receipt["sibling_sched_pcount"], 2)
+        self.assertEqual(receipt["sibling_sched_pcount_limit"], 1)
 
     def test_failure_receipt_records_exact_schedstat_accounting(self):
         task = one_task()
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / "failure").mkdir(mode=0o700)
-            digest = timing._save_failure(
-                root, task, 0, "base", ["example"], 0,
-                "2026-07-18T00:00:00.000Z", 10, 20, b"out", b"err", 7,
-                timing.TimingError("failure"), "c" * 64, None,
-                "exited_group_swept", None,
-                (0, 0, 0, 10, 0), (2, 0, 0, 11, 0),
-                {"runtime_ns": 100, "pcount": 5},
-                {"runtime_ns": 125, "pcount": 6})
-            name = timing.execution_name(task, 0, "base") + ".attempt0.json"
-            receipt_path = root / "failure" / name
-            receipt = timing.load_canonical(receipt_path, "test failure")
-            tampered_payload = {
-                key: value for key, value in receipt.items()
-                if key not in ("schema", "self_sha256_excluding_field")
+            frozen = root / "frozen"
+            frozen.mkdir(mode=0o700)
+            binary = frozen / timing.BINARY_NAMES["base"]
+            binary.write_bytes(b"fixture")
+            binary.chmod(0o555)
+            binary_sha256 = timing.sha256_file(binary)
+            command = [str(binary), "example"]
+            identity = {
+                "pid": 123, "start_ticks": 456,
+                "executable": {
+                    "path": str(binary), "device": binary.stat().st_dev,
+                    "inode": binary.stat().st_ino,
+                },
+                "argv": command,
+                "boot_id": "1788608a-7aa1-48de-8f7c-848485be3cc3",
+                "binding_observation": "double-proc-snapshot",
             }
-            tampered_payload["sibling_sched_pcount"] = True
-            tampered = timing.sealed_record(receipt["schema"], tampered_payload)
-            receipt_path.chmod(0o600)
-            receipt_path.write_bytes(timing.canonical_json(tampered))
-            receipt_path.chmod(0o444)
-            with self.assertRaisesRegex(timing.TimingError, "counter receipt"):
-                timing.replay_failure_receipt(root, name)
+            design = {
+                "immutable_files": {
+                    "frozen/" + timing.BINARY_NAMES["base"]: binary_sha256,
+                },
+                "core": 8, "topology": {"sibling": 72},
+                "controller_core": 126,
+            }
+            with mock.patch.object(
+                    timing, "_load_design", return_value=design), \
+                    mock.patch.object(
+                        timing, "_load_tasks", return_value=(task,)), \
+                    mock.patch.object(
+                        timing, "command_for", return_value=command):
+                digest = timing._save_failure(
+                    root, task, 0, "base", command, 0,
+                    "2026-07-18T00:00:00.000Z", 10, 20,
+                    b"out", b"err", 7, timing.TimingError("failure"),
+                    binary_sha256, identity, "exited_group_swept", None,
+                    (0, 0, 0, 10, 0), (2, 0, 0, 11, 0),
+                    {"runtime_ns": 100, "pcount": 5},
+                    {"runtime_ns": 125, "pcount": 6},
+                    *zero_irq_arguments(10, 20))
+                name = (
+                    timing.execution_name(task, 0, "base") +
+                    ".attempt0.json")
+                receipt_path = root / "failure" / name
+                receipt = timing.load_canonical(receipt_path, "test failure")
+                with self.assertRaises(timing.TimingError):
+                    timing.replay_failure_receipt(root, name, (1, 2, 3))
+
+                for field, forged in (
+                        ("cleanup_action", "impossible"),
+                        ("process_identity", {"forged": True}),
+                        ("argv", ["forged"]),
+                        ("binary_sha256", "0" * 64)):
+                    tampered_payload = {
+                        key: value for key, value in receipt.items()
+                        if key not in ("schema", "self_sha256_excluding_field")
+                    }
+                    tampered_payload[field] = forged
+                    tampered = timing.sealed_record(
+                        receipt["schema"], tampered_payload)
+                    receipt_path.chmod(0o600)
+                    receipt_path.write_bytes(timing.canonical_json(tampered))
+                    receipt_path.chmod(0o444)
+                    with self.subTest(forged_field=field):
+                        with self.assertRaises(timing.TimingError):
+                            timing.replay_failure_receipt(
+                                root, name, (8, 72, 126))
+
+                tampered_payload = {
+                    key: value for key, value in receipt.items()
+                    if key not in ("schema", "self_sha256_excluding_field")
+                }
+                tampered_payload["sibling_sched_pcount"] = True
+                tampered = timing.sealed_record(
+                    receipt["schema"], tampered_payload)
+                receipt_path.chmod(0o600)
+                receipt_path.write_bytes(timing.canonical_json(tampered))
+                receipt_path.chmod(0o444)
+                with self.assertRaisesRegex(
+                        timing.TimingError, "counter receipt"):
+                    timing.replay_failure_receipt(
+                        root, name, (8, 72, 126))
+                tampered_payload["sibling_sched_pcount"] = 1
+                tampered_payload["sibling_sched_runtime_limit_ns"] = 1
+                tampered = timing.sealed_record(
+                    receipt["schema"], tampered_payload)
+                receipt_path.chmod(0o600)
+                receipt_path.write_bytes(timing.canonical_json(tampered))
+                receipt_path.chmod(0o444)
+                with self.assertRaisesRegex(timing.TimingError, "runtime limit"):
+                    timing.replay_failure_receipt(
+                        root, name, (8, 72, 126))
         self.assertRegex(digest, r"^[0-9a-f]{64}$")
         self.assertEqual(set(receipt), timing.FAILURE_RECEIPT_FIELDS)
         self.assertEqual(receipt["sibling_sched_runtime_ns"], 25)
+        self.assertEqual(receipt["sibling_sched_runtime_limit_ns"], 0)
         self.assertEqual(receipt["sibling_sched_pcount"], 1)
+        self.assertEqual(receipt["sibling_sched_pcount_limit"], 1)
 
     def test_thermal_interval_is_exactly_bracketed_and_bounded(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -911,11 +1639,15 @@ os.kill(os.getpid(), signal.SIGKILL)
     def test_timeout_kills_descendants_in_the_owned_session(self):
         command = [
             str(self.bash), "-c",
-            "sleep 30 & child=$!; printf '%s\\n' \"$child\"; sleep 30",
+            # The trailing builtin prevents bash from replacing itself with the
+            # final sleep before the controller can bind its exact executable.
+            "sleep 30 & child=$!; printf '%s\\n' \"$child\"; sleep 30; :",
         ]
         with self.assertRaisesRegex(
                 timing.BoundCommandError, "exceeded its timeout") as raised:
-            timing.run_bound_command(command, self.bash, self.python, 0.10)
+            # Leave ample launch/binding slack under the intentionally saturated
+            # host; this deadline is testing post-bind process-group cleanup.
+            timing.run_bound_command(command, self.bash, self.python, 1.0)
         error = raised.exception
         child = int(error.stdout.strip())
         self.assertIn(
@@ -1059,13 +1791,13 @@ class OverlayProvenanceTests(unittest.TestCase):
             "48d14bc77e3f9e98605fca4d226aa218d7d03a0d")
         self.assertEqual(
             timing.CANDIDATE_COMMIT,
-            "c7203519b4ef42a3d5b7bd5073152a04f89eb9d3")
+            "be0bc94b97d03d6ddbc23db3b7058aa7f575b5cd")
         self.assertEqual(
             timing.MEASUREMENT_OVERLAY_COMMIT,
-            "3eb1eaf41ded5031393ac84200a62e3c0a0b5456")
+            "d6ab1a65c9864ad97ef06c4b88c2917cb387c0be")
         self.assertEqual(
             timing.MEASUREMENT_OVERLAY_PARENT_COMMIT,
-            "243f8ed86b7bf102fa1cb7156a481c170935e57b")
+            "3a659aeb132e6cf5e5e68d88094af8402cdb0e47")
         self.assertIn(
             "WIREHAIR_V2_GROUPED_TIMING_ONLY",
             timing.TIMING_CXX_FLAGS_RELEASE)
