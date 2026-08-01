@@ -326,12 +326,11 @@ class SourceTrustTests(unittest.TestCase):
             self.assertFalse(marker.exists())
 
     def test_formal_identity_constants(self) -> None:
-        self.assertIs(campaign.FORMAL_STAGE_A_LAUNCHABLE, False)
-        self.assertIs(campaign.FORMAL_STAGE_A_IDENTITIES_REPINNED, False)
-        self.assertIs(campaign.FORMAL_COHORT_INVARIANTS_REPINNED, False)
-        self.assertIn("uniform-root Stage A v2", campaign.FORMAL_STAGE_A_BLOCKER)
-        with self.assertRaisesRegex(campaign.CampaignError, "launch is blocked"):
-            campaign.require_formal_stage_a_launchable()
+        self.assertIs(campaign.FORMAL_STAGE_A_LAUNCHABLE, True)
+        self.assertIs(campaign.FORMAL_STAGE_A_IDENTITIES_REPINNED, True)
+        self.assertIs(campaign.FORMAL_COHORT_INVARIANTS_REPINNED, True)
+        self.assertIn("uniform-root Stage A formal", campaign.FORMAL_STAGE_A_BLOCKER)
+        campaign.require_formal_stage_a_launchable()
         flags = (
             "FORMAL_STAGE_A_LAUNCHABLE",
             "FORMAL_STAGE_A_IDENTITIES_REPINNED",
@@ -346,22 +345,96 @@ class SourceTrustTests(unittest.TestCase):
         with mock.patch.multiple(campaign, **{name: True for name in flags}):
             campaign.require_formal_stage_a_launchable()
         self.assertEqual(campaign.FORMAL_STAGE_A_CONTROLLER_SHA256,
-                         "f989dd991de3159abf3cb0a8c42deb118c41b2a868c4759c599d38170e6fa823")
+                         "54311c6a3737edbb0a7f088e881c372b47e48533419c461db6d0ee75f43719fd")
         self.assertEqual(campaign.FORMAL_STAGE_A_BINARY_SHA256,
-                         "df8da0d908e172f3cfd2ecba367b39d95fa253370f681560d1dd927e39b66a06")
+                         "784cde40a37a06e0862f1fb0150eac6a90810eba8d717b1659cac8ed6391dfb4")
         self.assertEqual(campaign.FORMAL_STAGE_A_CAMPAIGN_COMPLETE_FILE_SHA256,
-                         "38c3bcbfa392a96a95a08342a02c46d0404a557aff44401c7a0cba37b2237285")
+                         "399f2c6945533ab89f0f8996f89720be3c9121d2bf4af07412c1017db3c0d261")
         self.assertEqual(campaign.FORMAL_STAGE_A_CAMPAIGN_COMPLETE_SEAL,
-                         "3dee34a593203c6009d7f5ea3cbb913900eccbeec5ff40a0236d242f1f542cf0")
+                         "a8f8fae01453f1e86aa583eb1fd79783e389d372e3cbc19e74620101aefed0ee")
         self.assertEqual(campaign.FORMAL_STAGE_A_ANALYSIS_FILE_SHA256,
-                         "61619d0539f72eea3b5f7045edbd11c2b78c3941bcb629bc5e9b092cc158d1a3")
+                         "727be7d29bcf10bc28c30f4c113b6f686df5996da4c05245a797caba19069fb7")
         self.assertEqual(campaign.FORMAL_STAGE_A_ANALYSIS_SEAL,
-                         "ead9727fd0f1684fc9179fc481b5987d2eafe7e896b8eba508d262a4a24c5c34")
+                         "20cadb6b757aa653e4216fd5cbf342e62874cc6accfbe07ea03dd25726ecb8ba")
+        self.assertEqual(campaign.FORMAL_STAGE_A_SOURCE_IDENTITY_STREAM_SHA256,
+                         "2259ca80a7233d2465cb5d822c6a18812d8cccf3adab733ad7a796726b080a73")
+
+    def test_runtime_interlock_is_first_touch(self) -> None:
+        called = []
+
+        @campaign.exclusive_campaign
+        def handler(_args: object, _result_dir: Path) -> None:
+            called.append(True)
+
+        with tempfile.TemporaryDirectory() as root_text:
+            root = Path(root_text)
+            existing = root / "existing"
+            existing.mkdir()
+            missing = root / "missing"
+            for result_dir in (existing, missing):
+                with self.subTest(result_dir=result_dir), mock.patch.multiple(
+                        campaign, FORMAL_STAGE_A_LAUNCHABLE=False,
+                        FORMAL_STAGE_A_IDENTITIES_REPINNED=True,
+                        FORMAL_COHORT_INVARIANTS_REPINNED=True), \
+                        self.assertRaisesRegex(
+                            campaign.CampaignError, "launch is blocked"):
+                    handler(SimpleNamespace(result_dir=result_dir))
+                self.assertFalse((result_dir / "controller.lock").exists())
+            self.assertFalse(missing.exists())
+        self.assertEqual(called, [])
+
+    def test_prepare_rejects_controller_source_mutation_before_staging(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as root_text:
+            root = Path(root_text)
+            controller = root / "stage_b.py"
+            binary = root / "wirehair_v2_bench"
+            taskset = root / "taskset"
+            source_result = root / "stage_a"
+            result_dir = root / "stage_b"
+            controller.write_bytes(b"original-controller\n")
+            binary.write_bytes(b"binary\n")
+            taskset.write_bytes(b"taskset\n")
+            source_result.mkdir()
+
+            def mutate_source(_source: Path) -> tuple[dict, dict]:
+                controller.write_bytes(b"mutated-controller!\n")
+                return {}, {}
+
+            args = SimpleNamespace(
+                result_dir=result_dir, binary=binary,
+                stage_a_result=source_result, telemetry_log=None,
+            )
+            with mock.patch.object(campaign, "__file__", str(controller)), \
+                    mock.patch.object(campaign.shutil, "which",
+                                      return_value=str(taskset)), \
+                    mock.patch.object(campaign, "authenticate_stage_a",
+                                      side_effect=mutate_source), \
+                    mock.patch.multiple(
+                        campaign, FORMAL_STAGE_A_LAUNCHABLE=True,
+                        FORMAL_STAGE_A_IDENTITIES_REPINNED=True,
+                        FORMAL_COHORT_INVARIANTS_REPINNED=True), \
+                    self.assertRaisesRegex(
+                        campaign.CampaignError,
+                        "controller source changed during Stage-A authentication"):
+                campaign.prepare(args)
+            self.assertFalse(result_dir.exists())
+            self.assertEqual(list(root.glob(".stage_b.prepare-*")), [])
 
     def test_formal_manifest_maps_every_allk_task_to_adjacent_arm_pair(self) -> None:
         if not campaign.FORMAL_STAGE_A_LAUNCHABLE:
-            self.skipTest("fresh formal uniform-root Stage-A is not pinned")
-        formal = Path("/dev/shm/wh2-h13-stage-a-formal-v2")
+            self.skipTest("formal uniform-root Stage-A launch is blocked")
+        formal_text = os.environ.get("WIREHAIR_H13_STAGE_A_RESULT")
+        if formal_text is None:
+            self.skipTest(
+                "set WIREHAIR_H13_STAGE_A_RESULT for the formal artifact test"
+            )
+        formal = Path(formal_text).resolve()
+        if not formal.is_dir():
+            raise AssertionError(
+                f"WIREHAIR_H13_STAGE_A_RESULT is not a directory: {formal}"
+            )
         contract = campaign.load_sealed(
             formal / "contract.json", f"{campaign.SOURCE_SCHEMA}.contract",
         )
@@ -585,7 +658,8 @@ class SourceTrustTests(unittest.TestCase):
                         EXPECTED_SOURCE_UNION=0, EXPECTED_SCREEN_MATCHES=0,
                         EXPECTED_SCREEN_CELLS=0, EXPECTED_SCREEN_OUTCOMES=0,
                         EXPECTED_NONEMPTY_STRATA=0, EXPECTED_ZERO_STRATA=(),
-                        EXPECTED_SCREEN_TASKS=0):
+                        EXPECTED_SCREEN_TASKS=0,
+                        FORMAL_STAGE_A_SOURCE_IDENTITY_STREAM_SHA256="a" * 64):
                 with self.assertRaisesRegex(
                         campaign.CampaignError, "changed during authenticated replay"):
                     campaign.authenticate_stage_a(root)
@@ -703,10 +777,19 @@ class SelectionTests(unittest.TestCase):
                     campaign.CampaignError, "uniform-root"):
                 campaign.source_cell_record(key, arms)
 
-    def test_formal_stratum_invariants_are_fail_closed_until_repin(self) -> None:
-        self.assertEqual(campaign.EXPECTED_SOURCE_UNION, 0)
-        self.assertEqual(campaign.EXPECTED_NONEMPTY_STRATA, 0)
-        self.assertEqual(campaign.EXPECTED_ZERO_STRATA, ())
+    def test_formal_stratum_invariants_are_exact_before_release(self) -> None:
+        self.assertEqual(campaign.EXPECTED_SOURCE_UNION, 2376)
+        self.assertEqual(campaign.EXPECTED_NONEMPTY_STRATA, 185)
+        self.assertEqual(campaign.EXPECTED_ZERO_STRATA, (
+            (0, 0, "burst", 2),
+            (1, 2, "burst", 2),
+            (1, 2, "adversarial", 2),
+            (2, 0, "repair-only", 2),
+        ))
+        self.assertEqual(campaign.EXPECTED_SCREEN_MATCHES, 2376)
+        self.assertEqual(campaign.EXPECTED_SCREEN_CELLS, 4752)
+        self.assertEqual(campaign.EXPECTED_SCREEN_OUTCOMES, 9504)
+        self.assertEqual(campaign.EXPECTED_SCREEN_TASKS, 392)
         self.assertEqual(campaign.FORMER_V1_SOURCE_UNION, 893)
         self.assertEqual(campaign.FORMER_V1_NONEMPTY_STRATA, 61)
         self.assertEqual(campaign.FORMER_V1_ZERO_STRATA, (
@@ -1478,6 +1561,8 @@ class AllKOracleTests(unittest.TestCase):
                 **hashes, "result_dir": str(root),
                 "controller_sha256": campaign.FORMAL_STAGE_A_CONTROLLER_SHA256,
                 "binary_sha256": campaign.FORMAL_STAGE_A_BINARY_SHA256,
+                "source_identity_stream_sha256":
+                    campaign.FORMAL_STAGE_A_SOURCE_IDENTITY_STREAM_SHA256,
                 "taskset_sha256": "6" * 64,
                 "construction_seed_policy":
                     "matrix-c-peel-lo32-xor-hi32-v1",

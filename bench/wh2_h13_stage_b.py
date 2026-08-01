@@ -73,35 +73,36 @@ SOURCE_PAIRED_CELLS = (
 )
 SOURCE_ARM_OUTCOMES = SOURCE_PAIRED_CELLS * len(ARMS)
 FORMAL_STAGE_A_CONTROLLER_SHA256 = (
-    "f989dd991de3159abf3cb0a8c42deb118c41b2a868c4759c599d38170e6fa823"
+    "54311c6a3737edbb0a7f088e881c372b47e48533419c461db6d0ee75f43719fd"
 )
 FORMAL_STAGE_A_BINARY_SHA256 = (
-    "df8da0d908e172f3cfd2ecba367b39d95fa253370f681560d1dd927e39b66a06"
+    "784cde40a37a06e0862f1fb0150eac6a90810eba8d717b1659cac8ed6391dfb4"
 )
 FORMAL_STAGE_A_CAMPAIGN_COMPLETE_FILE_SHA256 = (
-    "38c3bcbfa392a96a95a08342a02c46d0404a557aff44401c7a0cba37b2237285"
+    "399f2c6945533ab89f0f8996f89720be3c9121d2bf4af07412c1017db3c0d261"
 )
 FORMAL_STAGE_A_CAMPAIGN_COMPLETE_SEAL = (
-    "3dee34a593203c6009d7f5ea3cbb913900eccbeec5ff40a0236d242f1f542cf0"
+    "a8f8fae01453f1e86aa583eb1fd79783e389d372e3cbc19e74620101aefed0ee"
 )
 FORMAL_STAGE_A_ANALYSIS_FILE_SHA256 = (
-    "61619d0539f72eea3b5f7045edbd11c2b78c3941bcb629bc5e9b092cc158d1a3"
+    "727be7d29bcf10bc28c30f4c113b6f686df5996da4c05245a797caba19069fb7"
 )
 FORMAL_STAGE_A_ANALYSIS_SEAL = (
-    "ead9727fd0f1684fc9179fc481b5987d2eafe7e896b8eba508d262a4a24c5c34"
+    "20cadb6b757aa653e4216fd5cbf342e62874cc6accfbe07ea03dd25726ecb8ba"
 )
-# The former pinned source above was later found to inherit production per-K
-# construction-seed fixups.  It is useful for controller-mechanics fixtures,
-# but it is not the required uniform-root experimental source.  Repin every
-# formal identity and cohort invariant after that Stage-A rerun before setting
-# this true.
-FORMAL_STAGE_A_LAUNCHABLE = False
-FORMAL_STAGE_A_IDENTITIES_REPINNED = False
-FORMAL_COHORT_INVARIANTS_REPINNED = False
+FORMAL_STAGE_A_SOURCE_IDENTITY_STREAM_SHA256 = (
+    "2259ca80a7233d2465cb5d822c6a18812d8cccf3adab733ad7a796726b080a73"
+)
+# These identities and cohort invariants are pinned to the completed
+# uniform-construction-root H13 Stage-A campaign.  All three gates were
+# released together only after an exact authenticated replay reproduced every
+# file identity, semantic stream identity, and cohort invariant below.
+FORMAL_STAGE_A_LAUNCHABLE = True
+FORMAL_STAGE_A_IDENTITIES_REPINNED = True
+FORMAL_COHORT_INVARIANTS_REPINNED = True
 FORMAL_STAGE_A_BLOCKER = (
-    "fresh uniform-root Stage A v2 has not completed; repin all formal "
-    "identities, union/stratum/cohort invariants, then explicitly release "
-    "the Stage-B launch interlock"
+    "uniform-root Stage A formal launch requires all three reviewed identity, "
+    "cohort-invariant, and launch interlocks to remain released together"
 )
 # Retained only as explicit provenance for the superseded v1 experiment.
 FORMER_V1_SOURCE_UNION = 893
@@ -110,16 +111,20 @@ FORMER_V1_ZERO_STRATA = (
     (0, 0, "repair-only", 2),
     (0, 2, "burst", 2),
 )
-# Active formal cohort invariants are fail-closed sentinels until the fresh v2
-# analysis is reviewed and pinned.  They must all be replaced together with
-# FORMAL_COHORT_INVARIANTS_REPINNED=True.
-EXPECTED_SOURCE_UNION = 0
-EXPECTED_NONEMPTY_STRATA = 0
-EXPECTED_ZERO_STRATA: tuple[tuple[int, int, str, int], ...] = ()
-EXPECTED_SCREEN_MATCHES = 0
-EXPECTED_SCREEN_CELLS = 0
-EXPECTED_SCREEN_OUTCOMES = 0
-EXPECTED_SCREEN_TASKS = 0
+# Active formal cohort invariants reproduced by an independent full OH0 replay
+# and by the controller's final authenticated release replay.
+EXPECTED_SOURCE_UNION = 2376
+EXPECTED_NONEMPTY_STRATA = 185
+EXPECTED_ZERO_STRATA: tuple[tuple[int, int, str, int], ...] = (
+    (0, 0, "burst", 2),
+    (1, 2, "burst", 2),
+    (1, 2, "adversarial", 2),
+    (2, 0, "repair-only", 2),
+)
+EXPECTED_SCREEN_MATCHES = 2376
+EXPECTED_SCREEN_CELLS = 4752
+EXPECTED_SCREEN_OUTCOMES = 9504
+EXPECTED_SCREEN_TASKS = 392
 ALLK_TASKS_PER_CONSTRUCTION_ROOT = (
     math.ceil(K_COUNT / CHUNK_SIZE) * len(LOSS_ROOTS) * len(SCHEDULES)
 )
@@ -1425,6 +1430,8 @@ def authenticate_stage_a(result_dir: Path) -> tuple[dict[str, Any], dict[str, An
                 cohort["paired_cells"] != EXPECTED_SCREEN_CELLS or
                 cohort["arm_outcomes"] != EXPECTED_SCREEN_OUTCOMES or
                 cohort["nonempty_strata"] != EXPECTED_NONEMPTY_STRATA or
+                cohort["source_identity_stream_sha256"] !=
+                    FORMAL_STAGE_A_SOURCE_IDENTITY_STREAM_SHA256 or
                 len(cohort["zero_strata"]) != len(EXPECTED_ZERO_STRATA) or
                 len(build_screen_tasks(cohort)) != EXPECTED_SCREEN_TASKS):
             die("Stage-A-derived screen cohort misses pinned v2 invariants")
@@ -1500,6 +1507,8 @@ class StageAAllKOracle:
                     FORMAL_STAGE_A_CONTROLLER_SHA256 or
                 expected_provenance.get("binary_sha256") !=
                     FORMAL_STAGE_A_BINARY_SHA256 or
+                expected_provenance.get("source_identity_stream_sha256") !=
+                    FORMAL_STAGE_A_SOURCE_IDENTITY_STREAM_SHA256 or
                 expected_provenance.get("construction_seed_policy") !=
                     "matrix-c-peel-lo32-xor-hi32-v1" or
                 expected_provenance.get("production_seed_fixups_applied") != 0 or
@@ -2503,11 +2512,17 @@ def _copy_unique(
     source: Path, destination: Path, executable: bool,
     *, allow_source_hardlinks: bool = False,
 ) -> str:
-    if destination.exists():
-        die(f"freeze target already exists: {destination}")
     data = stable_source_bytes(
         source, require_unique=not allow_source_hardlinks,
     )
+    return _freeze_unique_bytes(destination, data, executable)
+
+
+def _freeze_unique_bytes(
+    destination: Path, data: bytes, executable: bool,
+) -> str:
+    if destination.exists():
+        die(f"freeze target already exists: {destination}")
     atomic_write(destination, data)
     os.chmod(destination, 0o555 if executable else 0o444)
     digest = sha256_bytes(data)
@@ -2523,6 +2538,8 @@ def prepare(args: argparse.Namespace) -> None:
         die("result directory already exists")
     binary_source = args.binary.resolve(strict=True)
     controller_source = Path(__file__).resolve(strict=True)
+    controller_source_bytes = stable_source_bytes(controller_source)
+    controller_source_sha256 = sha256_bytes(controller_source_bytes)
     source_result = args.stage_a_result.resolve(strict=True)
     taskset_text = shutil.which("taskset")
     if not taskset_text:
@@ -2543,6 +2560,10 @@ def prepare(args: argparse.Namespace) -> None:
     # artifact.  A failed/partial Stage-A result can never leave something that
     # resembles a prepared Stage-B campaign.
     cohort, source_provenance = authenticate_stage_a(source_result)
+    controller_source_after = stable_source_bytes(controller_source)
+    if (controller_source_after != controller_source_bytes or
+            sha256_bytes(controller_source_after) != controller_source_sha256):
+        die("Stage-B controller source changed during Stage-A authentication")
     tasks = build_screen_tasks(cohort)
     if (len(tasks) != EXPECTED_SCREEN_TASKS or
             sum(len(task.ks) for task in tasks) != EXPECTED_SCREEN_CELLS):
@@ -2569,8 +2590,8 @@ def prepare(args: argparse.Namespace) -> None:
         frozen_controller = frozen / Path(__file__).name
         frozen_taskset = frozen / "taskset"
         binary_sha256 = _copy_unique(binary_source, frozen_binary, True)
-        controller_sha256 = _copy_unique(
-            controller_source, frozen_controller, True,
+        controller_sha256 = _freeze_unique_bytes(
+            frozen_controller, controller_source_bytes, True,
         )
         taskset_sha256 = _copy_unique(
             taskset_source, frozen_taskset, True,
@@ -2855,6 +2876,8 @@ def load_contract(
                 FORMAL_STAGE_A_CAMPAIGN_COMPLETE_FILE_SHA256 or
             provenance.get("analysis_sha256") !=
                 FORMAL_STAGE_A_ANALYSIS_FILE_SHA256 or
+            provenance.get("source_identity_stream_sha256") !=
+                FORMAL_STAGE_A_SOURCE_IDENTITY_STREAM_SHA256 or
             provenance.get("paired_cells_replayed") != SOURCE_PAIRED_CELLS or
             provenance.get("union_cells_replayed") != EXPECTED_SOURCE_UNION or
             provenance.get("construction_seed_policy") !=
@@ -3152,6 +3175,7 @@ def resolve_worker_count(requested: Optional[int], cpus: Sequence[int]) -> int:
 def exclusive_campaign(handler):
     @wraps(handler)
     def locked(args: argparse.Namespace):
+        require_formal_stage_a_launchable()
         result_dir = args.result_dir.resolve(strict=True)
         lock_path = result_dir / "controller.lock"
         flags = (os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) |
