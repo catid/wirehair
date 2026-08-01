@@ -770,6 +770,17 @@ if(BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
                     LABELS "v2;research;state-machine;h13"
                     TIMEOUT 60)
             add_test(
+                NAME wh2_h13_stage_b_test
+                COMMAND ${Python3_EXECUTABLE}
+                    ${PROJECT_SOURCE_DIR}/bench/wh2_h13_stage_b_test.py
+                    -v)
+            set_tests_properties(wh2_h13_stage_b_test
+                PROPERTIES
+                    ENVIRONMENT
+                        "PYTHONPATH=${PROJECT_SOURCE_DIR}/bench;PYTHONDONTWRITEBYTECODE=1;WIREHAIR_V2_BENCH=$<TARGET_FILE:wirehair_v2_bench>"
+                    LABELS "v2;research;state-machine;h13"
+                    TIMEOUT 120)
+            add_test(
                 NAME wh2_rank_floor_two_anchor_screen_test
                 COMMAND ${Python3_EXECUTABLE}
                     ${PROJECT_SOURCE_DIR}/bench/wh2_rank_floor_two_anchor_screen_test.py
