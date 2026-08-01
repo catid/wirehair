@@ -38,11 +38,11 @@ import tempfile
 import threading
 import types
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from typing import Any, Iterable, Iterator, Mapping, Optional, Sequence
+from typing import Any, Iterable, Iterator, Mapping, Optional, Sequence, Tuple
 
 
-SCHEMA = "wirehair.wh2.h13_stage_b.v1"
-SOURCE_SCHEMA = "wirehair.wh2.h13_stage_a.v1"
+SCHEMA = "wirehair.wh2.h13_stage_b.v2"
+SOURCE_SCHEMA = "wirehair.wh2.h13_stage_a.v2.uniform_construction_seed_v1"
 K_MIN = 2
 K_MAX = 64000
 K_COUNT = K_MAX - K_MIN + 1
@@ -52,17 +52,25 @@ ARMS = ("h12", "h13")
 ARM_GF256_ROWS = {"h12": 10, "h13": 11}
 ARM_HEAVY_ROWS = {"h12": 12, "h13": 13}
 ARM_GROUP_HASH_SEED = {"h12": "0xb7e15162", "h13": "0xb7e15163"}
-SEEDS = (
+CONSTRUCTION_ROOTS = (
+    "0x243f6a8885a308d3",
+    "0x13198a2e03707344",
+    "0xa4093822299f31d0",
+)
+LOSS_ROOTS = (
     "0xd1b54a32d192ed03",
     "0x94d049bb133111eb",
     "0x8538ecb5bd456ea3",
 )
+STAGE_A_ROOT_SETS = {"R0": (0,), "R1": (1, 2)}
 SCHEDULES = ("burst", "adversarial", "repair-only")
 BANDS = (
     (2, 4095), (4096, 8191), (8192, 9999), (10000, 16383),
     (16384, 32767), (32768, 49151), (49152, 64000),
 )
-SOURCE_PAIRED_CELLS = K_COUNT * len(SEEDS) * len(SCHEDULES)
+SOURCE_PAIRED_CELLS = (
+    K_COUNT * len(CONSTRUCTION_ROOTS) * len(LOSS_ROOTS) * len(SCHEDULES)
+)
 SOURCE_ARM_OUTCOMES = SOURCE_PAIRED_CELLS * len(ARMS)
 FORMAL_STAGE_A_CONTROLLER_SHA256 = (
     "f989dd991de3159abf3cb0a8c42deb118c41b2a868c4759c599d38170e6fa823"
@@ -82,27 +90,41 @@ FORMAL_STAGE_A_ANALYSIS_FILE_SHA256 = (
 FORMAL_STAGE_A_ANALYSIS_SEAL = (
     "ead9727fd0f1684fc9179fc481b5987d2eafe7e896b8eba508d262a4a24c5c34"
 )
-# The pinned source above was later found to inherit production per-K
+# The former pinned source above was later found to inherit production per-K
 # construction-seed fixups.  It is useful for controller-mechanics fixtures,
 # but it is not the required uniform-root experimental source.  Repin every
 # formal identity and cohort invariant after that Stage-A rerun before setting
 # this true.
 FORMAL_STAGE_A_LAUNCHABLE = False
+FORMAL_STAGE_A_IDENTITIES_REPINNED = False
+FORMAL_COHORT_INVARIANTS_REPINNED = False
 FORMAL_STAGE_A_BLOCKER = (
-    "pinned Stage-A used production per-K construction-seed fixups; rerun "
-    "uniform-root Stage A and repin formal identities, union, strata, and cohort"
+    "fresh uniform-root Stage A v2 has not completed; repin all formal "
+    "identities, union/stratum/cohort invariants, then explicitly release "
+    "the Stage-B launch interlock"
 )
-EXPECTED_SOURCE_UNION = 893
-EXPECTED_NONEMPTY_STRATA = 61
-EXPECTED_ZERO_STRATA = (
-    (0, "repair-only", 2),
-    (2, "burst", 2),
+# Retained only as explicit provenance for the superseded v1 experiment.
+FORMER_V1_SOURCE_UNION = 893
+FORMER_V1_NONEMPTY_STRATA = 61
+FORMER_V1_ZERO_STRATA = (
+    (0, 0, "repair-only", 2),
+    (0, 2, "burst", 2),
 )
-EXPECTED_SCREEN_MATCHES = 893
-EXPECTED_SCREEN_CELLS = 1786
-EXPECTED_SCREEN_OUTCOMES = 3572
-EXPECTED_SCREEN_TASKS = 143
-ALLK_TASKS = math.ceil(K_COUNT / CHUNK_SIZE) * len(SEEDS) * len(SCHEDULES)
+# Active formal cohort invariants are fail-closed sentinels until the fresh v2
+# analysis is reviewed and pinned.  They must all be replaced together with
+# FORMAL_COHORT_INVARIANTS_REPINNED=True.
+EXPECTED_SOURCE_UNION = 0
+EXPECTED_NONEMPTY_STRATA = 0
+EXPECTED_ZERO_STRATA: tuple[tuple[int, int, str, int], ...] = ()
+EXPECTED_SCREEN_MATCHES = 0
+EXPECTED_SCREEN_CELLS = 0
+EXPECTED_SCREEN_OUTCOMES = 0
+EXPECTED_SCREEN_TASKS = 0
+ALLK_TASKS_PER_CONSTRUCTION_ROOT = (
+    math.ceil(K_COUNT / CHUNK_SIZE) * len(LOSS_ROOTS) * len(SCHEDULES)
+)
+ALLK_TASKS = ALLK_TASKS_PER_CONSTRUCTION_ROOT * len(CONSTRUCTION_ROOTS)
+ALLK_CELLS_PER_CONSTRUCTION_ROOT = K_COUNT * len(LOSS_ROOTS) * len(SCHEDULES)
 ALLK_CELLS = SOURCE_PAIRED_CELLS
 ALLK_OUTCOMES = SOURCE_ARM_OUTCOMES
 OUTPUT_LIMIT = 8 << 20
@@ -110,11 +132,13 @@ EXECUTION_MODE = "authenticated-fd-taskset-v1"
 MAX_I63 = (1 << 63) - 1
 MASK64 = (1 << 64) - 1
 SELECTION_RULE = (
-    "within each packet-trace-root/schedule/K-band stratum, sort raw OH0 "
+    "within each construction-root/packet-trace-root/schedule/K-band "
+    "stratum, sort raw OH0 "
     "H12+H13 common-success non-union cells by SHA256 of "
-    "wirehair.wh2.h13_stage_b.v1|matched-control|seed_index|schedule|"
-    "band_lo|band_hi|K, then pair the first m with the m union cells in "
-    "ascending K order"
+    "wirehair.wh2.h13_stage_b.v2|matched-control|construction_seed_index|"
+    "construction_seed|packet_trace_root_index|packet_trace_root|schedule|"
+    "band_lo|band_hi|K, then pair the "
+    "first m with the m union cells in ascending K order"
 )
 LOSS_SEED_FORMULA = (
     "(external_seed ^ (K * 0x9e3779b97f4a7c15) ^ "
@@ -146,7 +170,7 @@ TELEMETRY_CONTINUITY = (
 def architecture_contract() -> dict[str, Any]:
     """Exact fixed semantics emitted by the groupedrecovery preamble/rows."""
     return {
-        "native_schema": "v1", "pair_order": list(ARMS), "arms_per_N": 2,
+        "native_schema": "v2", "pair_order": list(ARMS), "arms_per_N": 2,
         "policy": "h12-h13-q0-grouped-v1", "overhead": 0,
         "period": 48, "geometry": "shared-x", "residue_skew": 0,
         "residue_schedule": "constant", "residue_hash_seed": "0x0",
@@ -159,11 +183,21 @@ def architecture_contract() -> dict[str, Any]:
         "final_h_a_columns": ARM_HEAVY_ROWS,
         "dense_rows": 12, "dense_identity_corner": False,
         "dense_two_anchor": True, "dense_two_anchor_phase": 0,
-        "source_hits": "profile", "staircase_rows": "profile-dense-count",
+        "source_hits": "canonical-K-rule",
+        "staircase_rows": "GetDenseCount(K)",
         "field": "mixed-gf256-gf16", "heavy_family": "periodic-cauchy",
         "construction_attempt": 0, "systematic_probe": "direct-attempt0",
-        "seed_repair": "disabled", "mix_count": 2, "bb": 64,
-        "seed_block_bytes": 64, "solve_block_bytes": 2, "loss": "0.5",
+        "construction_seed_policy":
+            "matrix-c-peel-lo32-xor-hi32-v1",
+        "production_seed_fixups_applied": 0,
+        "construction_roots": list(CONSTRUCTION_ROOTS),
+        "construction_root_sets": {
+            name: list(indices) for name, indices in STAGE_A_ROOT_SETS.items()
+        },
+        "external_seed_role": "loss-trace-root",
+        "packet_trace_roots": list(LOSS_ROOTS),
+        "mix_count": 2, "bb": 64,
+        "solve_block_bytes": 2, "loss": "0.5",
         "overhead_stream": "paired", "packet_row_seed_multiplier": "0x1",
         "packet_row_seed_avalanche": 0, "odd_packet_peel_seed_xor": "0x0",
         "packet_vector": "one-shared-per-N", "payload": "shared-zero-v1",
@@ -192,7 +226,9 @@ def die(message: str) -> None:
 
 
 def require_formal_stage_a_launchable() -> None:
-    if FORMAL_STAGE_A_LAUNCHABLE is not True:
+    if (FORMAL_STAGE_A_LAUNCHABLE is not True or
+            FORMAL_STAGE_A_IDENTITIES_REPINNED is not True or
+            FORMAL_COHORT_INVARIANTS_REPINNED is not True):
         die(f"Stage-B launch is blocked: {FORMAL_STAGE_A_BLOCKER}")
 
 
@@ -398,6 +434,20 @@ def loss_seed(seed: str, K: int) -> int:
     ) & MASK64
 
 
+def construction_seed_values(root: str) -> tuple[int, int]:
+    """Return the exact g8iv matrix/peel seeds for one uniform root."""
+    matrix = strict_hex(root, "construction root", 64)
+    peel = ((matrix & 0xffffffff) ^ (matrix >> 32)) & 0xffffffff
+    return matrix, peel
+
+
+def construction_seed_text(index: int) -> str:
+    """Canonical decimal spelling used by the Stage-A v2 JSON contract."""
+    if type(index) is not int or index not in range(len(CONSTRUCTION_ROOTS)):
+        die("construction root index is outside the sealed domain")
+    return str(int(CONSTRUCTION_ROOTS[index], 16))
+
+
 def band_index(K: int) -> int:
     for index, (low, high) in enumerate(BANDS):
         if low <= K <= high:
@@ -406,19 +456,40 @@ def band_index(K: int) -> int:
     raise AssertionError
 
 
-def stratum_key(seed_index: int, schedule: str, K: int) -> tuple[int, str, int]:
-    return seed_index, schedule, band_index(K)
+CellKey = Tuple[int, int, str, int]
+StratumKey = Tuple[int, int, str, int]
 
 
-def cell_key_payload(key: tuple[int, str, int]) -> dict[str, Any]:
-    seed_index, schedule, K = key
+def stratum_key(
+    construction_seed_index: int, packet_trace_root_index: int,
+    schedule: str, K: int,
+) -> StratumKey:
+    return (
+        construction_seed_index, packet_trace_root_index, schedule,
+        band_index(K),
+    )
+
+
+def cell_ordinal(key: CellKey) -> int:
+    construction_seed_index, packet_trace_root_index, schedule, K = key
+    return (((
+        construction_seed_index * len(LOSS_ROOTS) + packet_trace_root_index
+    ) * len(SCHEDULES) + SCHEDULES.index(schedule)) * K_COUNT + K - K_MIN)
+
+
+def cell_key_payload(key: CellKey) -> dict[str, Any]:
+    construction_seed_index, packet_trace_root_index, schedule, K = key
     return {
-        "seed_index": seed_index, "seed": SEEDS[seed_index],
+        "construction_seed_index": construction_seed_index,
+        "construction_seed": construction_seed_text(construction_seed_index),
+        "packet_trace_root_index": packet_trace_root_index,
+        "packet_trace_root": LOSS_ROOTS[packet_trace_root_index],
         "schedule": schedule, "K": K,
     }
 
 
 SOURCE_IDENTITY_FIELDS = (
+    "construction_seed_policy", "production_seed_fixups_applied",
     "base_matrix_seed", "base_peel_seed", "matrix_seed", "peel_seed",
     "actual_staircase_rows", "actual_dense_rows", "actual_source_hits",
     "actual_dense_two_anchor", "actual_dense_two_anchor_phase",
@@ -427,7 +498,7 @@ SOURCE_IDENTITY_FIELDS = (
 
 
 def source_cell_record(
-    key: tuple[int, str, int], arms: Mapping[str, Mapping[str, str]],
+    key: CellKey, arms: Mapping[str, Mapping[str, str]],
 ) -> dict[str, Any]:
     if set(arms) != set(ARMS):
         die(f"source cell {key} is not an exact arm pair")
@@ -456,12 +527,18 @@ def source_cell_record(
         )
         record["raw_systematic_probe_results"][arm] = probe
     integer_fields = {
+        "production_seed_fixups_applied",
         "actual_staircase_rows", "actual_dense_rows", "actual_source_hits",
         "actual_dense_two_anchor", "actual_dense_two_anchor_phase",
     }
     for field in SOURCE_IDENTITY_FIELDS:
         value = h12[field]
-        record[field] = int(value) if field in integer_fields else value
+        if type(value) is not str:
+            die(f"source identity {field} has the wrong type at {key}")
+        record[field] = (
+            strict_uint(value, f"source {field}")
+            if field in integer_fields else value
+        )
     for name, bits in (
             ("base_matrix_seed", 64), ("matrix_seed", 64),
             ("base_peel_seed", 32), ("peel_seed", 32),
@@ -470,13 +547,26 @@ def source_cell_record(
     if (type(record["packet_trace_sha256"]) is not str or
             not re.fullmatch(r"[0-9a-f]{64}", record["packet_trace_sha256"])):
         die(f"source packet trace digest is malformed at {key}")
-    if record["packet_trace_seed"] != hex(loss_seed(SEEDS[key[0]], key[2])):
+    construction_seed_index, packet_trace_root_index, unused_schedule, K = key
+    del unused_schedule
+    matrix_seed, peel_seed = construction_seed_values(
+        CONSTRUCTION_ROOTS[construction_seed_index],
+    )
+    if record["packet_trace_seed"] != hex(
+            loss_seed(LOSS_ROOTS[packet_trace_root_index], K)):
         die(f"source packet trace seed differs from the frozen formula at {key}")
-    if (record["matrix_seed"] != record["base_matrix_seed"] or
-            record["peel_seed"] != record["base_peel_seed"]):
-        die(f"source active seeds are not raw attempt zero at {key}")
+    if (record["construction_seed_policy"] !=
+            "matrix-c-peel-lo32-xor-hi32-v1" or
+            record["production_seed_fixups_applied"] != 0 or
+            any(row.get("construction_seed") != str(matrix_seed)
+                for row in arms.values()) or
+            record["base_matrix_seed"] != hex(matrix_seed) or
+            record["matrix_seed"] != hex(matrix_seed) or
+            record["base_peel_seed"] != hex(peel_seed) or
+            record["peel_seed"] != hex(peel_seed)):
+        die(f"source construction seeds are not exact uniform-root v1 at {key}")
     if (record["actual_dense_rows"] != 12 or
-            record["actual_source_hits"] != (2 if key[2] < 10000 else 3) or
+            record["actual_source_hits"] != (2 if K < 10000 else 3) or
             record["actual_dense_two_anchor"] != 1 or
             record["actual_dense_two_anchor_phase"] != 0):
         die(f"source construction geometry differs at {key}")
@@ -484,11 +574,15 @@ def source_cell_record(
 
 
 def _control_digest(
-    seed_index: int, schedule: str, band: int, K: int,
+    construction_seed_index: int, packet_trace_root_index: int,
+    schedule: str, band: int, K: int,
 ) -> str:
     low, high = BANDS[band]
     material = (
-        f"{SCHEMA}|matched-control|{seed_index}|{schedule}|{low}|{high}|{K}"
+        f"{SCHEMA}|matched-control|{construction_seed_index}|"
+        f"{construction_seed_text(construction_seed_index)}|"
+        f"{packet_trace_root_index}|{LOSS_ROOTS[packet_trace_root_index]}|"
+        f"{schedule}|{low}|{high}|{K}"
     )
     return sha256_bytes(material.encode("ascii"))
 
@@ -511,28 +605,38 @@ class CohortDeriver:
         self.expected_cells = expected_cells
         self.expected_union = expected_union
         self.require_formal_strata = require_formal_strata
-        self.union_keys: list[tuple[int, str, int]] = []
-        self.union_set: set[tuple[int, str, int]] = set()
-        self.targets: dict[tuple[int, str, int], int] = {}
+        self.union_keys: list[CellKey] = []
+        self.union_set: set[CellKey] = set()
+        self.targets: dict[StratumKey, int] = {}
         previous = -1
         for item in sealed_union:
             if not isinstance(item, Mapping) or set(item) != {
-                    "seed_index", "seed", "schedule", "K"}:
+                    "construction_seed_index", "construction_seed",
+                    "packet_trace_root_index", "packet_trace_root",
+                    "schedule", "K"}:
                 die("source OH0 union record schema mismatch")
-            seed_index, schedule, K = (
-                item["seed_index"], item["schedule"], item["K"],
+            construction_seed_index, packet_trace_root_index, schedule, K = (
+                item["construction_seed_index"],
+                item["packet_trace_root_index"], item["schedule"], item["K"],
             )
-            if (type(seed_index) is not int or type(schedule) is not str or
-                    type(K) is not int or seed_index not in range(len(SEEDS)) or
-                    item["seed"] != SEEDS[seed_index] or
+            if (type(construction_seed_index) is not int or
+                    type(packet_trace_root_index) is not int or
+                    type(schedule) is not str or type(K) is not int or
+                    construction_seed_index not in range(len(CONSTRUCTION_ROOTS)) or
+                    packet_trace_root_index not in range(len(LOSS_ROOTS)) or
+                    item["construction_seed"] !=
+                        construction_seed_text(construction_seed_index) or
+                    item["packet_trace_root"] !=
+                        LOSS_ROOTS[packet_trace_root_index] or
                     schedule not in SCHEDULES or not K_MIN <= K <= K_MAX):
                 die("source OH0 union record is malformed")
-            ordinal = ((seed_index * len(SCHEDULES) + SCHEDULES.index(schedule)) *
-                       K_COUNT + K - K_MIN)
+            key = (
+                construction_seed_index, packet_trace_root_index, schedule, K,
+            )
+            ordinal = cell_ordinal(key)
             if ordinal <= previous:
                 die("source OH0 union is duplicated or not canonically ordered")
             previous = ordinal
-            key = seed_index, schedule, K
             self.union_keys.append(key)
             self.union_set.add(key)
             stratum = stratum_key(*key)
@@ -540,8 +644,9 @@ class CohortDeriver:
         if require_formal_strata:
             nonempty = set(self.targets)
             zero = {
-                (seed_index, schedule, band)
-                for seed_index in range(len(SEEDS))
+                (construction_seed_index, packet_trace_root_index, schedule, band)
+                for construction_seed_index in range(len(CONSTRUCTION_ROOTS))
+                for packet_trace_root_index in range(len(LOSS_ROOTS))
                 for schedule in SCHEDULES
                 for band in range(len(BANDS))
             } - nonempty
@@ -552,22 +657,23 @@ class CohortDeriver:
         self.identity = hashlib.sha256()
         self.count = 0
         self.previous_ordinal = -1
-        self.seen_union: dict[tuple[int, str, int], dict[str, Any]] = {}
+        self.seen_union: dict[CellKey, dict[str, Any]] = {}
         # Heap items use a negative digest integer so the largest retained
         # selection digest is at index zero and can be replaced in O(log m).
         self.controls: dict[
-            tuple[int, str, int], list[tuple[int, int, str, dict[str, Any]]]
+            StratumKey, list[tuple[int, int, str, dict[str, Any]]]
         ] = {key: [] for key in self.targets}
 
     def observe(
-        self, key: tuple[int, str, int], arms: Mapping[str, Mapping[str, str]],
+        self, key: CellKey, arms: Mapping[str, Mapping[str, str]],
     ) -> None:
-        seed_index, schedule, K = key
-        if (seed_index not in range(len(SEEDS)) or schedule not in SCHEDULES or
+        construction_seed_index, packet_trace_root_index, schedule, K = key
+        if (construction_seed_index not in range(len(CONSTRUCTION_ROOTS)) or
+                packet_trace_root_index not in range(len(LOSS_ROOTS)) or
+                schedule not in SCHEDULES or
                 not K_MIN <= K <= K_MAX):
             die("source stream contains an out-of-domain cell")
-        ordinal = ((seed_index * len(SCHEDULES) + SCHEDULES.index(schedule)) *
-                   K_COUNT + K - K_MIN)
+        ordinal = cell_ordinal(key)
         if ordinal <= self.previous_ordinal:
             die("source stream is duplicated or not canonically ordered")
         self.previous_ordinal = ordinal
@@ -583,7 +689,10 @@ class CohortDeriver:
         target = self.targets.get(stratum, 0)
         if target == 0 or any(record["raw_failures"].values()):
             return
-        digest = _control_digest(seed_index, schedule, stratum[2], K)
+        digest = _control_digest(
+            construction_seed_index, packet_trace_root_index, schedule,
+            stratum[3], K,
+        )
         item = (-int(digest, 16), -K, digest, record)
         heap = self.controls[stratum]
         if len(heap) < target:
@@ -600,7 +709,7 @@ class CohortDeriver:
         counts: list[dict[str, Any]] = []
         match_id = 0
         for stratum in sorted(self.targets, key=_stratum_order):
-            seed_index, schedule, band = stratum
+            construction_seed_index, packet_trace_root_index, schedule, band = stratum
             target = self.targets[stratum]
             heap = self.controls[stratum]
             if len(heap) != target:
@@ -618,7 +727,11 @@ class CohortDeriver:
                 die("matched-control stratum cardinality mismatch")
             low, high = BANDS[band]
             counts.append({
-                "seed_index": seed_index, "seed": SEEDS[seed_index],
+                "construction_seed_index": construction_seed_index,
+                "construction_seed": construction_seed_text(
+                    construction_seed_index),
+                "packet_trace_root_index": packet_trace_root_index,
+                "packet_trace_root": LOSS_ROOTS[packet_trace_root_index],
                 "schedule": schedule, "band_index": band,
                 "band": [low, high], "union": target, "controls": target,
             })
@@ -626,7 +739,11 @@ class CohortDeriver:
                 matches.append({
                     "match_id": match_id,
                     "stratum": {
-                        "seed_index": seed_index, "seed": SEEDS[seed_index],
+                        "construction_seed_index": construction_seed_index,
+                        "construction_seed": construction_seed_text(
+                            construction_seed_index),
+                        "packet_trace_root_index": packet_trace_root_index,
+                        "packet_trace_root": LOSS_ROOTS[packet_trace_root_index],
                         "schedule": schedule, "band_index": band,
                         "band": [low, high],
                     },
@@ -637,12 +754,16 @@ class CohortDeriver:
         if len(matches) != self.expected_union:
             die("derived matched cohort cardinality mismatch")
         union_keys = {
-            (match["union"]["seed_index"], match["union"]["schedule"],
-             match["union"]["K"]) for match in matches
+            (match["union"]["construction_seed_index"],
+             match["union"]["packet_trace_root_index"],
+             match["union"]["schedule"], match["union"]["K"])
+            for match in matches
         }
         control_keys = {
-            (match["control"]["seed_index"], match["control"]["schedule"],
-             match["control"]["K"]) for match in matches
+            (match["control"]["construction_seed_index"],
+             match["control"]["packet_trace_root_index"],
+             match["control"]["schedule"], match["control"]["K"])
+            for match in matches
         }
         if (len(union_keys) != self.expected_union or
                 len(control_keys) != self.expected_union or
@@ -658,13 +779,19 @@ class CohortDeriver:
             "bands": [list(value) for value in BANDS],
             "nonempty_strata": len(self.targets),
             "zero_strata": [
-                {"seed_index": seed_index, "seed": SEEDS[seed_index],
+                {"construction_seed_index": construction_seed_index,
+                 "construction_seed": construction_seed_text(
+                    construction_seed_index),
+                 "packet_trace_root_index": packet_trace_root_index,
+                 "packet_trace_root": LOSS_ROOTS[packet_trace_root_index],
                  "schedule": schedule, "band_index": band,
                  "band": list(BANDS[band])}
-                for seed_index in range(len(SEEDS))
+                for construction_seed_index in range(len(CONSTRUCTION_ROOTS))
+                for packet_trace_root_index in range(len(LOSS_ROOTS))
                 for schedule in SCHEDULES
                 for band in range(len(BANDS))
-                if (seed_index, schedule, band) not in self.targets
+                if (construction_seed_index, packet_trace_root_index,
+                    schedule, band) not in self.targets
             ],
             "source_identity_stream_sha256": self.identity.hexdigest(),
             "counts_by_stratum_band": counts,
@@ -672,8 +799,8 @@ class CohortDeriver:
         }
 
 
-def _stratum_order(value: tuple[int, str, int]) -> tuple[int, int, int]:
-    return value[0], SCHEDULES.index(value[1]), value[2]
+def _stratum_order(value: StratumKey) -> tuple[int, int, int, int]:
+    return value[0], value[1], SCHEDULES.index(value[2]), value[3]
 
 
 @dataclass(frozen=True)
@@ -681,8 +808,10 @@ class Task:
     phase: str
     overhead: int
     job: int
-    seed_index: int
-    seed: str
+    construction_seed_index: int
+    construction_seed: str
+    packet_trace_root_index: int
+    packet_trace_root: str
     schedule: str
     match_ids: tuple[int, ...]
     ks: tuple[int, ...]
@@ -695,7 +824,10 @@ class Task:
     def core(self) -> dict[str, Any]:
         return {
             "phase": self.phase, "overhead": self.overhead, "job": self.job,
-            "seed_index": self.seed_index, "seed": self.seed,
+            "construction_seed_index": self.construction_seed_index,
+            "construction_seed": self.construction_seed,
+            "packet_trace_root_index": self.packet_trace_root_index,
+            "packet_trace_root": self.packet_trace_root,
             "schedule": self.schedule, "match_ids": list(self.match_ids),
             "ks": list(self.ks),
         }
@@ -709,11 +841,14 @@ def task_digest(core: Mapping[str, Any]) -> str:
 
 
 def _new_task(
-    phase: str, job: int, seed_index: int, schedule: str,
+    phase: str, job: int, construction_seed_index: int,
+    packet_trace_root_index: int, schedule: str,
     match_ids: Sequence[int], ks: Sequence[int],
 ) -> Task:
     provisional = Task(
-        phase, 0, job, seed_index, SEEDS[seed_index], schedule,
+        phase, 0, job,
+        construction_seed_index, CONSTRUCTION_ROOTS[construction_seed_index],
+        packet_trace_root_index, LOSS_ROOTS[packet_trace_root_index], schedule,
         tuple(match_ids), tuple(ks), "",
     )
     return Task(**{
@@ -723,14 +858,19 @@ def _new_task(
 
 def validate_task(task: Task) -> None:
     if (any(type(value) is not int for value in (
-                task.overhead, task.job, task.seed_index,
+                task.overhead, task.job, task.construction_seed_index,
+                task.packet_trace_root_index,
                 *task.match_ids, *task.ks)) or
             any(type(value) is not str for value in (
-                task.phase, task.seed, task.schedule, task.task_id)) or
+                task.phase, task.construction_seed, task.packet_trace_root,
+                task.schedule, task.task_id)) or
             task.phase not in ("screen", "allk") or task.overhead != 0 or
             task.job < 0 or
-            task.seed_index not in range(len(SEEDS)) or
-            task.seed != SEEDS[task.seed_index] or
+            task.construction_seed_index not in range(len(CONSTRUCTION_ROOTS)) or
+            task.construction_seed !=
+                CONSTRUCTION_ROOTS[task.construction_seed_index] or
+            task.packet_trace_root_index not in range(len(LOSS_ROOTS)) or
+            task.packet_trace_root != LOSS_ROOTS[task.packet_trace_root_index] or
             task.schedule not in SCHEDULES or not task.ks or
             tuple(sorted(task.ks)) != task.ks or len(set(task.ks)) != len(task.ks) or
             len(task.ks) > CHUNK_SIZE or
@@ -748,15 +888,18 @@ def validate_task(task: Task) -> None:
 
 def task_from_payload(payload: Any) -> Task:
     fields = {
-        "phase", "overhead", "job", "seed_index", "seed", "schedule",
-        "match_ids", "ks", "task_id",
+        "phase", "overhead", "job", "construction_seed_index",
+        "construction_seed", "packet_trace_root_index", "packet_trace_root",
+        "schedule", "match_ids", "ks", "task_id",
     }
     if not isinstance(payload, dict) or set(payload) != fields:
         die("task has an unexpected schema")
     if (any(type(payload[name]) is not int for name in (
-            "overhead", "job", "seed_index")) or
+            "overhead", "job", "construction_seed_index",
+            "packet_trace_root_index")) or
             any(type(payload[name]) is not str for name in (
-                "phase", "seed", "schedule", "task_id")) or
+                "phase", "construction_seed", "packet_trace_root",
+                "schedule", "task_id")) or
             type(payload["match_ids"]) is not list or
             type(payload["ks"]) is not list or
             any(type(value) is not int for value in
@@ -764,7 +907,9 @@ def task_from_payload(payload: Any) -> Task:
         die("task scalar types are not canonical")
     task = Task(
         payload["phase"], payload["overhead"], payload["job"],
-        payload["seed_index"], payload["seed"], payload["schedule"],
+        payload["construction_seed_index"], payload["construction_seed"],
+        payload["packet_trace_root_index"], payload["packet_trace_root"],
+        payload["schedule"],
         tuple(payload["match_ids"]), tuple(payload["ks"]), payload["task_id"],
     )
     validate_task(task)
@@ -775,21 +920,34 @@ def build_screen_tasks(cohort: Mapping[str, Any]) -> list[Task]:
     matches = cohort.get("matches") if isinstance(cohort, Mapping) else None
     if not isinstance(matches, list) or not matches:
         die("matched cohort has no matches")
-    grouped: dict[tuple[int, str, int], list[Mapping[str, Any]]] = {}
+    grouped: dict[StratumKey, list[Mapping[str, Any]]] = {}
     for expected_id, match in enumerate(matches):
-        if (not isinstance(match, Mapping) or match.get("match_id") != expected_id or
+        if (not isinstance(match, Mapping) or
+                type(match.get("match_id")) is not int or
+                match.get("match_id") != expected_id or
                 not isinstance(match.get("stratum"), Mapping)):
             die("matched cohort has malformed or noncontiguous match IDs")
         stratum = match["stratum"]
-        key = (stratum.get("seed_index"), stratum.get("schedule"),
-               stratum.get("band_index"))
-        if (type(key[0]) is not int or type(key[1]) is not str or
-                type(key[2]) is not int):
+        key = (
+            stratum.get("construction_seed_index"),
+            stratum.get("packet_trace_root_index"),
+            stratum.get("schedule"), stratum.get("band_index"),
+        )
+        if (type(key[0]) is not int or type(key[1]) is not int or
+                type(key[2]) is not str or type(key[3]) is not int or
+                key[0] not in range(len(CONSTRUCTION_ROOTS)) or
+                key[1] not in range(len(LOSS_ROOTS)) or
+                key[2] not in SCHEDULES or
+                key[3] not in range(len(BANDS)) or
+                stratum.get("construction_seed") !=
+                    construction_seed_text(key[0]) or
+                stratum.get("packet_trace_root") != LOSS_ROOTS[key[1]] or
+                stratum.get("band") != list(BANDS[key[3]])):
             die("matched cohort stratum is malformed")
         grouped.setdefault(key, []).append(match)
     tasks: list[Task] = []
     for stratum in sorted(grouped, key=_stratum_order):
-        seed_index, schedule, band = stratum
+        construction_seed_index, packet_trace_root_index, schedule, band = stratum
         if band not in range(len(BANDS)):
             die("matched cohort band is outside the sealed partition")
         values = grouped[stratum]
@@ -801,7 +959,14 @@ def build_screen_tasks(cohort: Mapping[str, Any]) -> list[Task]:
                 for role in ("union", "control"):
                     cell = match.get(role)
                     if (not isinstance(cell, Mapping) or
-                            cell.get("seed_index") != seed_index or
+                            cell.get("construction_seed_index") !=
+                                construction_seed_index or
+                            cell.get("packet_trace_root_index") !=
+                                packet_trace_root_index or
+                            cell.get("construction_seed") !=
+                                construction_seed_text(construction_seed_index) or
+                            cell.get("packet_trace_root") !=
+                                LOSS_ROOTS[packet_trace_root_index] or
                             cell.get("schedule") != schedule or
                             type(cell.get("K")) is not int or
                             band_index(cell["K"]) != band):
@@ -810,7 +975,8 @@ def build_screen_tasks(cohort: Mapping[str, Any]) -> list[Task]:
             if len(set(keys)) != len(keys):
                 die("one screen task would contain a duplicate K")
             tasks.append(_new_task(
-                "screen", len(tasks), seed_index, schedule,
+                "screen", len(tasks), construction_seed_index,
+                packet_trace_root_index, schedule,
                 match_ids, sorted(keys),
             ))
     for task in tasks:
@@ -820,14 +986,16 @@ def build_screen_tasks(cohort: Mapping[str, Any]) -> list[Task]:
 
 def build_allk_tasks() -> list[Task]:
     tasks: list[Task] = []
-    for seed_index in range(len(SEEDS)):
-        for schedule in SCHEDULES:
-            for low in range(K_MIN, K_MAX + 1, CHUNK_SIZE):
-                high = min(low + CHUNK_SIZE - 1, K_MAX)
-                tasks.append(_new_task(
-                    "allk", len(tasks), seed_index, schedule, (),
-                    range(low, high + 1),
-                ))
+    for construction_seed_index in range(len(CONSTRUCTION_ROOTS)):
+        for packet_trace_root_index in range(len(LOSS_ROOTS)):
+            for schedule in SCHEDULES:
+                for low in range(K_MIN, K_MAX + 1, CHUNK_SIZE):
+                    high = min(low + CHUNK_SIZE - 1, K_MAX)
+                    tasks.append(_new_task(
+                        "allk", len(tasks), construction_seed_index,
+                        packet_trace_root_index, schedule, (),
+                        range(low, high + 1),
+                    ))
     if (len(tasks) != ALLK_TASKS or
             sum(len(task.ks) for task in tasks) != ALLK_CELLS):
         die("all-K planner cardinality differs from the sealed census")
@@ -901,7 +1069,12 @@ def _load_stage_a_module(controller: Path, digest: str) -> Any:
     if (getattr(module, "SCHEMA", None) != SOURCE_SCHEMA or
             getattr(module, "K_MIN", None) != K_MIN or
             getattr(module, "K_MAX", None) != K_MAX or
-            tuple(getattr(module, "SEEDS", ())) != SEEDS or
+            tuple(getattr(module, "LOSS_ROOTS", ())) != LOSS_ROOTS or
+            tuple(hex(value) for value in
+                  getattr(module, "CONSTRUCTION_SEEDS", ())) !=
+                CONSTRUCTION_ROOTS or
+            getattr(module, "CONSTRUCTION_SEED_POLICY", None) !=
+                "matrix-c-peel-lo32-xor-hi32-v1" or
             tuple(getattr(module, "SCHEDULES", ())) != SCHEDULES):
         die("authenticated Stage-A controller constants differ from Stage-B")
     return module
@@ -965,44 +1138,34 @@ def source_shard_epoch_sha256(module: Any, stage: Path, task: Any) -> str:
     return sha256_bytes(canonical_json(payload).encode())
 
 
+
 def authenticate_stage_a(result_dir: Path) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Authenticate formal completion and replay exact OH0 once for selection."""
+    """Authenticate and independently replay all three uniform-root OH0 censuses."""
     result_dir = result_dir.resolve(strict=True)
     if not result_dir.is_dir() or result_dir.is_symlink():
         die("Stage-A result is not a real directory")
-    independent_contract = load_sealed(
+    independent = load_sealed(
         result_dir / "contract.json", f"{SOURCE_SCHEMA}.contract",
     )
-    if not isinstance(independent_contract, dict):
-        die("Stage-A contract payload is not an object")
-    if independent_contract.get("result_dir") != str(result_dir):
+    if (not isinstance(independent, dict) or
+            independent.get("result_dir") != str(result_dir)):
         die("Stage-A contract does not bind its canonical result directory")
-    required_strings = (
-        "binary", "binary_sha256", "controller", "controller_sha256",
-        "taskset", "taskset_sha256",
-    )
-    for name in required_strings:
-        value = independent_contract.get(name)
-        if type(value) is not str:
+    for name in (
+            "binary", "binary_sha256", "controller", "controller_sha256",
+            "taskset", "taskset_sha256"):
+        if type(independent.get(name)) is not str:
             die(f"Stage-A contract lacks canonical {name}")
-    # Trust starts with reviewed, out-of-band formal identities.  Do not ever
-    # import a controller merely because an attacker-supplied contract hashes
-    # it consistently.
-    if (independent_contract["controller_sha256"] !=
+    if (independent["controller_sha256"] !=
             FORMAL_STAGE_A_CONTROLLER_SHA256 or
-            independent_contract["binary_sha256"] !=
-            FORMAL_STAGE_A_BINARY_SHA256):
+            independent["binary_sha256"] != FORMAL_STAGE_A_BINARY_SHA256):
         die("Stage-A controller/binary is not the pinned formal build")
     for name in ("binary", "controller", "taskset"):
-        path = Path(independent_contract[name])
-        if (path.parent != result_dir / "frozen" or
-                path.is_symlink() or not path.is_file() or
-                not re.fullmatch(r"[0-9a-f]{64}", independent_contract[
-                    f"{name}_sha256"]) or
-                sha256_file(path) != independent_contract[f"{name}_sha256"]):
+        path = Path(independent[name])
+        digest = independent[f"{name}_sha256"]
+        if (path.parent != result_dir / "frozen" or path.is_symlink() or
+                not path.is_file() or not re.fullmatch(r"[0-9a-f]{64}", digest) or
+                sha256_file(path) != digest):
             die(f"Stage-A frozen {name} path/hash mismatch")
-    # These exact formal seals bind the campaign chain and its independently
-    # reduced analysis before authenticated Python is allowed to execute.
     require_exact_seal(
         result_dir / "campaign_complete.json",
         f"{SOURCE_SCHEMA}.campaign_complete",
@@ -1011,172 +1174,261 @@ def authenticate_stage_a(result_dir: Path) -> tuple[dict[str, Any], dict[str, An
     )
     require_exact_seal(
         result_dir / "analysis.json", f"{SOURCE_SCHEMA}.analysis_record",
-        FORMAL_STAGE_A_ANALYSIS_SEAL,
-        FORMAL_STAGE_A_ANALYSIS_FILE_SHA256,
+        FORMAL_STAGE_A_ANALYSIS_SEAL, FORMAL_STAGE_A_ANALYSIS_FILE_SHA256,
     )
     module = _load_stage_a_module(
-        Path(independent_contract["controller"]),
-        independent_contract["controller_sha256"],
+        Path(independent["controller"]), independent["controller_sha256"],
     )
     try:
         contract = module.load_contract(
             result_dir, require_frozen_controller=False,
         )
-        if canonical_json(contract) != canonical_json(independent_contract):
+        if canonical_json(contract) != canonical_json(independent):
             die("authenticated Stage-A controller parsed a different contract")
         allowed_cpus = set(_source_affinity(module, result_dir))
-        stage = module.stage_path(result_dir, 0)
-        source_control_paths = {
+        common_paths = {
             "contract_sha256": result_dir / "contract.json",
             "controller_affinity_sha256":
                 result_dir / "controller_affinity.json",
-            "oh0_manifest_sha256": stage / "manifest.json",
-            "oh0_complete_sha256": stage / "complete.json",
             "terminal_sha256": result_dir / "terminal.json",
         }
-        source_control_sha256s = {
-            name: sha256_file(path)
-            for name, path in source_control_paths.items()
+        root_stages = [
+            module.stage_path(result_dir, index, 0)
+            for index in range(len(CONSTRUCTION_ROOTS))
+        ]
+        root_paths = [{
+            "construction_seed_index": index,
+            "manifest": stage / "manifest.json",
+            "complete": stage / "complete.json",
+        } for index, stage in enumerate(root_stages)]
+        initial_common = {
+            name: sha256_file(path) for name, path in common_paths.items()
         }
-        # This verifies all later nested stages, monotonicity, terminal
-        # disposition, and exact inventories.  Stage-B then independently
-        # streams OH0 below because only that attempt-zero census is eligible
-        # for cohort construction.
+        initial_root_hashes = [{
+            "construction_seed_index": item["construction_seed_index"],
+            "manifest_sha256": sha256_file(item["manifest"]),
+            "complete_sha256": sha256_file(item["complete"]),
+        } for item in root_paths]
         terminal = module.verify_terminal_campaign(
             result_dir, contract, allowed_cpus,
         )
+        if (not isinstance(terminal, dict) or
+                terminal.get("disposition") != "confirmation_complete" or
+                terminal.get("architecture_accepted") is not True or
+                terminal.get("executed_construction_seed_indices") != [0, 1, 2] or
+                terminal.get("production_seed_fixups_applied") != 0):
+            die("Stage-A did not complete the exact accepted R0+R1 campaign")
         start, end = _source_telemetry_receipts(module, result_dir, contract)
         completion = module.verify_campaign_completion(
             result_dir, contract, start, end,
         )
         if (not isinstance(completion, dict) or
-                source_control_sha256s["contract_sha256"] !=
-                    completion.get("contract_sha256") or
-                source_control_sha256s["controller_affinity_sha256"] !=
-                    completion.get("controller_affinity_sha256") or
-                source_control_sha256s["terminal_sha256"] !=
-                    completion.get("terminal_sha256") or
-                source_control_sha256s != {
-                    name: sha256_file(path)
-                    for name, path in source_control_paths.items()
-                }):
-            die("Stage-A control leaves changed during formal chain validation")
+                completion.get("contract_sha256") !=
+                    initial_common["contract_sha256"] or
+                completion.get("controller_affinity_sha256") !=
+                    initial_common["controller_affinity_sha256"] or
+                completion.get("terminal_sha256") !=
+                    initial_common["terminal_sha256"]):
+            die("Stage-A campaign completion/control-leaf mismatch")
         analysis = module.load_sealed(
             result_dir / "analysis.json", f"{SOURCE_SCHEMA}.analysis_record",
         )
-        if (not isinstance(analysis, dict) or
+        analysis_fields = {
+            "schema", "coverage", "terminal", "rounds",
+            "by_construction_seed", "interpretation", "loss_seed_formula",
+            "external_telemetry", "campaign_completion",
+        }
+        if (not isinstance(analysis, dict) or set(analysis) != analysis_fields or
                 analysis.get("schema") != f"{SOURCE_SCHEMA}.analysis" or
+                type(analysis.get("interpretation")) is not str or
+                analysis.get("loss_seed_formula") != LOSS_SEED_FORMULA or
+                not isinstance(analysis.get("external_telemetry"), dict) or
+                canonical_json(analysis.get("terminal")) !=
+                    canonical_json(terminal) or
                 canonical_json(analysis.get("campaign_completion")) !=
-                canonical_json(completion)):
-            die("Stage-A analysis/completion cross-seal mismatch")
+                    canonical_json(completion)):
+            die("Stage-A analysis terminal/completion cross-seal mismatch")
         coverage = analysis.get("coverage")
-        if (not isinstance(coverage, dict) or
+        expected_construction_seeds = [
+            str(int(root, 16)) for root in CONSTRUCTION_ROOTS
+        ]
+        coverage_fields = {
+            "K_min", "K_max", "unique_K", "construction_seed_policy",
+            "construction_seeds_predeclared", "construction_seeds_executed",
+            "packet_trace_roots", "schedules",
+            "paired_cells_per_construction_root", "r0_paired_cells",
+            "r1_paired_cells", "full_paired_cells",
+            "production_seed_fixups_applied",
+        }
+        if (not isinstance(coverage, dict) or set(coverage) != coverage_fields or
+                any(type(coverage.get(name)) is not int for name in (
+                    "K_min", "K_max", "unique_K", "packet_trace_roots",
+                    "schedules", "paired_cells_per_construction_root",
+                    "r0_paired_cells", "r1_paired_cells",
+                    "full_paired_cells", "production_seed_fixups_applied",
+                )) or
                 coverage.get("K_min") != K_MIN or
                 coverage.get("K_max") != K_MAX or
                 coverage.get("unique_K") != K_COUNT or
-                coverage.get("packet_trace_roots") != len(SEEDS) or
+                coverage.get("construction_seed_policy") !=
+                    "matrix-c-peel-lo32-xor-hi32-v1" or
+                coverage.get("construction_seeds_predeclared") !=
+                    expected_construction_seeds or
+                coverage.get("construction_seeds_executed") != [0, 1, 2] or
+                coverage.get("packet_trace_roots") != len(LOSS_ROOTS) or
                 coverage.get("schedules") != len(SCHEDULES) or
-                coverage.get("paired_cells") != SOURCE_PAIRED_CELLS or
-                coverage.get("outcomes_per_arm") != SOURCE_PAIRED_CELLS or
-                coverage.get("arm_outcomes_at_OH0") != SOURCE_ARM_OUTCOMES or
-                coverage.get("terminal_overhead") !=
-                terminal.get("terminal_overhead")):
-            die("Stage-A analysis coverage is not the exact formal census")
+                coverage.get("paired_cells_per_construction_root") !=
+                    ALLK_CELLS_PER_CONSTRUCTION_ROOT or
+                coverage.get("r0_paired_cells") !=
+                    ALLK_CELLS_PER_CONSTRUCTION_ROOT or
+                coverage.get("r1_paired_cells") !=
+                    2 * ALLK_CELLS_PER_CONSTRUCTION_ROOT or
+                coverage.get("full_paired_cells") != SOURCE_PAIRED_CELLS or
+                coverage.get("production_seed_fixups_applied") != 0):
+            die("Stage-A analysis coverage is not the exact uniform-root census")
+        rounds = analysis.get("rounds")
+        by_construction = analysis.get("by_construction_seed")
+        expected_rounds = {
+            "R0": ([0], ALLK_CELLS_PER_CONSTRUCTION_ROOT),
+            "R1": ([1, 2], 2 * ALLK_CELLS_PER_CONSTRUCTION_ROOT),
+            "FULL": ([0, 1, 2], SOURCE_PAIRED_CELLS),
+        }
+        round_fields = {
+            "construction_seed_indices", "paired_cells", "oh0",
+            "minimum_success_overhead", "right_censoring",
+        }
+        root_fields = {
+            "construction_seed", "campaign_round", "terminal_overhead",
+            "unresolved_union_failures", "oh0", "minimum_success_overhead",
+            "right_censoring",
+        }
+        if (not isinstance(rounds, dict) or set(rounds) != set(expected_rounds) or
+                any(not isinstance(rounds[name], dict) or
+                    set(rounds[name]) != round_fields or
+                    rounds[name].get("construction_seed_indices") != indices or
+                    type(rounds[name].get("paired_cells")) is not int or
+                    rounds[name].get("paired_cells") != paired_cells
+                    for name, (indices, paired_cells) in
+                    expected_rounds.items()) or
+                not isinstance(by_construction, dict) or
+                set(by_construction) != {"0", "1", "2"} or
+                any(not isinstance(by_construction[str(index)], dict) or
+                    set(by_construction[str(index)]) != root_fields or
+                    by_construction[str(index)].get("construction_seed") !=
+                        construction_seed_text(index) or
+                    by_construction[str(index)].get("campaign_round") !=
+                        ("R0" if index == 0 else "R1")
+                    for index in range(len(CONSTRUCTION_ROOTS)))):
+            die("Stage-A analysis round/root schema mismatch")
 
-        tasks = module.load_manifest(stage, 0)
-        module.validate_stage_file_inventory(stage, complete_required=True)
-        module.validate_stage_shard_inventory(stage, tasks)
-        sealed_complete = module.load_sealed(
-            stage / "complete.json", f"{SOURCE_SCHEMA}.stage_complete",
-        )
-        if (not isinstance(sealed_complete, dict) or
-                set(sealed_complete) != {
+        tasks_by_root: list[list[Any]] = []
+        sealed_union: list[dict[str, Any]] = []
+        for construction_index, stage in enumerate(root_stages):
+            tasks = module.load_manifest(stage, construction_index, 0)
+            module.validate_stage_file_inventory(stage, complete_required=True)
+            module.validate_stage_shard_inventory(stage, tasks)
+            complete = module.load_sealed(
+                stage / "complete.json", f"{SOURCE_SCHEMA}.stage_complete",
+            )
+            if (not isinstance(complete, dict) or set(complete) != {
                     "overhead", "job_count", "paired_cell_count", "metrics",
-                    "union_failures"} or
-                sealed_complete["overhead"] != 0 or
-                sealed_complete["job_count"] != len(tasks) or
-                sealed_complete["paired_cell_count"] != SOURCE_PAIRED_CELLS or
-                canonical_json(analysis.get("oh0")) !=
-                canonical_json(sealed_complete["metrics"])):
-            die("Stage-A OH0 completion/analysis mismatch")
-        deriver = CohortDeriver(sealed_complete["union_failures"])
+                    "union_failures"} or complete["overhead"] != 0 or
+                    complete["job_count"] != len(tasks) or
+                    len(tasks) != 2 * ALLK_TASKS_PER_CONSTRUCTION_ROOT or
+                    complete["paired_cell_count"] !=
+                        ALLK_CELLS_PER_CONSTRUCTION_ROOT or
+                    canonical_json(complete["metrics"]) != canonical_json(
+                        by_construction[str(construction_index)].get("oh0")) or
+                    not isinstance(complete["union_failures"], list) or
+                    any(item.get("construction_seed_index") != construction_index
+                        for item in complete["union_failures"]
+                        if isinstance(item, Mapping)) or
+                    any(not isinstance(item, Mapping)
+                        for item in complete["union_failures"])):
+                die("Stage-A OH0 root completion/analysis mismatch")
+            tasks_by_root.append(tasks)
+            sealed_union.extend(complete["union_failures"])
+        if len(sealed_union) != EXPECTED_SOURCE_UNION:
+            die("Stage-A OH0 union does not match the pinned v2 cardinality")
+        deriver = CohortDeriver(sealed_union)
         shard_epoch_sha256s: list[str] = []
 
         def observed_pairs() -> Iterator[
-            tuple[tuple[int, str, int], Mapping[str, Mapping[str, str]]]
+            tuple[CellKey, Mapping[str, Mapping[str, str]]]
         ]:
-            if len(tasks) % 2:
-                die("Stage-A OH0 manifest has an odd task count")
-            pair_count = len(tasks) // 2
-            for pair_index in range(pair_count):
-                left, right = tasks[2 * pair_index:2 * pair_index + 2]
-                if (left.arm != "h12" or right.arm != "h13" or
-                        left.pair != pair_index or right.pair != pair_index or
-                        left.overhead != 0 or right.overhead != 0 or
-                        left.seed_index != right.seed_index or
-                        left.seed != right.seed or
-                        left.schedule != right.schedule or
-                        tuple(left.ks) != tuple(right.ks)):
-                    die("Stage-A OH0 manifest arm pairing/order mismatch")
-                before = (
-                    source_shard_epoch_sha256(module, stage, left),
-                    source_shard_epoch_sha256(module, stage, right),
-                )
-                left_rows = module.validate_shard(
-                    stage, left, Path(contract["binary"]),
-                    contract["binary_sha256"], Path(contract["taskset"]),
-                    allowed_cpus,
-                )
-                right_rows = module.validate_shard(
-                    stage, right, Path(contract["binary"]),
-                    contract["binary_sha256"], Path(contract["taskset"]),
-                    allowed_cpus,
-                )
-                after = (
-                    source_shard_epoch_sha256(module, stage, left),
-                    source_shard_epoch_sha256(module, stage, right),
-                )
-                if before != after:
-                    die("Stage-A source shard changed during authenticated replay")
-                shard_epoch_sha256s.extend(before)
-                if (len(left_rows) != len(left.ks) or
-                        len(right_rows) != len(right.ks)):
-                    die("Stage-A source shard row count mismatch")
-                for K, h12, h13 in zip(left.ks, left_rows, right_rows):
-                    key = left.seed_index, left.schedule, K
-                    arms = {"h12": h12, "h13": h13}
-                    module.validate_pair_receipt(key, arms)
-                    deriver.observe(key, arms)
-                    yield key, arms
-                if ((pair_index + 1) % 256 == 0 or
-                        pair_index + 1 == pair_count):
-                    print(
-                        f"# Stage-A OH0: verified and epoch-bound paired "
-                        f"shard {pair_index + 1}/{pair_count}",
-                        file=sys.stderr, flush=True,
+            for construction_index, (stage, tasks) in enumerate(
+                    zip(root_stages, tasks_by_root)):
+                for pair_index in range(len(tasks) // 2):
+                    left, right = tasks[2 * pair_index:2 * pair_index + 2]
+                    if (left.arm != "h12" or right.arm != "h13" or
+                            left.pair != pair_index or right.pair != pair_index or
+                            left.overhead != 0 or right.overhead != 0 or
+                            left.construction_index != construction_index or
+                            right.construction_index != construction_index or
+                            left.construction_seed !=
+                                int(CONSTRUCTION_ROOTS[construction_index], 16) or
+                            right.construction_seed != left.construction_seed or
+                            left.seed_index != right.seed_index or
+                            left.seed != right.seed or
+                            left.schedule != right.schedule or
+                            tuple(left.ks) != tuple(right.ks)):
+                        die("Stage-A OH0 manifest arm/root pairing mismatch")
+                    before = (
+                        source_shard_epoch_sha256(module, stage, left),
+                        source_shard_epoch_sha256(module, stage, right),
                     )
+                    left_rows = module.validate_shard(
+                        stage, left, Path(contract["binary"]),
+                        contract["binary_sha256"], Path(contract["taskset"]),
+                        allowed_cpus,
+                    )
+                    right_rows = module.validate_shard(
+                        stage, right, Path(contract["binary"]),
+                        contract["binary_sha256"], Path(contract["taskset"]),
+                        allowed_cpus,
+                    )
+                    after = (
+                        source_shard_epoch_sha256(module, stage, left),
+                        source_shard_epoch_sha256(module, stage, right),
+                    )
+                    if before != after:
+                        die("Stage-A source shard changed during authenticated replay")
+                    shard_epoch_sha256s.extend(before)
+                    if (len(left_rows) != len(left.ks) or
+                            len(right_rows) != len(right.ks)):
+                        die("Stage-A source shard row count mismatch")
+                    for K, h12, h13 in zip(left.ks, left_rows, right_rows):
+                        key: CellKey = (
+                            construction_index, left.seed_index,
+                            left.schedule, K,
+                        )
+                        arms = {"h12": h12, "h13": h13}
+                        module.validate_pair_receipt(key, arms)
+                        deriver.observe(key, arms)
+                        yield key, arms
+                print(
+                    f"# Stage-A OH0: verified construction root "
+                    f"{construction_index + 1}/{len(CONSTRUCTION_ROOTS)}",
+                    file=sys.stderr, flush=True,
+                )
 
-        metrics, replayed_union = module.aggregate_pair_stream(observed_pairs())
-        replayed_complete = {
-            "overhead": 0, "job_count": len(tasks),
-            "paired_cell_count": metrics["paired_cells"],
-            "metrics": metrics, "union_failures": replayed_union,
-        }
-        if canonical_json(replayed_complete) != canonical_json(sealed_complete):
-            die("Stage-A OH0 sealed completion differs from streamed replay")
+        replayed_metrics, replayed_union = module.aggregate_pair_stream(
+            observed_pairs(),
+        )
+        if (canonical_json(replayed_metrics) !=
+                canonical_json(rounds["FULL"].get("oh0")) or
+                canonical_json(replayed_union) != canonical_json(sealed_union)):
+            die("Stage-A combined OH0 completion differs from streamed replay")
         cohort = deriver.finish()
         if (cohort["source_union_count"] != EXPECTED_SOURCE_UNION or
                 cohort["matched_control_count"] != EXPECTED_SCREEN_MATCHES or
                 cohort["paired_cells"] != EXPECTED_SCREEN_CELLS or
                 cohort["arm_outcomes"] != EXPECTED_SCREEN_OUTCOMES or
                 cohort["nonempty_strata"] != EXPECTED_NONEMPTY_STRATA or
-                len(cohort["zero_strata"]) != len(EXPECTED_ZERO_STRATA)):
-            die("Stage-A-derived screen cohort misses formal invariants")
-        screen_tasks = build_screen_tasks(cohort)
-        if len(screen_tasks) != EXPECTED_SCREEN_TASKS:
-            die("formal matched cohort does not yield exactly 143 screen tasks")
-        if (len(shard_epoch_sha256s) != len(tasks) or
-                len(shard_epoch_sha256s) != 2 * ALLK_TASKS):
+                len(cohort["zero_strata"]) != len(EXPECTED_ZERO_STRATA) or
+                len(build_screen_tasks(cohort)) != EXPECTED_SCREEN_TASKS):
+            die("Stage-A-derived screen cohort misses pinned v2 invariants")
+        if len(shard_epoch_sha256s) != 2 * ALLK_TASKS:
             die("Stage-A OH0 shard epoch cardinality mismatch")
         final_campaign_complete = require_exact_seal(
             result_dir / "campaign_complete.json",
@@ -1189,12 +1441,18 @@ def authenticate_stage_a(result_dir: Path) -> tuple[dict[str, Any], dict[str, An
             FORMAL_STAGE_A_ANALYSIS_SEAL,
             FORMAL_STAGE_A_ANALYSIS_FILE_SHA256,
         )
+        final_common = {
+            name: sha256_file(path) for name, path in common_paths.items()
+        }
+        final_root_hashes = [{
+            "construction_seed_index": item["construction_seed_index"],
+            "manifest_sha256": sha256_file(item["manifest"]),
+            "complete_sha256": sha256_file(item["complete"]),
+        } for item in root_paths]
         if (canonical_json(final_campaign_complete) != canonical_json(completion) or
                 canonical_json(final_analysis) != canonical_json(analysis) or
-                source_control_sha256s != {
-                    name: sha256_file(path)
-                    for name, path in source_control_paths.items()
-                }):
+                final_common != initial_common or
+                final_root_hashes != initial_root_hashes):
             die("formal Stage-A seals changed during authenticated replay")
     except CampaignError:
         raise
@@ -1204,17 +1462,14 @@ def authenticate_stage_a(result_dir: Path) -> tuple[dict[str, Any], dict[str, An
         die(f"authenticated Stage-A validation failed: {exc}")
     provenance = {
         "result_dir": str(result_dir),
-        "contract_sha256": source_control_sha256s["contract_sha256"],
+        "contract_sha256": initial_common["contract_sha256"],
         "controller_sha256": contract["controller_sha256"],
         "binary_sha256": contract["binary_sha256"],
         "taskset_sha256": contract["taskset_sha256"],
         "controller_affinity_sha256":
-            source_control_sha256s["controller_affinity_sha256"],
-        "oh0_manifest_sha256":
-            source_control_sha256s["oh0_manifest_sha256"],
-        "oh0_complete_sha256":
-            source_control_sha256s["oh0_complete_sha256"],
-        "terminal_sha256": source_control_sha256s["terminal_sha256"],
+            initial_common["controller_affinity_sha256"],
+        "terminal_sha256": initial_common["terminal_sha256"],
+        "oh0_root_control_sha256s": initial_root_hashes,
         "campaign_complete_sha256":
             FORMAL_STAGE_A_CAMPAIGN_COMPLETE_FILE_SHA256,
         "analysis_sha256": FORMAL_STAGE_A_ANALYSIS_FILE_SHA256,
@@ -1225,13 +1480,15 @@ def authenticate_stage_a(result_dir: Path) -> tuple[dict[str, Any], dict[str, An
             canonical_json(shard_epoch_sha256s).encode()),
         "paired_cells_replayed": SOURCE_PAIRED_CELLS,
         "union_cells_replayed": EXPECTED_SOURCE_UNION,
+        "construction_seed_policy": "matrix-c-peel-lo32-xor-hi32-v1",
+        "production_seed_fixups_applied": 0,
         "formal_completion_authenticated": True,
     }
     return cohort, provenance
 
 
 class StageAAllKOracle:
-    """Bounded per-task view of the pinned Stage-A OH0 shard census."""
+    """Bounded per-task view of the three pinned Stage-A OH0 root censuses."""
 
     def __init__(
         self, source_result: Path, expected_provenance: Mapping[str, Any],
@@ -1243,13 +1500,15 @@ class StageAAllKOracle:
                     FORMAL_STAGE_A_CONTROLLER_SHA256 or
                 expected_provenance.get("binary_sha256") !=
                     FORMAL_STAGE_A_BINARY_SHA256 or
+                expected_provenance.get("construction_seed_policy") !=
+                    "matrix-c-peel-lo32-xor-hi32-v1" or
+                expected_provenance.get("production_seed_fixups_applied") != 0 or
                 type(expected_provenance.get("taskset_sha256")) is not str or
                 not re.fullmatch(
                     r"[0-9a-f]{64}", expected_provenance["taskset_sha256"])):
             die("all-K oracle expected provenance is malformed")
         control_fields = (
-            "contract_sha256", "controller_affinity_sha256",
-            "oh0_manifest_sha256", "oh0_complete_sha256", "terminal_sha256",
+            "contract_sha256", "controller_affinity_sha256", "terminal_sha256",
             "campaign_complete_sha256", "analysis_sha256",
         )
         if any(type(expected_provenance.get(name)) is not str or
@@ -1306,54 +1565,103 @@ class StageAAllKOracle:
                 expected_provenance["controller_affinity_sha256"]:
             die("all-K oracle source affinity differs from authenticated replay")
         self.allowed_cpus = set(_source_affinity(self.module, self.result_dir))
-        self.stage = self.module.stage_path(self.result_dir, 0)
+        self.stages = [
+            self.module.stage_path(self.result_dir, index, 0)
+            for index in range(len(CONSTRUCTION_ROOTS))
+        ]
         control_paths = {
             "controller_affinity_sha256": affinity_path,
-            "oh0_manifest_sha256": self.stage / "manifest.json",
-            "oh0_complete_sha256": self.stage / "complete.json",
             "terminal_sha256": self.result_dir / "terminal.json",
         }
         if any(sha256_file(path) != expected_provenance[name]
                for name, path in control_paths.items()):
             die("all-K oracle control leaf differs from authenticated replay")
-        self.tasks = self.module.load_manifest(self.stage, 0)
-        if len(self.tasks) != 2 * ALLK_TASKS:
-            die("all-K oracle Stage-A OH0 task count mismatch")
+        expected_roots = expected_provenance.get("oh0_root_control_sha256s")
+        if (not isinstance(expected_roots, list) or
+                len(expected_roots) != len(CONSTRUCTION_ROOTS) or
+                any(not isinstance(item, dict) or set(item) != {
+                    "construction_seed_index", "manifest_sha256",
+                    "complete_sha256"} or
+                    item["construction_seed_index"] != index or
+                    any(type(item[name]) is not str or
+                        not re.fullmatch(r"[0-9a-f]{64}", item[name])
+                        for name in ("manifest_sha256", "complete_sha256"))
+                    for index, item in enumerate(expected_roots))):
+            die("all-K oracle root control provenance is malformed")
+        self.tasks_by_root = []
+        for index, stage in enumerate(self.stages):
+            expected_root = expected_roots[index]
+            if (sha256_file(stage / "manifest.json") !=
+                    expected_root["manifest_sha256"] or
+                    sha256_file(stage / "complete.json") !=
+                    expected_root["complete_sha256"]):
+                die("all-K oracle OH0 root leaf differs from authenticated replay")
+            tasks = self.module.load_manifest(stage, index, 0)
+            if len(tasks) != 2 * ALLK_TASKS_PER_CONSTRUCTION_ROOT:
+                die("all-K oracle Stage-A OH0 root task count mismatch")
+            self.tasks_by_root.append(tasks)
         if any(sha256_file(path) != expected_provenance[name]
                for name, path in control_paths.items()):
             die("all-K oracle control leaf changed while loading its manifest")
+        for index, stage in enumerate(self.stages):
+            if (sha256_file(stage / "manifest.json") !=
+                    expected_roots[index]["manifest_sha256"] or
+                    sha256_file(stage / "complete.json") !=
+                    expected_roots[index]["complete_sha256"]):
+                die("all-K oracle root control leaf changed while loading")
         expected_shard_epoch = expected_provenance.get(
             "oh0_shard_epoch_sha256s",
         )
         if (not isinstance(expected_shard_epoch, Sequence) or
                 isinstance(expected_shard_epoch, (str, bytes)) or
-                len(expected_shard_epoch) != len(self.tasks) or
+                len(expected_shard_epoch) != 2 * ALLK_TASKS or
                 any(type(value) is not str or
                     not re.fullmatch(r"[0-9a-f]{64}", value)
-                    for value in expected_shard_epoch)):
+                    for value in expected_shard_epoch) or
+                expected_provenance.get("oh0_shard_epoch_root_sha256") !=
+                    sha256_bytes(canonical_json(expected_shard_epoch).encode()) or
+                expected_provenance.get("paired_cells_replayed") !=
+                    SOURCE_PAIRED_CELLS or
+                expected_provenance.get("union_cells_replayed") !=
+                    EXPECTED_SOURCE_UNION or
+                expected_provenance.get("formal_completion_authenticated") is not
+                    True):
             die("all-K oracle source shard epoch is malformed")
         self.expected_shard_epoch = tuple(expected_shard_epoch)
 
     def for_task(
         self, task: Task,
-    ) -> dict[tuple[int, str, int], dict[str, Any]]:
+    ) -> dict[CellKey, dict[str, Any]]:
         validate_task(task)
         if task.phase != "allk" or task.job not in range(ALLK_TASKS):
             die("all-K oracle received a non-all-K task")
-        left, right = self.tasks[2 * task.job:2 * task.job + 2]
+        construction_index = task.construction_seed_index
+        local_job = task.job - (
+            construction_index * ALLK_TASKS_PER_CONSTRUCTION_ROOT
+        )
+        if local_job not in range(ALLK_TASKS_PER_CONSTRUCTION_ROOT):
+            die("all-K task job does not belong to its construction root")
+        stage = self.stages[construction_index]
+        tasks = self.tasks_by_root[construction_index]
+        left, right = tasks[2 * local_job:2 * local_job + 2]
         if (left.arm != "h12" or right.arm != "h13" or
                 left.overhead != 0 or right.overhead != 0 or
-                left.pair != task.job or right.pair != task.job or
-                left.seed_index != task.seed_index or
-                right.seed_index != task.seed_index or
-                left.seed != task.seed or right.seed != task.seed or
+                left.pair != local_job or right.pair != local_job or
+                left.construction_index != construction_index or
+                right.construction_index != construction_index or
+                left.construction_seed != int(task.construction_seed, 16) or
+                right.construction_seed != int(task.construction_seed, 16) or
+                left.seed_index != task.packet_trace_root_index or
+                right.seed_index != task.packet_trace_root_index or
+                left.seed != task.packet_trace_root or
+                right.seed != task.packet_trace_root or
                 left.schedule != task.schedule or right.schedule != task.schedule or
                 tuple(left.ks) != task.ks or tuple(right.ks) != task.ks):
             die("all-K task does not align with its Stage-A OH0 oracle shards")
         epoch_indices = (2 * task.job, 2 * task.job + 1)
         before = (
-            source_shard_epoch_sha256(self.module, self.stage, left),
-            source_shard_epoch_sha256(self.module, self.stage, right),
+            source_shard_epoch_sha256(self.module, stage, left),
+            source_shard_epoch_sha256(self.module, stage, right),
         )
         expected_epoch = tuple(
             self.expected_shard_epoch[index] for index in epoch_indices
@@ -1361,26 +1669,29 @@ class StageAAllKOracle:
         if before != expected_epoch:
             die("all-K oracle source shard differs from authenticated replay epoch")
         left_rows = self.module.validate_shard(
-            self.stage, left, Path(self.contract["binary"]),
+            stage, left, Path(self.contract["binary"]),
             self.contract["binary_sha256"], Path(self.contract["taskset"]),
             self.allowed_cpus,
         )
         right_rows = self.module.validate_shard(
-            self.stage, right, Path(self.contract["binary"]),
+            stage, right, Path(self.contract["binary"]),
             self.contract["binary_sha256"], Path(self.contract["taskset"]),
             self.allowed_cpus,
         )
         after = (
-            source_shard_epoch_sha256(self.module, self.stage, left),
-            source_shard_epoch_sha256(self.module, self.stage, right),
+            source_shard_epoch_sha256(self.module, stage, left),
+            source_shard_epoch_sha256(self.module, stage, right),
         )
         if after != expected_epoch:
             die("all-K oracle source shard changed while it was consumed")
         if len(left_rows) != len(task.ks) or len(right_rows) != len(task.ks):
             die("all-K oracle source shard row count mismatch")
-        result: dict[tuple[int, str, int], dict[str, Any]] = {}
+        result: dict[CellKey, dict[str, Any]] = {}
         for K, h12, h13 in zip(task.ks, left_rows, right_rows):
-            key = task.seed_index, task.schedule, K
+            key: CellKey = (
+                construction_index, task.packet_trace_root_index,
+                task.schedule, K,
+            )
             arms = {"h12": h12, "h13": h13}
             self.module.validate_pair_receipt(key, arms)
             result[key] = {"role": "allk", "match_id": task.job,
@@ -1390,7 +1701,7 @@ class StageAAllKOracle:
 
 def expected_cells_for_task(
     source: Any, task: Task,
-) -> Mapping[tuple[int, str, int], Mapping[str, Any]]:
+) -> Mapping[CellKey, Mapping[str, Any]]:
     if isinstance(source, Mapping):
         return source
     loader = getattr(source, "for_task", None)
@@ -1706,7 +2017,9 @@ BENCH_HEADER = (
     "period", "geometry", "residue_skew", "residue_schedule", "gf256_rows",
     "gf16_rows", "heavy_rows", "grouped_rows", "grouped_gf256_row_mask",
     "buckets_requested", "grouped_hash_seed", "final_h_a_columns",
-    "construction_attempt", "systematic_probe_result", "base_matrix_seed",
+    "construction_attempt", "construction_seed_policy", "construction_seed",
+    "production_seed_fixups_applied", "systematic_probe_result",
+    "base_matrix_seed",
     "base_peel_seed", "matrix_seed", "peel_seed", "staircase_rows",
     "dense_rows", "source_hits", "dense_identity_corner", "dense_two_anchor",
     "dense_two_anchor_phase", "field", "heavy_family", "mix_count",
@@ -1727,7 +2040,9 @@ UINT_FIELDS = (
     "pair_index", "pair_order_index", "N", "bb", "solve_block_bytes",
     "overhead", "external_seed", "period", "residue_skew", "gf256_rows",
     "gf16_rows", "heavy_rows", "grouped_rows", "final_h_a_columns",
-    "construction_attempt", "systematic_probe_result", "staircase_rows",
+    "construction_attempt", "construction_seed",
+    "production_seed_fixups_applied", "systematic_probe_result",
+    "staircase_rows",
     "dense_rows", "source_hits", "dense_identity_corner", "dense_two_anchor",
     "dense_two_anchor_phase", "mix_count", "precode_count", "packet_count",
     "pair_results_equal", "result", "packet_rows", "peeled_columns",
@@ -1745,10 +2060,15 @@ UINT_FIELDS = (
 def expected_preamble_items(task: Task) -> tuple[tuple[str, str], ...]:
     validate_task(task)
     return (
-        ("schema", "v1"), ("pair_order", "h12,h13"),
+        ("schema", "v2"), ("pair_order", "h12,h13"),
         ("arms_per_N", "2"), ("N_count", str(len(task.ks))),
         ("N", ",".join(map(str, task.ks))), ("overhead", "0"),
-        ("seed", str(int(task.seed, 16))), ("schedule", task.schedule),
+        ("seed", str(int(task.packet_trace_root, 16))),
+        ("seed_role", "loss-trace-root"),
+        ("construction_seed_policy", "matrix-c-peel-lo32-xor-hi32-v1"),
+        ("construction_seed", str(int(task.construction_seed, 16))),
+        ("production_seed_fixups_applied", "0"),
+        ("schedule", task.schedule),
         ("policy", "h12-h13-q0-grouped-v1"), ("period", "48"),
         ("geometry", "shared-x"), ("residue_skew", "0"),
         ("residue_schedule", "constant"), ("residue_hash_seed", "0x0"),
@@ -1761,14 +2081,13 @@ def expected_preamble_items(task: Task) -> tuple[tuple[str, str], ...]:
         ("grouped_final_h_a_columns", "arm-heavy-rows"),
         ("dense_rows", "12"), ("dense_identity_corner", "0"),
         ("dense_two_anchor", "1"), ("dense_two_anchor_phase", "0"),
-        ("source_hits", "profile"),
-        ("staircase_rows", "profile-dense-count"),
+        ("source_hits", "canonical-K-rule"),
+        ("staircase_rows", "GetDenseCount(K)"),
         ("field", "mixed-gf256-gf16"),
         ("heavy_family", "periodic-cauchy"),
         ("construction_attempt", "0"),
         ("systematic_probe", "direct-attempt0"),
-        ("seed_repair", "disabled"), ("mix", "2"), ("bb", "64"),
-        ("seed_block_bytes", "64"),
+        ("mix", "2"), ("bb", "64"),
         ("solve_block_bytes", "2"), ("loss", "0.5"),
         ("overhead_stream", "paired"),
         ("packet_row_seed_multiplier", "0x1"),
@@ -1792,7 +2111,7 @@ def expected_preamble_line(task: Task) -> str:
 def parse_preamble(line: str) -> dict[str, str]:
     prefix = "# groupedrecovery: "
     if not line.startswith(prefix):
-        die("missing groupedrecovery schema-v1 preamble")
+        die("missing groupedrecovery schema-v2 preamble")
     values: dict[str, str] = {}
     for token in line[len(prefix):].split(" "):
         name, separator, value = token.partition("=")
@@ -1806,17 +2125,25 @@ def make_benchmark_argv(binary: Path, task: Task) -> list[str]:
     validate_task(task)
     return [
         str(binary), "groupedrecovery", "--N", ",".join(map(str, task.ks)),
-        "--overhead", "0", "--seed", str(int(task.seed, 16)),
+        "--overhead", "0", "--seed", str(int(task.packet_trace_root, 16)),
+        "--construction-seed", str(int(task.construction_seed, 16)),
         "--schedule", task.schedule,
     ]
 
 
 def grouped_pair_id(task: Task, K: int, trace_seed: int, trace_sha256: str) -> str:
+    matrix_seed, peel_seed = construction_seed_values(task.construction_seed)
     domain = (
-        "wirehair-wh2-grouped-recovery-pair-v1\n"
-        f"N={K}\nbb=64\nseed_block_bytes=64\nsolve_block_bytes=2\n"
+        "wirehair-wh2-grouped-recovery-pair-v2\n"
+        f"N={K}\nbb=64\nsolve_block_bytes=2\n"
         "overhead=0\nloss=0.5\n"
-        f"external_seed={int(task.seed, 16)}\nschedule={task.schedule}\n"
+        f"external_seed={int(task.packet_trace_root, 16)}\n"
+        "external_seed_role=loss-trace-root\n"
+        "construction_seed_policy=matrix-c-peel-lo32-xor-hi32-v1\n"
+        f"construction_seed={int(task.construction_seed, 16)}\n"
+        "production_seed_fixups_applied=0\n"
+        f"base_matrix_seed={matrix_seed}\nbase_peel_seed={peel_seed}\n"
+        f"schedule={task.schedule}\n"
         "period=48\ngeometry=shared-x\nresidue_skew=0\n"
         "residue_schedule=constant\nresidue_hash_seed=0\n"
         "extension_residue_seed_xor=78\n"
@@ -1826,9 +2153,9 @@ def grouped_pair_id(task: Task, K: int, trace_seed: int, trace_sha256: str) -> s
         "grouped_hash_seed=h12:0xb7e15162|h13:0xb7e15163\n"
         "buckets=separate\ndense_rows=12\ndense_identity_corner=0\n"
         "dense_two_anchor=1\ndense_two_anchor_phase=0\n"
-        "source_hits=profile\nstaircase_rows=profile-dense-count\n"
+        "source_hits=canonical-K-rule\nstaircase_rows=GetDenseCount(K)\n"
         "field=mixed-gf256-gf16\nheavy_family=periodic-cauchy\n"
-        "construction_attempt=0\nseed_repair=disabled\nmix=2\n"
+        "construction_attempt=0\nmix=2\n"
         "overhead_stream=paired\npacket_row_seed_multiplier=1\n"
         "packet_row_seed_avalanche=0\nodd_packet_peel_seed_xor=0\n"
         "payload=shared-zero-v1\n"
@@ -1839,41 +2166,65 @@ def grouped_pair_id(task: Task, K: int, trace_seed: int, trace_sha256: str) -> s
     return sha256_bytes(domain.encode("ascii"))
 
 
-def cohort_cell_map(cohort: Mapping[str, Any]) -> dict[tuple[int, str, int], dict[str, Any]]:
+def cohort_cell_map(cohort: Mapping[str, Any]) -> dict[CellKey, dict[str, Any]]:
     matches = cohort.get("matches") if isinstance(cohort, Mapping) else None
     if not isinstance(matches, list):
         die("cohort matches are malformed")
-    cells: dict[tuple[int, str, int], dict[str, Any]] = {}
+    cells: dict[CellKey, dict[str, Any]] = {}
+    stratum_fields = {
+        "construction_seed_index", "construction_seed",
+        "packet_trace_root_index", "packet_trace_root", "schedule",
+        "band_index", "band",
+    }
+    source_fields = {
+        "construction_seed_index", "construction_seed",
+        "packet_trace_root_index", "packet_trace_root", "schedule", "K",
+        "raw_failures", "raw_systematic_probe_results",
+        *SOURCE_IDENTITY_FIELDS,
+    }
     for expected_match_id, match in enumerate(matches):
         if (not isinstance(match, Mapping) or set(match) != {
                 "match_id", "stratum", "control_selection_sha256", "union",
                 "control"} or match.get("match_id") != expected_match_id):
             die("cohort match is malformed")
         stratum = match.get("stratum")
-        if (not isinstance(stratum, Mapping) or set(stratum) != {
-                "seed_index", "seed", "schedule", "band_index", "band"}):
+        if not isinstance(stratum, Mapping) or set(stratum) != stratum_fields:
             die("cohort match stratum schema mismatch")
-        seed_index = stratum["seed_index"]
+        construction_seed_index = stratum["construction_seed_index"]
+        packet_trace_root_index = stratum["packet_trace_root_index"]
         schedule = stratum["schedule"]
         band = stratum["band_index"]
-        if (type(seed_index) is not int or seed_index not in range(len(SEEDS)) or
-                stratum["seed"] != SEEDS[seed_index] or
+        if (type(construction_seed_index) is not int or
+                construction_seed_index not in range(len(CONSTRUCTION_ROOTS)) or
+                stratum["construction_seed"] !=
+                    construction_seed_text(construction_seed_index) or
+                type(packet_trace_root_index) is not int or
+                packet_trace_root_index not in range(len(LOSS_ROOTS)) or
+                stratum["packet_trace_root"] !=
+                    LOSS_ROOTS[packet_trace_root_index] or
                 schedule not in SCHEDULES or type(band) is not int or
                 band not in range(len(BANDS)) or
                 stratum["band"] != list(BANDS[band])):
             die("cohort match stratum value mismatch")
         for role in ("union", "control"):
             source = match.get(role)
-            if not isinstance(source, dict) or set(source) != {
-                    "seed_index", "seed", "schedule", "K", "raw_failures",
-                    "raw_systematic_probe_results", *SOURCE_IDENTITY_FIELDS}:
+            if not isinstance(source, dict) or set(source) != source_fields:
                 die("cohort source cell is malformed")
-            key = source.get("seed_index"), source.get("schedule"), source.get("K")
-            if (type(key[0]) is not int or type(key[1]) is not str or
-                    type(key[2]) is not int or key in cells or
-                    key[0] != seed_index or key[1] != schedule or
-                    source.get("seed") != SEEDS[seed_index] or
-                    not K_MIN <= key[2] <= K_MAX or band_index(key[2]) != band):
+            key: CellKey = (
+                source.get("construction_seed_index"),
+                source.get("packet_trace_root_index"),
+                source.get("schedule"), source.get("K"),
+            )
+            if (type(key[0]) is not int or type(key[1]) is not int or
+                    type(key[2]) is not str or type(key[3]) is not int or
+                    key in cells or key[0] != construction_seed_index or
+                    key[1] != packet_trace_root_index or key[2] != schedule or
+                    source.get("construction_seed") !=
+                        construction_seed_text(construction_seed_index) or
+                    source.get("packet_trace_root") !=
+                        LOSS_ROOTS[packet_trace_root_index] or
+                    not K_MIN <= key[3] <= K_MAX or
+                    band_index(key[3]) != band):
                 die("cohort source cell is duplicated or malformed")
             failures = source["raw_failures"]
             probes = source["raw_systematic_probe_results"]
@@ -1892,10 +2243,18 @@ def cohort_cell_map(cohort: Mapping[str, Any]) -> dict[tuple[int, str, int], dic
                 if type(source[name]) is not str:
                     die("cohort source seed receipt has the wrong type")
                 strict_hex(source[name], f"cohort:{name}", bits)
-            if (source["base_matrix_seed"] != source["matrix_seed"] or
-                    source["base_peel_seed"] != source["peel_seed"] or
-                    source["packet_trace_seed"] !=
-                        hex(loss_seed(SEEDS[seed_index], key[2])) or
+            matrix_seed, peel_seed = construction_seed_values(
+                CONSTRUCTION_ROOTS[construction_seed_index],
+            )
+            if (source["construction_seed_policy"] !=
+                    "matrix-c-peel-lo32-xor-hi32-v1" or
+                    source["production_seed_fixups_applied"] != 0 or
+                    source["base_matrix_seed"] != hex(matrix_seed) or
+                    source["matrix_seed"] != hex(matrix_seed) or
+                    source["base_peel_seed"] != hex(peel_seed) or
+                    source["peel_seed"] != hex(peel_seed) or
+                    source["packet_trace_seed"] != hex(loss_seed(
+                        LOSS_ROOTS[packet_trace_root_index], key[3])) or
                     type(source["packet_trace_sha256"]) is not str or
                     not re.fullmatch(
                         r"[0-9a-f]{64}", source["packet_trace_sha256"]) or
@@ -1905,7 +2264,7 @@ def cohort_cell_map(cohort: Mapping[str, Any]) -> dict[tuple[int, str, int], dic
                         "actual_dense_two_anchor_phase")) or
                     source["actual_dense_rows"] != 12 or
                     source["actual_source_hits"] !=
-                        (2 if key[2] < 10000 else 3) or
+                        (2 if key[3] < 10000 else 3) or
                     source["actual_dense_two_anchor"] != 1 or
                     source["actual_dense_two_anchor_phase"] != 0 or
                     type(source["actual_staircase_rows"]) is not int or
@@ -1916,7 +2275,8 @@ def cohort_cell_map(cohort: Mapping[str, Any]) -> dict[tuple[int, str, int], dic
             }
         control = match["control"]
         expected_selection = _control_digest(
-            seed_index, schedule, band, control["K"],
+            construction_seed_index, packet_trace_root_index, schedule, band,
+            control["K"],
         )
         if match["control_selection_sha256"] != expected_selection:
             die("cohort control selection digest mismatch")
@@ -1932,12 +2292,14 @@ def _validate_row_geometry(
     fixed = {
         "pair_index": pair_index, "pair_order_index": ARMS.index(arm),
         "N": K, "bb": 64, "solve_block_bytes": 2, "overhead": 0,
-        "external_seed": int(task.seed, 16), "period": 48,
+        "external_seed": int(task.packet_trace_root, 16), "period": 48,
         "residue_skew": 0, "gf16_rows": 2,
         "gf256_rows": ARM_GF256_ROWS[arm],
         "heavy_rows": ARM_HEAVY_ROWS[arm], "grouped_rows": 3,
         "final_h_a_columns": ARM_HEAVY_ROWS[arm],
-        "construction_attempt": 0, "dense_rows": 12,
+        "construction_attempt": 0,
+        "construction_seed": int(task.construction_seed, 16),
+        "production_seed_fixups_applied": 0, "dense_rows": 12,
         "source_hits": 2 if K < 10000 else 3,
         "dense_identity_corner": 0, "dense_two_anchor": 1,
         "dense_two_anchor_phase": 0, "mix_count": 2,
@@ -1950,6 +2312,7 @@ def _validate_row_geometry(
         "schedule": task.schedule, "loss": "0.5", "geometry": "shared-x",
         "residue_schedule": "constant", "buckets_requested": "separate",
         "field": "mixed-gf256-gf16", "heavy_family": "periodic-cauchy",
+        "construction_seed_policy": "matrix-c-peel-lo32-xor-hi32-v1",
     }
     for name, value in text_fixed.items():
         if row[name] != value:
@@ -1969,9 +2332,12 @@ def _validate_row_geometry(
             ("base_peel_seed", 32), ("peel_seed", 32),
             ("packet_trace_seed", 64)):
         strict_hex(row[name], f"{context}:{name}", bits)
-    if (row["matrix_seed"] != row["base_matrix_seed"] or
-            row["peel_seed"] != row["base_peel_seed"]):
-        die(f"{context}: active seeds are not literal attempt zero")
+    matrix_seed, peel_seed = construction_seed_values(task.construction_seed)
+    if (row["base_matrix_seed"] != hex(matrix_seed) or
+            row["matrix_seed"] != hex(matrix_seed) or
+            row["base_peel_seed"] != hex(peel_seed) or
+            row["peel_seed"] != hex(peel_seed)):
+        die(f"{context}: seeds are not exact uniform-root v1")
     if expected is not None:
         source = expected["source"]
         source_names = {
@@ -1993,7 +2359,8 @@ def _validate_row_geometry(
                     "Stage-A OH0"
                 )
     if (not re.fullmatch(r"[0-9a-f]{64}", row["packet_trace_sha256"]) or
-            int(row["packet_trace_seed"], 16) != loss_seed(task.seed, K)):
+            int(row["packet_trace_seed"], 16) !=
+                loss_seed(task.packet_trace_root, K)):
         die(f"{context}: packet trace receipt mismatch")
     if parsed["precode_count"] != (
             parsed["staircase_rows"] + parsed["dense_rows"] +
@@ -2055,6 +2422,8 @@ def validate_output_pair(
         "schedule", "external_seed", "loss", "period", "geometry",
         "residue_skew", "residue_schedule", "gf16_rows", "grouped_rows",
         "grouped_gf256_row_mask", "buckets_requested", "construction_attempt",
+        "construction_seed_policy", "construction_seed",
+        "production_seed_fixups_applied",
         "base_matrix_seed", "base_peel_seed", "matrix_seed", "peel_seed",
         "staircase_rows", "dense_rows", "source_hits", "dense_identity_corner",
         "dense_two_anchor", "dense_two_anchor_phase", "field", "heavy_family",
@@ -2074,12 +2443,12 @@ def validate_output_pair(
     )
     if (h12["pair_id"] != expected_pair_id or
             not re.fullmatch(r"[0-9a-f]{64}", h12["pair_id"])):
-        die(f"K={K}: pair_id does not authenticate its exact domain")
+        die(f"K={K}: pair_id does not authenticate its declared pair domain")
 
 
 def parse_output(
     output: str, task: Task,
-    expected_cells: Mapping[tuple[int, str, int], Mapping[str, Any]],
+    expected_cells: Mapping[CellKey, Mapping[str, Any]],
 ) -> list[dict[str, dict[str, str]]]:
     if "\r" in output or not output.endswith("\n"):
         die("benchmark output is not canonical LF-terminated text")
@@ -2095,11 +2464,14 @@ def parse_output(
     except csv.Error as exc:
         die(f"malformed grouped recovery CSV header: {exc}")
     if lines[1] != ",".join(BENCH_HEADER) or header != BENCH_HEADER:
-        die("benchmark CSV header differs from groupedrecovery schema v1")
+        die("benchmark CSV header differs from groupedrecovery schema v2")
     pairs: list[dict[str, dict[str, str]]] = []
     seen_pair_ids: set[str] = set()
     for pair_index, K in enumerate(task.ks):
-        expected = expected_cells.get((task.seed_index, task.schedule, K))
+        expected = expected_cells.get((
+            task.construction_seed_index, task.packet_trace_root_index,
+            task.schedule, K,
+        ))
         if expected is None:
             die(f"K={K}: task cell is absent from its authenticated source oracle")
         arms: dict[str, dict[str, str]] = {}
@@ -2159,10 +2531,12 @@ def prepare(args: argparse.Namespace) -> None:
     telemetry_path = (
         args.telemetry_log.resolve(strict=True) if args.telemetry_log else None
     )
-    if (checked_product(K_COUNT, len(SEEDS), len(SCHEDULES)) !=
+    if (checked_product(
+            K_COUNT, len(CONSTRUCTION_ROOTS), len(LOSS_ROOTS), len(SCHEDULES)) !=
             SOURCE_PAIRED_CELLS or
             checked_product(SOURCE_PAIRED_CELLS, len(ARMS)) !=
-            SOURCE_ARM_OUTCOMES or ALLK_TASKS != 2304):
+            SOURCE_ARM_OUTCOMES or ALLK_TASKS != 6912 or
+            ALLK_CELLS != 1727973):
         die("Stage-B cardinality constants are inconsistent")
 
     # Expensive source validation deliberately precedes creation of any target
@@ -2208,7 +2582,13 @@ def prepare(args: argparse.Namespace) -> None:
         cohort_sha256 = sha256_file(staging / "cohort.json")
         final_frozen = result_dir / "frozen"
         contract = {
-            "K_domain": [K_MIN, K_MAX], "packet_trace_roots": list(SEEDS),
+            "K_domain": [K_MIN, K_MAX],
+            "construction_roots": list(CONSTRUCTION_ROOTS),
+            "construction_root_sets": {
+                name: list(indices)
+                for name, indices in STAGE_A_ROOT_SETS.items()
+            },
+            "packet_trace_roots": list(LOSS_ROOTS),
             "schedules": list(SCHEDULES),
             "bands": [list(value) for value in BANDS],
             "source_stage_a": source_provenance,
@@ -2231,8 +2611,10 @@ def prepare(args: argparse.Namespace) -> None:
                 "arm_outcomes": EXPECTED_SCREEN_OUTCOMES,
                 "nonempty_strata": EXPECTED_NONEMPTY_STRATA,
                 "zero_strata": [
-                    [seed_index, schedule, band]
-                    for seed_index, schedule, band in EXPECTED_ZERO_STRATA
+                    [construction_seed_index, packet_trace_root_index,
+                     schedule, band]
+                    for (construction_seed_index, packet_trace_root_index,
+                         schedule, band) in EXPECTED_ZERO_STRATA
                 ],
                 "matches_per_task_max": SCREEN_MATCH_CHUNK,
                 "pair_native_tasks": EXPECTED_SCREEN_TASKS,
@@ -2317,34 +2699,46 @@ def load_cohort(result_dir: Path, expected_sha256: str) -> dict[str, Any]:
     if len(cells) != EXPECTED_SCREEN_CELLS:
         die("sealed cohort cell keys are not exact/disjoint")
     expected_zero = [
-        {"seed_index": seed_index, "seed": SEEDS[seed_index],
+        {"construction_seed_index": construction_seed_index,
+         "construction_seed": construction_seed_text(construction_seed_index),
+         "packet_trace_root_index": packet_trace_root_index,
+         "packet_trace_root": LOSS_ROOTS[packet_trace_root_index],
          "schedule": schedule, "band_index": band,
          "band": list(BANDS[band])}
-        for seed_index in range(len(SEEDS))
+        for construction_seed_index in range(len(CONSTRUCTION_ROOTS))
+        for packet_trace_root_index in range(len(LOSS_ROOTS))
         for schedule in SCHEDULES
         for band in range(len(BANDS))
-        if (seed_index, schedule, band) in set(EXPECTED_ZERO_STRATA)
+        if (construction_seed_index, packet_trace_root_index,
+            schedule, band) in set(EXPECTED_ZERO_STRATA)
     ]
     if canonical_json(cohort["zero_strata"]) != canonical_json(expected_zero):
         die("sealed cohort zero-stratum identities mismatch")
-    counts: dict[tuple[int, str, int], int] = {}
+    counts: dict[StratumKey, int] = {}
     for match in cohort["matches"]:
         stratum = match["stratum"]
-        key = (stratum["seed_index"], stratum["schedule"],
-               stratum["band_index"])
+        key = (
+            stratum["construction_seed_index"],
+            stratum["packet_trace_root_index"], stratum["schedule"],
+            stratum["band_index"],
+        )
         counts[key] = counts.get(key, 0) + 1
     expected_counts = [
-        {"seed_index": seed_index, "seed": SEEDS[seed_index],
+        {"construction_seed_index": construction_seed_index,
+         "construction_seed": construction_seed_text(construction_seed_index),
+         "packet_trace_root_index": packet_trace_root_index,
+         "packet_trace_root": LOSS_ROOTS[packet_trace_root_index],
          "schedule": schedule, "band_index": band,
          "band": list(BANDS[band]), "union": count, "controls": count}
-        for (seed_index, schedule, band), count in sorted(
+        for (construction_seed_index, packet_trace_root_index,
+             schedule, band), count in sorted(
             counts.items(), key=lambda item: _stratum_order(item[0]))
     ]
     if canonical_json(cohort["counts_by_stratum_band"]) != \
             canonical_json(expected_counts):
         die("sealed cohort count-by-stratum receipts mismatch")
     if len(build_screen_tasks(cohort)) != EXPECTED_SCREEN_TASKS:
-        die("sealed cohort does not reproduce the 143-task plan")
+        die("sealed cohort does not reproduce the pinned screen-task plan")
     return cohort
 
 
@@ -2354,7 +2748,8 @@ def load_contract(
     require_formal_stage_a_launchable()
     contract = load_sealed(result_dir / "contract.json", f"{SCHEMA}.contract")
     expected_keys = {
-        "K_domain", "packet_trace_roots", "schedules", "bands",
+        "K_domain", "construction_roots", "construction_root_sets",
+        "packet_trace_roots", "schedules", "bands",
         "source_stage_a", "source_controller_sha256", "source_binary_sha256",
         "source_campaign_complete_seal",
         "source_campaign_complete_file_sha256", "source_analysis_seal",
@@ -2367,7 +2762,13 @@ def load_contract(
     }
     if (not isinstance(contract, dict) or set(contract) != expected_keys or
             contract["K_domain"] != [K_MIN, K_MAX] or
-            contract["packet_trace_roots"] != list(SEEDS) or
+            contract["construction_roots"] != list(CONSTRUCTION_ROOTS) or
+            canonical_json(contract["construction_root_sets"]) !=
+                canonical_json({
+                    name: list(indices)
+                    for name, indices in STAGE_A_ROOT_SETS.items()
+                }) or
+            contract["packet_trace_roots"] != list(LOSS_ROOTS) or
             contract["schedules"] != list(SCHEDULES) or
             contract["bands"] != [list(value) for value in BANDS] or
             contract["source_controller_sha256"] !=
@@ -2429,18 +2830,19 @@ def load_contract(
     provenance_fields = {
         "result_dir", "contract_sha256", "controller_sha256",
         "binary_sha256", "taskset_sha256", "controller_affinity_sha256",
-        "oh0_manifest_sha256", "oh0_complete_sha256", "terminal_sha256",
+        "terminal_sha256", "oh0_root_control_sha256s",
         "campaign_complete_sha256", "analysis_sha256",
         "source_identity_stream_sha256", "oh0_shard_epoch_sha256s",
         "oh0_shard_epoch_root_sha256", "paired_cells_replayed",
-        "union_cells_replayed", "formal_completion_authenticated",
+        "union_cells_replayed", "construction_seed_policy",
+        "production_seed_fixups_applied", "formal_completion_authenticated",
     }
     epoch = provenance.get("oh0_shard_epoch_sha256s") \
         if isinstance(provenance, dict) else None
     provenance_hashes = (
         "contract_sha256", "controller_sha256", "binary_sha256",
         "taskset_sha256", "controller_affinity_sha256",
-        "oh0_manifest_sha256", "oh0_complete_sha256", "terminal_sha256",
+        "terminal_sha256",
         "campaign_complete_sha256", "analysis_sha256",
         "source_identity_stream_sha256", "oh0_shard_epoch_root_sha256",
     )
@@ -2455,6 +2857,9 @@ def load_contract(
                 FORMAL_STAGE_A_ANALYSIS_FILE_SHA256 or
             provenance.get("paired_cells_replayed") != SOURCE_PAIRED_CELLS or
             provenance.get("union_cells_replayed") != EXPECTED_SOURCE_UNION or
+            provenance.get("construction_seed_policy") !=
+                "matrix-c-peel-lo32-xor-hi32-v1" or
+            provenance.get("production_seed_fixups_applied") != 0 or
             provenance.get("formal_completion_authenticated") is not True or
             any(type(provenance.get(name)) is not str or
                 not re.fullmatch(r"[0-9a-f]{64}", provenance[name])
@@ -2465,6 +2870,18 @@ def load_contract(
             provenance.get("oh0_shard_epoch_root_sha256") != sha256_bytes(
                 canonical_json(epoch).encode())):
         die("Stage-B source provenance is malformed")
+    root_controls = provenance["oh0_root_control_sha256s"]
+    if (type(root_controls) is not list or
+            len(root_controls) != len(CONSTRUCTION_ROOTS) or
+            any(not isinstance(item, dict) or set(item) != {
+                "construction_seed_index", "manifest_sha256",
+                "complete_sha256"} or
+                item["construction_seed_index"] != index or
+                any(type(item[name]) is not str or
+                    not re.fullmatch(r"[0-9a-f]{64}", item[name])
+                    for name in ("manifest_sha256", "complete_sha256"))
+                for index, item in enumerate(root_controls))):
+        die("Stage-B source root-control provenance is malformed")
     for name in ("binary", "controller", "taskset"):
         path = Path(contract[name])
         if (path.parent != result_dir / "frozen" or
@@ -2924,7 +3341,8 @@ def receipt_payload(
         "paired_cell_count": len(task.ks), "row_count": 2 * len(task.ks),
         "loss_seed_formula": LOSS_SEED_FORMULA,
         "loss_seeds": [
-            {"K": K, "hex": hex(loss_seed(task.seed, K))} for K in task.ks
+            {"K": K, "hex": hex(loss_seed(task.packet_trace_root, K))}
+            for K in task.ks
         ],
     }
 
@@ -3092,6 +3510,7 @@ def dispatch_tasks(
             pending: dict[Any, Task] = {}
             iterator = iter(tasks)
             failure: Optional[BaseException] = None
+            completed_count = 0
             while True:
                 while failure is None and len(pending) < workers:
                     try:
@@ -3116,11 +3535,12 @@ def dispatch_tasks(
                             failure = exc
                             children.stop()
                     else:
-                        if ((task.job + 1) % 16 == 0 or
-                                task.job + 1 == len(tasks)):
+                        completed_count += 1
+                        if (completed_count % 16 == 0 or
+                                completed_count == len(tasks)):
                             print(
-                                f"# Stage-B screen completed "
-                                f"{task.job + 1}/{len(tasks)}",
+                                f"# Stage-B {task.phase} completed "
+                                f"{completed_count}/{len(tasks)}",
                                 file=sys.stderr, flush=True,
                             )
                 if failure is not None:
@@ -3223,9 +3643,9 @@ def _finish_scope(scope: dict[str, Any]) -> dict[str, Any]:
 def iter_screen_pairs(
     stage: Path, tasks: Sequence[Task], binary: Path, binary_sha256: str,
     taskset: Path, allowed_cpus: set[int],
-    cells: Mapping[tuple[int, str, int], Mapping[str, Any]],
+    cells: Mapping[CellKey, Mapping[str, Any]],
 ) -> Iterator[
-    tuple[tuple[int, str, int], dict[str, dict[str, str]], Mapping[str, Any]]
+    tuple[CellKey, dict[str, dict[str, str]], Mapping[str, Any]]
 ]:
     for task in tasks:
         pairs = validate_shard(
@@ -3234,7 +3654,10 @@ def iter_screen_pairs(
         if len(pairs) != len(task.ks):
             die("validated screen shard pair count mismatch")
         for K, arms in zip(task.ks, pairs):
-            key = task.seed_index, task.schedule, K
+            key: CellKey = (
+                task.construction_seed_index, task.packet_trace_root_index,
+                task.schedule, K,
+            )
             expected = cells.get(key)
             if expected is None:
                 die("screen shard contains a cell outside the matched cohort")
@@ -3243,17 +3666,16 @@ def iter_screen_pairs(
 
 def aggregate_screen_pairs(
     pairs: Iterable[
-        tuple[tuple[int, str, int], Mapping[str, Mapping[str, str]],
-              Mapping[str, Any]]
+        tuple[CellKey, Mapping[str, Mapping[str, str]], Mapping[str, Any]]
     ],
-    expected_keys: set[tuple[int, str, int]],
+    expected_keys: set[CellKey],
 ) -> dict[str, Any]:
     scopes = {
         "full_matched": _empty_scope(), "union": _empty_scope(),
         "control": _empty_scope(),
     }
     by_stratum: dict[str, dict[str, Any]] = {}
-    seen: set[tuple[int, str, int]] = set()
+    seen: set[CellKey] = set()
     weak_cells: list[dict[str, Any]] = []
     for key, arms, expected in pairs:
         if key in seen:
@@ -3265,11 +3687,18 @@ def aggregate_screen_pairs(
             die("screen aggregate cell role/match receipt is malformed")
         _update_scope(scopes["full_matched"], arms)
         _update_scope(scopes[role], arms)
-        seed_index, schedule, K = key
+        construction_seed_index, packet_trace_root_index, schedule, K = key
         band = band_index(K)
-        stratum_name = f"seed{seed_index}:{schedule}:band{band}"
+        stratum_name = (
+            f"construction{construction_seed_index}:"
+            f"trace{packet_trace_root_index}:{schedule}:band{band}"
+        )
         stratum = by_stratum.setdefault(stratum_name, {
-            "seed_index": seed_index, "seed": SEEDS[seed_index],
+            "construction_seed_index": construction_seed_index,
+            "construction_seed": construction_seed_text(
+                construction_seed_index),
+            "packet_trace_root_index": packet_trace_root_index,
+            "packet_trace_root": LOSS_ROOTS[packet_trace_root_index],
             "schedule": schedule, "band_index": band,
             "band": list(BANDS[band]), "full_matched": _empty_scope(),
             "union": _empty_scope(), "control": _empty_scope(),
@@ -3698,7 +4127,7 @@ def cleanup_orphan_allk_staging(stage: Path, tasks: Sequence[Task]) -> None:
 def iter_allk_pairs(
     stage: Path, tasks: Sequence[Task], binary: Path, binary_sha256: str,
     taskset: Path, allowed_cpus: set[int], oracle: StageAAllKOracle,
-) -> Iterator[tuple[tuple[int, str, int], dict[str, dict[str, str]]]]:
+) -> Iterator[tuple[CellKey, dict[str, dict[str, str]]]]:
     previous = -1
     for task in tasks:
         pairs = validate_shard(
@@ -3707,72 +4136,198 @@ def iter_allk_pairs(
         if len(pairs) != len(task.ks):
             die("validated all-K shard pair count mismatch")
         for K, arms in zip(task.ks, pairs):
-            ordinal = ((task.seed_index * len(SCHEDULES) +
-                        SCHEDULES.index(task.schedule)) * K_COUNT + K - K_MIN)
+            key: CellKey = (
+                task.construction_seed_index, task.packet_trace_root_index,
+                task.schedule, K,
+            )
+            ordinal = cell_ordinal(key)
             if ordinal <= previous:
                 die("all-K cells are duplicated or not in canonical order")
             previous = ordinal
-            yield (task.seed_index, task.schedule, K), arms
+            yield key, arms
 
 
 def aggregate_allk_pairs(
     pairs: Iterable[
-        tuple[tuple[int, str, int], Mapping[str, Mapping[str, str]]]
+        tuple[CellKey, Mapping[str, Mapping[str, str]]]
     ],
 ) -> dict[str, Any]:
     overall = _empty_scope()
-    by_seed = {str(index): _empty_scope() for index in range(len(SEEDS))}
-    by_schedule = {schedule: _empty_scope() for schedule in SCHEDULES}
-    by_seed_schedule = {
-        f"seed{index}:{schedule}": _empty_scope()
-        for index in range(len(SEEDS)) for schedule in SCHEDULES
+    by_construction_root = {
+        str(index): _empty_scope() for index in range(len(CONSTRUCTION_ROOTS))
     }
-    failure_by_k = {arm: {} for arm in ARMS}
+    by_packet_trace_root = {
+        str(index): _empty_scope() for index in range(len(LOSS_ROOTS))
+    }
+    by_schedule = {schedule: _empty_scope() for schedule in SCHEDULES}
+    by_k_band = {
+        f"band{index}:{low}-{high}": {
+            "band_index": index, "band": [low, high], **_empty_scope(),
+        }
+        for index, (low, high) in enumerate(BANDS)
+    }
+    by_root_pair_schedule = {
+        f"construction{construction_index}:trace{trace_index}:{schedule}":
+            _empty_scope()
+        for construction_index in range(len(CONSTRUCTION_ROOTS))
+        for trace_index in range(len(LOSS_ROOTS))
+        for schedule in SCHEDULES
+    }
+    failure_by_k: dict[str, dict[int, int]] = {arm: {} for arm in ARMS}
+    failure_by_kc: dict[str, dict[tuple[int, int], int]] = {
+        arm: {} for arm in ARMS
+    }
+    failure_records_kc: dict[
+        str, dict[tuple[int, int], list[dict[str, Any]]]
+    ] = {arm: {} for arm in ARMS}
     weak_cells: list[dict[str, Any]] = []
     count = 0
-    for (seed_index, schedule, K), arms in pairs:
+    previous_ordinal = -1
+    for (construction_index, trace_index, schedule, K), arms in pairs:
+        if (construction_index not in range(len(CONSTRUCTION_ROOTS)) or
+                trace_index not in range(len(LOSS_ROOTS)) or
+                schedule not in SCHEDULES or not K_MIN <= K <= K_MAX):
+            die("all-K aggregate contains an out-of-domain cell")
+        ordinal = cell_ordinal((construction_index, trace_index, schedule, K))
+        if ordinal <= previous_ordinal:
+            die("all-K aggregate is duplicated or not canonically ordered")
+        previous_ordinal = ordinal
         count += 1
         _update_scope(overall, arms)
-        _update_scope(by_seed[str(seed_index)], arms)
+        _update_scope(by_construction_root[str(construction_index)], arms)
+        _update_scope(by_packet_trace_root[str(trace_index)], arms)
         _update_scope(by_schedule[schedule], arms)
-        _update_scope(by_seed_schedule[f"seed{seed_index}:{schedule}"], arms)
+        band = band_index(K)
+        low, high = BANDS[band]
+        _update_scope(by_k_band[f"band{band}:{low}-{high}"], arms)
+        _update_scope(by_root_pair_schedule[
+            f"construction{construction_index}:trace{trace_index}:{schedule}"
+        ], arms)
         failures = {arm: arms[arm]["result"] == "1" for arm in ARMS}
         for arm in ARMS:
             if failures[arm]:
                 failure_by_k[arm][K] = failure_by_k[arm].get(K, 0) + 1
+                kc = (K, construction_index)
+                failure_by_kc[arm][kc] = failure_by_kc[arm].get(kc, 0) + 1
+                failure_records_kc[arm].setdefault(kc, []).append({
+                    "packet_trace_root_index": trace_index,
+                    "packet_trace_root": LOSS_ROOTS[trace_index],
+                    "schedule": schedule,
+                    "pair_id": arms[arm]["pair_id"],
+                })
         if any(failures.values()):
             weak_cells.append({
-                **cell_key_payload((seed_index, schedule, K)),
+                **cell_key_payload((construction_index, trace_index, schedule, K)),
                 "outcomes": {
                     arm: arms[arm]["result_name"] for arm in ARMS
                 },
                 "pair_id": arms["h12"]["pair_id"],
             })
     if count != ALLK_CELLS:
-        die("all-K reduction did not contain the exact 575,991-cell census")
+        die("all-K reduction did not contain the exact 1,727,973-cell census")
     _finish_scope(overall)
-    for mapping in (by_seed, by_schedule, by_seed_schedule):
+    for mapping in (
+            by_construction_root, by_packet_trace_root, by_schedule,
+            by_k_band, by_root_pair_schedule):
         for scope in mapping.values():
             _finish_scope(scope)
     weak_k = {}
     for arm in ARMS:
-        histogram = {str(value): 0 for value in range(10)}
+        strata_per_k = checked_product(
+            len(CONSTRUCTION_ROOTS), len(LOSS_ROOTS), len(SCHEDULES),
+        )
+        strata_per_kc = checked_product(len(LOSS_ROOTS), len(SCHEDULES))
+        kc_histogram = {
+            str(value): 0 for value in range(strata_per_kc + 1)
+        }
+        for construction_index in range(len(CONSTRUCTION_ROOTS)):
+            for K in range(K_MIN, K_MAX + 1):
+                failures = failure_by_kc[arm].get(
+                    (K, construction_index), 0,
+                )
+                if failures > strata_per_kc:
+                    die("one all-K (K,construction) exceeds nine failures")
+                kc_histogram[str(failures)] += 1
+        k_histogram = {
+            str(value): 0 for value in range(strata_per_k + 1)
+        }
         for K in range(K_MIN, K_MAX + 1):
             failures = failure_by_k[arm].get(K, 0)
-            if failures > 9:
-                die("one all-K K has more than nine named-stratum failures")
-            histogram[str(failures)] += 1
+            if failures > strata_per_k:
+                die("one all-K K exceeds the named-stratum failure count")
+            k_histogram[str(failures)] += 1
         weak_k[arm] = {
-            "weak_K": K_COUNT - histogram["0"],
-            "multi_failure_K": sum(histogram[str(value)] for value in range(2, 10)),
-            "maximum_failure_strata": max(failure_by_k[arm].values(), default=0),
-            "failure_strata_histogram_0_to_9": histogram,
+            "sampled_unique_K": K_COUNT,
+            "sampled_K_construction_pairs": checked_product(
+                K_COUNT, len(CONSTRUCTION_ROOTS),
+            ),
+            "weak_K_construction_pairs": (
+                checked_product(K_COUNT, len(CONSTRUCTION_ROOTS)) -
+                kc_histogram["0"]
+            ),
+            "weak_K": K_COUNT - k_histogram["0"],
+            "multi_failure_K_construction_pairs": sum(
+                kc_histogram[str(value)]
+                for value in range(2, strata_per_kc + 1)
+            ),
+            "multi_failure_K": sum(
+                k_histogram[str(value)]
+                for value in range(2, strata_per_k + 1)
+            ),
+            "maximum_failure_strata_per_K_construction": max(
+                failure_by_kc[arm].values(), default=0,
+            ),
+            "maximum_failure_strata_per_K": max(
+                failure_by_k[arm].values(), default=0,
+            ),
+            # Preserve the original weak-K receipt names while adding the
+            # explicit per-(K,C) and per-K vocabulary used by Stage A v2.
+            "maximum_failure_strata": max(
+                failure_by_k[arm].values(), default=0,
+            ),
+            f"failure_strata_histogram_per_K_construction_0_to_{strata_per_kc}":
+                kc_histogram,
+            f"failure_strata_histogram_per_K_0_to_{strata_per_k}": k_histogram,
+            f"failure_strata_histogram_0_to_{strata_per_k}": k_histogram,
+            "weak_K_construction_records": [
+                {
+                    "K": K,
+                    "construction_seed_index": construction_index,
+                    "construction_seed": construction_seed_text(
+                        construction_index),
+                    "failure_strata": len(records),
+                    "failures": records,
+                }
+                for (K, construction_index), records in sorted(
+                    failure_records_kc[arm].items())
+            ],
+            "weak_K_records": [
+                {
+                    "K": K,
+                    "failure_strata": failure_by_k[arm][K],
+                    "construction_seed_multiplicities": [
+                        {
+                            "construction_seed_index": construction_index,
+                            "construction_seed": construction_seed_text(
+                                construction_index),
+                            "failure_strata": failure_by_kc[arm].get(
+                                (K, construction_index), 0),
+                        }
+                        for construction_index in range(
+                            len(CONSTRUCTION_ROOTS))
+                    ],
+                }
+                for K in sorted(failure_by_k[arm])
+            ],
         }
     return {
         "overall": overall,
         "descriptive_scopes": {
-            "by_packet_trace_root": by_seed, "by_schedule": by_schedule,
-            "by_packet_trace_root_schedule": by_seed_schedule,
+            "by_construction_root": by_construction_root,
+            "by_packet_trace_root": by_packet_trace_root,
+            "by_schedule": by_schedule,
+            "by_K_band": by_k_band,
+            "by_root_pair_schedule": by_root_pair_schedule,
         },
         "weak_K": weak_k, "weak_cells": weak_cells,
     }
@@ -4172,7 +4727,9 @@ def reduce_allk(args: argparse.Namespace, result_dir: Path) -> None:
         "schema": f"{SCHEMA}.allk_analysis",
         "phase": "allk", "coverage": {
             "K_min": K_MIN, "K_max": K_MAX, "unique_K": K_COUNT,
-            "packet_trace_roots": len(SEEDS), "schedules": len(SCHEDULES),
+            "construction_roots": len(CONSTRUCTION_ROOTS),
+            "packet_trace_roots": len(LOSS_ROOTS),
+            "schedules": len(SCHEDULES),
             "paired_cells": ALLK_CELLS, "arm_outcomes": ALLK_OUTCOMES,
             "pair_native_tasks": ALLK_TASKS,
         },
@@ -4196,10 +4753,12 @@ def reduce_allk(args: argparse.Namespace, result_dir: Path) -> None:
         },
         "campaign_completion": completion,
         "interpretation": (
-            "Exact deterministic all-K census over the same nine named "
-            "packet-loss strata, with every construction/trace receipt checked "
-            "against the pinned Stage-A OH0 oracle. Statistical values are "
-            "descriptive rather than IID population claims."
+            "Exact deterministic all-K census over all 27 named "
+            "construction-root/loss-root/schedule strata, with every receipt "
+            "checked against the pinned Stage-A OH0 oracle. Weak (K,C), "
+            "weak-K, and per-K-band summaries describe the grouped Stage-B "
+            "architecture itself. Statistical values are descriptive rather "
+            "than IID population claims."
         ),
     }
     write_sealed_once(
