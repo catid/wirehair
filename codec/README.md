@@ -322,6 +322,76 @@ prefix at every requested overhead, with each larger arm appending packets to
 the smaller one.  This makes `failure_trials` sets directly comparable and
 should produce a monotone failure curve for rank-only solves.
 
+The narrow test-hook `precodefail --raw-attempt0` mode is reserved for the
+P48/shared-X, constant-residue, mix2 Stage-A comparison of 10+2 (H12) against
+11+2 (H13).  It requires one trial, one thread, 64-byte seed blocks,
+`--paired-overhead-stream`, the literal D12 `--binary-dense-two-anchor`, and a
+burst, adversarial, or repair-only schedule.  It constructs attempt zero
+directly: a systematic probe returning `NeedMore` is recorded but never
+repaired, retried, or used to select another seed.  Each CSV row appends the
+forced attempt, base and active matrix/peel seeds, probe result, precode count,
+and the exact loss-seed and SHA-256 receipt for the packet-ID trace actually
+solved.  This mode does not alter ordinary `precodefail` output or production
+profile selection.
+
+The corresponding restartable census controller is
+`bench/wh2_h13_stage_a.py`.  It freezes the benchmark and controller, emits
+4,608 OH0 jobs covering K=2..64000 under three seeds and three hard schedules
+(575,991 paired cell keys, 575,991 outcomes per arm), validates strict per-job
+receipts, then runs
+both arms at OH1 only for the OH0 union failures and repeats on nested packet
+prefixes through OH1024.  Prepare it without launching work, then use the
+printed frozen commands:
+
+```bash
+python3 bench/wh2_h13_stage_a.py prepare \
+  --binary build/codec/wirehair_v2_bench \
+  --result-dir /absolute/path/to/wh2-h13-stage-a \
+  --telemetry-log /absolute/path/to/existing-thermal.csv
+/absolute/path/to/wh2-h13-stage-a/frozen/wh2_h13_stage_a.py run \
+  --result-dir /absolute/path/to/wh2-h13-stage-a --cpus 0-63
+/absolute/path/to/wh2-h13-stage-a/frozen/wh2_h13_stage_a.py reduce \
+  --result-dir /absolute/path/to/wh2-h13-stage-a
+```
+
+CPU 127 is rejected because it is reserved for campaign telemetry.  The
+controller does not start or stop filler, thermal sampling, or host-isolation
+services.  When `--telemetry-log` is supplied, it binds the existing log's
+inode and exact byte interval, requires at least one sample, validates the
+canonical thermal schema, monotonic gaps, load floor, temperatures, DIMM read
+status, and EDAC counter continuity, and publishes a semantic receipt.  The
+external sampler process identity remains an operator/root provenance
+responsibility.  This is deliberately one continuous interval: the sampler
+and enough externally supervised filler to maintain the 95% busy floor must
+remain alive from the first `telemetry_start.json` through terminal completion,
+including controller downtime.  An idle sample or a gap longer than five
+seconds, including a final sample more than five seconds behind canonical
+system uptime at interval sealing, makes that result directory ineligible for
+a formal claim; restart the campaign in a fresh result directory rather than
+weakening or splicing the receipt.  A formal run should not claim thermal
+evidence when that option is omitted.
+
+Every benchmark is launched in its own registered process group.  SIGINT and
+SIGTERM cancel pending work, kill and reap all active groups, and Linux
+`PR_SET_PDEATHSIG` kills a benchmark even if the controller itself dies.  A
+restart accepts only exact manifest-named sealed shards; extra, missing,
+symlinked, or staging entries fail closed, as do out-of-ledger files at a stage
+or campaign root.  Terminal verification also replays per-arm nesting and
+rejects any success-to-failure reversal before publication.  `terminal.json`
+is written before the external telemetry audit, but is not a publishable
+completion marker.
+Only `campaign_complete.json`, written after telemetry succeeds (or after an
+explicit null-telemetry receipt), cross-seals the contract, controller
+affinity, complete stage chain, terminal receipt, and telemetry disposition;
+reduction requires that final cross-seal.
+
+The JSON SHA-256 seals detect accidental substitution inside a trusted,
+operator-owned result directory; they are unkeyed integrity receipts, not
+authentication against a malicious writer who can replace both content and
+seals.  Minimum overheads unresolved at OH1024 are reported as
+right-censored/unknown (`null` p99 when the selected order statistic is
+censored), never as an observed OH1024 or synthetic OH1025 success.
+
 Test builds also expose `--source-hits N` and
 `--packet-peel-seed-xor U32` on `precodefail`.  The latter perturbs the
 profile-derived sparse-row seed without replacing its K-dependent derivation,

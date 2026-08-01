@@ -1,0 +1,1216 @@
+#!/usr/bin/env python3
+"""Boundary and fail-closed tests for the WH2 H13 Stage-A controller."""
+
+from __future__ import annotations
+
+import csv
+from contextlib import redirect_stderr, redirect_stdout
+import fcntl
+import io
+import json
+import os
+from pathlib import Path
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+from types import SimpleNamespace
+from typing import Any
+import unittest
+from unittest import mock
+
+import wh2_h13_stage_a as campaign
+
+
+def wait_for_path(path: Path, *, present: bool, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while path.exists() != present and time.monotonic() < deadline:
+        time.sleep(0.01)
+    if path.exists() != present:
+        raise AssertionError(
+            f"path presence did not become {present}: {path}",
+        )
+
+
+def read_pid_when_ready(path: Path, timeout: float = 5.0) -> int:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            text = path.read_text(encoding="ascii").strip()
+        except FileNotFoundError:
+            text = ""
+        if text.isdigit() and int(text) > 1:
+            return int(text)
+        time.sleep(0.01)
+    raise AssertionError(f"PID file did not become complete: {path}")
+
+
+def task(arm: str, ks: tuple[int, ...] = (2,), *, overhead: int = 0,
+         job: int | None = None) -> campaign.Task:
+    return campaign._new_task(
+        overhead, (0 if arm == "h12" else 1) if job is None else job,
+        0, arm, 0, "burst", ks,
+    )
+
+
+def row_for(
+    value: campaign.Task, K: int, *, outcome: str = "success",
+    overrides: dict[str, str] | None = None,
+) -> dict[str, str]:
+    row = {field: "0" for field in campaign.BENCH_HEADER}
+    row.update({
+        "N": str(K), "bb": "64", "heavy_family": "periodic",
+        "mix_count": "2", "overhead": str(value.overhead), "trials": "1",
+        "success": "1" if outcome == "success" else "0",
+        "rank_fail": "1" if outcome == "rank_fail" else "0",
+        "error": "1" if outcome == "error" else "0",
+        "fail_rate": "0.00000000" if outcome == "success" else "1.00000000",
+        "inact_mu": "17.000", "inact_max": "17",
+        "binary_def_mu": "12.000", "binary_def_max": "12",
+        "heavy_gain_mu": "11.000" if outcome == "rank_fail" else "12.000",
+        "heavy_gain_min": "11" if outcome == "rank_fail" else "12",
+        "heavy_shortfall": "1" if outcome == "rank_fail" else "0",
+        "solve_ms_mu": "0.053",
+        "build_ms_mu": "0.001", "peel_ms_mu": "0.009",
+        "project_ms_mu": "0.003", "residual_ms_mu": "0.039",
+        "backsub_ms_mu": "0.001", "seed_attempt": "0",
+        "block_xors_mu": "97.000", "block_muladds_mu": "540.000",
+        "first_rank_fail": "0" if outcome == "rank_fail" else "-1",
+        "binary_def_hist": "12:1",
+        "heavy_gain_hist": "11:1" if outcome == "rank_fail" else "12:1",
+        "failure_trials": "" if outcome == "success" else "0",
+        "active_packet_peel_seed_xor": "0x0",
+        "mixed_joint_source_xors_mu": "4.000",
+        "mixed_joint_marginal_xors_mu": "5.000",
+        "mixed_joint_marginal_copies_mu": "6.000",
+        "mixed_joint_active_deltas_mu": "7.000",
+        "mixed_joint_scratch_bytes_mu": "8.000",
+        "mixed_dual_source_columns_mu": "9.000",
+        "construction_attempt": "0", "base_matrix_seed": "0x1234",
+        "base_peel_seed": "0x5678", "matrix_seed": "0x1234",
+        "peel_seed": "0x5678", "actual_staircase_rows": str(K),
+        "actual_dense_rows": "12",
+        "actual_heavy_rows": "12" if value.arm == "h12" else "13",
+        "actual_source_hits": "2" if K < 10000 else "3",
+        "actual_dense_two_anchor": "1",
+        "actual_dense_two_anchor_phase": "0",
+        "systematic_probe_result": "0",
+        "precode_count": str(K + (24 if value.arm == "h12" else 25)),
+        "packet_trace_seed": hex(campaign.loss_seed(value.seed, K)),
+        "packet_trace_sha256": "a" * 64,
+    })
+    if overrides:
+        row.update(overrides)
+    return row
+
+
+def output_for(
+    value: campaign.Task, *, outcomes: dict[int, str] | None = None,
+    overrides: dict[int, dict[str, str]] | None = None,
+) -> str:
+    stream = io.StringIO(newline="")
+    stream.write(campaign.expected_preamble_line(value) + "\n")
+    writer = csv.DictWriter(
+        stream, fieldnames=campaign.BENCH_HEADER, lineterminator="\n",
+    )
+    writer.writeheader()
+    for K in value.ks:
+        writer.writerow(row_for(
+            value, K, outcome=(outcomes or {}).get(K, "success"),
+            overrides=(overrides or {}).get(K),
+        ))
+    return stream.getvalue()
+
+
+def telemetry_row(
+    monotonic: int, busy: str = "99.0", *, cpu_temp: str = "65.0",
+    dimm_temp: str = "40.0", dimm_errors: str = "0",
+    edac_ce: str = "0", edac_ue: str = "0",
+) -> bytes:
+    values = [
+        f"2026-08-01T00:00:{monotonic % 60:02d}Z", str(monotonic), busy,
+        "3000.0", cpu_temp, *(dimm_temp for _ in range(8)), dimm_errors,
+        "100.0", "100.0", "100.0", edac_ce, edac_ue,
+    ]
+    assert len(values) == len(campaign.THERMAL_FIELDS)
+    return (",".join(values) + "\n").encode("ascii")
+
+
+class PlannerTests(unittest.TestCase):
+    def test_exact_oh0_cardinality_and_chunking(self) -> None:
+        tasks = campaign.build_tasks(0)
+        self.assertEqual(len(tasks), 4608)
+        self.assertEqual(campaign.PAIRED_CELLS, 575991)
+        self.assertEqual(
+            sum(len(value.ks) for value in tasks), 2 * 575991,
+        )
+        self.assertTrue(all(len(value.ks) <= 250 for value in tasks))
+        self.assertEqual(tasks[0].ks, tuple(range(2, 252)))
+        self.assertEqual(tasks[-1].ks[-1], 64000)
+        self.assertEqual(len(tasks[-1].ks), 249)
+
+    def test_arm_argv_has_exactly_one_geometry_delta(self) -> None:
+        binary = Path("/frozen/wirehair_v2_bench")
+        left = campaign.make_benchmark_argv(binary, task("h12"))
+        right = campaign.make_benchmark_argv(binary, task("h13"))
+        differences = [
+            (index, a, b) for index, (a, b) in enumerate(zip(left, right))
+            if a != b
+        ]
+        self.assertEqual(len(differences), 1)
+        self.assertEqual(differences[0][1:], ("10", "11"))
+        self.assertIn("--raw-attempt0", left)
+        self.assertIn("--paired-overhead-stream", left)
+        self.assertIn("--binary-dense-two-anchor", left)
+        self.assertEqual(left[left.index("--seed-block-bytes") + 1], "64")
+        self.assertNotIn("--seed-width", left)
+
+    def test_nested_planner_runs_both_arms_only_on_union(self) -> None:
+        cohort = {(0, "burst", 2), (0, "burst", 64000),
+                  (2, "repair-only", 41)}
+        tasks = campaign.build_tasks(17, cohort)
+        self.assertEqual(len(tasks), 4)
+        actual = {
+            (value.seed_index, value.schedule, K)
+            for value in tasks for K in value.ks
+        }
+        self.assertEqual(actual, cohort)
+        self.assertEqual([value.arm for value in tasks], ["h12", "h13"] * 2)
+        with self.assertRaises(campaign.CampaignError):
+            campaign.build_tasks(18, [
+                (0, "burst", 2), (0, "burst", 2),
+            ])
+
+    def test_unbounded_job_ids_and_checked_accounting(self) -> None:
+        before = task("h12", job=99999)
+        after = task("h12", job=100000)
+        self.assertNotEqual(before.stem, after.stem)
+        self.assertIn("job0099999", before.stem)
+        self.assertIn("job0100000", after.stem)
+        self.assertEqual(
+            campaign.task_from_payload(after.payload()), after,
+        )
+        for field, bad_value in (("job", True), ("overhead", 1.0),
+                                 ("seed_index", "0")):
+            malformed = after.payload()
+            malformed[field] = bad_value
+            with self.subTest(field=field):
+                with self.assertRaises(campaign.CampaignError):
+                    campaign.task_from_payload(malformed)
+        with self.assertRaises(campaign.CampaignError):
+            campaign.checked_product(1 << 62, 4)
+
+    def test_exact_loss_seed_formula(self) -> None:
+        self.assertEqual(
+            hex(campaign.loss_seed(campaign.SEEDS[0], 64)),
+            "0x8a7aff2a3a348603",
+        )
+        self.assertEqual(
+            hex(campaign.loss_seed(campaign.SEEDS[0], 2)),
+            "0x3bca6207163f7b69",
+        )
+
+    def test_nan_timeout_is_rejected_before_dispatch(self) -> None:
+        errors = io.StringIO()
+        with redirect_stderr(errors):
+            result = campaign.main([
+                "run", "--result-dir", "/does/not/exist", "--cpus", "0",
+                "--timeout", "nan",
+            ])
+        self.assertEqual(result, 2)
+        self.assertIn("finite and positive", errors.getvalue())
+
+    def test_explicit_zero_workers_is_not_treated_as_default(self) -> None:
+        self.assertEqual(campaign.resolve_worker_count(None, [1, 2]), 2)
+        with self.assertRaises(campaign.CampaignError):
+            campaign.resolve_worker_count(0, [1, 2])
+
+    def test_freeze_accepts_trusted_host_tool_hardlink_source_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "taskset-a"
+            alias = root / "taskset-b"
+            source.write_bytes(b"trusted-host-tool")
+            os.link(source, alias)
+            with self.assertRaises(campaign.CampaignError):
+                campaign._copy_unique(source, root / "strict-copy", True)
+            digest = campaign._copy_unique(
+                source, root / "host-tool-copy", True,
+                allow_source_hardlinks=True,
+            )
+            self.assertEqual(digest, campaign.sha256_file(root / "host-tool-copy"))
+            self.assertEqual((root / "host-tool-copy").stat().st_nlink, 1)
+
+    def test_prepare_freezes_exact_4608_job_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            binary = root / "bench"
+            binary.write_bytes(b"fake-test-hook-benchmark")
+            binary.chmod(0o755)
+            result_dir = root / "campaign"
+            output = io.StringIO()
+            with redirect_stdout(output):
+                campaign.prepare(SimpleNamespace(
+                    binary=binary, result_dir=result_dir, telemetry_log=None,
+                ))
+            contract = campaign.load_contract(
+                result_dir.resolve(), require_frozen_controller=False,
+            )
+            self.assertEqual(contract["paired_cells"], 575991)
+            self.assertEqual(contract["outcomes_per_arm"], 575991)
+            tasks = campaign.load_manifest(campaign.stage_path(result_dir, 0), 0)
+            self.assertEqual(len(tasks), 4608)
+            self.assertIn('"oh0_jobs":4608', output.getvalue())
+
+    def test_oh0_manifest_rejects_a_resealed_truncated_census(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            stage = Path(temporary) / "stage"
+            tasks = campaign.build_tasks(0)
+            campaign.write_sealed_once(
+                stage / "manifest.json", f"{campaign.SCHEMA}.stage_manifest",
+                campaign.manifest_payload(0, tasks[:-2]),
+            )
+            with self.assertRaises(campaign.CampaignError):
+                campaign.load_manifest(stage, 0)
+
+    def test_exclusive_campaign_lock_rejects_second_controller(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            descriptor = os.open(root / "controller.lock", os.O_RDWR | os.O_CREAT, 0o600)
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+            @campaign.exclusive_campaign
+            def probe(_args, resolved):
+                return resolved
+
+            try:
+                with self.assertRaises(campaign.CampaignError):
+                    probe(SimpleNamespace(result_dir=root))
+            finally:
+                os.close(descriptor)
+            self.assertEqual(probe(SimpleNamespace(result_dir=root)), root.resolve())
+
+    def test_controller_affinity_is_bound_and_receipted(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with mock.patch.object(campaign.os, "sched_setaffinity") as setter, \
+                    mock.patch.object(
+                        campaign.os, "sched_getaffinity", return_value={2, 3}):
+                campaign.bind_controller_affinity(root, [2, 3])
+            setter.assert_called_once_with(0, {2, 3})
+            receipt = campaign.load_sealed(
+                root / "controller_affinity.json",
+                f"{campaign.SCHEMA}.controller_affinity",
+            )
+            self.assertEqual(receipt["actual_cpus"], [2, 3])
+            self.assertTrue(receipt["reserved_cpu_127_excluded"])
+
+
+class SignalLifecycleTests(unittest.TestCase):
+    def _fixture(self, root: Path) -> tuple[subprocess.Popen[bytes], Path, Path, Path]:
+        value = task("h12")
+        output = root / "output.csv"
+        output.write_text(output_for(value), encoding="ascii")
+        mode = root / "mode"
+        mode.write_text("sleep", encoding="ascii")
+        child_pid = root / "child.pid"
+        binary = root / "fake-benchmark"
+        binary.write_text(
+            f"#!{sys.executable}\n"
+            "import os\n"
+            "from pathlib import Path\n"
+            "import sys\n"
+            "import time\n"
+            f"pid_path = Path({str(child_pid)!r})\n"
+            f"mode_path = Path({str(mode)!r})\n"
+            f"output_path = Path({str(output)!r})\n"
+            "pid_path.write_text(str(os.getpid()), encoding='ascii')\n"
+            "if mode_path.read_text(encoding='ascii') == 'sleep':\n"
+            "    time.sleep(60)\n"
+            "sys.stdout.write(output_path.read_text(encoding='ascii'))\n",
+            encoding="utf-8",
+        )
+        binary.chmod(0o755)
+        taskset = root / "taskset"
+        taskset.write_text(
+            f"#!{sys.executable}\n"
+            "import os\n"
+            "import sys\n"
+            "os.execv(sys.argv[3], sys.argv[3:])\n",
+            encoding="utf-8",
+        )
+        taskset.chmod(0o755)
+        harness = root / "harness.py"
+        harness.write_text(
+            "from pathlib import Path\n"
+            "import queue\n"
+            "import sys\n"
+            f"sys.path.insert(0, {str(Path(campaign.__file__).parent)!r})\n"
+            "import wh2_h13_stage_a as campaign\n"
+            f"root = Path({str(root)!r})\n"
+            f"binary = Path({str(binary)!r})\n"
+            f"taskset = Path({str(taskset)!r})\n"
+            "value = campaign._new_task(0, 0, 0, 'h12', 0, 'burst', (2,))\n"
+            "cpus = queue.Queue()\n"
+            "cpus.put(2)\n"
+            "try:\n"
+            "    campaign.dispatch_tasks(\n"
+            "        root, root / 'stage', [value], binary,\n"
+            "        campaign.sha256_file(binary), taskset,\n"
+            "        campaign.sha256_file(taskset), cpus, 1, 30.0, {2})\n"
+            "except campaign.CampaignInterrupted as exc:\n"
+            "    raise SystemExit(128 + exc.signum)\n",
+            encoding="utf-8",
+        )
+        process = subprocess.Popen(
+            [sys.executable, str(harness)], stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        read_pid_when_ready(child_pid)
+        return process, child_pid, mode, harness
+
+    def _assert_signal_cleanup(self, signals: tuple[int, ...]) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            process, child_pid_path, mode, harness = self._fixture(root)
+            child_pid = int(child_pid_path.read_text(encoding="ascii"))
+            for signum in signals:
+                try:
+                    process.send_signal(signum)
+                except ProcessLookupError:
+                    break
+            stdout, stderr = process.communicate(timeout=10)
+            self.assertEqual(stdout, b"")
+            self.assertEqual(stderr, b"")
+            self.assertEqual(process.returncode, 128 + signals[0])
+            wait_for_path(Path(f"/proc/{child_pid}"), present=False)
+            self.assertFalse((root / "stage" / "shards").exists())
+
+            # The interrupted task left no trusted shard and restarts once.
+            mode.write_text("fast", encoding="ascii")
+            restarted = subprocess.run(
+                [sys.executable, str(harness)], capture_output=True,
+                timeout=10, check=False,
+            )
+            self.assertEqual(restarted.returncode, 0, restarted.stderr)
+            final = campaign.shard_path(root / "stage", task("h12"))
+            self.assertTrue(final.is_dir())
+
+    def test_sigint_sigterm_and_double_signal_leave_no_child_or_duplicate(self) -> None:
+        for signals in (
+                (signal.SIGINT,), (signal.SIGTERM,),
+                (signal.SIGINT, signal.SIGINT)):
+            with self.subTest(signals=signals):
+                self._assert_signal_cleanup(signals)
+
+    def test_sigkill_parent_death_signal_leaves_no_detached_child(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            process, child_pid_path, _mode, _harness = self._fixture(
+                Path(temporary),
+            )
+            child_pid = int(child_pid_path.read_text(encoding="ascii"))
+            process.kill()
+            process.communicate(timeout=10)
+            self.assertEqual(process.returncode, -signal.SIGKILL)
+            wait_for_path(Path(f"/proc/{child_pid}"), present=False)
+
+    def test_parent_death_launcher_rejects_wrong_expected_parent(self) -> None:
+        process = subprocess.run(
+            [str(Path(campaign.__file__).resolve()), "__pdeath_exec",
+             str(os.getpid() + 1000000), sys.executable, "-c", "pass"],
+            capture_output=True, timeout=10, check=False,
+        )
+        self.assertEqual(process.returncode, -signal.SIGKILL)
+
+
+class ParserTests(unittest.TestCase):
+    def test_strict_valid_receipt_and_need_more(self) -> None:
+        value = task("h12", (2, 3))
+        parsed = campaign.parse_output(output_for(
+            value, outcomes={3: "rank_fail"},
+            overrides={3: {"systematic_probe_result": "1"}},
+        ), value)
+        self.assertEqual(len(parsed), 2)
+        self.assertEqual(parsed[1]["systematic_probe_result"], "1")
+
+    def test_source_hits_canonical_cutoff_is_sealed(self) -> None:
+        value = task("h12", (9999, 10000))
+        parsed = campaign.parse_output(output_for(value), value)
+        self.assertEqual(
+            [row["actual_source_hits"] for row in parsed], ["2", "3"],
+        )
+        with self.assertRaises(campaign.CampaignError):
+            campaign.parse_output(output_for(
+                value, overrides={10000: {"actual_source_hits": "2"}},
+            ), value)
+
+    def test_rejects_header_preamble_and_numeric_mutations(self) -> None:
+        value = task("h12")
+        valid = output_for(value)
+        lines = valid.splitlines(keepends=True)
+        tokens = lines[0].rstrip("\n").split(" ")
+        tokens[-1], tokens[-2] = tokens[-2], tokens[-1]
+        cases = [
+            " ".join(tokens) + "\n" + "".join(lines[1:]),
+            valid.replace("packet_trace_sha256", "packet_trace_sha257", 1),
+            valid.replace("N,bb", '"N",bb', 1),
+            valid.replace("\n2,64", '\n"2",64', 1),
+            output_for(value, overrides={2: {"success": "01"}}),
+            output_for(value, overrides={2: {"base_matrix_seed": "0X1234"}}),
+            output_for(value, overrides={2: {"packet_trace_seed": "0x0"}}),
+            output_for(value, overrides={2: {"error": "1", "success": "0",
+                                             "fail_rate": "1.00000000",
+                                             "failure_trials": "0"}}),
+            output_for(value, overrides={2: {"actual_dense_rows": "13",
+                                             "precode_count": "27"}}),
+        ]
+        for mutated in cases:
+            with self.subTest(prefix=mutated[:50]):
+                with self.assertRaises(campaign.CampaignError):
+                    campaign.parse_output(mutated, value)
+
+    def test_pairing_rejects_receipt_substitution(self) -> None:
+        left = task("h12")
+        right = task("h13")
+        left_rows = campaign.parse_output(output_for(left), left)
+        right_rows = campaign.parse_output(output_for(right), right)
+        paired = campaign.pair_rows(((left, left_rows), (right, right_rows)))
+        self.assertEqual(len(paired), 1)
+        bad_right = campaign.parse_output(output_for(
+            right, overrides={2: {
+                "base_matrix_seed": "0x999", "matrix_seed": "0x999",
+            }},
+        ), right)
+        with self.assertRaises(campaign.CampaignError):
+            campaign.pair_rows(((left, left_rows), (right, bad_right)))
+
+
+class ReceiptAndReducerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Synthetic telemetry rows use a small deterministic boot clock.
+        # Keep the seal-time freshness check on that same clock domain.
+        patcher = mock.patch.object(
+            campaign, "system_uptime_s", return_value=105.0,
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _verify_tiny_terminal(
+        self, root: Path, contract: dict[str, Any],
+    ) -> dict[str, Any]:
+        with mock.patch.multiple(
+                campaign, OH0_JOBS=2, TOTAL_ARM_OUTCOMES=2):
+            return campaign.verify_terminal_campaign(root, contract, {2})
+
+    def _write_shard(
+        self, stage: Path, value: campaign.Task, binary: Path, taskset: Path,
+        *, receipt_task: campaign.Task | None = None,
+        outcome: str = "success",
+        outcomes: dict[int, str] | None = None,
+    ) -> str:
+        output = output_for(
+            value,
+            outcomes=(outcomes if outcomes is not None else
+                      {K: outcome for K in value.ks}),
+        )
+        stdout = output.encode("ascii")
+        stderr = b""
+        final = campaign.shard_path(stage, value)
+        final.mkdir(parents=True)
+        benchmark_argv = campaign.make_benchmark_argv(binary, receipt_task or value)
+        command = [str(taskset), "-c", "2", *benchmark_argv]
+        campaign.atomic_write(final / "stdout.csv", stdout)
+        campaign.atomic_write(final / "stderr.txt", stderr)
+        campaign.write_sealed_once(
+            final / "receipt.json", f"{campaign.SCHEMA}.job_receipt",
+            campaign.receipt_payload(
+                receipt_task or value, benchmark_argv, command, 2,
+                campaign.sha256_file(binary), stdout, stderr, len(value.ks),
+            ),
+        )
+        return output
+
+    def test_restart_accepts_only_exact_sealed_shard(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            stage = root / "stage"
+            binary = root / "bench"
+            taskset = root / "taskset"
+            binary.write_bytes(b"binary-v1")
+            taskset.write_bytes(b"taskset-v1")
+            value = task("h12")
+            self._write_shard(stage, value, binary, taskset)
+            digest = campaign.sha256_file(binary)
+            first = campaign.validate_shard(
+                stage, value, binary, digest, taskset, {2},
+            )
+            second = campaign.validate_shard(
+                stage, value, binary, digest, taskset, {2},
+            )
+            self.assertEqual(first, second)
+            stdout = campaign.shard_path(stage, value) / "stdout.csv"
+            stdout.write_bytes(stdout.read_bytes() + b"substitution\n")
+            with self.assertRaises(campaign.CampaignError):
+                campaign.validate_shard(
+                    stage, value, binary, digest, taskset, {2},
+                )
+
+    def test_cross_arm_receipt_substitution_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            stage = root / "stage"
+            binary = root / "bench"
+            taskset = root / "taskset"
+            binary.write_bytes(b"binary-v1")
+            taskset.write_bytes(b"taskset-v1")
+            left = task("h12")
+            right = task("h13")
+            self._write_shard(stage, right, binary, taskset, receipt_task=left)
+            with self.assertRaises(campaign.CampaignError):
+                campaign.validate_shard(
+                    stage, right, binary, campaign.sha256_file(binary), taskset,
+                    {2},
+                )
+
+    def test_job_receipt_rejects_bool_aliases_and_unsealed_cpu(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            stage = root / "stage"
+            binary = root / "bench"
+            taskset = root / "taskset"
+            binary.write_bytes(b"binary-v1")
+            taskset.write_bytes(b"taskset-v1")
+            value = task("h12")
+            self._write_shard(stage, value, binary, taskset)
+            receipt_path = campaign.shard_path(stage, value) / "receipt.json"
+            original = campaign.load_sealed(
+                receipt_path, f"{campaign.SCHEMA}.job_receipt",
+            )
+            mutations = (
+                ("cpu", True), ("cpu", 3), ("returncode", False),
+                ("row_count", True),
+            )
+            for field, replacement in mutations:
+                with self.subTest(field=field, replacement=replacement):
+                    mutated = json.loads(campaign.canonical_json(original))
+                    mutated[field] = replacement
+                    receipt_path.unlink()
+                    campaign.write_sealed_once(
+                        receipt_path, f"{campaign.SCHEMA}.job_receipt",
+                        mutated,
+                    )
+                    with self.assertRaises(campaign.CampaignError):
+                        campaign.validate_shard(
+                            stage, value, binary,
+                            campaign.sha256_file(binary), taskset, {2},
+                        )
+                    receipt_path.unlink()
+                    campaign.write_sealed_once(
+                        receipt_path, f"{campaign.SCHEMA}.job_receipt",
+                        original,
+                    )
+
+    def test_metrics_include_mcnemar_and_joint_common_success_work(self) -> None:
+        left = task("h12", (2, 3, 4))
+        right = task("h13", (2, 3, 4))
+        left_rows = campaign.parse_output(output_for(
+            left, outcomes={2: "rank_fail"},
+        ), left)
+        right_rows = campaign.parse_output(output_for(
+            right, outcomes={3: "rank_fail"},
+        ), right)
+        cells = campaign.pair_rows(((left, left_rows), (right, right_rows)))
+        report = campaign.aggregate_cells(cells)
+        comparison = report["comparison"]
+        self.assertEqual(comparison["repairs"], 1)
+        self.assertEqual(comparison["introductions"], 1)
+        self.assertEqual(comparison["exact_two_sided_mcnemar"], "1")
+        self.assertEqual(comparison["common_success"], 1)
+        self.assertEqual(
+            comparison["common_success_work"]["h13"]
+            ["mixed_joint_source_xors_mu_milli_sum"], 4000,
+        )
+        self.assertEqual(
+            comparison["h13_over_h12_common_success_work_ratios"]
+            ["mixed_joint_source_xors_mu"], "1",
+        )
+
+    def test_sealed_record_never_replaces_different_content(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "record.json"
+            campaign.write_sealed_once(path, "test.schema", {"a": 1})
+            campaign.write_sealed_once(path, "test.schema", {"a": 1})
+            with self.assertRaises(campaign.CampaignError):
+                campaign.write_sealed_once(path, "test.schema", {"a": 2})
+
+    def test_sealed_record_create_race_never_overwrites_winner(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "record.json"
+            winner = (
+                campaign.canonical_json(campaign.sealed_record(
+                    "test.schema", {"winner": True},
+                )) + "\n"
+            ).encode()
+            original_link = campaign.os.link
+
+            def install_winner_then_link(
+                source: Path, destination: Path, *, follow_symlinks: bool,
+            ) -> None:
+                campaign.atomic_write(destination, winner)
+                original_link(
+                    source, destination, follow_symlinks=follow_symlinks,
+                )
+
+            with mock.patch.object(
+                    campaign.os, "link", side_effect=install_winner_then_link):
+                with self.assertRaises(campaign.CampaignError):
+                    campaign.write_sealed_once(
+                        path, "test.schema", {"winner": False},
+                    )
+            self.assertEqual(path.read_bytes(), winner)
+
+    def test_orphan_seal_temporaries_are_safely_restartable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            stage = campaign.stage_path(root, 0)
+            stage.mkdir(parents=True)
+            root_orphan = root / ".terminal.json.create-dead"
+            root_orphan.write_bytes(b"pre-link\n")
+            stage_orphan = stage / ".complete.json.create-dead"
+            stage_orphan.write_bytes(b"post-link\n")
+            stage_complete = stage / "complete.json"
+            os.link(stage_orphan, stage_complete)
+            self.assertEqual(stage_orphan.stat().st_nlink, 2)
+
+            campaign.cleanup_orphan_seal_temporaries(root)
+            self.assertFalse(root_orphan.exists())
+            self.assertFalse(stage_orphan.exists())
+            self.assertEqual(stage_complete.read_bytes(), b"post-link\n")
+            self.assertEqual(stage_complete.stat().st_nlink, 1)
+
+            unsafe = root / ".telemetry_end.json.create-unsafe"
+            unsafe.mkdir()
+            with self.assertRaises(campaign.CampaignError):
+                campaign.cleanup_orphan_seal_temporaries(root)
+
+    def test_terminal_seal_rejects_missing_shard_repair(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            binary = root / "bench"
+            taskset = root / "taskset"
+            binary.write_bytes(b"binary-v1")
+            taskset.write_bytes(b"taskset-v1")
+            tasks = [task("h12"), task("h13")]
+            stage = campaign.stage_path(root, 0)
+            campaign.write_sealed_once(
+                stage / "manifest.json", f"{campaign.SCHEMA}.stage_manifest",
+                campaign.manifest_payload(0, tasks),
+            )
+            for value in tasks:
+                self._write_shard(stage, value, binary, taskset)
+            completed = campaign.complete_stage(
+                stage, 0, tasks, binary, campaign.sha256_file(binary), taskset,
+                {2},
+            )
+            self.assertFalse(completed["union_failures"])
+            campaign.write_sealed_once(
+                root / "terminal.json", f"{campaign.SCHEMA}.terminal",
+                campaign.terminal_payload(stage, 0, 0),
+            )
+            contract = {
+                "binary": str(binary),
+                "binary_sha256": campaign.sha256_file(binary),
+                "taskset": str(taskset),
+            }
+            self._verify_tiny_terminal(root, contract)
+            stage_extra = stage / "unsealed-smoke.csv"
+            stage_extra.write_text("out of ledger\n", encoding="ascii")
+            with self.assertRaises(campaign.CampaignError):
+                self._verify_tiny_terminal(root, contract)
+            stage_extra.unlink()
+            root_extra = root / "out-of-ledger.txt"
+            root_extra.write_text("out of ledger\n", encoding="ascii")
+            with self.assertRaises(campaign.CampaignError):
+                self._verify_tiny_terminal(root, contract)
+            root_extra.unlink()
+            skipped = campaign.stage_path(root, 999)
+            skipped.mkdir()
+            with self.assertRaises(campaign.CampaignError):
+                self._verify_tiny_terminal(root, contract)
+            skipped.rmdir()
+            extra = stage / "shards" / "out-of-ledger-smoke"
+            extra.mkdir()
+            with self.assertRaises(campaign.CampaignError):
+                self._verify_tiny_terminal(root, contract)
+            extra.rmdir()
+            shutil.rmtree(campaign.shard_path(stage, tasks[0]))
+            with self.assertRaises(campaign.CampaignError):
+                self._verify_tiny_terminal(root, contract)
+
+    def test_campaign_completion_cross_seal_and_null_inventory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            campaign.write_sealed_once(
+                root / "contract.json", "test.contract", {"frozen": True},
+            )
+            campaign.write_sealed_once(
+                root / "controller_affinity.json", "test.affinity",
+                {"cpus": [2]},
+            )
+            stage = campaign.stage_path(root, 0)
+            campaign.write_sealed_once(
+                stage / "manifest.json", "test.manifest", {"overhead": 0},
+            )
+            campaign.write_sealed_once(
+                stage / "complete.json", "test.complete", {"overhead": 0},
+            )
+            campaign.write_sealed_once(
+                root / "terminal.json", f"{campaign.SCHEMA}.terminal",
+                {"terminal_overhead": 0, "unresolved_paired_cells": 0,
+                 "last_stage_complete_sha256": campaign.sha256_file(
+                     stage / "complete.json")},
+            )
+            campaign.atomic_write(root / "telemetry_start.json", b"stray\n")
+            with self.assertRaises(campaign.CampaignError):
+                campaign.seal_campaign_completion(root, None)
+            (root / "telemetry_start.json").unlink()
+            completed = campaign.seal_campaign_completion(root, None)
+            self.assertFalse(completed["external_telemetry_bound"])
+            verified = campaign.verify_campaign_completion(
+                root, {"external_telemetry": {"path": None}}, None, None,
+            )
+            self.assertEqual(verified, completed)
+            self.assertEqual(completed["stage_count"], 1)
+            (stage / "manifest.json").write_bytes(b"changed\n")
+            with self.assertRaises(campaign.CampaignError):
+                campaign.verify_campaign_completion(
+                    root, {"external_telemetry": {"path": None}}, None, None,
+                )
+
+    def test_terminal_rejects_empty_stage_after_union_resolved(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            binary = root / "bench"
+            taskset = root / "taskset"
+            binary.write_bytes(b"binary-v1")
+            taskset.write_bytes(b"taskset-v1")
+            tasks = [task("h12"), task("h13")]
+            first = campaign.stage_path(root, 0)
+            campaign.write_sealed_once(
+                first / "manifest.json", f"{campaign.SCHEMA}.stage_manifest",
+                campaign.manifest_payload(0, tasks),
+            )
+            for value in tasks:
+                self._write_shard(first, value, binary, taskset)
+            completed = campaign.complete_stage(
+                first, 0, tasks, binary, campaign.sha256_file(binary), taskset,
+                {2},
+            )
+            self.assertFalse(completed["union_failures"])
+
+            second = campaign.stage_path(root, 1)
+            campaign.write_sealed_once(
+                second / "manifest.json", f"{campaign.SCHEMA}.stage_manifest",
+                campaign.manifest_payload(1, []),
+            )
+            (second / "shards").mkdir()
+            campaign.complete_stage(
+                second, 1, [], binary, campaign.sha256_file(binary), taskset,
+                {2},
+            )
+            campaign.write_sealed_once(
+                root / "terminal.json", f"{campaign.SCHEMA}.terminal",
+                campaign.terminal_payload(second, 1, 0),
+            )
+            contract = {
+                "binary": str(binary),
+                "binary_sha256": campaign.sha256_file(binary),
+                "taskset": str(taskset),
+            }
+            with self.assertRaises(campaign.CampaignError):
+                self._verify_tiny_terminal(root, contract)
+
+    def test_terminal_rejects_per_arm_success_reversal(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            binary = root / "bench"
+            taskset = root / "taskset"
+            binary.write_bytes(b"binary-v1")
+            taskset.write_bytes(b"taskset-v1")
+            contract = {
+                "binary": str(binary),
+                "binary_sha256": campaign.sha256_file(binary),
+                "taskset": str(taskset),
+            }
+
+            first_tasks = [task("h12"), task("h13")]
+            first = campaign.stage_path(root, 0)
+            campaign.write_sealed_once(
+                first / "manifest.json", f"{campaign.SCHEMA}.stage_manifest",
+                campaign.manifest_payload(0, first_tasks),
+            )
+            self._write_shard(
+                first, first_tasks[0], binary, taskset, outcome="success",
+            )
+            self._write_shard(
+                first, first_tasks[1], binary, taskset, outcome="rank_fail",
+            )
+            campaign.complete_stage(
+                first, 0, first_tasks, binary,
+                campaign.sha256_file(binary), taskset, {2},
+            )
+
+            second_tasks = [
+                task("h12", overhead=1), task("h13", overhead=1),
+            ]
+            second = campaign.stage_path(root, 1)
+            campaign.write_sealed_once(
+                second / "manifest.json", f"{campaign.SCHEMA}.stage_manifest",
+                campaign.manifest_payload(1, second_tasks),
+            )
+            self._write_shard(
+                second, second_tasks[0], binary, taskset,
+                outcome="rank_fail",
+            )
+            self._write_shard(
+                second, second_tasks[1], binary, taskset, outcome="success",
+            )
+            campaign.complete_stage(
+                second, 1, second_tasks, binary,
+                campaign.sha256_file(binary), taskset, {2},
+            )
+            campaign.write_sealed_once(
+                root / "terminal.json", f"{campaign.SCHEMA}.terminal",
+                campaign.terminal_payload(second, 1, 1),
+            )
+            with mock.patch.multiple(
+                    campaign, OH0_JOBS=2, TOTAL_ARM_OUTCOMES=2,
+                    MAX_OVERHEAD=1):
+                with self.assertRaisesRegex(
+                        campaign.CampaignError, "reverted h12 success"):
+                    campaign.verify_terminal_campaign(root, contract, {2})
+
+    def test_legal_nested_reduction_accounts_repairs_and_censoring(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.multiple(
+                campaign, PAIRED_CELLS=2, TOTAL_ARM_OUTCOMES=4,
+                OH0_JOBS=2, MAX_OVERHEAD=2):
+            root = Path(temporary)
+            binary = root / "bench"
+            taskset = root / "taskset"
+            binary.write_bytes(b"binary-v1")
+            taskset.write_bytes(b"taskset-v1")
+            digest = campaign.sha256_file(binary)
+
+            def make_stage(
+                overhead: int, ks: tuple[int, ...],
+                left_outcomes: dict[int, str],
+                right_outcomes: dict[int, str],
+            ) -> None:
+                tasks = [
+                    task("h12", ks, overhead=overhead),
+                    task("h13", ks, overhead=overhead),
+                ]
+                stage = campaign.stage_path(root, overhead)
+                campaign.write_sealed_once(
+                    stage / "manifest.json",
+                    f"{campaign.SCHEMA}.stage_manifest",
+                    campaign.manifest_payload(overhead, tasks),
+                )
+                self._write_shard(
+                    stage, tasks[0], binary, taskset,
+                    outcomes=left_outcomes,
+                )
+                self._write_shard(
+                    stage, tasks[1], binary, taskset,
+                    outcomes=right_outcomes,
+                )
+                campaign.complete_stage(
+                    stage, overhead, tasks, binary, digest, taskset, {2},
+                )
+
+            make_stage(
+                0, (2, 3),
+                {2: "rank_fail", 3: "rank_fail"},
+                {2: "success", 3: "rank_fail"},
+            )
+            make_stage(
+                1, (2, 3),
+                {2: "success", 3: "rank_fail"},
+                {2: "success", 3: "success"},
+            )
+            make_stage(
+                2, (3,), {3: "rank_fail"}, {3: "success"},
+            )
+            campaign.atomic_write(root / "campaign_complete.json", b"present\n")
+            contract = {
+                "binary": str(binary), "binary_sha256": digest,
+                "taskset": str(taskset),
+                "external_telemetry": {
+                    "path": None, "policy": campaign.TELEMETRY_POLICY,
+                    "sampler_identity": "test sampler",
+                    "continuity": campaign.TELEMETRY_CONTINUITY,
+                },
+            }
+            terminal = {"terminal_overhead": 2}
+            with mock.patch.multiple(
+                    campaign,
+                    load_contract=mock.Mock(return_value=contract),
+                    apply_sealed_controller_affinity=mock.Mock(return_value=[2]),
+                    telemetry_start=mock.Mock(return_value=None),
+                    verify_terminal_campaign=mock.Mock(return_value=terminal),
+                    telemetry_finish=mock.Mock(return_value=None),
+                    verify_campaign_completion=mock.Mock(
+                        return_value={"verified": True},
+                    )):
+                with redirect_stdout(io.StringIO()):
+                    campaign.reduce_campaign.__wrapped__(
+                        SimpleNamespace(), root,
+                    )
+            summary = campaign.load_sealed(
+                root / "analysis.json", f"{campaign.SCHEMA}.analysis_record",
+            )
+            self.assertEqual(summary["oh0"]["comparison"]["repairs"], 1)
+            self.assertEqual(summary["oh0"]["comparison"]["introductions"], 0)
+            self.assertEqual(summary["oh0"]["comparison"]["both_fail"], 1)
+            self.assertEqual(
+                summary["minimum_success_overhead"]["h12"]["all_cells"],
+                {"cells": 2, "p99": None, "censored": 1,
+                 "maximum_observed": 1,
+                 "histogram": {"1": 1, "censored": 1}},
+            )
+            self.assertEqual(
+                summary["minimum_success_overhead"]["h13"]["all_cells"]
+                ["histogram"], {"0": 1, "1": 1},
+            )
+            self.assertEqual(summary["unresolved_union_failures_at_cap"], 1)
+
+    def test_overhead_reports_distinguish_all_and_failure_cohorts(self) -> None:
+        self.assertEqual(campaign.overhead_report([0, 0, 0])["p99"], 0)
+        report = campaign.overhead_report([1, 2, None])
+        self.assertIsNone(report["p99"])
+        self.assertEqual(report["histogram"], {"1": 1, "2": 1, "censored": 1})
+
+    def test_external_telemetry_interval_is_nonempty_and_semantically_sealed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            log = root / "thermal.csv"
+            log.write_bytes(
+                (",".join(campaign.THERMAL_FIELDS) + "\n").encode("ascii") +
+                telemetry_row(100)
+            )
+            contract = {"external_telemetry": {
+                "path": str(log),
+                "prepare_mark": campaign.external_file_mark(log),
+            }}
+            start = campaign.telemetry_start(root, contract)
+            with log.open("ab") as output:
+                output.write(telemetry_row(101) + telemetry_row(102))
+            end = campaign.telemetry_finish(root, contract, start)
+            self.assertEqual(end["semantic_audit"]["samples"], 2)
+            self.assertEqual(end["semantic_audit"]["edac_ce_delta"], 0)
+            self.assertEqual(end["semantic_audit"]["cpu_busy_min_pct"], 99.0)
+            self.assertEqual(end["semantic_audit"]["audit_uptime_s"], 105.0)
+            self.assertEqual(end["semantic_audit"]["tail_age_seconds"], 3.0)
+
+    def test_external_telemetry_rejects_stale_final_sample(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            log, contract, start = self._start_telemetry(root)
+            with log.open("ab") as output:
+                output.write(telemetry_row(101))
+            with mock.patch.object(
+                    campaign, "system_uptime_s", return_value=106.000001):
+                with self.assertRaises(campaign.CampaignError):
+                    campaign.telemetry_finish(root, contract, start)
+
+    def _start_telemetry(
+        self, root: Path, baseline: bytes | None = None,
+    ) -> tuple[Path, dict[str, Any], dict[str, Any]]:
+        log = root / "thermal.csv"
+        log.write_bytes(
+            (",".join(campaign.THERMAL_FIELDS) + "\n").encode("ascii") +
+            (telemetry_row(100) if baseline is None else baseline)
+        )
+        contract = {"external_telemetry": {
+            "path": str(log),
+            "prepare_mark": campaign.external_file_mark(log),
+        }}
+        start = campaign.telemetry_start(root, contract)
+        assert start is not None
+        return log, contract, start
+
+    def test_external_telemetry_policy_boundaries(self) -> None:
+        valid_rows = (
+            telemetry_row(105),
+            telemetry_row(101, "95.0"),
+            telemetry_row(101, cpu_temp="89.999"),
+            telemetry_row(101, dimm_temp="89.999"),
+            telemetry_row(101, edac_ce="42", edac_ue="7"),
+        )
+        valid_baselines = (
+            None, None, None, None,
+            telemetry_row(100, edac_ce="42", edac_ue="7"),
+        )
+        for row, baseline in zip(valid_rows, valid_baselines):
+            with self.subTest(valid=row):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    log, contract, start = self._start_telemetry(root, baseline)
+                    with log.open("ab") as output:
+                        output.write(row)
+                    end = campaign.telemetry_finish(root, contract, start)
+                    self.assertIsNotNone(end)
+                    if baseline is not None:
+                        self.assertEqual(end["semantic_audit"]["edac_ce"], 42)
+                        self.assertEqual(end["semantic_audit"]["edac_ue"], 7)
+
+        invalid = (
+            (None, telemetry_row(100)),
+            (None, telemetry_row(99)),
+            (None, telemetry_row(106)),
+            (None, telemetry_row(101, "94.999")),
+            (None, telemetry_row(101, cpu_temp="90.0")),
+            (None, telemetry_row(101, dimm_temp="90.0")),
+            (None, telemetry_row(101, dimm_errors="1")),
+            (telemetry_row(100, edac_ce="1"),
+             telemetry_row(101, edac_ce="2")),
+            (telemetry_row(100, edac_ce="1"),
+             telemetry_row(101, edac_ce="0")),
+            (telemetry_row(100, edac_ue="1"),
+             telemetry_row(101, edac_ue="2")),
+        )
+        for baseline, row in invalid:
+            with self.subTest(invalid=row):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    log, contract, start = self._start_telemetry(root, baseline)
+                    with log.open("ab") as output:
+                        output.write(row)
+                    with self.assertRaises(campaign.CampaignError):
+                        campaign.telemetry_finish(root, contract, start)
+
+    def test_restart_keeps_one_continuous_telemetry_interval(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            log, contract, first_start = self._start_telemetry(root)
+            with log.open("ab") as output:
+                output.write(telemetry_row(101) + telemetry_row(102))
+            restarted = campaign.telemetry_start(root, contract)
+            self.assertEqual(restarted, first_start)
+            with log.open("ab") as output:
+                output.write(telemetry_row(103))
+            end = campaign.telemetry_finish(root, contract, restarted)
+            self.assertEqual(end["semantic_audit"]["samples"], 3)
+
+        for downtime_row in (
+                telemetry_row(101, "94.999"), telemetry_row(106)):
+            with self.subTest(downtime_row=downtime_row):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    log, contract, start = self._start_telemetry(root)
+                    with log.open("ab") as output:
+                        output.write(downtime_row)
+                    self.assertEqual(campaign.telemetry_start(root, contract), start)
+                    with self.assertRaises(campaign.CampaignError):
+                        campaign.telemetry_finish(root, contract, start)
+
+    def test_external_telemetry_rejects_header_and_partial_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            log = root / "thermal.csv"
+            log.write_bytes(b"not,the,thermal,header\n" + telemetry_row(100))
+            contract = {"external_telemetry": {
+                "path": str(log),
+                "prepare_mark": campaign.external_file_mark(log),
+            }}
+            with self.assertRaises(campaign.CampaignError):
+                campaign.telemetry_start(root, contract)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            log, contract, start = self._start_telemetry(root)
+            with log.open("ab") as output:
+                output.write(telemetry_row(101)[:-1])
+            with self.assertRaises(campaign.CampaignError):
+                campaign.telemetry_finish(root, contract, start)
+
+    def test_external_telemetry_rejects_rotation_race_and_changed_end(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            log, contract, start = self._start_telemetry(root)
+            with log.open("ab") as output:
+                output.write(telemetry_row(101))
+            original_mark = campaign.external_file_mark
+            rotated = False
+
+            def rotate_after_mark(path: Path) -> dict[str, Any]:
+                nonlocal rotated
+                mark = original_mark(path)
+                if not rotated:
+                    replacement = root / "replacement.csv"
+                    replacement.write_bytes(path.read_bytes())
+                    os.replace(replacement, path)
+                    rotated = True
+                return mark
+
+            with mock.patch.object(
+                    campaign, "external_file_mark",
+                    side_effect=rotate_after_mark):
+                with self.assertRaises(campaign.CampaignError):
+                    campaign.telemetry_finish(root, contract, start)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            log, contract, start = self._start_telemetry(root)
+            with log.open("ab") as output:
+                output.write(telemetry_row(101))
+            campaign.telemetry_finish(root, contract, start)
+            with log.open("r+b") as output:
+                output.seek(start["offset"])
+                original = output.read(128)
+                changed = original.replace(b",99.0,", b",98.0,", 1)
+                self.assertEqual(len(changed), len(original))
+                output.seek(start["offset"])
+                output.write(changed)
+            with self.assertRaises(campaign.CampaignError):
+                campaign.telemetry_finish(root, contract, start)
+
+    def test_external_telemetry_rejects_bool_alias_in_end_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            log, contract, start = self._start_telemetry(root)
+            with log.open("ab") as output:
+                output.write(telemetry_row(101))
+            campaign.telemetry_finish(root, contract, start)
+            end_path = root / "telemetry_end.json"
+            end = campaign.load_sealed(
+                end_path, f"{campaign.SCHEMA}.telemetry_end",
+            )
+            end["semantic_audit"]["samples"] = True
+            end_path.unlink()
+            campaign.write_sealed_once(
+                end_path, f"{campaign.SCHEMA}.telemetry_end", end,
+            )
+            with self.assertRaises(campaign.CampaignError):
+                campaign.telemetry_finish(root, contract, start)
+
+    def test_external_telemetry_rejects_empty_interval(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            log = root / "thermal.csv"
+            log.write_bytes(
+                (",".join(campaign.THERMAL_FIELDS) + "\n").encode("ascii") +
+                telemetry_row(100)
+            )
+            contract = {"external_telemetry": {
+                "path": str(log),
+                "prepare_mark": campaign.external_file_mark(log),
+            }}
+            start = campaign.telemetry_start(root, contract)
+            with self.assertRaises(campaign.CampaignError):
+                campaign.telemetry_finish(root, contract, start)
+
+
+if __name__ == "__main__":
+    unittest.main()

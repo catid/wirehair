@@ -2,6 +2,31 @@ if(NOT DEFINED BENCH)
     message(FATAL_ERROR "BENCH is required")
 endif()
 
+# Raw Stage-A support is a test-hook facility but must not depend on the
+# separately disableable preferred-attempt command block.
+execute_process(
+    COMMAND "${BENCH}" precodefail --raw-attempt0
+        --paired-overhead-stream --N 3 --bb-list 64 --overhead 0
+        --trials 1 --threads 1 --loss 0.5 --completion mixed
+        --heavy-family periodic --mix-count 2 --seed 0xd1b54a32d192ed03
+        --schedule burst --mixed-period 48 --mixed-gf256-rows 10
+        --mixed-gf16-rows 2 --mixed-geometry shared-x
+        --mixed-residue-skew 0 --mixed-residue-schedule constant
+        --binary-dense-two-anchor --binary-dense-two-anchor-phase 0
+        --seed-block-bytes 64 --packet-peel-seed-xor 0
+    RESULT_VARIABLE raw_result
+    OUTPUT_VARIABLE raw_out
+    ERROR_VARIABLE raw_err
+    TIMEOUT 10)
+if(NOT raw_result EQUAL 0 OR raw_err OR
+   NOT raw_out MATCHES "raw_attempt0=1" OR
+   NOT raw_out MATCHES
+       ",0,0x[0-9a-f]+,0x[0-9a-f]+,0x[0-9a-f]+,0x[0-9a-f]+,3,12,12,2,1,0,1,27,0x[0-9a-f]+,[0-9a-f]+[\r\n]*$")
+    message(FATAL_ERROR
+        "raw Stage-A command depends on preferred-attempt support\n"
+        "rc=${raw_result}\nstdout=${raw_out}\nstderr=${raw_err}")
+endif()
+
 execute_process(
     COMMAND "${BENCH}"
     RESULT_VARIABLE usage_result

@@ -2039,6 +2039,36 @@ bool TestMixedCompletion()
             return false;
         }
     }
+    // Stage A compares ungrouped P48 H12 (10+2) with H13 (11+2).  Repeat
+    // H12 after H13 on the same thread so a cache keyed only by geometry or
+    // period cannot leave the extra subfield row active after restoration.
+    if (!TestMixedCompletionForPeriod(
+            48u,
+            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,
+            wirehair_v2::kMixedGF16Rows,
+            0u,
+            wirehair_v2::MixedResidueSchedule::Constant,
+            false,
+            wirehair_v2::kMixedGF256Rows) ||
+        !TestMixedCompletionForPeriod(
+            48u,
+            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,
+            wirehair_v2::kMixedGF16Rows,
+            0u,
+            wirehair_v2::MixedResidueSchedule::Constant,
+            false,
+            wirehair_v2::kMixedGF256Rows + 1u) ||
+        !TestMixedCompletionForPeriod(
+            48u,
+            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,
+            wirehair_v2::kMixedGF16Rows,
+            0u,
+            wirehair_v2::MixedResidueSchedule::Constant,
+            false,
+            wirehair_v2::kMixedGF256Rows))
+    {
+        return false;
+    }
     if (!TestMixedCompletionForPeriod(
             32u,
             wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,

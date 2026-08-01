@@ -856,6 +856,183 @@ expect_failure("validated 12" precodefail
 expect_failure("use shared-x for an extra row" precodefail
     --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
     --completion mixed --mixed-gf256-rows 11 --mixed-geometry frozen)
+
+# Raw Stage A bypasses adaptive seed selection and authenticates the exact
+# attempt-0 construction and packet trace.  H12 and H13 must share every seed
+# and packet receipt while differing by exactly one precode row.
+set(raw_stage_a_common
+    precodefail --raw-attempt0 --paired-overhead-stream
+    --bb-list 64 --trials 1 --threads 1 --loss 0.5
+    --completion mixed --mix-count 2 --seed 0xd1b54a32d192ed03
+    --mixed-period 48 --mixed-geometry shared-x
+    --mixed-gf16-rows 2 --binary-dense-two-anchor --seed-block-bytes 64)
+
+function(capture_raw_stage_a_receipt output prefix expected_precode_count
+         expected_staircase expected_heavy)
+    if(ARGC GREATER 5)
+        set(expected_source_hits "${ARGV5}")
+    else()
+        set(expected_source_hits 2)
+    endif()
+    string(REGEX MATCH
+        ",0,0x[0-9a-f]+,0x[0-9a-f]+,0x[0-9a-f]+,0x[0-9a-f]+,[0-9]+,[0-9]+,[0-9]+,[0-9]+,[01],[0-9]+,[01],[0-9]+,0x[0-9a-f]+,[0-9a-f]+[\r\n]*$"
+        receipt "${output}")
+    string(REGEX REPLACE "[\r\n]+$" "" receipt "${receipt}")
+    string(SUBSTRING "${receipt}" 1 -1 receipt)
+    string(REPLACE "," ";" receipt_fields "${receipt}")
+    list(LENGTH receipt_fields receipt_field_count)
+    if(receipt_field_count EQUAL 15)
+        list(GET receipt_fields 1 base_matrix_seed)
+        list(GET receipt_fields 2 base_peel_seed)
+        list(GET receipt_fields 3 matrix_seed)
+        list(GET receipt_fields 4 peel_seed)
+        list(GET receipt_fields 5 actual_staircase)
+        list(GET receipt_fields 6 actual_dense)
+        list(GET receipt_fields 7 actual_heavy)
+        list(GET receipt_fields 8 actual_source_hits)
+        list(GET receipt_fields 9 actual_anchor)
+        list(GET receipt_fields 10 actual_phase)
+        list(GET receipt_fields 11 probe_result)
+        list(GET receipt_fields 12 precode_count)
+        list(GET receipt_fields 13 trace_seed)
+        list(GET receipt_fields 14 trace_sha256)
+    endif()
+    if(NOT receipt OR NOT receipt_field_count EQUAL 15 OR
+       NOT base_matrix_seed STREQUAL matrix_seed OR
+       NOT base_peel_seed STREQUAL peel_seed OR
+       (expected_staircase GREATER_EQUAL 0 AND
+        NOT actual_staircase EQUAL expected_staircase) OR
+       NOT actual_dense EQUAL 12 OR
+       NOT actual_heavy EQUAL expected_heavy OR
+       NOT actual_source_hits EQUAL expected_source_hits OR
+       NOT actual_anchor EQUAL 1 OR
+       NOT actual_phase EQUAL 0 OR
+       (expected_precode_count GREATER_EQUAL 0 AND
+        NOT precode_count EQUAL expected_precode_count))
+        message(FATAL_ERROR
+            "raw Stage-A receipt mismatch: ${prefix}\n${output}")
+    endif()
+    string(LENGTH "${trace_sha256}" trace_hash_length)
+    if(NOT trace_hash_length EQUAL 64)
+        message(FATAL_ERROR
+            "raw Stage-A trace hash is not SHA-256: ${prefix}")
+    endif()
+    set(${prefix}_matrix_seed "${matrix_seed}" PARENT_SCOPE)
+    set(${prefix}_peel_seed "${peel_seed}" PARENT_SCOPE)
+    set(${prefix}_staircase "${actual_staircase}" PARENT_SCOPE)
+    set(${prefix}_source_hits "${actual_source_hits}" PARENT_SCOPE)
+    set(${prefix}_probe_result "${probe_result}" PARENT_SCOPE)
+    set(${prefix}_trace_seed "${trace_seed}" PARENT_SCOPE)
+    set(${prefix}_trace_sha256 "${trace_sha256}" PARENT_SCOPE)
+endfunction()
+
+run_bench(raw_h12_result raw_h12 raw_h12_err
+    ${raw_stage_a_common} --N 64 --overhead 0 --schedule adversarial
+    --mixed-gf256-rows 10)
+run_bench(raw_h13_result raw_h13 raw_h13_err
+    ${raw_stage_a_common} --N 64 --overhead 0 --schedule adversarial
+    --mixed-gf256-rows 11)
+if(NOT raw_h12_result EQUAL 0 OR NOT raw_h13_result EQUAL 0 OR
+   raw_h12_err OR raw_h13_err OR
+   NOT raw_h12 MATCHES
+       "overhead_stream=paired.*schedule=adversarial raw_attempt0=1" OR
+   NOT raw_h13 MATCHES
+       "mixed_gf256_rows=11 mixed_gf16_rows=2.*raw_attempt0=1" OR
+   NOT raw_h12 MATCHES
+       "matrix_seed,peel_seed,actual_staircase_rows,actual_dense_rows,actual_heavy_rows,actual_source_hits,actual_dense_two_anchor,actual_dense_two_anchor_phase,systematic_probe_result,precode_count,packet_trace_seed,packet_trace_sha256")
+    message(FATAL_ERROR
+        "raw Stage-A H12/H13 command failed\n"
+        "H12=${raw_h12}\nH12err=${raw_h12_err}\n"
+        "H13=${raw_h13}\nH13err=${raw_h13_err}")
+endif()
+capture_raw_stage_a_receipt("${raw_h12}" raw_h12 43 19 12)
+capture_raw_stage_a_receipt("${raw_h13}" raw_h13 44 19 13)
+if(NOT raw_h12_matrix_seed STREQUAL raw_h13_matrix_seed OR
+   NOT raw_h12_peel_seed STREQUAL raw_h13_peel_seed OR
+   NOT raw_h12_staircase STREQUAL raw_h13_staircase OR
+   NOT raw_h12_source_hits STREQUAL raw_h13_source_hits OR
+   NOT raw_h12_trace_seed STREQUAL raw_h13_trace_seed OR
+   NOT raw_h12_trace_sha256 STREQUAL raw_h13_trace_sha256)
+    message(FATAL_ERROR
+        "raw Stage-A H12/H13 seeds or packet trace diverged")
+endif()
+
+# K=3 attempt 0 is systematically rank-deficient for this receipt.  Raw mode
+# must record NeedMore (1), still execute the requested hard trace, and exit 0.
+run_bench(raw_need_more_result raw_need_more raw_need_more_err
+    ${raw_stage_a_common} --N 3 --overhead 0 --schedule adversarial
+    --mixed-gf256-rows 10)
+capture_raw_stage_a_receipt("${raw_need_more}" raw_need_more 27 3 12)
+if(NOT raw_need_more_result EQUAL 0 OR raw_need_more_err OR
+   NOT raw_need_more_probe_result EQUAL 1)
+    message(FATAL_ERROR
+        "raw Stage-A systematic NeedMore was repaired or rejected\n"
+        "${raw_need_more}\n${raw_need_more_err}")
+endif()
+
+# The canonical source-hit rule changes at K=10000; pin both sides using the
+# actual raw benchmark receipt consumed by the campaign parser.
+foreach(raw_source_case IN ITEMS "9999|2" "10000|3")
+    string(REPLACE "|" ";" raw_source_fields "${raw_source_case}")
+    list(GET raw_source_fields 0 raw_source_k)
+    list(GET raw_source_fields 1 raw_source_expected_hits)
+    run_bench(raw_source_result raw_source_output raw_source_error
+        ${raw_stage_a_common} --N ${raw_source_k} --overhead 0
+        --schedule burst --mixed-gf256-rows 10)
+    capture_raw_stage_a_receipt(
+        "${raw_source_output}" "raw_source_${raw_source_k}"
+        -1 -1 12 ${raw_source_expected_hits})
+    if(NOT raw_source_result EQUAL 0 OR raw_source_error)
+        message(FATAL_ERROR
+            "raw Stage-A source-hit boundary failed at K=${raw_source_k}\n"
+            "${raw_source_output}\n${raw_source_error}")
+    endif()
+endforeach()
+
+# Independent packet-schedule oracle: all three hard schedules at OH0/OH1
+# pin the exact K64 loss seed and actual packet-ID trace digest.
+set(raw_trace_cases
+    "burst|0|193a3916f3ca47a13d8f71e10be17198cf689aec21045787e7d1355eea280907"
+    "burst|1|c55dd4af5f426a9421b81af10e10eb06c3cf084ce7493837bebd3ac7a702a4bd"
+    "adversarial|0|950134e9cef148fb82c6121e6e104329563e5a408bb6a607bea32b43cbfe5804"
+    "adversarial|1|f3de67328fccdacb6d1091c3561898b3e22c7855142d8950139cc46e22362fc4"
+    "repair-only|0|8c2606524c8155aef5891c0c2ba22d6821ed3bbbb4ab7b475fcebb115cf2ef71"
+    "repair-only|1|60eecb2ae19cedf0a1368d0db7a115c29b8b492f7e1d5a55e412731f33164b9e")
+set(raw_trace_case_index 0)
+foreach(raw_trace_case IN LISTS raw_trace_cases)
+    string(REPLACE "|" ";" raw_trace_fields "${raw_trace_case}")
+    list(GET raw_trace_fields 0 raw_trace_schedule)
+    list(GET raw_trace_fields 1 raw_trace_overhead)
+    list(GET raw_trace_fields 2 raw_trace_expected_sha256)
+    run_bench(raw_trace_result raw_trace_output raw_trace_error
+        ${raw_stage_a_common} --N 64 --overhead ${raw_trace_overhead}
+        --schedule ${raw_trace_schedule} --mixed-gf256-rows 10)
+    set(raw_trace_prefix "raw_trace_${raw_trace_case_index}")
+    capture_raw_stage_a_receipt(
+        "${raw_trace_output}" ${raw_trace_prefix} 43 19 12)
+    if(NOT raw_trace_result EQUAL 0 OR raw_trace_error OR
+       NOT ${raw_trace_prefix}_trace_seed STREQUAL "0x8a7aff2a3a348603" OR
+       NOT ${raw_trace_prefix}_trace_sha256 STREQUAL raw_trace_expected_sha256)
+        message(FATAL_ERROR
+            "raw Stage-A golden trace mismatch: ${raw_trace_case}\n"
+            "${raw_trace_output}\n${raw_trace_error}")
+    endif()
+    math(EXPR raw_trace_case_index "${raw_trace_case_index} + 1")
+endforeach()
+
+expect_failure("--raw-attempt0 requires the Stage-A" precodefail
+    --raw-attempt0 --paired-overhead-stream --N 64 --bb-list 64
+    --overhead 0 --trials 2 --threads 1 --loss 0.5 --completion mixed
+    --mix-count 2 --seed 0xd1b54a32d192ed03 --schedule adversarial
+    --mixed-period 48 --mixed-geometry shared-x --mixed-gf256-rows 10
+    --mixed-gf16-rows 2 --binary-dense-two-anchor --seed-block-bytes 64)
+expect_failure("--raw-attempt0 requires the Stage-A" precodefail
+    --raw-attempt0 --paired-overhead-stream --N 64 --bb-list 64
+    --overhead 0 --trials 1 --threads 1 --loss 0.5 --completion mixed
+    --mix-count 2 --seed 0xd1b54a32d192ed03 --schedule adversarial
+    --mixed-period 48 --mixed-geometry shared-x --mixed-gf256-rows 10
+    --mixed-gf16-rows 2 --binary-dense-two-anchor --seed-block-bytes 64
+    --packet-peel-seed-xor 1)
 expect_success("mixed_gf256_rows=11" compare
     --nlo 64 --nhi 64 --trials 1 --bb-list 8 --max-message-mib 1
     --loss 0.1 --precode --precode-profile mixed

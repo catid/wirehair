@@ -4739,6 +4739,101 @@ const char* PacketPeelSeedTableName(PacketPeelSeedTable table)
     }
 }
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+#if !defined(WIREHAIR_V2_BENCH_DISABLE_PREFERRED_ATTEMPT)
+bool IsLowerHexSha256(const std::string& text)
+{
+    if (text.size() != 64u) return false;
+    for (char ch : text) {
+        if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f'))) {
+            return false;
+        }
+    }
+    return true;
+}
+#endif
+
+uint32_t Sha256RotateRight(uint32_t value, uint32_t shift)
+{
+    return (value >> shift) | (value << (32u - shift));
+}
+
+// Small benchmark-only SHA-256 implementation shared by immutable route
+// manifests and experiment packet-trace receipts.
+std::string Sha256Hex(const std::string& input)
+{
+    static const uint32_t kRound[64] = {
+        0x428a2f98u, 0x71374491u, 0xb5c0fbcfu, 0xe9b5dba5u,
+        0x3956c25bu, 0x59f111f1u, 0x923f82a4u, 0xab1c5ed5u,
+        0xd807aa98u, 0x12835b01u, 0x243185beu, 0x550c7dc3u,
+        0x72be5d74u, 0x80deb1feu, 0x9bdc06a7u, 0xc19bf174u,
+        0xe49b69c1u, 0xefbe4786u, 0x0fc19dc6u, 0x240ca1ccu,
+        0x2de92c6fu, 0x4a7484aau, 0x5cb0a9dcu, 0x76f988dau,
+        0x983e5152u, 0xa831c66du, 0xb00327c8u, 0xbf597fc7u,
+        0xc6e00bf3u, 0xd5a79147u, 0x06ca6351u, 0x14292967u,
+        0x27b70a85u, 0x2e1b2138u, 0x4d2c6dfcu, 0x53380d13u,
+        0x650a7354u, 0x766a0abbu, 0x81c2c92eu, 0x92722c85u,
+        0xa2bfe8a1u, 0xa81a664bu, 0xc24b8b70u, 0xc76c51a3u,
+        0xd192e819u, 0xd6990624u, 0xf40e3585u, 0x106aa070u,
+        0x19a4c116u, 0x1e376c08u, 0x2748774cu, 0x34b0bcb5u,
+        0x391c0cb3u, 0x4ed8aa4au, 0x5b9cca4fu, 0x682e6ff3u,
+        0x748f82eeu, 0x78a5636fu, 0x84c87814u, 0x8cc70208u,
+        0x90befffau, 0xa4506cebu, 0xbef9a3f7u, 0xc67178f2u,
+    };
+    uint32_t state[8] = {
+        0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
+        0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u,
+    };
+    std::vector<uint8_t> bytes(input.begin(), input.end());
+    const uint64_t bit_count = (uint64_t)bytes.size() * 8u;
+    bytes.push_back(0x80u);
+    while ((bytes.size() & 63u) != 56u) bytes.push_back(0u);
+    for (int shift = 56; shift >= 0; shift -= 8) {
+        bytes.push_back((uint8_t)(bit_count >> shift));
+    }
+    for (size_t offset = 0u; offset < bytes.size(); offset += 64u)
+    {
+        uint32_t words[64];
+        for (uint32_t i = 0u; i < 16u; ++i) {
+            const size_t pos = offset + (size_t)i * 4u;
+            words[i] = ((uint32_t)bytes[pos] << 24) |
+                ((uint32_t)bytes[pos + 1u] << 16) |
+                ((uint32_t)bytes[pos + 2u] << 8) |
+                (uint32_t)bytes[pos + 3u];
+        }
+        for (uint32_t i = 16u; i < 64u; ++i) {
+            const uint32_t x = words[i - 15u];
+            const uint32_t y = words[i - 2u];
+            const uint32_t s0 = Sha256RotateRight(x, 7u) ^
+                Sha256RotateRight(x, 18u) ^ (x >> 3u);
+            const uint32_t s1 = Sha256RotateRight(y, 17u) ^
+                Sha256RotateRight(y, 19u) ^ (y >> 10u);
+            words[i] = words[i - 16u] + s0 + words[i - 7u] + s1;
+        }
+        uint32_t a = state[0], b = state[1], c = state[2], d = state[3];
+        uint32_t e = state[4], f = state[5], g = state[6], h = state[7];
+        for (uint32_t i = 0u; i < 64u; ++i) {
+            const uint32_t s1 = Sha256RotateRight(e, 6u) ^
+                Sha256RotateRight(e, 11u) ^ Sha256RotateRight(e, 25u);
+            const uint32_t choose = (e & f) ^ ((~e) & g);
+            const uint32_t temp1 = h + s1 + choose + kRound[i] + words[i];
+            const uint32_t s0 = Sha256RotateRight(a, 2u) ^
+                Sha256RotateRight(a, 13u) ^ Sha256RotateRight(a, 22u);
+            const uint32_t majority = (a & b) ^ (a & c) ^ (b & c);
+            const uint32_t temp2 = s0 + majority;
+            h = g; g = f; f = e; e = d + temp1;
+            d = c; c = b; b = a; a = temp1 + temp2;
+        }
+        state[0] += a; state[1] += b; state[2] += c; state[3] += d;
+        state[4] += e; state[5] += f; state[6] += g; state[7] += h;
+    }
+    std::ostringstream output;
+    output << std::hex << std::setfill('0');
+    for (uint32_t value : state) output << std::setw(8) << value;
+    return output.str();
+}
+#endif
+
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS) && \
     !defined(WIREHAIR_V2_BENCH_DISABLE_PREFERRED_ATTEMPT)
 
@@ -4926,99 +5021,6 @@ std::string CanonicalPreferredAttemptMapText(
         }
     }
     return canonical.str();
-}
-
-bool IsLowerHexSha256(const std::string& text)
-{
-    if (text.size() != 64u) return false;
-    for (char ch : text) {
-        if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f'))) {
-            return false;
-        }
-    }
-    return true;
-}
-
-uint32_t Sha256RotateRight(uint32_t value, uint32_t shift)
-{
-    return (value >> shift) | (value << (32u - shift));
-}
-
-// Small benchmark-only SHA-256 implementation used to bind a trusted route
-// manifest to the exact bytes produced by route mode.  Keeping verification in
-// the consumer prevents a stale or forged preferred map from being blessed by
-// an unrelated digest supplied on the command line.
-std::string Sha256Hex(const std::string& input)
-{
-    static const uint32_t kRound[64] = {
-        0x428a2f98u, 0x71374491u, 0xb5c0fbcfu, 0xe9b5dba5u,
-        0x3956c25bu, 0x59f111f1u, 0x923f82a4u, 0xab1c5ed5u,
-        0xd807aa98u, 0x12835b01u, 0x243185beu, 0x550c7dc3u,
-        0x72be5d74u, 0x80deb1feu, 0x9bdc06a7u, 0xc19bf174u,
-        0xe49b69c1u, 0xefbe4786u, 0x0fc19dc6u, 0x240ca1ccu,
-        0x2de92c6fu, 0x4a7484aau, 0x5cb0a9dcu, 0x76f988dau,
-        0x983e5152u, 0xa831c66du, 0xb00327c8u, 0xbf597fc7u,
-        0xc6e00bf3u, 0xd5a79147u, 0x06ca6351u, 0x14292967u,
-        0x27b70a85u, 0x2e1b2138u, 0x4d2c6dfcu, 0x53380d13u,
-        0x650a7354u, 0x766a0abbu, 0x81c2c92eu, 0x92722c85u,
-        0xa2bfe8a1u, 0xa81a664bu, 0xc24b8b70u, 0xc76c51a3u,
-        0xd192e819u, 0xd6990624u, 0xf40e3585u, 0x106aa070u,
-        0x19a4c116u, 0x1e376c08u, 0x2748774cu, 0x34b0bcb5u,
-        0x391c0cb3u, 0x4ed8aa4au, 0x5b9cca4fu, 0x682e6ff3u,
-        0x748f82eeu, 0x78a5636fu, 0x84c87814u, 0x8cc70208u,
-        0x90befffau, 0xa4506cebu, 0xbef9a3f7u, 0xc67178f2u,
-    };
-    uint32_t state[8] = {
-        0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
-        0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u,
-    };
-    std::vector<uint8_t> bytes(input.begin(), input.end());
-    const uint64_t bit_count = (uint64_t)bytes.size() * 8u;
-    bytes.push_back(0x80u);
-    while ((bytes.size() & 63u) != 56u) bytes.push_back(0u);
-    for (int shift = 56; shift >= 0; shift -= 8) {
-        bytes.push_back((uint8_t)(bit_count >> shift));
-    }
-    for (size_t offset = 0u; offset < bytes.size(); offset += 64u)
-    {
-        uint32_t words[64];
-        for (uint32_t i = 0u; i < 16u; ++i) {
-            const size_t pos = offset + (size_t)i * 4u;
-            words[i] = ((uint32_t)bytes[pos] << 24) |
-                ((uint32_t)bytes[pos + 1u] << 16) |
-                ((uint32_t)bytes[pos + 2u] << 8) |
-                (uint32_t)bytes[pos + 3u];
-        }
-        for (uint32_t i = 16u; i < 64u; ++i) {
-            const uint32_t x = words[i - 15u];
-            const uint32_t y = words[i - 2u];
-            const uint32_t s0 = Sha256RotateRight(x, 7u) ^
-                Sha256RotateRight(x, 18u) ^ (x >> 3u);
-            const uint32_t s1 = Sha256RotateRight(y, 17u) ^
-                Sha256RotateRight(y, 19u) ^ (y >> 10u);
-            words[i] = words[i - 16u] + s0 + words[i - 7u] + s1;
-        }
-        uint32_t a = state[0], b = state[1], c = state[2], d = state[3];
-        uint32_t e = state[4], f = state[5], g = state[6], h = state[7];
-        for (uint32_t i = 0u; i < 64u; ++i) {
-            const uint32_t s1 = Sha256RotateRight(e, 6u) ^
-                Sha256RotateRight(e, 11u) ^ Sha256RotateRight(e, 25u);
-            const uint32_t choose = (e & f) ^ ((~e) & g);
-            const uint32_t temp1 = h + s1 + choose + kRound[i] + words[i];
-            const uint32_t s0 = Sha256RotateRight(a, 2u) ^
-                Sha256RotateRight(a, 13u) ^ Sha256RotateRight(a, 22u);
-            const uint32_t majority = (a & b) ^ (a & c) ^ (b & c);
-            const uint32_t temp2 = s0 + majority;
-            h = g; g = f; f = e; e = d + temp1;
-            d = c; c = b; b = a; a = temp1 + temp2;
-        }
-        state[0] += a; state[1] += b; state[2] += c; state[3] += d;
-        state[4] += e; state[5] += f; state[6] += g; state[7] += h;
-    }
-    std::ostringstream output;
-    output << std::hex << std::setfill('0');
-    for (uint32_t value : state) output << std::setw(8) << value;
-    return output.str();
 }
 
 bool ReadBoundedFile(
@@ -7565,6 +7567,90 @@ int CmdGroupedTiming(int argc, char** argv)
 
 #endif // test hooks && !WIREHAIR_V2_BENCH_DISABLE_PREFERRED_ATTEMPT
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+struct PrecodeFailRawTraceReceipt
+{
+    uint64_t Seed = 0u;
+    std::string Sha256;
+    std::vector<uint32_t> PacketIds;
+};
+
+bool BuildPrecodeFailRawTraceReceipt(
+    uint32_t K,
+    uint32_t block_bytes,
+    uint32_t overhead,
+    double loss,
+    uint64_t external_seed,
+    PacketScheduleKind schedule,
+    bool paired_overhead_stream,
+    PrecodeFailRawTraceReceipt& receipt)
+{
+    const uint64_t delivered_wide = (uint64_t)K + overhead;
+    if (delivered_wide > UINT32_MAX ||
+        (schedule != PacketScheduleKind::Burst &&
+         schedule != PacketScheduleKind::Adversarial &&
+         schedule != PacketScheduleKind::RepairOnly))
+    {
+        return false;
+    }
+    receipt.Seed = external_seed ^
+        ((uint64_t)K * UINT64_C(0x9e3779b97f4a7c15)) ^
+        ((uint64_t)block_bytes * UINT64_C(0xbf58476d1ce4e5b9)) ^
+        ((uint64_t)(paired_overhead_stream ? 0u : overhead) *
+            UINT64_C(0x94d049bb133111eb));
+    receipt.PacketIds = BuildPacketSchedule(
+        K, (uint32_t)delivered_wide, loss, receipt.Seed, schedule);
+    if (receipt.PacketIds.size() != (size_t)delivered_wide) return false;
+
+    std::ostringstream trace;
+    trace << "wirehair-wh2-precodefail-raw-packet-trace-v1\n"
+          << "K=" << K << "\nblock_bytes=" << block_bytes
+          << "\noverhead=" << overhead << "\nloss="
+          << std::setprecision(17) << loss << "\nexternal_seed="
+          << external_seed << "\ntrace_seed=" << receipt.Seed
+          << "\nschedule=" << PacketScheduleName(schedule)
+          << "\noverhead_stream="
+          << (paired_overhead_stream ? "paired" : "salted")
+          << "\ntrial=0\nids=";
+    for (size_t i = 0u; i < receipt.PacketIds.size(); ++i) {
+        if (i != 0u) trace << ',';
+        trace << receipt.PacketIds[i];
+    }
+    trace << '\n';
+    receipt.Sha256 = Sha256Hex(trace.str());
+    return true;
+}
+
+WirehairResult ProbePrecodeFailRawSystematicAttemptZero(
+    const wirehair_v2::PrecodeSystem& system,
+    const wirehair_v2::PacketRowConfig& config)
+{
+    try
+    {
+        const uint32_t K = system.Params.BlockCount;
+        const uint8_t zero[2] = {0u, 0u};
+        const uint32_t probe_bytes =
+            system.Params.Field ==
+                    wirehair_v2::CompletionField::MixedGF256GF16 ?
+                2u : 1u;
+        std::vector<wirehair_v2::SolvePacket> packets(K);
+        for (uint32_t block_id = 0u; block_id < K; ++block_id) {
+            packets[block_id].BlockId = block_id;
+            packets[block_id].Data = zero;
+        }
+        std::vector<uint8_t> intermediate;
+        return wirehair_v2::SolvePrecodeSystem(
+            system, config, packets, probe_bytes, intermediate);
+    }
+    catch (const std::bad_alloc&) {
+        return Wirehair_OOM;
+    }
+    catch (const std::length_error&) {
+        return Wirehair_OOM;
+    }
+}
+#endif
+
 int CmdPrecodeFail(int argc, char** argv)
 {
     std::string nlist = "1000,3200,10000,32000,64000";
@@ -7598,6 +7684,7 @@ int CmdPrecodeFail(int argc, char** argv)
     bool binary_dense_two_anchor = false;
     uint32_t binary_dense_two_anchor_phase = 0u;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    bool raw_attempt0 = false;
     bool mixed_null_witness_internal_error = false;
     uint32_t fail_thread_launch_after = UINT32_MAX;
     bool source_hits_explicit = false;
@@ -7739,6 +7826,9 @@ int CmdPrecodeFail(int argc, char** argv)
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
         else if (!std::strcmp(argv[i], "--full-payload-solve")) {
             full_payload_solve = true;
+        }
+        else if (!std::strcmp(argv[i], "--raw-attempt0")) {
+            raw_attempt0 = true;
         }
         else if (!std::strcmp(argv[i], "--mixed-null-witnesses")) {
             mixed_null_witnesses = true;
@@ -8367,6 +8457,49 @@ int CmdPrecodeFail(int argc, char** argv)
             "its normalized H15/mix2 geometry\n");
         return 1;
     }
+    const bool raw_hard_schedule =
+        schedule_kind == PacketScheduleKind::Burst ||
+        schedule_kind == PacketScheduleKind::Adversarial ||
+        schedule_kind == PacketScheduleKind::RepairOnly;
+    if (raw_attempt0 &&
+        (completion != PrecodeFailCompletion::Mixed ||
+         BBs.size() != 1u || BBs[0] != 64 ||
+         heavy_families.size() != 1u ||
+         heavy_families[0] !=
+            wirehair_v2::HeavyCoefficientFamily::PeriodicCauchy ||
+         mix_counts.size() != 1u || mix_counts[0] != 2 ||
+         trials != 1u || threads != 1u || loss != 0.5 ||
+         !raw_hard_schedule || !paired_overhead_stream ||
+         payload_e2e || full_payload_solve ||
+         mixed_null_witnesses || mixed_period != 48u ||
+         (mixed_gf256_rows != wirehair_v2::kMixedGF256Rows &&
+          mixed_gf256_rows != wirehair_v2::kMixedGF256Rows + 1u) ||
+         mixed_gf16_rows != wirehair_v2::kMixedGF16Rows ||
+         mixed_geometry !=
+            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX ||
+         mixed_residue_skew != 0u ||
+         mixed_residue_schedule !=
+            wirehair_v2::MixedResidueSchedule::Constant ||
+         mixed_residue_hash_seed != 0u || mixed_residue_hash_keyed ||
+         mixed_independent_extension_residues ||
+         mixed_grouped_gf256_rows != 0u ||
+         mixed_grouped_gf256_row_mask != 0u ||
+         mixed_residue_bucket_mode !=
+            wirehair_v2::MixedResidueBucketMode::Automatic ||
+         source_hits_override != 0u || binary_dense_rows_override != 0u ||
+         !binary_dense_two_anchor || binary_dense_two_anchor_phase != 0u ||
+         gf256_heavy_rows_override != 0u || packet_peel_seed_xor != 0u ||
+         packet_peel_seed_table != PacketPeelSeedTable::None ||
+         odd_packet_peel_seed_xor != 0u ||
+         packet_row_seed_multiplier != 1u || packet_row_seed_avalanche ||
+         seed_block_bytes_override != 64u))
+    {
+        std::fprintf(stderr,
+            "precodefail --raw-attempt0 requires the Stage-A P48 shared-x "
+            "10-or-11 GF256 + 2 GF16, D12 two-anchor q0, mix2, one-trial "
+            "64-byte seed-width paired-overhead geometry with no seed fixes\n");
+        return 1;
+    }
 #endif
 
     if (completion == PrecodeFailCompletion::Certified)
@@ -8423,7 +8556,7 @@ int CmdPrecodeFail(int argc, char** argv)
             "odd_packet_peel_seed_xor=0x%x "
             "packet_row_seed_multiplier=0x%x "
             "packet_row_seed_avalanche=%u seed_block_bytes_override=%u "
-            "overhead_stream=%s full_payload_solve=%u schedule=%s%s\n",
+            "overhead_stream=%s full_payload_solve=%u schedule=%s%s%s\n",
             trials, threads, loss, (unsigned long long)seed,
             PrecodeFailCompletionName(completion),
             wirehair_v2::ActiveMixedCoefficientPeriod(),
@@ -8463,8 +8596,25 @@ int CmdPrecodeFail(int argc, char** argv)
             paired_overhead_stream ? "paired" : "salted",
             full_payload_solve ? 1u : 0u,
             PacketScheduleName(schedule_kind),
-            mixed_null_witnesses ? " mixed_null_witnesses=1" : "");
+            mixed_null_witnesses ? " mixed_null_witnesses=1" : "",
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            raw_attempt0 ? " raw_attempt0=1" : ""
+#else
+            ""
+#endif
+            );
     }
+    const char* raw_receipt_header =
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        raw_attempt0 ?
+            ",construction_attempt,base_matrix_seed,base_peel_seed,"
+            "matrix_seed,peel_seed,actual_staircase_rows,"
+            "actual_dense_rows,actual_heavy_rows,actual_source_hits,"
+            "actual_dense_two_anchor,actual_dense_two_anchor_phase,"
+            "systematic_probe_result,precode_count,packet_trace_seed,"
+            "packet_trace_sha256" :
+#endif
+        "";
     std::printf(
         "N,bb,heavy_family,mix_count,overhead,trials,success,rank_fail,error,"
         "fail_rate,"
@@ -8475,7 +8625,8 @@ int CmdPrecodeFail(int argc, char** argv)
         "heavy_gain_hist,failure_trials,active_packet_peel_seed_xor,"
         "mixed_joint_source_xors_mu,mixed_joint_marginal_xors_mu,"
         "mixed_joint_marginal_copies_mu,mixed_joint_active_deltas_mu,"
-        "mixed_joint_scratch_bytes_mu,mixed_dual_source_columns_mu\n");
+        "mixed_joint_scratch_bytes_mu,mixed_dual_source_columns_mu%s\n",
+        raw_receipt_header);
 
     for (int bb_value : BBs) for (int n_value : Ns)
     {
@@ -8601,10 +8752,51 @@ int CmdPrecodeFail(int argc, char** argv)
             wirehair_v2::PrecodeSystem system;
             wirehair_v2::PacketRowConfig config;
             uint32_t seed_attempt = 0u;
-            const WirehairResult select_result =
-                wirehair_v2::SelectSystematicConfiguration(
+            WirehairResult select_result = Wirehair_Success;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            WirehairResult systematic_probe_result = Wirehair_Success;
+            if (raw_attempt0)
+            {
+                if (!wirehair_v2::BuildPrecodeSystem(
+                        wirehair_v2::PrecodeParamsForAttempt(
+                            base_params, 0u), system))
+                {
+                    select_result = Wirehair_InvalidInput;
+                }
+                else
+                {
+                    config = wirehair_v2::PacketConfigForAttempt(
+                        base_config, 0u);
+                    systematic_probe_result =
+                        ProbePrecodeFailRawSystematicAttemptZero(
+                            system, config);
+                    if (systematic_probe_result != Wirehair_Success &&
+                        systematic_probe_result != Wirehair_NeedMore)
+                    {
+                        select_result = systematic_probe_result;
+                    }
+                }
+            }
+            else
+#endif
+            {
+                select_result = wirehair_v2::SelectSystematicConfiguration(
                     base_params, base_config, system, config, &seed_attempt);
+            }
             if (select_result != Wirehair_Success) {
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+                if (raw_attempt0)
+                {
+                    std::fprintf(stderr,
+                        "precodefail raw attempt0 construction/probe failed "
+                        "N=%u bb=%u heavy_family=%s mix_count=%u "
+                        "result=%d\n",
+                        K, bb, HeavyFamilyName(heavy_family),
+                        (uint32_t)mix_count_value,
+                        (int)select_result);
+                    return 2;
+                }
+#endif
                 std::fprintf(stderr,
                     "precodefail seed selection failed N=%u bb=%u "
                     "heavy_family=%s mix_count=%u result=%d\n",
@@ -8623,6 +8815,27 @@ int CmdPrecodeFail(int argc, char** argv)
                 return 2;
             }
             const uint32_t precode_count = (uint32_t)precode_count_wide;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            if (raw_attempt0 &&
+                (system.Params.Staircase != canonical_params.Staircase ||
+                 system.Params.DenseRows != 12u ||
+                 system.Params.HeavyRows !=
+                    mixed_gf256_rows + mixed_gf16_rows ||
+                 system.Params.SourceHits != canonical_params.SourceHits ||
+                 !system.Params.DenseTwoAnchor ||
+                 system.Params.DenseTwoAnchorPhase != 0u))
+            {
+                std::fprintf(stderr,
+                    "precodefail raw attempt0 construction geometry "
+                    "mismatch N=%u S=%u D=%u H=%u N1=%u anchor=%u "
+                    "phase=%u\n",
+                    K, system.Params.Staircase, system.Params.DenseRows,
+                    system.Params.HeavyRows, system.Params.SourceHits,
+                    system.Params.DenseTwoAnchor ? 1u : 0u,
+                    system.Params.DenseTwoAnchorPhase);
+                return 2;
+            }
+#endif
             wirehair_v2::PacketRowRuntime runtime;
             if (!runtime.Initialize(K, precode_count, config.MixCount)) {
                 std::fprintf(stderr,
@@ -8652,11 +8865,40 @@ int CmdPrecodeFail(int argc, char** argv)
             uint32_t solve_block_bytes =
                 completion == PrecodeFailCompletion::Mixed ? 2u : 1u;
             if (full_payload_solve) solve_block_bytes = bb;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            PrecodeFailRawTraceReceipt raw_trace_receipt;
+            if (raw_attempt0 && !BuildPrecodeFailRawTraceReceipt(
+                    K, bb, overhead, loss, seed, schedule_kind,
+                    paired_overhead_stream, raw_trace_receipt))
+            {
+                std::fprintf(stderr,
+                    "precodefail raw attempt0 packet trace failed "
+                    "N=%u bb=%u overhead=%u\n",
+                    K, bb, overhead);
+                return 2;
+            }
+#endif
             const auto populate_trial_packets = [&, overhead](
                 uint32_t trial,
                 const uint8_t* packet_data,
                 std::vector<wirehair_v2::SolvePacket>& packets) -> bool
             {
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+                if (raw_attempt0)
+                {
+                    if (trial != 0u ||
+                        raw_trace_receipt.PacketIds.size() != packets.size())
+                    {
+                        return false;
+                    }
+                    for (size_t i = 0u; i < packets.size(); ++i) {
+                        packets[i].BlockId =
+                            raw_trace_receipt.PacketIds[i];
+                        packets[i].Data = packet_data;
+                    }
+                    return true;
+                }
+#endif
                 const uint64_t loss_seed =
                     seed ^
                     ((uint64_t)K * UINT64_C(0x9e3779b97f4a7c15)) ^
@@ -9085,7 +9327,7 @@ int CmdPrecodeFail(int argc, char** argv)
             std::printf(
                 "%u,%u,%s,%u,%u,%u,%u,%u,%u,%.8f,%.3f,%u,%.3f,%u,%.3f,"
                 "%u,%u,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%u,%.3f,%.3f,%d,"
-                "%s,%s,%s,0x%x,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\n",
+                "%s,%s,%s,0x%x,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f",
                 K, bb, HeavyFamilyName(heavy_family),
                 (uint32_t)mix_count_value, overhead, trials,
                 successes, rank_failures, errors,
@@ -9116,6 +9358,29 @@ int CmdPrecodeFail(int argc, char** argv)
                 (double)mixed_joint_active_deltas_sum / trials,
                 (double)mixed_joint_scratch_bytes_sum / trials,
                 (double)mixed_dual_source_columns_sum / trials);
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            if (raw_attempt0)
+            {
+                std::printf(
+                    ",0,0x%llx,0x%x,0x%llx,0x%x,%u,%u,%u,%u,%u,%u,"
+                    "%d,%u,0x%llx,%s",
+                    (unsigned long long)base_params.Seed,
+                    base_config.PeelSeed,
+                    (unsigned long long)system.Params.Seed,
+                    config.PeelSeed,
+                    system.Params.Staircase,
+                    system.Params.DenseRows,
+                    system.Params.HeavyRows,
+                    system.Params.SourceHits,
+                    system.Params.DenseTwoAnchor ? 1u : 0u,
+                    system.Params.DenseTwoAnchorPhase,
+                    (int)systematic_probe_result,
+                    precode_count,
+                    (unsigned long long)raw_trace_receipt.Seed,
+                    raw_trace_receipt.Sha256.c_str());
+            }
+#endif
+            std::printf("\n");
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
             if (mixed_null_witnesses)
             {
@@ -9248,6 +9513,42 @@ int CmdSelfTest()
         return 1;
     }
     std::printf("mixed null-witness exit policy: PASS\n");
+
+    // Paired-overhead Stage-A receipts rebuild a schedule at each overhead.
+    // Pin the contract that every longer schedule is the exact same prefix,
+    // across all formal schedules, roots, and K/source-hit boundaries.
+    static const uint32_t kPrefixKs[] = { 2u, 9999u, 10000u, 64000u };
+    static const uint64_t kPrefixRoots[] = {
+        UINT64_C(0xd1b54a32d192ed03),
+        UINT64_C(0x94d049bb133111eb),
+        UINT64_C(0x8538ecb5bd456ea3)
+    };
+    static const PacketScheduleKind kPrefixSchedules[] = {
+        PacketScheduleKind::Burst,
+        PacketScheduleKind::Adversarial,
+        PacketScheduleKind::RepairOnly
+    };
+    for (uint32_t K : kPrefixKs)
+    for (uint64_t root : kPrefixRoots)
+    for (PacketScheduleKind schedule : kPrefixSchedules)
+    {
+        const uint64_t trace_seed = root ^
+            ((uint64_t)K * UINT64_C(0x9e3779b97f4a7c15)) ^
+            (UINT64_C(64) * UINT64_C(0xbf58476d1ce4e5b9));
+        const std::vector<uint32_t> oh0 = BuildPacketSchedule(
+            K, K, 0.5, trace_seed, schedule);
+        const std::vector<uint32_t> oh1024 = BuildPacketSchedule(
+            K, K + 1024u, 0.5, trace_seed, schedule);
+        if (oh0.size() != K || oh1024.size() != (size_t)K + 1024u ||
+            !std::equal(oh0.begin(), oh0.end(), oh1024.begin()))
+        {
+            std::fprintf(stderr,
+                "paired packet schedule prefix mismatch: K=%u root=%llx "
+                "schedule=%s\n",
+                K, (unsigned long long)root, PacketScheduleName(schedule));
+            return 1;
+        }
+    }
 #endif
 
     double wilson_lower = 0.0;

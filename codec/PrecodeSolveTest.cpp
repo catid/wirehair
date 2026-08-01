@@ -1969,6 +1969,43 @@ bool CheckMixedProjectionResidueBucketsOracle()
             return false;
         }
     }
+    // P48 Stage A keeps the two GF(2^16) rows fixed while appending one
+    // GF(256) row.  That places the two extension coefficients on opposite
+    // sides of a packed-word boundary.  The H12/H13/H12 sequence also proves
+    // that the same-thread packed coefficient cache restores the H12 layout.
+    if (!CheckMixedProjectionResidueBucketsOracleForPeriod(
+            48u,
+            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,
+            wirehair_v2::kMixedGF16Rows,
+            0u,
+            wirehair_v2::MixedResidueSchedule::Constant,
+            false,
+            wirehair_v2::kMixedGF256Rows,
+            wirehair_v2::MixedResidueBucketMode::Automatic,
+            true) ||
+        !CheckMixedProjectionResidueBucketsOracleForPeriod(
+            48u,
+            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,
+            wirehair_v2::kMixedGF16Rows,
+            0u,
+            wirehair_v2::MixedResidueSchedule::Constant,
+            false,
+            wirehair_v2::kMixedGF256Rows + 1u,
+            wirehair_v2::MixedResidueBucketMode::Automatic,
+            true) ||
+        !CheckMixedProjectionResidueBucketsOracleForPeriod(
+            48u,
+            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,
+            wirehair_v2::kMixedGF16Rows,
+            0u,
+            wirehair_v2::MixedResidueSchedule::Constant,
+            false,
+            wirehair_v2::kMixedGF256Rows,
+            wirehair_v2::MixedResidueBucketMode::Automatic,
+            true))
+    {
+        return false;
+    }
     if (!CheckMixedProjectionResidueBucketsOracleForPeriod(
             29u,
             wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,

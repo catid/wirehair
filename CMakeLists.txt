@@ -759,6 +759,17 @@ if(BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
         endforeach()
         if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
             add_test(
+                NAME wh2_h13_stage_a_test
+                COMMAND ${Python3_EXECUTABLE}
+                    ${PROJECT_SOURCE_DIR}/bench/wh2_h13_stage_a_test.py
+                    -v)
+            set_tests_properties(wh2_h13_stage_a_test
+                PROPERTIES
+                    ENVIRONMENT
+                        "PYTHONPATH=${PROJECT_SOURCE_DIR}/bench;PYTHONDONTWRITEBYTECODE=1"
+                    LABELS "v2;research;state-machine;h13"
+                    TIMEOUT 60)
+            add_test(
                 NAME wh2_rank_floor_two_anchor_screen_test
                 COMMAND ${Python3_EXECUTABLE}
                     ${PROJECT_SOURCE_DIR}/bench/wh2_rank_floor_two_anchor_screen_test.py
