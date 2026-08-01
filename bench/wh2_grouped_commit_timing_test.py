@@ -141,12 +141,12 @@ def schedstat_text(records=((0, 1000, 10), (1, 2000, 20))):
 
 
 def isolation_snapshot(start_ns=100, end_ns=120):
-    expected = [8, 72, 126]
+    expected = [6, 70, 80]
     affinity_records = [
-        {"irq": 30, "effective_affinity_list": "8",
-         "effective_cpus": [8]},
-        {"irq": 31, "effective_affinity_list": "0-7",
-         "effective_cpus": list(range(8))},
+        {"irq": timing.ZERO_COUNT_GUARDED_IRQ,
+         "effective_affinity_list": "6", "effective_cpus": [6]},
+        {"irq": 31, "effective_affinity_list": "0-5",
+         "effective_cpus": list(range(6))},
     ]
     managed = []
     for irq, identity, handler, requested, effective in \
@@ -165,29 +165,30 @@ def isolation_snapshot(start_ns=100, end_ns=120):
         })
     affinity_records.sort(key=lambda value: value["irq"])
     return {
-        "schema": "wirehair.wh2.runtime_isolation_snapshot.v2",
+        "schema": "wirehair.wh2.runtime_isolation_snapshot.v3",
         "capture_start_monotonic_ns": start_ns,
         "capture_end_monotonic_ns": end_ns,
         "capture_duration_ns": end_ns - start_ns,
         "self_cgroup": "/wh2-timing-v4",
         "expected_isolated_cpus": expected,
-        "kernel_isolated_cpu_list": "8,72,126",
+        "kernel_isolated_cpu_list": "6,70,80",
         "kernel_isolated_cpus": expected,
-        "cgroup_cpu_list": "8,72,126", "cgroup_cpus": expected,
-        "cgroup_effective_cpu_list": "8,72,126",
+        "cgroup_cpu_list": "6,70,80", "cgroup_cpus": expected,
+        "cgroup_effective_cpu_list": "6,70,80",
         "cgroup_effective_cpus": expected,
-        "cgroup_exclusive_cpu_list": "8,72,126",
+        "cgroup_exclusive_cpu_list": "6,70,80",
         "cgroup_exclusive_cpus": expected,
-        "cgroup_exclusive_effective_cpu_list": "8,72,126",
+        "cgroup_exclusive_effective_cpu_list": "6,70,80",
         "cgroup_exclusive_effective_cpus": expected,
         "cgroup_partition": "isolated",
         "irq_effective_affinities": affinity_records,
-        "irq30_exception": {
-            "irq": 30, "identity": timing.IRQ30_IDENTITY,
-            "handler_directories": ["AMD-Vi0-PPR"],
+        "zero_count_irq_exception": {
+            "irq": timing.ZERO_COUNT_GUARDED_IRQ,
+            "identity": timing.ZERO_COUNT_GUARDED_IRQ_IDENTITY,
+            "handler_directories": [timing.ZERO_COUNT_GUARDED_IRQ_HANDLER],
             "requested_affinity_list": "0-127",
             "requested_cpus": list(range(128)),
-            "effective_affinity_list": "8", "effective_cpus": [8],
+            "effective_affinity_list": "6", "effective_cpus": [6],
             "global_interrupt_count": 0,
         },
         "managed_nvme_exceptions": managed,
@@ -200,8 +201,9 @@ def target_irq_snapshot(
     hard = hard or {}
     soft = soft or {}
     global_hard = global_hard or {}
-    hard_vectors = (("30", timing.IRQ30_IDENTITY),
-                    ("103", timing.GUARDED_IRQ_IDENTITIES[103]),
+    hard_vectors = ((str(timing.ZERO_COUNT_GUARDED_IRQ),
+                     timing.ZERO_COUNT_GUARDED_IRQ_IDENTITY),
+                    ("142", timing.GUARDED_IRQ_IDENTITIES[142]),
                     ("NMI", "Non-maskable interrupts"),
                     ("LOC", "Local timer interrupts"))
     interrupts = [" " + " ".join("CPU%d" % cpu for cpu in cpu_ids)]
@@ -535,7 +537,7 @@ class ReceiptAndThermalTests(unittest.TestCase):
             grouped_stdout("base", task), "base", task, 4096, 8)
         before = target_irq_snapshot(start_ns=100, end_ns=110)
         after = target_irq_snapshot(
-            hard={"103": (1, 0, 0)}, start_ns=120, end_ns=130)
+            hard={"142": (1, 0, 0)}, start_ns=120, end_ns=130)
         delta = timing.checked_target_irq_delta(
             before, after, (8, 72, 126), "fixture")
         with self.assertRaisesRegex(timing.TimingError, "campaign-fatal"):
@@ -854,10 +856,10 @@ class ReceiptAndThermalTests(unittest.TestCase):
 
         numeric = timing.checked_target_irq_delta(
             before, target_irq_snapshot(
-                hard={"103": (1, 0, 0)}, start_ns=120, end_ns=130),
+                hard={"142": (1, 0, 0)}, start_ns=120, end_ns=130),
             (8, 72, 126), "fixture")
         self.assertEqual(
-            numeric["contaminations"], ["numeric-hardirq:103:cpu8:1"])
+            numeric["contaminations"], ["numeric-hardirq:142:cpu8:1"])
         device_soft = timing.checked_target_irq_delta(
             before,
             target_irq_snapshot(
@@ -879,7 +881,7 @@ class ReceiptAndThermalTests(unittest.TestCase):
         with self.assertRaisesRegex(timing.TimingError, "counter reset"):
             timing.checked_target_irq_delta(
                 target_irq_snapshot(
-                    hard={"103": (1, 0, 0)}, start_ns=80, end_ns=90),
+                    hard={"142": (1, 0, 0)}, start_ns=80, end_ns=90),
                 before,
                 (8, 72, 126), "fixture")
         with self.assertRaisesRegex(timing.TimingError, "counter reset"):
@@ -917,7 +919,7 @@ class ReceiptAndThermalTests(unittest.TestCase):
         for global_tamper in (
                 ["ERR", "global", 0, 0],
                 ["ERR", "named", "Error counters", 0, 0, 0],
-                ["103", "global", 0]):
+                ["142", "global", 0]):
             tampered = copy.deepcopy(before)
             index = next(
                 index for index, row in enumerate(tampered["hardirq_rows"])
@@ -974,7 +976,7 @@ class ReceiptAndThermalTests(unittest.TestCase):
         changed_identity = copy.deepcopy(after)
         numeric_index = next(
             index for index, row in enumerate(changed_identity["hardirq_rows"])
-            if row[0] == "103")
+            if row[0] == "142")
         changed_identity["hardirq_rows"][numeric_index][2] = "foreign-device"
         changed_identity["hardirq_sha256"] = timing._target_rows_sha256(
             "hardirq", (8, 72, 126), changed_identity["cpu_ids"],
@@ -1055,7 +1057,7 @@ class ReceiptAndThermalTests(unittest.TestCase):
         start = isolation_snapshot(100, 120)
         end = isolation_snapshot(10_000, 10_030)
         timing.validate_runtime_isolation_transition(
-            start, end, (8, 72, 126))
+            start, end, (6, 70, 80))
         digest = timing.runtime_isolation_snapshot_sha256(start)
         self.assertRegex(digest, r"^[0-9a-f]{64}$")
         changed = copy.deepcopy(start)
@@ -1073,20 +1075,32 @@ class ReceiptAndThermalTests(unittest.TestCase):
         malformed_cases.append(malformed)
         malformed = copy.deepcopy(start)
         malformed["irq_effective_affinities"][1] = {
-            "irq": 31, "effective_affinity_list": "72",
-            "effective_cpus": [72],
+            "irq": 31, "effective_affinity_list": "70",
+            "effective_cpus": [70],
         }
         malformed_cases.append(malformed)
         malformed = copy.deepcopy(start)
-        malformed["irq30_exception"]["global_interrupt_count"] = True
+        malformed["zero_count_irq_exception"][
+            "global_interrupt_count"] = True
         malformed_cases.append(malformed)
         malformed = copy.deepcopy(start)
-        malformed["irq30_exception"]["identity"] = \
-            "OTHER 999-edge AMD-Vi0-PPR"
+        malformed["zero_count_irq_exception"]["identity"] = \
+            "OTHER 999-edge AMDI0010:05"
         malformed_cases.append(malformed)
         malformed = copy.deepcopy(start)
-        malformed["irq30_exception"]["requested_affinity_list"] = "0-126"
-        malformed["irq30_exception"]["requested_cpus"] = list(range(127))
+        malformed["zero_count_irq_exception"][
+            "requested_affinity_list"] = "0-126"
+        malformed["zero_count_irq_exception"][
+            "requested_cpus"] = list(range(127))
+        malformed_cases.append(malformed)
+        malformed = copy.deepcopy(start)
+        malformed["zero_count_irq_exception"][
+            "effective_affinity_list"] = "70"
+        malformed["zero_count_irq_exception"]["effective_cpus"] = [70]
+        malformed_cases.append(malformed)
+        malformed = copy.deepcopy(start)
+        malformed["zero_count_irq_exception"][
+            "handler_directories"] = ["AMDI0010:04"]
         malformed_cases.append(malformed)
         malformed = copy.deepcopy(start)
         malformed["managed_nvme_exceptions"][0][
@@ -1116,7 +1130,7 @@ class ReceiptAndThermalTests(unittest.TestCase):
             with self.subTest(value=value):
                 with self.assertRaises(timing.TimingError):
                     timing.validate_runtime_isolation_snapshot(
-                        value, (8, 72, 126), "tampered")
+                        value, (6, 70, 80), "tampered")
         with self.assertRaisesRegex(timing.TimingError, "cardinality"):
             timing.parse_cpu_list("0-2147483647")
 
@@ -1128,12 +1142,17 @@ class ReceiptAndThermalTests(unittest.TestCase):
             (proc / "self").mkdir(parents=True)
             (proc / "self/cgroup").write_text(
                 "0::/wh2-timing-v4\n", encoding="ascii")
-            irq30 = proc / "irq/30"
-            (irq30 / "AMD-Vi0-PPR").mkdir(parents=True)
-            (irq30 / "effective_affinity_list").write_text(
-                "8\n", encoding="ascii")
-            (irq30 / "smp_affinity_list").write_text(
+            zero_irq = proc / ("irq/%d" % timing.ZERO_COUNT_GUARDED_IRQ)
+            (zero_irq / timing.ZERO_COUNT_GUARDED_IRQ_HANDLER).mkdir(
+                parents=True)
+            (zero_irq / "effective_affinity_list").write_text(
+                "6\n", encoding="ascii")
+            (zero_irq / "smp_affinity_list").write_text(
                 "0-127\n", encoding="ascii")
+            old_zero_irq = proc / "irq/30"
+            (old_zero_irq / "AMD-Vi0-PPR").mkdir(parents=True)
+            (old_zero_irq / "effective_affinity_list").write_text(
+                "8\n", encoding="ascii")
             for irq, _identity, handler, requested, effective in \
                     timing.MANAGED_NVME_IRQ_WHITELIST:
                 path = proc / ("irq/%d" % irq)
@@ -1149,7 +1168,7 @@ class ReceiptAndThermalTests(unittest.TestCase):
             irq31 = proc / "irq/31"
             irq31.mkdir(parents=True)
             (irq31 / "effective_affinity_list").write_text(
-                "0-7\n", encoding="ascii")
+                "0-5\n", encoding="ascii")
             interrupt_lines = [" CPU0 CPU1"] + [
                 " %d: 0 0 %s" % (irq, identity)
                 for irq, identity in sorted(
@@ -1160,60 +1179,68 @@ class ReceiptAndThermalTests(unittest.TestCase):
             group = cgroup / "wh2-timing-v4"
             group.mkdir(parents=True)
             (cgroup / "cpuset.cpus.isolated").write_text(
-                "8,72,126\n", encoding="ascii")
+                "6,70,80\n", encoding="ascii")
             for name in (
                     "cpuset.cpus", "cpuset.cpus.effective",
                     "cpuset.cpus.exclusive",
                     "cpuset.cpus.exclusive.effective"):
-                (group / name).write_text("8,72,126\n", encoding="ascii")
+                (group / name).write_text("6,70,80\n", encoding="ascii")
             (group / "cpuset.cpus.partition").write_text(
                 "isolated\n", encoding="ascii")
             with mock.patch.object(
                     timing.time, "monotonic_ns", side_effect=[100, 200]):
                 captured = timing.capture_runtime_isolation_snapshot(
-                    8, 72, 126, proc_root=proc, cgroup_root=cgroup)
+                    6, 70, 80, proc_root=proc, cgroup_root=cgroup)
             self.assertEqual(captured["capture_duration_ns"], 100)
             self.assertEqual(
-                captured["irq30_exception"]["global_interrupt_count"], 0)
+                captured["zero_count_irq_exception"][
+                    "global_interrupt_count"], 0)
             self.assertEqual(
                 [item["irq"] for item in
                  captured["irq_effective_affinities"]],
-                sorted([2, 30, 31] + [
+                sorted([2, timing.ZERO_COUNT_GUARDED_IRQ, 30, 31] + [
                     item[0] for item in timing.MANAGED_NVME_IRQ_WHITELIST]))
+            irq30_record = next(
+                item for item in captured["irq_effective_affinities"]
+                if item["irq"] == 30)
+            self.assertEqual(irq30_record["effective_cpus"], [8])
             self.assertEqual(
                 captured["irq_effective_affinities"][0]["effective_cpus"], [])
 
             (irq31 / "effective_affinity_list").write_text(
-                "72\n", encoding="ascii")
+                "70\n", encoding="ascii")
             with self.assertRaisesRegex(timing.TimingError, "IRQ 31"):
                 timing.capture_runtime_isolation_snapshot(
-                    8, 72, 126, proc_root=proc, cgroup_root=cgroup)
+                    6, 70, 80, proc_root=proc, cgroup_root=cgroup)
             (irq31 / "effective_affinity_list").write_text(
-                "0-7\n", encoding="ascii")
+                "0-5\n", encoding="ascii")
             (proc / "interrupts").write_text(
                 " CPU0 CPU1\n"
-                " 30: 0 1 IOMMU-MSI 376-edge AMD-Vi0-PPR\n",
+                " 23: 0 1 IR-IO-APIC 23-edge AMDI0010:05\n",
                 encoding="ascii")
             with self.assertRaises(timing.TimingError):
                 timing.capture_runtime_isolation_snapshot(
-                    8, 72, 126, proc_root=proc, cgroup_root=cgroup)
+                    6, 70, 80, proc_root=proc, cgroup_root=cgroup)
 
     def test_guarded_irq_parser_rejects_nonzero_identity_or_malformed_rows(self):
         zero = (
             b" CPU0 CPU1\n"
-            b" 30: 0 0 IOMMU-MSI 376-edge AMD-Vi0-PPR\n")
-        expected = {30: timing.IRQ30_IDENTITY}
+            b" 23: 0 0 IR-IO-APIC 23-edge AMDI0010:05\n")
+        expected = {
+            timing.ZERO_COUNT_GUARDED_IRQ:
+                timing.ZERO_COUNT_GUARDED_IRQ_IDENTITY}
         self.assertEqual(
-            timing._parse_guarded_irq_rows(zero, expected)[30]["total_count"],
+            timing._parse_guarded_irq_rows(
+                zero, expected)[timing.ZERO_COUNT_GUARDED_IRQ]["total_count"],
             0)
         self.assertEqual(timing._parse_guarded_irq_rows(
-            zero.replace(b"30: 0 0", b"30: 0 1"), expected
-        )[30]["total_count"], 1)
+            zero.replace(b"23: 0 0", b"23: 0 1"), expected
+        )[timing.ZERO_COUNT_GUARDED_IRQ]["total_count"], 1)
         for malformed in (
                 zero[:-1],
                 zero.replace(b"CPU1", b"CPU0"),
                 zero + zero.splitlines(keepends=True)[1],
-                zero.replace(b"AMD-Vi0-PPR", b"other")):
+                zero.replace(b"AMDI0010:05", b"other")):
             with self.subTest(malformed=malformed):
                 with self.assertRaises(timing.TimingError):
                     timing._parse_guarded_irq_rows(malformed, expected)

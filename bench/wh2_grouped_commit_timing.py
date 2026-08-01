@@ -102,26 +102,26 @@ EXPECTED_SOFTIRQ_VECTORS = (
 )
 GLOBAL_HARDIRQ_VECTORS = frozenset(("ERR", "MIS"))
 MANAGED_NVME_IRQ_WHITELIST = (
-    (103, "IR-PCI-MSIX-0000:a9:00.0 9-edge nvme2q9",
-     "nvme2q9", "8", "8"),
-    (107, "IR-PCI-MSIX-0000:d1:00.0 2-edge nvme0q2",
-     "nvme0q2", "5-9,69-72", "72"),
-    (134, "IR-PCI-MSIX-0000:d2:00.0 14-edge nvme1q14",
-     "nvme1q14", "60-63,124-127", "126"),
-    (176, "IR-PCI-MSIX-0000:aa:00.0 9-edge nvme3q9",
-     "nvme3q9", "8", "8"),
-    (257, "IR-PCI-MSIX-0000:a9:00.0 73-edge nvme2q73",
-     "nvme2q73", "72", "72"),
-    (304, "IR-PCI-MSIX-0000:aa:00.0 73-edge nvme3q73",
-     "nvme3q73", "72", "72"),
-    (365, "IR-PCI-MSIX-0000:a9:00.0 127-edge nvme2q127",
-     "nvme2q127", "126", "126"),
-    (390, "IR-PCI-MSIX-0000:aa:00.0 127-edge nvme3q127",
-     "nvme3q127", "126", "126"),
+    (142, "IR-PCI-MSIX-0000:a9:00.0 7-edge nvme2q7",
+     "nvme2q7", "6", "6"),
+    (172, "IR-PCI-MSIX-0000:aa:00.0 7-edge nvme3q7",
+     "nvme3q7", "6", "6"),
+    (253, "IR-PCI-MSIX-0000:a9:00.0 71-edge nvme2q71",
+     "nvme2q71", "70", "70"),
+    (273, "IR-PCI-MSIX-0000:a9:00.0 81-edge nvme2q81",
+     "nvme2q81", "80", "80"),
+    (300, "IR-PCI-MSIX-0000:aa:00.0 71-edge nvme3q71",
+     "nvme3q71", "70", "70"),
+    (320, "IR-PCI-MSIX-0000:aa:00.0 81-edge nvme3q81",
+     "nvme3q81", "80", "80"),
 )
-IRQ30_IDENTITY = "IOMMU-MSI 376-edge AMD-Vi0-PPR"
+ZERO_COUNT_GUARDED_IRQ = 23
+ZERO_COUNT_GUARDED_IRQ_IDENTITY = "IR-IO-APIC 23-edge AMDI0010:05"
+ZERO_COUNT_GUARDED_IRQ_HANDLER = "AMDI0010:05"
+ZERO_COUNT_GUARDED_IRQ_REQUESTED_AFFINITY = "0-127"
+ZERO_COUNT_GUARDED_IRQ_EFFECTIVE_AFFINITY = "6"
 GUARDED_IRQ_IDENTITIES = {
-    30: IRQ30_IDENTITY,
+    ZERO_COUNT_GUARDED_IRQ: ZERO_COUNT_GUARDED_IRQ_IDENTITY,
     **{
         irq: identity
         for irq, identity, _handler, _requested, _effective
@@ -445,13 +445,13 @@ RUNTIME_ISOLATION_SNAPSHOT_FIELDS = frozenset((
     "cgroup_effective_cpus", "cgroup_exclusive_cpu_list",
     "cgroup_exclusive_cpus", "cgroup_exclusive_effective_cpu_list",
     "cgroup_exclusive_effective_cpus", "cgroup_partition",
-    "irq_effective_affinities", "irq30_exception",
+    "irq_effective_affinities", "zero_count_irq_exception",
     "managed_nvme_exceptions",
 ))
 IRQ_EFFECTIVE_AFFINITY_FIELDS = frozenset((
     "irq", "effective_affinity_list", "effective_cpus",
 ))
-IRQ30_EXCEPTION_FIELDS = frozenset((
+ZERO_COUNT_IRQ_EXCEPTION_FIELDS = frozenset((
     "irq", "identity", "handler_directories", "requested_affinity_list",
     "requested_cpus", "effective_affinity_list", "effective_cpus",
     "global_interrupt_count",
@@ -1947,7 +1947,7 @@ def validate_runtime_isolation_snapshot(
     if (not isinstance(snapshot, dict) or
             set(snapshot) != RUNTIME_ISOLATION_SNAPSHOT_FIELDS or
             snapshot.get("schema") !=
-            "wirehair.wh2.runtime_isolation_snapshot.v2" or
+            "wirehair.wh2.runtime_isolation_snapshot.v3" or
             snapshot.get("self_cgroup") != "/wh2-timing-v4" or
             snapshot.get("expected_isolated_cpus") != list(expected) or
             snapshot.get("cgroup_partition") != "isolated"):
@@ -1971,7 +1971,7 @@ def validate_runtime_isolation_snapshot(
     if not isinstance(affinities, list) or not affinities:
         raise TimingError("%s IRQ affinity inventory is malformed" % context)
     previous_irq = -1
-    irq30_record: Optional[Dict[str, object]] = None
+    zero_count_irq_record: Optional[Dict[str, object]] = None
     intersecting = []
     affinity_by_irq = {}
     for record in affinities:
@@ -1991,11 +1991,11 @@ def validate_runtime_isolation_snapshot(
         if overlap:
             intersecting.append(irq)
         affinity_by_irq[irq] = record
-        if irq == 30:
-            irq30_record = record
-    exception = snapshot.get("irq30_exception")
+        if irq == ZERO_COUNT_GUARDED_IRQ:
+            zero_count_irq_record = record
+    exception = snapshot.get("zero_count_irq_exception")
     managed = snapshot.get("managed_nvme_exceptions")
-    expected_intersecting = [30] + [
+    expected_intersecting = [ZERO_COUNT_GUARDED_IRQ] + [
         irq for irq, _identity, _handler, _requested, _effective
         in MANAGED_NVME_IRQ_WHITELIST]
     if intersecting != sorted(expected_intersecting) or exception is None or \
@@ -2003,31 +2003,38 @@ def validate_runtime_isolation_snapshot(
             len(managed) != len(MANAGED_NVME_IRQ_WHITELIST):
         raise TimingError("%s numeric IRQ reaches an isolated CPU" % context)
     if (not isinstance(exception, dict) or
-            set(exception) != IRQ30_EXCEPTION_FIELDS or
-            exception.get("irq") != 30 or
-            exception.get("identity") != IRQ30_IDENTITY or
-            exception.get("handler_directories") != ["AMD-Vi0-PPR"] or
+            set(exception) != ZERO_COUNT_IRQ_EXCEPTION_FIELDS or
+            exception.get("irq") != ZERO_COUNT_GUARDED_IRQ or
+            exception.get("identity") != ZERO_COUNT_GUARDED_IRQ_IDENTITY or
+            exception.get("handler_directories") !=
+            [ZERO_COUNT_GUARDED_IRQ_HANDLER] or
             not isinstance(exception.get("global_interrupt_count"), int) or
             isinstance(exception.get("global_interrupt_count"), bool) or
             exception.get("global_interrupt_count") != 0 or
-            irq30_record is None):
-        raise TimingError("%s guarded IRQ30 identity/count is malformed" % context)
+            zero_count_irq_record is None):
+        raise TimingError(
+            "%s zero-count guarded IRQ identity/count is malformed" % context)
     requested = _snapshot_cpu_list(
         exception.get("requested_affinity_list"),
-        exception.get("requested_cpus"), "%s IRQ30 requested" % context)
+        exception.get("requested_cpus"),
+        "%s zero-count IRQ requested" % context)
     effective = _snapshot_cpu_list(
         exception.get("effective_affinity_list"),
-        exception.get("effective_cpus"), "%s IRQ30 effective" % context)
+        exception.get("effective_cpus"),
+        "%s zero-count IRQ effective" % context)
     if (not requested or
-            exception.get("requested_affinity_list") != "0-127" or
+            exception.get("requested_affinity_list") !=
+            ZERO_COUNT_GUARDED_IRQ_REQUESTED_AFFINITY or
             list(requested) != list(range(128)) or
-            exception.get("effective_affinity_list") != "8" or
-            list(effective) != [8] or 8 not in expected or
             exception.get("effective_affinity_list") !=
-            irq30_record.get("effective_affinity_list") or
-            list(effective) != irq30_record.get("effective_cpus") or
+            ZERO_COUNT_GUARDED_IRQ_EFFECTIVE_AFFINITY or
+            list(effective) != [6] or 6 not in expected or
+            exception.get("effective_affinity_list") !=
+            zero_count_irq_record.get("effective_affinity_list") or
+            list(effective) != zero_count_irq_record.get("effective_cpus") or
             not set(effective).intersection(expected)):
-        raise TimingError("%s guarded IRQ30 affinity is malformed" % context)
+        raise TimingError(
+            "%s zero-count guarded IRQ affinity is malformed" % context)
     for record, frozen in zip(managed, MANAGED_NVME_IRQ_WHITELIST):
         irq, identity, handler, requested_text, effective_text = frozen
         if (not isinstance(record, dict) or
@@ -2130,7 +2137,7 @@ def capture_runtime_isolation_snapshot(
         }
         records.append(record)
         if set(affinity_cpus).intersection(expected):
-            if irq != 30 and irq not in managed_by_irq:
+            if irq != ZERO_COUNT_GUARDED_IRQ and irq not in managed_by_irq:
                 raise TimingError(
                     "numeric IRQ %d reaches an isolated timing CPU" % irq)
             try:
@@ -2143,16 +2150,19 @@ def capture_runtime_isolation_snapshot(
             requested_text, requested_cpus = cpu_list_record(
                 path / "smp_affinity_list",
                 "IRQ %d requested affinity" % irq)
-            if irq == 30:
+            if irq == ZERO_COUNT_GUARDED_IRQ:
                 exception = {
-                    "irq": 30, "identity": guarded_before[30]["identity"],
+                    "irq": ZERO_COUNT_GUARDED_IRQ,
+                    "identity": guarded_before[
+                        ZERO_COUNT_GUARDED_IRQ]["identity"],
                     "handler_directories": handler_directories,
                     "requested_affinity_list": requested_text,
                     "requested_cpus": requested_cpus,
                     "effective_affinity_list": affinity_text,
                     "effective_cpus": affinity_cpus,
                     "global_interrupt_count":
-                        guarded_before[30]["total_count"],
+                        guarded_before[
+                            ZERO_COUNT_GUARDED_IRQ]["total_count"],
                 }
             else:
                 managed_exceptions.append({
@@ -2176,12 +2186,13 @@ def capture_runtime_isolation_snapshot(
                 any(right < left for left, right in zip(
                     before_guard["counters"], after_guard["counters"]))):
             raise TimingError("guarded IRQ topology/counter changed during capture")
-    if (guarded_before[30]["total_count"] != 0 or
-            guarded_after[30]["total_count"] != 0):
-        raise TimingError("guarded IRQ30 fired during isolation capture")
+    if (guarded_before[ZERO_COUNT_GUARDED_IRQ]["total_count"] != 0 or
+            guarded_after[ZERO_COUNT_GUARDED_IRQ]["total_count"] != 0):
+        raise TimingError(
+            "zero-count guarded IRQ fired during isolation capture")
     capture_end_ns = time.monotonic_ns()
     snapshot = {
-        "schema": "wirehair.wh2.runtime_isolation_snapshot.v2",
+        "schema": "wirehair.wh2.runtime_isolation_snapshot.v3",
         "capture_start_monotonic_ns": capture_start_ns,
         "capture_end_monotonic_ns": capture_end_ns,
         "capture_duration_ns": capture_end_ns - capture_start_ns,
@@ -2198,7 +2209,7 @@ def capture_runtime_isolation_snapshot(
         "cgroup_exclusive_effective_cpus": exclusive_effective,
         "cgroup_partition": partition,
         "irq_effective_affinities": records,
-        "irq30_exception": exception,
+        "zero_count_irq_exception": exception,
         "managed_nvme_exceptions": managed_exceptions,
     }
     return validate_runtime_isolation_snapshot(
@@ -5043,7 +5054,7 @@ def run_campaign(args: argparse.Namespace) -> None:
     require_live_tmpfs_tree(
         root, int(result_tmpfs_binding["device"]), "completed campaign")
     launch = sealed_record(
-        "wirehair.wh2.grouped_commit_timing.launch_receipt.v5", {
+        "wirehair.wh2.grouped_commit_timing.launch_receipt.v6", {
             "started_utc": started_utc, "ended_utc": utc_now(),
             "start_monotonic_s": campaign_start_s,
             "end_monotonic_s": campaign_end_s,
@@ -5718,7 +5729,7 @@ def replay_campaign(root: Path) -> Tuple[Dict[str, object], set[str]]:
     _validate_prepare_receipt(root, design)
     launch = load_canonical(root / "launch_receipt.json", "launch receipt")
     verify_sealed_record(
-        launch, "wirehair.wh2.grouped_commit_timing.launch_receipt.v5",
+        launch, "wirehair.wh2.grouped_commit_timing.launch_receipt.v6",
         "launch receipt")
     if set(launch) != LAUNCH_RECEIPT_FIELDS:
         raise TimingError("launch receipt fields changed")
@@ -6209,9 +6220,9 @@ def replay_campaign(root: Path) -> Tuple[Dict[str, object], set[str]]:
                 isolation_start["irq_effective_affinities"]),
             "end_numeric_irq_count": len(
                 isolation_end["irq_effective_affinities"]),
-            "guarded_irq30_unchanged":
-                isolation_start["irq30_exception"] ==
-                isolation_end["irq30_exception"],
+            "zero_count_irq_guard_unchanged":
+                isolation_start["zero_count_irq_exception"] ==
+                isolation_end["zero_count_irq_exception"],
             "managed_nvme_whitelist_unchanged":
                 isolation_start["managed_nvme_exceptions"] ==
                 isolation_end["managed_nvme_exceptions"],
@@ -6290,7 +6301,7 @@ def reduce_campaign(args: argparse.Namespace) -> None:
     _require_external_prepare_anchor(root, args.expected_prepare_sha256)
     payload, expected = replay_campaign(root)
     summary = sealed_record(
-        "wirehair.wh2.grouped_commit_timing.validated_summary.v2", payload)
+        "wirehair.wh2.grouped_commit_timing.validated_summary.v3", payload)
     summary_path = root / "validated_summary.json"
     publication = {
         "validated_summary.json": _publish_or_verify_reduction_artifact(
@@ -6325,10 +6336,10 @@ def verify_campaign(args: argparse.Namespace) -> None:
     payload, expected = replay_campaign(root)
     summary = load_canonical(root / "validated_summary.json", "validated summary")
     verify_sealed_record(
-        summary, "wirehair.wh2.grouped_commit_timing.validated_summary.v2",
+        summary, "wirehair.wh2.grouped_commit_timing.validated_summary.v3",
         "validated summary")
     expected_summary = sealed_record(
-        "wirehair.wh2.grouped_commit_timing.validated_summary.v2", payload)
+        "wirehair.wh2.grouped_commit_timing.validated_summary.v3", payload)
     if summary != expected_summary:
         raise TimingError("validated summary does not reproduce")
     expected.add("validated_summary.json")
