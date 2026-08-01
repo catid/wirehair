@@ -36,6 +36,22 @@ function(expect_failure pattern)
     reject_sanitizer("${out}${err}" "expected failure: ${ARGN}")
 endfunction()
 
+function(expect_failure_without_output pattern)
+    run_bench(result out err ${ARGN})
+    if(NOT result MATCHES "^-?[0-9]+$" OR NOT result EQUAL 1 OR
+       NOT out STREQUAL "")
+        message(FATAL_ERROR
+            "expected exit 1 with empty stdout, got '${result}': ${ARGN}\n"
+            "stdout=${out}\nstderr=${err}")
+    endif()
+    if(NOT err MATCHES "${pattern}")
+        message(FATAL_ERROR
+            "missing diagnostic '${pattern}': ${ARGN}\nstderr=${err}")
+    endif()
+    reject_sanitizer("${out}${err}"
+        "expected output-free failure: ${ARGN}")
+endfunction()
+
 function(expect_success pattern)
     run_bench(result out err ${ARGN})
     if(NOT result MATCHES "^-?[0-9]+$" OR NOT result EQUAL 0)
@@ -1033,6 +1049,360 @@ foreach(raw_trace_case IN LISTS raw_trace_cases)
     endif()
     math(EXPR raw_trace_case_index "${raw_trace_case_index} + 1")
 endforeach()
+
+# `groupedrecovery` is the pair-native Stage-B revalidation data plane.  It
+# must emit two homogeneous rows per N, in literal H12/H13 adjacency, while
+# preserving the raw Stage-A attempt-zero trace, seed, probe, and rank-only
+# solve contracts above.
+set(grouped_recovery_preamble
+    "# groupedrecovery: schema=v1 pair_order=h12,h13 arms_per_N=2 N_count=2 N=3,64 overhead=0 seed=15111065706836454659 schedule=adversarial policy=h12-h13-q0-grouped-v1 period=48 geometry=shared-x residue_skew=0 residue_schedule=constant residue_hash_seed=0x0 extension_residue_seed_xor=0x4e independent_extension_residues=0 gf256_rows=h12:10|h13:11 gf16_rows=2 grouped_rows=3 grouped_gf256_row_mask=0x380 buckets=separate grouped_hash_seed=h12:0xb7e15162|h13:0xb7e15163 grouped_final_h_a_columns=arm-heavy-rows dense_rows=12 dense_identity_corner=0 dense_two_anchor=1 dense_two_anchor_phase=0 source_hits=profile staircase_rows=profile-dense-count field=mixed-gf256-gf16 heavy_family=periodic-cauchy construction_attempt=0 systematic_probe=direct-attempt0 seed_repair=disabled mix=2 bb=64 seed_block_bytes=64 solve_block_bytes=2 loss=0.5 overhead_stream=paired packet_row_seed_multiplier=0x1 packet_row_seed_avalanche=0 odd_packet_peel_seed_xor=0x0 packet_vector=one-shared-per-N payload=shared-zero-v1 packet_payload_bytes=2 packet_trace_schema=wirehair-wh2-precodefail-raw-packet-trace-v1 coefficient_layout=materialized-before-solve grouped_schedule_prefix=materialized-before-solve")
+set(grouped_recovery_header
+    "pair_id,pair_index,pair_order_index,arm,N,bb,solve_block_bytes,overhead,schedule,external_seed,loss,period,geometry,residue_skew,residue_schedule,gf256_rows,gf16_rows,heavy_rows,grouped_rows,grouped_gf256_row_mask,buckets_requested,grouped_hash_seed,final_h_a_columns,construction_attempt,systematic_probe_result,base_matrix_seed,base_peel_seed,matrix_seed,peel_seed,staircase_rows,dense_rows,source_hits,dense_identity_corner,dense_two_anchor,dense_two_anchor_phase,field,heavy_family,mix_count,precode_count,packet_count,packet_trace_seed,packet_trace_sha256,pair_class,pair_results_equal,result,result_name,packet_rows,peeled_columns,inactivated_columns,residual_rows,binary_residual_rank,residual_rank,binary_deficit,heavy_gain,binary_row_references,binary_row_storage_bytes,binary_adjacency_storage_bytes,binary_row_storage_allocations,binary_adjacency_storage_allocations,block_xors,block_muladds,build_ns,peel_ns,project_ns,residual_ns,backsub_ns,packet_seed_attempt,joint_source_xors,joint_marginal_xors,joint_marginal_copies,joint_active_deltas,joint_scratch_bytes,dual_source_columns,intermediate_bytes")
+run_bench(grouped_recovery_result grouped_recovery grouped_recovery_err
+    groupedrecovery --N 3,64 --overhead 0
+    --seed 15111065706836454659 --schedule adversarial)
+string(REPLACE "\r\n" "\n" grouped_recovery "${grouped_recovery}")
+string(FIND "${grouped_recovery}"
+    "${grouped_recovery_preamble}\n${grouped_recovery_header}\n"
+    grouped_recovery_preamble_index)
+string(REGEX MATCHALL "\n[0-9a-f]+,[^\n]*"
+    grouped_recovery_rows "\n${grouped_recovery}")
+list(LENGTH grouped_recovery_rows grouped_recovery_row_count)
+if(NOT grouped_recovery_result EQUAL 0 OR grouped_recovery_err OR
+   NOT grouped_recovery_preamble_index EQUAL 0 OR
+   NOT grouped_recovery_row_count EQUAL 4)
+    message(FATAL_ERROR
+        "grouped recovery schema/inventory mismatch\n"
+        "${grouped_recovery}\n${grouped_recovery_err}")
+endif()
+
+set(grouped_recovery_expected_prefixes
+    "7d97a55c56fb9fecbcb92a5e22bd34a6a467db7f3d4ef93787860806b7c6ac34,0,0,h12,3,64,2,0,adversarial,15111065706836454659,0.5,48,shared-x,0,constant,10,2,12,3,0x380,separate,0xb7e15162,12,0,1,0x679d20a06742baae,0x11f13757,0x679d20a06742baae,0x11f13757,3,12,2,0,1,0,mixed-gf256-gf16,periodic-cauchy,2,27,3,0xdd02fc599574f77c,a2d086103e34b13d877befe89379a93fafed066f5d97a452166a750d86d13707,both-need-more,1,1,need-more,"
+    "7d97a55c56fb9fecbcb92a5e22bd34a6a467db7f3d4ef93787860806b7c6ac34,0,1,h13,3,64,2,0,adversarial,15111065706836454659,0.5,48,shared-x,0,constant,11,2,13,3,0x380,separate,0xb7e15163,13,0,1,0x679d20a06742baae,0x11f13757,0x679d20a06742baae,0x11f13757,3,12,2,0,1,0,mixed-gf256-gf16,periodic-cauchy,2,28,3,0xdd02fc599574f77c,a2d086103e34b13d877befe89379a93fafed066f5d97a452166a750d86d13707,both-need-more,1,1,need-more,"
+    "1db283245379a4c48a74d9756e4577397df337a393b5cb826e217aa3bc9fd352,1,0,h12,64,64,2,0,adversarial,15111065706836454659,0.5,48,shared-x,0,constant,10,2,12,3,0x380,separate,0xb7e15162,12,0,0,0x176b76a38b0fe98d,0x9695c306,0x176b76a38b0fe98d,0x9695c306,19,12,2,0,1,0,mixed-gf256-gf16,periodic-cauchy,2,43,64,0x8a7aff2a3a348603,950134e9cef148fb82c6121e6e104329563e5a408bb6a607bea32b43cbfe5804,both-success,1,0,success,"
+    "1db283245379a4c48a74d9756e4577397df337a393b5cb826e217aa3bc9fd352,1,1,h13,64,64,2,0,adversarial,15111065706836454659,0.5,48,shared-x,0,constant,11,2,13,3,0x380,separate,0xb7e15163,13,0,0,0x176b76a38b0fe98d,0x9695c306,0x176b76a38b0fe98d,0x9695c306,19,12,2,0,1,0,mixed-gf256-gf16,periodic-cauchy,2,44,64,0x8a7aff2a3a348603,950134e9cef148fb82c6121e6e104329563e5a408bb6a607bea32b43cbfe5804,both-success,1,0,success,")
+set(grouped_recovery_stat_indices
+    46 47 48 49 50 51 52 53 54 55 56 57 58 59 60
+    66 67 68 69 70 71 72 73)
+set(grouped_recovery_expected_stats
+    "3|13|17|5|4|4|13|0|126|872|752|3|2|46|0|0|0|0|0|0|0|0|0"
+    "3|13|18|5|4|4|14|0|126|872|760|3|2|60|0|0|0|0|0|0|0|0|0"
+    "64|73|34|34|22|34|12|12|1248|6756|5856|3|2|1620|982|0|0|0|0|0|0|0|214"
+    "64|70|38|38|25|38|13|13|1248|6756|5864|3|2|1597|1115|0|0|0|0|0|0|0|216")
+set(grouped_recovery_clean_rows)
+foreach(grouped_recovery_row_index RANGE 0 3)
+    list(GET grouped_recovery_rows ${grouped_recovery_row_index}
+        grouped_recovery_row)
+    string(SUBSTRING "${grouped_recovery_row}" 1 -1
+        grouped_recovery_row)
+    list(APPEND grouped_recovery_clean_rows "${grouped_recovery_row}")
+    list(GET grouped_recovery_expected_prefixes
+        ${grouped_recovery_row_index} grouped_recovery_expected_prefix)
+    string(FIND "${grouped_recovery_row}"
+        "${grouped_recovery_expected_prefix}" grouped_recovery_prefix_index)
+    string(REPLACE "," ";" grouped_recovery_fields
+        "${grouped_recovery_row}")
+    list(LENGTH grouped_recovery_fields grouped_recovery_field_count)
+    list(GET grouped_recovery_fields 0 grouped_recovery_pair_id)
+    list(GET grouped_recovery_fields 25 grouped_recovery_base_matrix)
+    list(GET grouped_recovery_fields 26 grouped_recovery_base_peel)
+    list(GET grouped_recovery_fields 27 grouped_recovery_matrix)
+    list(GET grouped_recovery_fields 28 grouped_recovery_peel)
+    list(GET grouped_recovery_fields 41 grouped_recovery_trace_sha256)
+    string(LENGTH "${grouped_recovery_pair_id}"
+        grouped_recovery_pair_id_length)
+    string(LENGTH "${grouped_recovery_trace_sha256}"
+        grouped_recovery_trace_sha256_length)
+    if(NOT grouped_recovery_prefix_index EQUAL 0 OR
+       NOT grouped_recovery_field_count EQUAL 74 OR
+       NOT grouped_recovery_pair_id_length EQUAL 64 OR
+       NOT grouped_recovery_pair_id MATCHES "^[0-9a-f]+$" OR
+       NOT grouped_recovery_trace_sha256_length EQUAL 64 OR
+       NOT grouped_recovery_trace_sha256 MATCHES "^[0-9a-f]+$" OR
+       NOT grouped_recovery_base_matrix STREQUAL grouped_recovery_matrix OR
+       NOT grouped_recovery_base_peel STREQUAL grouped_recovery_peel)
+        message(FATAL_ERROR
+            "grouped recovery golden row mismatch at "
+            "${grouped_recovery_row_index}\n${grouped_recovery_row}")
+    endif()
+    foreach(grouped_recovery_timing_index RANGE 61 65)
+        list(GET grouped_recovery_fields ${grouped_recovery_timing_index}
+            grouped_recovery_timing)
+        if(NOT grouped_recovery_timing MATCHES "^[0-9]+$")
+            message(FATAL_ERROR
+                "grouped recovery non-numeric timing field "
+                "${grouped_recovery_timing_index}")
+        endif()
+    endforeach()
+    list(GET grouped_recovery_expected_stats
+        ${grouped_recovery_row_index} grouped_recovery_expected_stat_text)
+    string(REPLACE "|" ";" grouped_recovery_expected_stat_fields
+        "${grouped_recovery_expected_stat_text}")
+    set(grouped_recovery_stat_position 0)
+    foreach(grouped_recovery_stat_index IN LISTS
+            grouped_recovery_stat_indices)
+        list(GET grouped_recovery_fields ${grouped_recovery_stat_index}
+            grouped_recovery_actual_stat)
+        list(GET grouped_recovery_expected_stat_fields
+            ${grouped_recovery_stat_position} grouped_recovery_expected_stat)
+        if(NOT grouped_recovery_actual_stat STREQUAL
+                grouped_recovery_expected_stat)
+            message(FATAL_ERROR
+                "grouped recovery raw stat mismatch row="
+                "${grouped_recovery_row_index} field="
+                "${grouped_recovery_stat_index}: got "
+                "${grouped_recovery_actual_stat}, expected "
+                "${grouped_recovery_expected_stat}")
+        endif()
+        math(EXPR grouped_recovery_stat_position
+            "${grouped_recovery_stat_position} + 1")
+    endforeach()
+endforeach()
+
+# Every pair-domain receipt is duplicated on both adjacent arm rows.  The
+# logical arm geometry, systematic probe, result, and solve statistics are the
+# only fields allowed to differ.
+set(grouped_recovery_shared_indices
+    0 1 4 5 6 7 8 9 10 11 12 13 14 16 18 19 20 23
+    25 26 27 28 29 30 31 32 33 34 35 36 37 39 40 41 42 43)
+foreach(grouped_recovery_pair_start IN ITEMS 0 2)
+    math(EXPR grouped_recovery_pair_end
+        "${grouped_recovery_pair_start} + 1")
+    list(GET grouped_recovery_clean_rows ${grouped_recovery_pair_start}
+        grouped_recovery_h12_row)
+    list(GET grouped_recovery_clean_rows ${grouped_recovery_pair_end}
+        grouped_recovery_h13_row)
+    string(REPLACE "," ";" grouped_recovery_h12_fields
+        "${grouped_recovery_h12_row}")
+    string(REPLACE "," ";" grouped_recovery_h13_fields
+        "${grouped_recovery_h13_row}")
+    foreach(grouped_recovery_shared_index IN LISTS
+            grouped_recovery_shared_indices)
+        list(GET grouped_recovery_h12_fields
+            ${grouped_recovery_shared_index} grouped_recovery_h12_value)
+        list(GET grouped_recovery_h13_fields
+            ${grouped_recovery_shared_index} grouped_recovery_h13_value)
+        if(NOT grouped_recovery_h12_value STREQUAL
+                grouped_recovery_h13_value)
+            message(FATAL_ERROR
+                "grouped recovery pair receipt diverged at field "
+                "${grouped_recovery_shared_index}")
+        endif()
+    endforeach()
+endforeach()
+list(GET grouped_recovery_clean_rows 0 grouped_recovery_k3_h12_row)
+list(GET grouped_recovery_clean_rows 2 grouped_recovery_k64_h12_row)
+string(REPLACE "," ";" grouped_recovery_k3_h12_fields
+    "${grouped_recovery_k3_h12_row}")
+string(REPLACE "," ";" grouped_recovery_k64_h12_fields
+    "${grouped_recovery_k64_h12_row}")
+list(GET grouped_recovery_k3_h12_fields 0 grouped_recovery_k3_pair_id)
+list(GET grouped_recovery_k64_h12_fields 0 grouped_recovery_k64_pair_id)
+list(GET grouped_recovery_k3_h12_fields 24 grouped_recovery_k3_probe)
+list(GET grouped_recovery_k64_h12_fields 24 grouped_recovery_k64_probe)
+list(GET grouped_recovery_k64_h12_fields 25 grouped_recovery_k64_matrix)
+list(GET grouped_recovery_k64_h12_fields 26 grouped_recovery_k64_peel)
+list(GET grouped_recovery_k64_h12_fields 40 grouped_recovery_k64_trace_seed)
+list(GET grouped_recovery_k64_h12_fields 41 grouped_recovery_k64_trace_sha)
+if(grouped_recovery_k3_pair_id STREQUAL grouped_recovery_k64_pair_id OR
+   NOT grouped_recovery_k3_probe STREQUAL raw_need_more_probe_result OR
+   NOT grouped_recovery_k64_probe STREQUAL raw_h12_probe_result OR
+   NOT grouped_recovery_k64_matrix STREQUAL raw_h12_matrix_seed OR
+   NOT grouped_recovery_k64_peel STREQUAL raw_h12_peel_seed OR
+   NOT grouped_recovery_k64_trace_seed STREQUAL raw_h12_trace_seed OR
+   NOT grouped_recovery_k64_trace_sha STREQUAL raw_h12_trace_sha256)
+    message(FATAL_ERROR
+        "grouped recovery diverged from raw attempt0 receipts")
+endif()
+
+# The pair-native command must reproduce the independent raw trace oracle for
+# all hard schedules and both nested OH0/OH1 prefixes.
+foreach(raw_trace_case IN LISTS raw_trace_cases)
+    string(REPLACE "|" ";" raw_trace_fields "${raw_trace_case}")
+    list(GET raw_trace_fields 0 grouped_recovery_trace_schedule)
+    list(GET raw_trace_fields 1 grouped_recovery_trace_overhead)
+    list(GET raw_trace_fields 2 grouped_recovery_trace_expected_sha256)
+    run_bench(grouped_recovery_trace_result grouped_recovery_trace_output
+        grouped_recovery_trace_error groupedrecovery --N 64
+        --overhead ${grouped_recovery_trace_overhead}
+        --seed 15111065706836454659
+        --schedule ${grouped_recovery_trace_schedule})
+    string(REPLACE "\r\n" "\n" grouped_recovery_trace_output
+        "${grouped_recovery_trace_output}")
+    string(REGEX MATCHALL "\n[0-9a-f]+,[^\n]*"
+        grouped_recovery_trace_rows "\n${grouped_recovery_trace_output}")
+    list(LENGTH grouped_recovery_trace_rows
+        grouped_recovery_trace_row_count)
+    if(NOT grouped_recovery_trace_result EQUAL 0 OR
+       grouped_recovery_trace_error OR
+       NOT grouped_recovery_trace_row_count EQUAL 2)
+        message(FATAL_ERROR
+            "grouped recovery hard trace command failed: "
+            "${raw_trace_case}\n${grouped_recovery_trace_output}\n"
+            "${grouped_recovery_trace_error}")
+    endif()
+    set(grouped_recovery_trace_pair_id "")
+    foreach(grouped_recovery_trace_row IN LISTS
+            grouped_recovery_trace_rows)
+        string(SUBSTRING "${grouped_recovery_trace_row}" 1 -1
+            grouped_recovery_trace_row)
+        string(REPLACE "," ";" grouped_recovery_trace_row_fields
+            "${grouped_recovery_trace_row}")
+        list(LENGTH grouped_recovery_trace_row_fields
+            grouped_recovery_trace_field_count)
+        list(GET grouped_recovery_trace_row_fields 0
+            grouped_recovery_trace_row_pair_id)
+        list(GET grouped_recovery_trace_row_fields 39
+            grouped_recovery_trace_packet_count)
+        list(GET grouped_recovery_trace_row_fields 40
+            grouped_recovery_trace_seed)
+        list(GET grouped_recovery_trace_row_fields 41
+            grouped_recovery_trace_sha256)
+        math(EXPR grouped_recovery_trace_expected_packet_count
+            "64 + ${grouped_recovery_trace_overhead}")
+        if(NOT grouped_recovery_trace_field_count EQUAL 74 OR
+           NOT grouped_recovery_trace_packet_count EQUAL
+               grouped_recovery_trace_expected_packet_count OR
+           NOT grouped_recovery_trace_seed STREQUAL
+               "0x8a7aff2a3a348603" OR
+           NOT grouped_recovery_trace_sha256 STREQUAL
+               grouped_recovery_trace_expected_sha256 OR
+           (grouped_recovery_trace_pair_id AND
+            NOT grouped_recovery_trace_pair_id STREQUAL
+                grouped_recovery_trace_row_pair_id))
+            message(FATAL_ERROR
+                "grouped recovery hard trace receipt mismatch: "
+                "${raw_trace_case}\n${grouped_recovery_trace_row}")
+        endif()
+        set(grouped_recovery_trace_pair_id
+            "${grouped_recovery_trace_row_pair_id}")
+    endforeach()
+endforeach()
+
+# Inclusive scalar/N boundaries and the exact 250-entry batch limit are live
+# successes; 251 entries are rejected before any solve output is emitted.
+run_bench(grouped_recovery_boundary_result grouped_recovery_boundary
+    grouped_recovery_boundary_err groupedrecovery --N 2,64000
+    --overhead 1024 --seed 18446744073709551615 --schedule repair-only)
+string(REPLACE "\r\n" "\n" grouped_recovery_boundary
+    "${grouped_recovery_boundary}")
+string(REGEX MATCHALL "\n[0-9a-f]+,[^\n]*"
+    grouped_recovery_boundary_rows "\n${grouped_recovery_boundary}")
+list(LENGTH grouped_recovery_boundary_rows
+    grouped_recovery_boundary_row_count)
+if(NOT grouped_recovery_boundary_result EQUAL 0 OR
+   grouped_recovery_boundary_err OR
+   NOT grouped_recovery_boundary_row_count EQUAL 4 OR
+   NOT grouped_recovery_boundary MATCHES
+       "N_count=2 N=2,64000 overhead=1024 seed=18446744073709551615")
+    message(FATAL_ERROR
+        "grouped recovery inclusive boundary failed\n"
+        "${grouped_recovery_boundary}\n${grouped_recovery_boundary_err}")
+endif()
+set(grouped_recovery_max_N_list "")
+foreach(grouped_recovery_N RANGE 2 251)
+    if(grouped_recovery_max_N_list)
+        string(APPEND grouped_recovery_max_N_list ",")
+    endif()
+    string(APPEND grouped_recovery_max_N_list "${grouped_recovery_N}")
+endforeach()
+run_bench(grouped_recovery_max_result grouped_recovery_max
+    grouped_recovery_max_err groupedrecovery
+    --N "${grouped_recovery_max_N_list}" --overhead 0 --seed 0
+    --schedule burst)
+string(REPLACE "\r\n" "\n" grouped_recovery_max
+    "${grouped_recovery_max}")
+string(REGEX MATCHALL "\n[0-9a-f]+,[^\n]*"
+    grouped_recovery_max_rows "\n${grouped_recovery_max}")
+list(LENGTH grouped_recovery_max_rows grouped_recovery_max_row_count)
+if(NOT grouped_recovery_max_result EQUAL 0 OR grouped_recovery_max_err OR
+   NOT grouped_recovery_max_row_count EQUAL 500 OR
+   NOT grouped_recovery_max MATCHES
+       "arms_per_N=2 N_count=250 N=2,3,4,5")
+    message(FATAL_ERROR
+        "grouped recovery 250-entry boundary failed\n"
+        "${grouped_recovery_max_err}")
+endif()
+set(grouped_recovery_too_many_N_list
+    "${grouped_recovery_max_N_list},252")
+expect_failure_without_output("at most 250 values" groupedrecovery
+    --N "${grouped_recovery_too_many_N_list}" --overhead 0 --seed 0
+    --schedule burst)
+
+expect_failure_without_output(
+    "requires --N, --overhead, --seed, and --schedule"
+    groupedrecovery)
+expect_failure("requires --N, --overhead, --seed, and --schedule"
+    groupedrecovery --N 2 --overhead 0 --seed 0)
+expect_failure("--N requires a value" groupedrecovery --N)
+expect_failure("--overhead requires a value" groupedrecovery
+    --N 2 --overhead)
+expect_failure("--seed requires a value" groupedrecovery
+    --N 2 --overhead 0 --seed)
+expect_failure("--schedule requires a value" groupedrecovery
+    --N 2 --overhead 0 --seed 0 --schedule)
+foreach(grouped_recovery_duplicate IN ITEMS
+        --N --overhead --seed --schedule)
+    if(grouped_recovery_duplicate STREQUAL "--N")
+        expect_failure("specified more than once" groupedrecovery
+            --N 2 --N 3 --overhead 0 --seed 0 --schedule burst)
+    elseif(grouped_recovery_duplicate STREQUAL "--overhead")
+        expect_failure("specified more than once" groupedrecovery
+            --N 2 --overhead 0 --overhead 1 --seed 0 --schedule burst)
+    elseif(grouped_recovery_duplicate STREQUAL "--seed")
+        expect_failure("specified more than once" groupedrecovery
+            --N 2 --overhead 0 --seed 0 --seed 1 --schedule burst)
+    else()
+        expect_failure("specified more than once" groupedrecovery
+            --N 2 --overhead 0 --seed 0 --schedule burst
+            --schedule adversarial)
+    endif()
+endforeach()
+foreach(grouped_recovery_bad_N IN ITEMS
+        02 2,03 3,2 2,2 2, 2,,3 malformed -2)
+    expect_failure("--N must be a canonical strictly increasing"
+        groupedrecovery --N "${grouped_recovery_bad_N}" --overhead 0
+        --seed 0 --schedule burst)
+endforeach()
+foreach(grouped_recovery_bad_N IN ITEMS 1 64001)
+    expect_failure("--N values must be in \\[2,64000\\]"
+        groupedrecovery --N ${grouped_recovery_bad_N} --overhead 0
+        --seed 0 --schedule burst)
+endforeach()
+foreach(grouped_recovery_bad_overhead IN ITEMS 00 01 1025 4294967296)
+    expect_failure("overhead" groupedrecovery --N 2
+        --overhead ${grouped_recovery_bad_overhead} --seed 0
+        --schedule burst)
+endforeach()
+foreach(grouped_recovery_bad_seed IN ITEMS
+        00 01 0x1 -1 18446744073709551616)
+    expect_failure("bad --seed value" groupedrecovery --N 2 --overhead 0
+        --seed ${grouped_recovery_bad_seed} --schedule burst)
+endforeach()
+foreach(grouped_recovery_bad_schedule IN ITEMS
+        iid permutation systematic-first malformed)
+    expect_failure("--schedule must be burst, adversarial, or repair-only"
+        groupedrecovery --N 2 --overhead 0 --seed 0
+        --schedule ${grouped_recovery_bad_schedule})
+endforeach()
+expect_failure_without_output("unknown option --loss" groupedrecovery
+    --N 2 --overhead 0 --seed 0 --schedule burst --loss 0.5)
+
+if(EXISTS "/dev/full")
+    execute_process(
+        COMMAND "${BENCH}" groupedrecovery --N 3,64 --overhead 0
+            --seed 15111065706836454659 --schedule adversarial
+        OUTPUT_FILE "/dev/full"
+        ERROR_VARIABLE grouped_recovery_full_error
+        RESULT_VARIABLE grouped_recovery_full_result)
+    if(grouped_recovery_full_result EQUAL 0 OR
+       NOT grouped_recovery_full_error MATCHES
+           "could not write the complete output batch")
+        message(FATAL_ERROR
+            "grouped recovery accepted a truncated output sink\n"
+            "${grouped_recovery_full_error}")
+    endif()
+endif()
 
 expect_failure("--raw-attempt0 requires the Stage-A" precodefail
     --raw-attempt0 --paired-overhead-stream --N 64 --bb-list 64

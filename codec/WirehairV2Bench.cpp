@@ -4835,6 +4835,158 @@ std::string Sha256Hex(const std::string& input)
     for (uint32_t value : state) output << std::setw(8) << value;
     return output.str();
 }
+
+bool ParseCanonicalU32(const std::string& text, uint32_t& value)
+{
+    if (!ParseU32Scalar(text.c_str(), value)) return false;
+    char canonical[16];
+    std::snprintf(canonical, sizeof(canonical), "%u", value);
+    return text == canonical;
+}
+
+bool ParseCanonicalU64Decimal(const std::string& text, uint64_t& value)
+{
+    if (text.empty() || text[0] < '0' || text[0] > '9') return false;
+    errno = 0;
+    char* end = nullptr;
+    const unsigned long long parsed =
+        std::strtoull(text.c_str(), &end, 10);
+    if (errno != 0 || !end || *end != '\0' ||
+        parsed > std::numeric_limits<uint64_t>::max())
+    {
+        return false;
+    }
+    value = (uint64_t)parsed;
+    return text == std::to_string(value);
+}
+
+bool ParseCanonicalU32Arg(
+    const char* option,
+    const char* text,
+    uint32_t& value)
+{
+    return ParseCanonicalU32(text ? text : "", value) || BadArg(option, text);
+}
+
+bool ParseCanonicalU64Arg(
+    const char* option,
+    const char* text,
+    uint64_t& value)
+{
+    return ParseCanonicalU64Decimal(text ? text : "", value) ||
+        BadArg(option, text);
+}
+
+// Shared by the timing and reliability test-hook commands.  Keeping the
+// complete TLS recipe in one helper prevents either harness from silently
+// measuring a different grouped completion matrix.
+struct GroupedTimingArm
+{
+    uint32_t Period = 0u;
+    uint32_t GF256Rows = 0u;
+    uint32_t GroupedRows = 0u;
+    uint32_t GroupedRowMask = 0u;
+    wirehair_v2::MixedResidueBucketMode Buckets =
+        wirehair_v2::MixedResidueBucketMode::Automatic;
+};
+
+bool GroupedTimingRowMaskIsValid(const GroupedTimingArm& arm)
+{
+    if (arm.GF256Rows == 0u || arm.GF256Rows >= 32u) return false;
+    const uint32_t valid_mask =
+        (UINT32_C(1) << arm.GF256Rows) - 1u;
+    if ((arm.GroupedRowMask & ~valid_mask) != 0u) return false;
+    uint32_t bit_count = 0u;
+    for (uint32_t mask = arm.GroupedRowMask; mask != 0u; mask >>= 1u) {
+        bit_count += mask & 1u;
+    }
+    return bit_count == arm.GroupedRows;
+}
+
+bool ConfigureGroupedTimingArm(const GroupedTimingArm& arm)
+{
+    // Reapply the complete thread-local experiment state for every physical
+    // solve.  Several setters deliberately clear secondary schedules, so the
+    // grouped suffix must remain last.  None of this setup is timed.
+    if (!wirehair_v2::SetMixedCoefficientGeometryForTesting(
+            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX))
+    {
+        return false;
+    }
+    // Normalize through the base GF256 count before raising the period.  The
+    // H16 test geometry accepts only P31/P32, while a short-period H12 state
+    // cannot grow directly to H13.  This order reaches a common safe state
+    // from either one without weakening any setter validation.
+    if (wirehair_v2::ActiveMixedGF256Rows() >=
+            wirehair_v2::kMixedGF256Rows + 2u &&
+        !wirehair_v2::SetMixedGF256RowsForTesting(
+            wirehair_v2::kMixedGF256Rows))
+    {
+        return false;
+    }
+    if (!wirehair_v2::SetMixedCoefficientPeriodForTesting(
+            wirehair_v2::kMixedCoefficientPeriod) ||
+        !wirehair_v2::SetMixedGF256RowsForTesting(
+            arm.GF256Rows) ||
+        !wirehair_v2::SetMixedGF16RowsForTesting(
+            wirehair_v2::kMixedGF16Rows) ||
+        !wirehair_v2::SetMixedCoefficientPeriodForTesting(arm.Period) ||
+        !wirehair_v2::SetMixedResidueSkewForTesting(0u) ||
+        !wirehair_v2::SetMixedResidueScheduleForTesting(
+            wirehair_v2::MixedResidueSchedule::Constant))
+    {
+        return false;
+    }
+    wirehair_v2::SetMixedResidueHashSeedForTesting(0u);
+    wirehair_v2::SetMixedIndependentExtensionSeedXorForTesting(78u);
+    if (!wirehair_v2::SetMixedIndependentExtensionResiduesForTesting(false) ||
+        !wirehair_v2::SetMixedResidueBucketModeForTesting(arm.Buckets) ||
+        !wirehair_v2::SetPacketRowSeedMultiplierForTesting(1u))
+    {
+        return false;
+    }
+    wirehair_v2::SetPacketRowSeedAvalancheForTesting(false);
+    wirehair_v2::SetOddPacketPeelSeedXorForTesting(0u);
+    if (!wirehair_v2::SetMixedGroupedGF256RowsForTesting(
+            arm.GroupedRows) ||
+        !wirehair_v2::SetMixedGroupedGF256RowMaskForTesting(
+            arm.GroupedRowMask))
+    {
+        return false;
+    }
+    const bool state_matches =
+        wirehair_v2::ActiveMixedCoefficientGeometry() ==
+            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX &&
+        wirehair_v2::ActiveMixedGF256Rows() == arm.GF256Rows &&
+        wirehair_v2::ActiveMixedGF16Rows() ==
+            wirehair_v2::kMixedGF16Rows &&
+        wirehair_v2::ActiveMixedCoefficientPeriod() == arm.Period &&
+        wirehair_v2::ActiveMixedResidueSkew() == 0u &&
+        wirehair_v2::ActiveMixedResidueSchedule() ==
+            wirehair_v2::MixedResidueSchedule::Constant &&
+        wirehair_v2::ActiveMixedResidueHashSeed() == 0u &&
+        !wirehair_v2::ActiveMixedIndependentExtensionResidues() &&
+        wirehair_v2::ActiveMixedGroupedGF256Rows() == arm.GroupedRows &&
+        wirehair_v2::ActiveMixedGroupedGF256RowMask() ==
+            arm.GroupedRowMask &&
+        wirehair_v2::ActiveMixedResidueBucketModeForTesting() == arm.Buckets;
+    if (!state_matches) return false;
+
+    // Alternating H12/H13 solves share one thread but use distinct packed
+    // coefficient layouts.  Materialize both caches outside any timed solve.
+    if (wirehair_v2::GetMixedCoefficientRows() == nullptr ||
+        wirehair_v2::GetMixedPackedCoefficients() == nullptr)
+    {
+        return false;
+    }
+    if (arm.GroupedRows != 0u &&
+        wirehair_v2::ActiveMixedGroupedGF256ResidueBlockShift(0u) >=
+            arm.Period)
+    {
+        return false;
+    }
+    return true;
+}
 #endif
 
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS) && \
@@ -5045,47 +5197,6 @@ bool ReadBoundedFile(
         return false;
     }
     return true;
-}
-
-bool ParseCanonicalU32(const std::string& text, uint32_t& value)
-{
-    if (!ParseU32Scalar(text.c_str(), value)) return false;
-    char canonical[16];
-    std::snprintf(canonical, sizeof(canonical), "%u", value);
-    return text == canonical;
-}
-
-bool ParseCanonicalU64Decimal(const std::string& text, uint64_t& value)
-{
-    if (text.empty() || text[0] < '0' || text[0] > '9') return false;
-    errno = 0;
-    char* end = nullptr;
-    const unsigned long long parsed =
-        std::strtoull(text.c_str(), &end, 10);
-    if (errno != 0 || !end || *end != '\0' ||
-        parsed > std::numeric_limits<uint64_t>::max())
-    {
-        return false;
-    }
-    value = (uint64_t)parsed;
-    return text == std::to_string(value);
-}
-
-bool ParseCanonicalU32Arg(
-    const char* option,
-    const char* text,
-    uint32_t& value)
-{
-    return ParseCanonicalU32(text ? text : "", value) || BadArg(option, text);
-}
-
-bool ParseCanonicalU64Arg(
-    const char* option,
-    const char* text,
-    uint64_t& value)
-{
-    return ParseCanonicalU64Decimal(text ? text : "", value) ||
-        BadArg(option, text);
 }
 
 struct PreferredRouteRecord
@@ -6904,115 +7015,6 @@ const char* GroupedTimingCacheStateName(GroupedTimingCacheState state)
     return state == GroupedTimingCacheState::Cold ? "cold" : "warm";
 }
 
-struct GroupedTimingArm
-{
-    uint32_t Period = 0u;
-    uint32_t GF256Rows = 0u;
-    uint32_t GroupedRows = 0u;
-    uint32_t GroupedRowMask = 0u;
-    wirehair_v2::MixedResidueBucketMode Buckets =
-        wirehair_v2::MixedResidueBucketMode::Automatic;
-};
-
-bool GroupedTimingRowMaskIsValid(const GroupedTimingArm& arm)
-{
-    if (arm.GF256Rows == 0u || arm.GF256Rows >= 32u) return false;
-    const uint32_t valid_mask =
-        (UINT32_C(1) << arm.GF256Rows) - 1u;
-    if ((arm.GroupedRowMask & ~valid_mask) != 0u) return false;
-    uint32_t bit_count = 0u;
-    for (uint32_t mask = arm.GroupedRowMask; mask != 0u; mask >>= 1u) {
-        bit_count += mask & 1u;
-    }
-    return bit_count == arm.GroupedRows;
-}
-
-bool ConfigureGroupedTimingArm(const GroupedTimingArm& arm)
-{
-    // Reapply the complete thread-local experiment state for every physical
-    // solve.  Several setters deliberately clear secondary schedules, so the
-    // grouped suffix must remain last.  None of this setup is timed.
-    if (!wirehair_v2::SetMixedCoefficientGeometryForTesting(
-            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX))
-    {
-        return false;
-    }
-    // Normalize through the base GF256 count before raising the period.  The
-    // H16 test geometry accepts only P31/P32, while a short-period H12 state
-    // cannot grow directly to H13.  This order reaches a common safe state
-    // from either one without weakening any setter validation.
-    if (wirehair_v2::ActiveMixedGF256Rows() >=
-            wirehair_v2::kMixedGF256Rows + 2u &&
-        !wirehair_v2::SetMixedGF256RowsForTesting(
-            wirehair_v2::kMixedGF256Rows))
-    {
-        return false;
-    }
-    if (!wirehair_v2::SetMixedCoefficientPeriodForTesting(
-            wirehair_v2::kMixedCoefficientPeriod) ||
-        !wirehair_v2::SetMixedGF256RowsForTesting(
-            arm.GF256Rows) ||
-        !wirehair_v2::SetMixedGF16RowsForTesting(
-            wirehair_v2::kMixedGF16Rows) ||
-        !wirehair_v2::SetMixedCoefficientPeriodForTesting(arm.Period) ||
-        !wirehair_v2::SetMixedResidueSkewForTesting(0u) ||
-        !wirehair_v2::SetMixedResidueScheduleForTesting(
-            wirehair_v2::MixedResidueSchedule::Constant))
-    {
-        return false;
-    }
-    wirehair_v2::SetMixedResidueHashSeedForTesting(0u);
-    wirehair_v2::SetMixedIndependentExtensionSeedXorForTesting(78u);
-    if (!wirehair_v2::SetMixedIndependentExtensionResiduesForTesting(false) ||
-        !wirehair_v2::SetMixedResidueBucketModeForTesting(arm.Buckets) ||
-        !wirehair_v2::SetPacketRowSeedMultiplierForTesting(1u))
-    {
-        return false;
-    }
-    wirehair_v2::SetPacketRowSeedAvalancheForTesting(false);
-    wirehair_v2::SetOddPacketPeelSeedXorForTesting(0u);
-    if (!wirehair_v2::SetMixedGroupedGF256RowsForTesting(
-            arm.GroupedRows) ||
-        !wirehair_v2::SetMixedGroupedGF256RowMaskForTesting(
-            arm.GroupedRowMask))
-    {
-        return false;
-    }
-    const bool state_matches =
-        wirehair_v2::ActiveMixedCoefficientGeometry() ==
-            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX &&
-        wirehair_v2::ActiveMixedGF256Rows() == arm.GF256Rows &&
-        wirehair_v2::ActiveMixedGF16Rows() ==
-            wirehair_v2::kMixedGF16Rows &&
-        wirehair_v2::ActiveMixedCoefficientPeriod() == arm.Period &&
-        wirehair_v2::ActiveMixedResidueSkew() == 0u &&
-        wirehair_v2::ActiveMixedResidueSchedule() ==
-            wirehair_v2::MixedResidueSchedule::Constant &&
-        !wirehair_v2::ActiveMixedIndependentExtensionResidues() &&
-        wirehair_v2::ActiveMixedGroupedGF256Rows() == arm.GroupedRows &&
-        wirehair_v2::ActiveMixedGroupedGF256RowMask() ==
-            arm.GroupedRowMask &&
-        wirehair_v2::ActiveMixedResidueBucketModeForTesting() == arm.Buckets;
-    if (!state_matches) return false;
-
-    // H12/H13 alternating samples share one thread but use distinct packed
-    // coefficient layouts.  Materialize the active layout here so a cache-key
-    // transition is never charged to the timed solve.  Cold samples evict it
-    // afterward; warm samples retain it, matching the requested cache policy.
-    if (wirehair_v2::GetMixedCoefficientRows() == nullptr ||
-        wirehair_v2::GetMixedPackedCoefficients() == nullptr)
-    {
-        return false;
-    }
-    if (arm.GroupedRows != 0u &&
-        wirehair_v2::ActiveMixedGroupedGF256ResidueBlockShift(0u) >=
-            arm.Period)
-    {
-        return false;
-    }
-    return true;
-}
-
 bool SameGroupedTimingBaseGraph(
     const wirehair_v2::PrecodeParams& a_params,
     const wirehair_v2::PacketRowConfig& a_config,
@@ -7817,6 +7819,610 @@ WirehairResult ProbePrecodeFailRawSystematicAttemptZero(
     catch (const std::length_error&) {
         return Wirehair_OOM;
     }
+}
+
+struct GroupedRecoveryArmObservation
+{
+    GroupedTimingArm Arm;
+    uint32_t GroupedHashSeed = 0u;
+    wirehair_v2::PrecodeParams BaseParams;
+    wirehair_v2::PacketRowConfig BaseConfig;
+    wirehair_v2::PrecodeParams Params;
+    wirehair_v2::PacketRowConfig Config;
+    uint32_t PrecodeCount = 0u;
+    WirehairResult SystematicProbeResult = Wirehair_Error;
+    WirehairResult Result = Wirehair_Error;
+    wirehair_v2::PrecodeSolveStats Stats;
+    size_t IntermediateBytes = 0u;
+};
+
+struct GroupedRecoveryPairObservation
+{
+    uint32_t PairIndex = 0u;
+    uint32_t K = 0u;
+    uint32_t PacketCount = 0u;
+    uint64_t TraceSeed = 0u;
+    std::string TraceSha256;
+    std::string PairId;
+    GroupedRecoveryArmObservation H12;
+    GroupedRecoveryArmObservation H13;
+};
+
+bool GroupedRecoveryOptionOnce(const char* option, bool& seen)
+{
+    if (seen) {
+        std::fprintf(stderr,
+            "groupedrecovery %s specified more than once\n", option);
+        return false;
+    }
+    seen = true;
+    return true;
+}
+
+bool IsCanonicalGroupedRecoveryNList(
+    const std::string& text,
+    const std::vector<int>& values)
+{
+    if (values.empty()) return false;
+    std::ostringstream canonical;
+    for (size_t i = 0u; i < values.size(); ++i)
+    {
+        if (i != 0u)
+        {
+            if (values[i] <= values[i - 1u]) return false;
+            canonical << ',';
+        }
+        canonical << values[i];
+    }
+    return text == canonical.str();
+}
+
+bool IsLowerHexDigest(const std::string& text)
+{
+    if (text.size() != 64u) return false;
+    for (char ch : text) {
+        if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f'))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::string GroupedRecoveryPairId(
+    uint32_t K,
+    uint32_t overhead,
+    uint64_t external_seed,
+    PacketScheduleKind schedule,
+    const PrecodeFailRawTraceReceipt& trace)
+{
+    std::ostringstream domain;
+    domain << "wirehair-wh2-grouped-recovery-pair-v1\n"
+           << "N=" << K << "\nbb=64\nseed_block_bytes=64"
+           << "\nsolve_block_bytes=2\noverhead=" << overhead
+           << "\nloss=0.5\nexternal_seed=" << external_seed
+           << "\nschedule=" << PacketScheduleName(schedule)
+           << "\nperiod=48\ngeometry=shared-x"
+           << "\nresidue_skew=0\nresidue_schedule=constant"
+           << "\nresidue_hash_seed=0"
+           << "\nextension_residue_seed_xor=78"
+           << "\nindependent_extension_residues=0"
+           << "\ngf256_rows=h12:10|h13:11\ngf16_rows=2"
+           << "\ngrouped_rows=3\ngrouped_gf256_row_mask=0x380"
+           << "\ngrouped_hash_seed=h12:0xb7e15162|h13:0xb7e15163"
+           << "\nbuckets=separate\ndense_rows=12"
+           << "\ndense_identity_corner=0"
+           << "\ndense_two_anchor=1\ndense_two_anchor_phase=0"
+           << "\nsource_hits=profile\nstaircase_rows=profile-dense-count"
+           << "\nfield=mixed-gf256-gf16"
+           << "\nheavy_family=periodic-cauchy"
+           << "\nconstruction_attempt=0\nseed_repair=disabled\nmix=2"
+           << "\noverhead_stream=paired"
+           << "\npacket_row_seed_multiplier=1"
+           << "\npacket_row_seed_avalanche=0"
+           << "\nodd_packet_peel_seed_xor=0"
+           << "\npayload=shared-zero-v1"
+           << "\npacket_trace_schema="
+              "wirehair-wh2-precodefail-raw-packet-trace-v1"
+           << "\npacket_trace_seed=" << trace.Seed
+           << "\npacket_trace_sha256=" << trace.Sha256 << '\n';
+    return Sha256Hex(domain.str());
+}
+
+bool SameGroupedRecoveryBaseGraph(
+    const GroupedRecoveryArmObservation& h12,
+    const GroupedRecoveryArmObservation& h13)
+{
+    const wirehair_v2::PrecodeParams& a = h12.BaseParams;
+    const wirehair_v2::PrecodeParams& b = h13.BaseParams;
+    return a.BlockCount == b.BlockCount &&
+        a.Staircase == b.Staircase &&
+        a.DenseRows == b.DenseRows &&
+        a.SourceHits == b.SourceHits &&
+        a.Field == b.Field &&
+        a.DenseIdentityCorner == b.DenseIdentityCorner &&
+        a.DenseTwoAnchor == b.DenseTwoAnchor &&
+        a.DenseTwoAnchorPhase == b.DenseTwoAnchorPhase &&
+        a.HeavyFamily == b.HeavyFamily &&
+        a.Seed == b.Seed &&
+        h12.BaseConfig.PeelSeed == h13.BaseConfig.PeelSeed &&
+        h12.BaseConfig.MixCount == h13.BaseConfig.MixCount &&
+        h12.Params.Seed == h13.Params.Seed &&
+        h12.Config.PeelSeed == h13.Config.PeelSeed &&
+        h12.Config.MixCount == h13.Config.MixCount;
+}
+
+bool RunGroupedRecoveryArm(
+    const char* arm_name,
+    const GroupedTimingArm& arm,
+    uint32_t K,
+    const std::vector<wirehair_v2::SolvePacket>& packets,
+    GroupedRecoveryArmObservation& observation)
+{
+    observation = GroupedRecoveryArmObservation{};
+    observation.Arm = arm;
+    if (!GroupedTimingRowMaskIsValid(arm) ||
+        !ConfigureGroupedTimingArm(arm))
+    {
+        std::fprintf(stderr,
+            "groupedrecovery could not configure %s for N=%u\n",
+            arm_name, K);
+        return false;
+    }
+    observation.GroupedHashSeed =
+        wirehair_v2::ActiveMixedGroupedGF256HashSeed();
+
+    const wirehair_v2::SeedProfile profile =
+        wirehair_v2::SelectSeedProfile(K, 64u);
+    if (profile.BlockCount != K || profile.BlockBytes != 64u ||
+        profile.DenseCount == 0u)
+    {
+        std::fprintf(stderr,
+            "groupedrecovery invalid base seed profile for %s N=%u\n",
+            arm_name, K);
+        return false;
+    }
+    observation.BaseParams = wirehair_v2::MakeMixedParams(
+        K,
+        wirehair_v2::MatrixSeedFromProfile(
+            profile, 0u, wirehair_v2::kMessagePrecodeSeedSalt));
+    observation.BaseParams.Staircase = profile.DenseCount;
+    observation.BaseParams.DenseRows = 12u;
+    observation.BaseParams.DenseIdentityCorner = false;
+    observation.BaseParams.DenseTwoAnchor = true;
+    observation.BaseParams.DenseTwoAnchorPhase = 0u;
+    observation.BaseParams.HeavyFamily =
+        wirehair_v2::HeavyCoefficientFamily::PeriodicCauchy;
+    observation.BaseConfig.PeelSeed =
+        wirehair_v2::PacketPeelSeedFromProfile(
+            profile, wirehair_v2::kMessageRecoveryRowSeedSalt);
+    observation.BaseConfig.MixCount = 2u;
+
+    // This command deliberately never calls SelectSystematicConfiguration:
+    // q0 means the literal attempt-zero graph, even when it needs more rows.
+    observation.Params = wirehair_v2::PrecodeParamsForAttempt(
+        observation.BaseParams, 0u);
+    observation.Config = wirehair_v2::PacketConfigForAttempt(
+        observation.BaseConfig, 0u);
+    wirehair_v2::PrecodeSystem system;
+    if (!wirehair_v2::BuildPrecodeSystem(observation.Params, system))
+    {
+        std::fprintf(stderr,
+            "groupedrecovery could not build attempt0 %s for N=%u\n",
+            arm_name, K);
+        return false;
+    }
+    observation.SystematicProbeResult =
+        ProbePrecodeFailRawSystematicAttemptZero(
+            system, observation.Config);
+    if (observation.SystematicProbeResult != Wirehair_Success &&
+        observation.SystematicProbeResult != Wirehair_NeedMore)
+    {
+        std::fprintf(stderr,
+            "groupedrecovery attempt0 systematic probe failed for %s "
+            "N=%u result=%d\n",
+            arm_name, K, (int)observation.SystematicProbeResult);
+        return false;
+    }
+    const uint32_t expected_heavy =
+        arm.GF256Rows + wirehair_v2::kMixedGF16Rows;
+    if (system.Params.BlockCount != K ||
+        system.Params.Staircase != profile.DenseCount ||
+        system.Params.DenseRows != 12u ||
+        system.Params.HeavyRows != expected_heavy ||
+        system.Params.SourceHits != observation.BaseParams.SourceHits ||
+        system.Params.Field !=
+            wirehair_v2::CompletionField::MixedGF256GF16 ||
+        system.Params.DenseIdentityCorner ||
+        !system.Params.DenseTwoAnchor ||
+        system.Params.DenseTwoAnchorPhase != 0u ||
+        system.Params.HeavyFamily !=
+            wirehair_v2::HeavyCoefficientFamily::PeriodicCauchy ||
+        system.Params.Seed != observation.BaseParams.Seed ||
+        observation.Config.PeelSeed != observation.BaseConfig.PeelSeed ||
+        observation.Config.MixCount != 2u)
+    {
+        std::fprintf(stderr,
+            "groupedrecovery attempt0 geometry mismatch for %s N=%u\n",
+            arm_name, K);
+        return false;
+    }
+    observation.Params = system.Params;
+    const uint64_t precode_count_wide =
+        (uint64_t)system.Params.Staircase + system.Params.DenseRows +
+        system.Params.HeavyRows;
+    if (precode_count_wide > UINT32_MAX ||
+        packets.size() > UINT32_MAX)
+    {
+        std::fprintf(stderr,
+            "groupedrecovery count overflow for %s N=%u\n", arm_name, K);
+        return false;
+    }
+    observation.PrecodeCount = (uint32_t)precode_count_wide;
+    wirehair_v2::PacketRowRuntime runtime;
+    if (!runtime.Initialize(
+            K, observation.PrecodeCount, observation.Config.MixCount) ||
+        !runtime.IsValidFor(
+            K, observation.PrecodeCount, observation.Config.MixCount) ||
+        !ConfigureGroupedTimingArm(arm))
+    {
+        std::fprintf(stderr,
+            "groupedrecovery could not initialize %s runtime for N=%u\n",
+            arm_name, K);
+        return false;
+    }
+    std::vector<uint8_t> intermediate;
+    observation.Result =
+        wirehair_v2::SolvePrecodeSystemForValidatedSystemWithRuntime(
+            system, observation.Config, runtime, packets, 2u,
+            intermediate, &observation.Stats);
+    observation.IntermediateBytes = intermediate.size();
+    if ((observation.Result != Wirehair_Success &&
+         observation.Result != Wirehair_NeedMore) ||
+        observation.Stats.PacketRows != packets.size() ||
+        observation.Stats.PacketSeedAttempt != 0u ||
+        observation.Stats.BinaryResidualRank >
+            observation.Stats.ResidualRank ||
+        observation.Stats.ResidualRank >
+            observation.Stats.InactivatedColumns)
+    {
+        std::fprintf(stderr,
+            "groupedrecovery %s solve invariant failed N=%u result=%d\n",
+            arm_name, K, (int)observation.Result);
+        return false;
+    }
+    return true;
+}
+
+const char* GroupedRecoveryResultName(WirehairResult result)
+{
+    return result == Wirehair_Success ? "success" : "need-more";
+}
+
+const char* GroupedRecoveryPairClass(
+    WirehairResult h12,
+    WirehairResult h13)
+{
+    if (h12 == Wirehair_Success && h13 == Wirehair_Success) {
+        return "both-success";
+    }
+    if (h12 == Wirehair_Success) return "h12-only";
+    if (h13 == Wirehair_Success) return "h13-only";
+    return "both-need-more";
+}
+
+std::string GroupedRecoveryArmRow(
+    const GroupedRecoveryPairObservation& pair,
+    uint32_t overhead,
+    uint64_t external_seed,
+    PacketScheduleKind schedule,
+    const char* arm_name,
+    uint32_t pair_order_index,
+    const GroupedRecoveryArmObservation& arm)
+{
+    const wirehair_v2::PrecodeSolveStats& stats = arm.Stats;
+    const uint32_t binary_deficit =
+        stats.InactivatedColumns - stats.BinaryResidualRank;
+    const uint32_t heavy_gain =
+        stats.ResidualRank - stats.BinaryResidualRank;
+    const bool results_equal = pair.H12.Result == pair.H13.Result;
+    std::ostringstream row;
+    row << pair.PairId << ',' << pair.PairIndex << ',' << pair_order_index
+        << ',' << arm_name << ',' << pair.K << ",64,2," << overhead << ','
+        << PacketScheduleName(schedule) << ',' << external_seed
+        << ",0.5," << arm.Arm.Period << ",shared-x,0,constant,"
+        << arm.Arm.GF256Rows << ',' << wirehair_v2::kMixedGF16Rows << ','
+        << arm.Params.HeavyRows << ',' << arm.Arm.GroupedRows << ",0x"
+        << std::hex << arm.Arm.GroupedRowMask << std::dec << ",separate,0x"
+        << std::hex << arm.GroupedHashSeed << std::dec << ','
+        << arm.Params.HeavyRows << ",0,"
+        << (int)arm.SystematicProbeResult << ",0x" << std::hex
+        << arm.BaseParams.Seed << ",0x" << arm.BaseConfig.PeelSeed
+        << ",0x" << arm.Params.Seed << ",0x" << arm.Config.PeelSeed
+        << std::dec << ',' << arm.Params.Staircase << ','
+        << arm.Params.DenseRows << ',' << arm.Params.SourceHits << ','
+        << (arm.Params.DenseIdentityCorner ? 1u : 0u) << ','
+        << (arm.Params.DenseTwoAnchor ? 1u : 0u) << ','
+        << arm.Params.DenseTwoAnchorPhase
+        << ",mixed-gf256-gf16,periodic-cauchy,"
+        << arm.Config.MixCount << ',' << arm.PrecodeCount << ','
+        << pair.PacketCount << ",0x" << std::hex << pair.TraceSeed
+        << std::dec << ',' << pair.TraceSha256 << ','
+        << GroupedRecoveryPairClass(pair.H12.Result, pair.H13.Result) << ','
+        << (results_equal ? 1u : 0u) << ',' << (int)arm.Result << ','
+        << GroupedRecoveryResultName(arm.Result) << ','
+        << stats.PacketRows << ',' << stats.PeeledColumns << ','
+        << stats.InactivatedColumns << ',' << stats.ResidualRows << ','
+        << stats.BinaryResidualRank << ',' << stats.ResidualRank << ','
+        << binary_deficit << ',' << heavy_gain << ','
+        << stats.BinaryRowReferences << ',' << stats.BinaryRowStorageBytes
+        << ',' << stats.BinaryAdjacencyStorageBytes << ','
+        << stats.BinaryRowStorageAllocations << ','
+        << stats.BinaryAdjacencyStorageAllocations << ','
+        << stats.BlockXors << ',' << stats.BlockMulAdds << ','
+        << stats.BuildNanoseconds << ',' << stats.PeelNanoseconds << ','
+        << stats.ProjectNanoseconds << ',' << stats.ResidualNanoseconds << ','
+        << stats.BackSubNanoseconds << ',' << stats.PacketSeedAttempt << ','
+        << stats.MixedJointSourceXors << ','
+        << stats.MixedJointMarginalXors << ','
+        << stats.MixedJointMarginalCopies << ','
+        << stats.MixedJointActiveDeltas << ','
+        << stats.MixedJointScratchBytes << ','
+        << stats.MixedDualSourceColumns << ',' << arm.IntermediateBytes;
+    return row.str();
+}
+
+int CmdGroupedRecovery(int argc, char** argv)
+{
+    std::string nlist;
+    uint32_t overhead = 0u;
+    uint64_t seed = 0u;
+    PacketScheduleKind schedule = PacketScheduleKind::Iid;
+    bool have_N = false;
+    bool have_overhead = false;
+    bool have_seed = false;
+    bool have_schedule = false;
+    for (int i = 0; i < argc; ++i)
+    {
+        const char* value = nullptr;
+        if (!std::strcmp(argv[i], "--N"))
+        {
+            if (!GroupedRecoveryOptionOnce("--N", have_N) ||
+                !TakeArg("groupedrecovery", "--N", argc, argv, i, value))
+            {
+                return 1;
+            }
+            nlist = value;
+        }
+        else if (!std::strcmp(argv[i], "--overhead"))
+        {
+            if (!GroupedRecoveryOptionOnce("--overhead", have_overhead) ||
+                !TakeArg(
+                    "groupedrecovery", "--overhead", argc, argv, i,
+                    value) ||
+                !ParseCanonicalU32Arg("--overhead", value, overhead))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--seed"))
+        {
+            if (!GroupedRecoveryOptionOnce("--seed", have_seed) ||
+                !TakeArg(
+                    "groupedrecovery", "--seed", argc, argv, i, value) ||
+                !ParseCanonicalU64Arg("--seed", value, seed))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--schedule"))
+        {
+            if (!GroupedRecoveryOptionOnce("--schedule", have_schedule) ||
+                !TakeArg(
+                    "groupedrecovery", "--schedule", argc, argv, i,
+                    value))
+            {
+                return 1;
+            }
+            if (!ParsePacketSchedule(value, schedule))
+            {
+                std::fprintf(stderr,
+                    "groupedrecovery --schedule must be burst, adversarial, "
+                    "or repair-only\n");
+                return 1;
+            }
+        }
+        else if (!UnknownArg("groupedrecovery", argv[i])) {
+            return 1;
+        }
+    }
+    if (!have_N || !have_overhead || !have_seed || !have_schedule)
+    {
+        std::fprintf(stderr,
+            "groupedrecovery requires --N, --overhead, --seed, and "
+            "--schedule\n");
+        return 1;
+    }
+    size_t n_count = nlist.empty() ? 0u : 1u;
+    for (char ch : nlist) n_count += ch == ',' ? 1u : 0u;
+    if (n_count > 250u) {
+        std::fprintf(stderr,
+            "groupedrecovery --N accepts at most 250 values\n");
+        return 1;
+    }
+    const std::vector<int> Ns = ParseIntList(nlist);
+    if (!IsCanonicalGroupedRecoveryNList(nlist, Ns))
+    {
+        std::fprintf(stderr,
+            "groupedrecovery --N must be a canonical strictly increasing "
+            "comma-separated decimal list\n");
+        return 1;
+    }
+    if (!ValidateBlockCounts(Ns, "groupedrecovery")) return 1;
+    if (overhead > 1024u)
+    {
+        std::fprintf(stderr,
+            "groupedrecovery --overhead must be in [0,1024]\n");
+        return 1;
+    }
+    if (schedule != PacketScheduleKind::Burst &&
+        schedule != PacketScheduleKind::Adversarial &&
+        schedule != PacketScheduleKind::RepairOnly)
+    {
+        std::fprintf(stderr,
+            "groupedrecovery --schedule must be burst, adversarial, or "
+            "repair-only\n");
+        return 1;
+    }
+
+    GroupedTimingArm h12_arm;
+    h12_arm.Period = 48u;
+    h12_arm.GF256Rows = wirehair_v2::kMixedGF256Rows;
+    h12_arm.GroupedRows = 3u;
+    h12_arm.GroupedRowMask = 0x380u;
+    h12_arm.Buckets = wirehair_v2::MixedResidueBucketMode::Separate;
+    GroupedTimingArm h13_arm = h12_arm;
+    h13_arm.GF256Rows = wirehair_v2::kMixedGF256Rows + 1u;
+    if (!GroupedTimingRowMaskIsValid(h12_arm) ||
+        !GroupedTimingRowMaskIsValid(h13_arm))
+    {
+        std::fprintf(stderr,
+            "groupedrecovery internal hardcoded arm mismatch\n");
+        return 2;
+    }
+
+    std::vector<GroupedRecoveryPairObservation> observations;
+    observations.reserve(Ns.size());
+    std::map<std::string, uint32_t> pair_ids;
+    for (size_t pair_index = 0u; pair_index < Ns.size(); ++pair_index)
+    {
+        const uint32_t K = (uint32_t)Ns[pair_index];
+        PrecodeFailRawTraceReceipt trace;
+        if (!BuildPrecodeFailRawTraceReceipt(
+                K, 64u, overhead, 0.5, seed, schedule, true, trace) ||
+            !IsLowerHexDigest(trace.Sha256))
+        {
+            std::fprintf(stderr,
+                "groupedrecovery packet trace failed for N=%u\n", K);
+            return 2;
+        }
+        uint8_t shared_zero[2] = {};
+        std::vector<wirehair_v2::SolvePacket> packets(
+            trace.PacketIds.size());
+        for (size_t i = 0u; i < packets.size(); ++i) {
+            packets[i].BlockId = trace.PacketIds[i];
+            packets[i].Data = shared_zero;
+        }
+
+        GroupedRecoveryPairObservation pair;
+        pair.PairIndex = (uint32_t)pair_index;
+        pair.K = K;
+        pair.PacketCount = (uint32_t)packets.size();
+        pair.TraceSeed = trace.Seed;
+        pair.TraceSha256 = trace.Sha256;
+        pair.PairId = GroupedRecoveryPairId(
+            K, overhead, seed, schedule, trace);
+        if (!IsLowerHexDigest(pair.PairId) ||
+            !pair_ids.insert(std::make_pair(
+                pair.PairId, (uint32_t)pair_index)).second ||
+            !RunGroupedRecoveryArm(
+                "h12", h12_arm, K, packets, pair.H12) ||
+            !RunGroupedRecoveryArm(
+                "h13", h13_arm, K, packets, pair.H13))
+        {
+            std::fprintf(stderr,
+                "groupedrecovery pair construction failed for N=%u\n", K);
+            return 2;
+        }
+        if (!SameGroupedRecoveryBaseGraph(pair.H12, pair.H13) ||
+            pair.H12.Arm.GF256Rows != 10u ||
+            pair.H13.Arm.GF256Rows != 11u ||
+            pair.H12.Params.HeavyRows != 12u ||
+            pair.H13.Params.HeavyRows != 13u ||
+            (pair.H12.SystematicProbeResult != Wirehair_Success &&
+             pair.H12.SystematicProbeResult != Wirehair_NeedMore) ||
+            (pair.H13.SystematicProbeResult != Wirehair_Success &&
+             pair.H13.SystematicProbeResult != Wirehair_NeedMore) ||
+            pair.H12.PrecodeCount + 1u != pair.H13.PrecodeCount ||
+            pair.H12.GroupedHashSeed != UINT32_C(0xb7e15162) ||
+            pair.H13.GroupedHashSeed != UINT32_C(0xb7e15163))
+        {
+            std::fprintf(stderr,
+                "groupedrecovery paired-arm receipt mismatch for N=%u\n",
+                K);
+            return 2;
+        }
+        observations.push_back(pair);
+    }
+
+    std::ostringstream batch;
+    batch
+        << "# groupedrecovery: schema=v1 pair_order=h12,h13 arms_per_N=2 "
+        << "N_count=" << observations.size() << " N=" << nlist
+        << " overhead=" << overhead << " seed=" << seed
+        << " schedule=" << PacketScheduleName(schedule) << ' '
+        << "policy=h12-h13-q0-grouped-v1 period=48 geometry=shared-x "
+        << "residue_skew=0 residue_schedule=constant residue_hash_seed=0x0 "
+        << "extension_residue_seed_xor=0x4e "
+        << "independent_extension_residues=0 "
+        << "gf256_rows=h12:10|h13:11 gf16_rows=2 grouped_rows=3 "
+        << "grouped_gf256_row_mask=0x380 buckets=separate "
+        << "grouped_hash_seed=h12:0xb7e15162|h13:0xb7e15163 "
+        << "grouped_final_h_a_columns=arm-heavy-rows "
+        << "dense_rows=12 dense_identity_corner=0 dense_two_anchor=1 "
+        << "dense_two_anchor_phase=0 source_hits=profile "
+        << "staircase_rows=profile-dense-count field=mixed-gf256-gf16 "
+        << "heavy_family=periodic-cauchy construction_attempt=0 "
+        << "systematic_probe=direct-attempt0 seed_repair=disabled mix=2 "
+        << "bb=64 seed_block_bytes=64 "
+        << "solve_block_bytes=2 loss=0.5 "
+        << "overhead_stream=paired packet_row_seed_multiplier=0x1 "
+        << "packet_row_seed_avalanche=0 odd_packet_peel_seed_xor=0x0 "
+        << "packet_vector=one-shared-per-N payload=shared-zero-v1 "
+        << "packet_payload_bytes=2 "
+        << "packet_trace_schema=wirehair-wh2-precodefail-raw-packet-trace-v1 "
+        << "coefficient_layout=materialized-before-solve "
+        << "grouped_schedule_prefix=materialized-before-solve\n"
+        <<
+        "pair_id,pair_index,pair_order_index,arm,N,bb,solve_block_bytes,"
+        "overhead,schedule,"
+        "external_seed,loss,period,geometry,residue_skew,residue_schedule,"
+        "gf256_rows,gf16_rows,heavy_rows,grouped_rows,"
+        "grouped_gf256_row_mask,buckets_requested,grouped_hash_seed,"
+        "final_h_a_columns,construction_attempt,systematic_probe_result,"
+        "base_matrix_seed,"
+        "base_peel_seed,matrix_seed,peel_seed,staircase_rows,dense_rows,"
+        "source_hits,dense_identity_corner,dense_two_anchor,"
+        "dense_two_anchor_phase,field,heavy_family,mix_count,precode_count,"
+        "packet_count,packet_trace_seed,packet_trace_sha256,pair_class,"
+        "pair_results_equal,result,result_name,packet_rows,peeled_columns,"
+        "inactivated_columns,residual_rows,binary_residual_rank,"
+        "residual_rank,binary_deficit,heavy_gain,binary_row_references,"
+        "binary_row_storage_bytes,binary_adjacency_storage_bytes,"
+        "binary_row_storage_allocations,"
+        "binary_adjacency_storage_allocations,block_xors,block_muladds,"
+        "build_ns,peel_ns,project_ns,residual_ns,backsub_ns,"
+        "packet_seed_attempt,joint_source_xors,joint_marginal_xors,"
+        "joint_marginal_copies,joint_active_deltas,joint_scratch_bytes,"
+        "dual_source_columns,intermediate_bytes\n";
+    for (const GroupedRecoveryPairObservation& pair : observations)
+    {
+        batch << GroupedRecoveryArmRow(
+            pair, overhead, seed, schedule, "h12", 0u, pair.H12) << '\n';
+        batch << GroupedRecoveryArmRow(
+            pair, overhead, seed, schedule, "h13", 1u, pair.H13) << '\n';
+    }
+    const std::string output = batch.str();
+    const size_t written = std::fwrite(
+        output.data(), 1u, output.size(), stdout);
+    const int flush_result = std::fflush(stdout);
+    if (written != output.size() || flush_result != 0 ||
+        std::ferror(stdout))
+    {
+        std::fprintf(stderr,
+            "groupedrecovery could not write the complete output batch\n");
+        return 2;
+    }
+    return 0;
 }
 #endif
 
@@ -9775,8 +10381,13 @@ int main(int argc, char** argv)
         std::fprintf(stderr,
             "usage: wirehair_v2_bench compare|precodecheck|seedtable|"
             "peelcost|densecheck|densetune|densecount|densegrid|precodefail|"
-            "preferredattempt|preferredtiming|groupedtiming|selftest "
-            "[opts]\n");
+            "preferredattempt|preferredtiming|groupedtiming|groupedrecovery|"
+            "selftest [opts]\n");
+#elif defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        std::fprintf(stderr,
+            "usage: wirehair_v2_bench compare|precodecheck|seedtable|"
+            "peelcost|densecheck|densetune|densecount|densegrid|precodefail|"
+            "groupedrecovery|selftest [opts]\n");
 #else
         std::fprintf(stderr,
             "usage: wirehair_v2_bench compare|precodecheck|seedtable|"
@@ -9824,6 +10435,11 @@ int main(int argc, char** argv)
         }
         if (!std::strcmp(argv[1], "groupedtiming")) {
             return CmdGroupedTiming(argc - 2, argv + 2);
+        }
+#endif
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        if (!std::strcmp(argv[1], "groupedrecovery")) {
+            return CmdGroupedRecovery(argc - 2, argv + 2);
         }
 #endif
         if (!std::strcmp(argv[1], "selftest")) {

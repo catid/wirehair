@@ -343,6 +343,43 @@ and the exact loss-seed and SHA-256 receipt for the packet-ID trace actually
 solved.  This mode does not alter ordinary `precodefail` output or production
 profile selection.
 
+Test builds also expose the pair-native `groupedrecovery` data plane for the
+grouped Stage-B revalidation of that Stage-A result.  It accepts only four
+explicit options: a canonical,
+strictly increasing decimal `--N` list (2..64000, at most 250 entries),
+`--overhead` in 0..1024, a canonical decimal `--seed`, and a hard
+`--schedule` of `burst`, `adversarial`, or `repair-only`.  For example:
+
+```bash
+build/codec/wirehair_v2_bench groupedrecovery \
+  --N 3,64,10000 --overhead 0 \
+  --seed 15111065706836454659 --schedule adversarial
+```
+
+The architecture is intentionally not configurable: P48/shared-X constant-A,
+separate residue buckets, grouped rows 7..9 (`0x380`), D12 two-anchor phase
+zero, periodic completion, mix2, and direct construction attempt zero.  For
+each N the command builds one paired loss trace using the 64-byte seed-profile
+width, then runs H12 followed immediately by H13 over the same packet vector.
+Like raw `precodefail`, it records each arm's attempt-zero systematic probe but
+never selects, repairs, or retries a seed based on that result.  The campaign
+solve remains the mixed rank-only 2-byte solve; the preamble and every row
+distinguish `seed_block_bytes=64`/`bb=64` from `solve_block_bytes=2`.
+
+Output is an all-or-nothing `schema=v1` CSV batch: after one frozen-policy
+preamble and one header it emits exactly two homogeneous data rows per N, in
+`h12,h13` order, with no separate pair row.  Both rows repeat the deterministic
+pair ID, pair index and order index, command inputs, base and active seeds,
+packet-trace seed and SHA-256, binary-base receipts, pair classification, and
+the complete raw solve-stat record.  Arm-specific H geometry, grouped hash,
+probe result, outcome, and statistics remain explicit.  A `NeedMore` outcome
+is experimental data and does not make the command fail; malformed input,
+construction errors, unexpected solver results, or any cross-arm receipt
+mismatch do.  Results are buffered until every requested pair validates, so a
+nonzero exit never presents a partial batch as complete.  This command exists
+only with `WIREHAIR_V2_ENABLE_TEST_HOOKS` and changes no named profile or
+production equation.
+
 The corresponding restartable census controller is
 `bench/wh2_h13_stage_a.py`.  It freezes the benchmark and controller, emits
 4,608 OH0 jobs covering K=2..64000 under three seeds and three hard schedules
