@@ -15,14 +15,10 @@ namespace wirehair_v2 {
 // confused with the separately versioned experimental recovery-row helper.
 static const uint32_t kPacketRowContractVersion = 4u;
 static const uint32_t kPrecodeContractVersion = 2u; // existing/default alias
-static const uint32_t kMixedPrecodeContractVersion = 3u;
 
-inline uint32_t PrecodeContractVersion(CompletionField field)
+inline uint32_t PrecodeContractVersion()
 {
-    if (field == CompletionField::GF256) return kPrecodeContractVersion;
-    if (field == CompletionField::MixedGF256GF16)
-        return kMixedPrecodeContractVersion;
-    return 0u;
+    return kPrecodeContractVersion;
 }
 static const uint32_t kCertifiedPacketMixCount = 3u;
 static const uint32_t kMaxPacketSeedAttempts = 256u;
@@ -97,9 +93,6 @@ struct PrecodeSolveStats
 };
 
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-/** Largest mixed quotient reconstructed by the null-witness diagnostic. */
-static const uint32_t kMaxMixedNullWitnessQuotientColumns = 15u;
-
 /**
     Multiply packet ids by an odd 32-bit constant before initializing the row
     PRNG.  Odd multiplication is a permutation of the complete id domain, so
@@ -120,18 +113,6 @@ void SetPacketRowSeedAvalancheForTesting(bool enabled);
 void SetOddPacketPeelSeedXorForTesting(uint32_t seed_xor);
 
 /**
-    Enable an independent dense-expansion oracle for mixed completion
-    coefficient projection.  Balanced enable/disable calls are nestable.  Test
-    code uses this to compare the optimized residue-bucket projection against
-    the original L-by-R expansion exactly.
-*/
-void SetMixedProjectionOracleForTesting(bool enabled);
-
-/** Reset/read the number of successful optimized-versus-dense comparisons. */
-void ResetMixedProjectionOracleComparisonsForTesting();
-uint64_t MixedProjectionOracleComparisonsForTesting();
-
-/**
     Enable an exact comparison between low-degree-XOR and row-scan binary
     peeling.  The oracle also rejects duplicate columns within any equation.
 */
@@ -141,52 +122,6 @@ void SetBinaryPeelOracleForTesting(bool enabled);
 void ResetBinaryPeelOracleComparisonsForTesting();
 uint64_t BinaryPeelOracleComparisonsForTesting();
 
-/**
-    Compare packed-GF(2) residual insertion against the byte GF(256) oracle at
-    word boundaries, including poisoned tail bits and inconsistent RHS rows.
-*/
-bool CheckPackedBinaryResidualOracleForTesting();
-
-enum class MixedNullWitnessStatus : uint32_t
-{
-    None = 0,
-    Captured = 1,
-    AlgebraMismatch = 2,
-    AllocationFailure = 3,
-    InternalError = 4
-};
-
-/**
-    Exact test-only description of ker(A) intersect ker(C) for a singular
-    mixed quotient.  CanonicalBasis is row-major over all original solver
-    columns, with KernelDimension rows and ColumnCount columns.
-*/
-struct MixedNullWitnessDiagnostic
-{
-    MixedNullWitnessStatus Status = MixedNullWitnessStatus::None;
-    uint32_t ColumnCount = 0u;
-    uint32_t InactiveCount = 0u;
-    uint32_t BinaryRank = 0u;
-    uint32_t QuotientColumns = 0u;
-    uint32_t QuotientRank = 0u;
-    uint32_t KernelDimension = 0u;
-    bool QuotientVerified = false;
-    bool BinaryVerified = false;
-    bool CompletionVerified = false;
-    bool CanonicalVerified = false;
-    uint64_t BasisHashLow = 0u;
-    uint64_t BasisHashHigh = 0u;
-    std::vector<uint16_t> CanonicalBasis;
-    /** One byte per original column: one for inactive, zero for peeled. */
-    std::vector<uint8_t> InactiveMask;
-};
-
-/** Install a non-owning capture sink for mixed solves on the calling thread. */
-void SetMixedNullWitnessDiagnosticForTesting(
-    MixedNullWitnessDiagnostic* diagnostic);
-
-/** Pure GF(2^16) nullspace/canonicalization invariance oracle. */
-bool CheckMixedNullWitnessCanonicalizationForTesting();
 #endif
 
 /**
@@ -317,13 +252,12 @@ bool EvaluatePacketBlockForValidatedSystemWithRuntime(
     uint64_t* block_ops_out = nullptr);
 
 /**
-    Solve the complete V2 system over its configured completion field.
+    Solve the complete V2 system over GF(256).
 
     Binary staircase/dense constraints and packet equations are peeled first.
     Unused binary rows are projected onto the inactivated columns.  The
-    generic path expands them into a GF(256) residual before inserting its
-    Cauchy heavy equations; the mixed path keeps that residual packed in
-    GF(2), then solves only its remaining quotient over GF(2^16).  On success
+    solver expands them into a GF(256) residual before inserting its
+    Cauchy heavy equations.  On success
     `intermediate_blocks_out` contains all
     K+S+D2+H block values.  The exact residual solve is bounded to
     kMaxInactiveColumns to contain adversarial memory use.  NeedMore means the
@@ -332,8 +266,6 @@ bool EvaluatePacketBlockForValidatedSystemWithRuntime(
     every failure.  When resume_state is non-null, a rank-deficient residual
     within the cap atomically replaces it with an active affine/pivot
     checkpoint; cap failures leave it unchanged and require a cold retry.
-    Mixed GF(256)/GF(2^16) solves do not publish resume checkpoints and leave
-    any caller-provided resume state unchanged on NeedMore.
     `stats` is diagnostic rather than transactional output: completed algebraic
     outcomes publish their counters, while validation failures and allocation
     failures before a resumable checkpoint may leave the caller's prior value

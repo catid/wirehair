@@ -324,8 +324,9 @@ static bool ReadmeExample()
     }
 
     // FEC success proves only that the equations were solvable.  A corrupt,
-    // mixed-profile, or adversarially self-consistent stream can recover the
-    // wrong bytes successfully, so authenticate the result before using it.
+    // mismatched-profile, or adversarially self-consistent stream can recover
+    // the wrong bytes successfully, so authenticate the result before using
+    // it.
     if (!ApplicationDigestMatches(decoded, trustedDigest))
     {
         cout << "recovered message failed application digest" << endl;

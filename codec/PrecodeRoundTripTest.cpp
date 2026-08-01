@@ -56,8 +56,7 @@ bool RunFacadeLossCase(
     uint32_t block_bytes,
     uint32_t tail_bytes,
     uint32_t loss_stride,
-    bool repair_only,
-    bool mixed_profile = false)
+    bool repair_only)
 {
     const uint64_t message_bytes =
         (uint64_t)(K - 1u) * block_bytes + tail_bytes;
@@ -69,10 +68,6 @@ bool RunFacadeLossCase(
     wirehair_v2::Codec encoder;
     wirehair_v2::Codec decoder;
     wirehair_v2::MessagePrecodeEncoderOptions options;
-    if (mixed_profile) {
-        options.Completion =
-            wirehair_v2::CompletionField::MixedGF256GF16;
-    }
     if (encoder.InitializePrecodeEncoder(
             message.data(), message_bytes, block_bytes,
             nullptr, &options) != Wirehair_Success ||
@@ -196,9 +191,7 @@ bool RunFacadeLossCase(
     std::printf(
         "precode E2E K=%u bb=%u mode=%s delivered=%u overhead=%d: PASS\n",
         K, block_bytes,
-        repair_only ?
-            (mixed_profile ? "mixed-repair-only" : "repair-only") :
-            (mixed_profile ? "mixed-reverse-loss" : "mixed"),
+        repair_only ? "repair-only" : "reverse-loss",
         delivered, (int)delivered - (int)K);
     return true;
 }
@@ -371,106 +364,6 @@ bool RunForcedNeedMoreResumeCase()
     return true;
 }
 
-bool RunMixedColdRetryCase()
-{
-    const uint32_t K = 64u;
-    const uint32_t block_bytes = 16u;
-    const uint64_t message_bytes = (uint64_t)K * block_bytes;
-    std::vector<uint8_t> message((size_t)message_bytes);
-    for (size_t i = 0; i < message.size(); ++i) {
-        message[i] = (uint8_t)(i * 43u + 17u);
-    }
-    wirehair_v2::MessagePrecodeEncoderOptions options;
-    options.Completion =
-        wirehair_v2::CompletionField::MixedGF256GF16;
-    wirehair_v2::Codec encoder;
-    if (encoder.InitializePrecodeEncoder(
-            message.data(), message_bytes, block_bytes,
-            nullptr, &options) != Wirehair_Success)
-    {
-        return false;
-    }
-
-    std::vector<uint8_t> block(block_bytes);
-    // Pinned distinct packet row that leaves the cold solve one rank short
-    // for this canonical mixed profile/message fixture.
-    for (uint32_t candidate = 1936u; candidate < 1937u; ++candidate)
-    {
-        wirehair_v2::MessagePrecodeDecoder decoder;
-        if (decoder.InitializeResult(
-                message_bytes, block_bytes, &encoder.Profile()) !=
-                Wirehair_Success)
-        {
-            return false;
-        }
-        WirehairResult result = Wirehair_NeedMore;
-        for (uint32_t id = 0; id + 1u < K; ++id)
-        {
-            uint32_t bytes = 0u;
-            if (encoder.Encode(id, block.data(), block_bytes, &bytes) !=
-                    Wirehair_Success)
-            {
-                return false;
-            }
-            result = decoder.DecodeResult(id, block.data(), bytes);
-        }
-        uint32_t bytes = 0u;
-        if (encoder.Encode(
-                candidate, block.data(), block_bytes, &bytes) !=
-                Wirehair_Success)
-        {
-            return false;
-        }
-        result = decoder.DecodeResult(candidate, block.data(), bytes);
-        if (result == Wirehair_Success) continue;
-        if (result != Wirehair_NeedMore ||
-            decoder.HasIncrementalResumeStateForTesting() ||
-            decoder.ColdReceiveCapacityBytesForTesting() < message_bytes)
-        {
-            std::fprintf(stderr,
-                "mixed cold retry: deficient state contract failed\n");
-            return false;
-        }
-        const uint32_t attempts_before = decoder.SolveAttemptCount();
-        if (decoder.DecodeResult(
-                candidate, block.data(), bytes) != Wirehair_NeedMore ||
-            decoder.SolveAttemptCount() != attempts_before)
-        {
-            std::fprintf(stderr,
-                "mixed cold retry: duplicate triggered another solve\n");
-            return false;
-        }
-        for (uint32_t repair = K;
-             result == Wirehair_NeedMore && repair < K + 128u; ++repair)
-        {
-            if (repair == candidate) continue;
-            if (encoder.Encode(
-                    repair, block.data(), block_bytes, &bytes) !=
-                    Wirehair_Success)
-            {
-                return false;
-            }
-            result = decoder.DecodeResult(repair, block.data(), bytes);
-        }
-        std::vector<uint8_t> recovered(message.size());
-        if (result != Wirehair_Success ||
-            decoder.RecoverResult(recovered.data(), recovered.size()) !=
-                Wirehair_Success || recovered != message)
-        {
-            std::fprintf(stderr,
-                "mixed cold retry: recovery failed candidate=%u\n",
-                candidate);
-            return false;
-        }
-        std::printf(
-            "mixed deficient cold retry candidate=%u attempts=%u: PASS\n",
-            candidate, decoder.SolveAttemptCount());
-        return true;
-    }
-    std::fprintf(stderr, "mixed cold retry: no deficient fixture found\n");
-    return false;
-}
-
 bool RunUnauthenticatedCorruptionBoundary()
 {
     const uint32_t K = 64u;
@@ -573,8 +466,7 @@ bool SameOptions(
     return a.RecoveryMixCount == b.RecoveryMixCount &&
         a.DenseIdentityCorner == b.DenseIdentityCorner &&
         a.PrecodeSeedSalt == b.PrecodeSeedSalt &&
-        a.RecoveryRowSeedSalt == b.RecoveryRowSeedSalt &&
-        a.Completion == b.Completion;
+        a.RecoveryRowSeedSalt == b.RecoveryRowSeedSalt;
 }
 
 bool RunOptionContractCase(
@@ -583,9 +475,7 @@ bool RunOptionContractCase(
     const wirehair_v2::MessagePrecodeEncoderOptions& mismatched)
 {
     const uint32_t K = 64u;
-    const uint32_t block_bytes =
-        options.Completion ==
-            wirehair_v2::CompletionField::MixedGF256GF16 ? 16u : 17u;
+    const uint32_t block_bytes = 17u;
     const uint64_t message_bytes = (uint64_t)K * block_bytes;
     std::vector<uint8_t> message((size_t)message_bytes);
     for (size_t i = 0; i < message.size(); ++i) {
@@ -604,13 +494,12 @@ bool RunOptionContractCase(
     if (wirehair_v2::kPacketRowContractVersion != 4u ||
         !profile.V2SeedSelected ||
         profile.V2PrecodeContractVersion !=
-            wirehair_v2::PrecodeContractVersion(options.Completion) ||
+            wirehair_v2::PrecodeContractVersion() ||
         profile.V2PacketRowContractVersion !=
             wirehair_v2::kPacketRowContractVersion ||
         profile.V2StaircaseCount != profile.DenseCount ||
         profile.V2RecoveryMixCount != options.RecoveryMixCount ||
         profile.V2DenseIdentityCorner != options.DenseIdentityCorner ||
-        profile.V2CompletionField != options.Completion ||
         profile.V2PrecodeSeedSalt != options.PrecodeSeedSalt ||
         profile.V2RecoveryRowSeedSalt != options.RecoveryRowSeedSalt)
     {
@@ -625,7 +514,6 @@ bool RunOptionContractCase(
         inherited.System().Params.Staircase != profile.V2StaircaseCount ||
         inherited.System().Params.DenseRows != profile.V2DenseRowCount ||
         inherited.System().Params.HeavyRows != profile.V2HeavyRowCount ||
-        inherited.System().Params.Field != profile.V2CompletionField ||
         inherited.System().Params.SourceHits != profile.V2SourceHits ||
         inherited.System().Params.Seed != profile.V2PrecodeSeed ||
         inherited.PacketPeelSeed() != profile.V2PacketPeelSeed ||
@@ -685,7 +573,7 @@ bool RunBoundContractCases()
             &variant) != Wirehair_InvalidInput)
     {
         std::fprintf(stderr,
-            "contract: GF256/mix2 option pair was accepted\n");
+            "contract: unsupported recovery mix count was accepted\n");
         return false;
     }
     variant = defaults;
@@ -703,18 +591,6 @@ bool RunBoundContractCases()
     if (!RunOptionContractCase("packet-salt", variant, defaults)) {
         return false;
     }
-    variant = defaults;
-    variant.Completion =
-        wirehair_v2::CompletionField::MixedGF256GF16;
-    if (!RunOptionContractCase("mixed-completion", variant, defaults)) {
-        return false;
-    }
-    wirehair_v2::MessagePrecodeEncoderOptions mixed_mix3 = variant;
-    variant.RecoveryMixCount = 2u;
-    if (!RunOptionContractCase("mixed-mix2", variant, mixed_mix3)) {
-        return false;
-    }
-
     const uint32_t K = 320u;
     const uint32_t block_bytes = 7u;
     const uint64_t message_bytes = (uint64_t)K * block_bytes;
@@ -849,7 +725,7 @@ bool RunBoundContractCases()
 
     malformed = wirehair_v2::SelectSeedProfile(K, block_bytes);
     malformed.V2DenseRowCount = 12u;
-    if (!reject_profile(malformed, "mixed unselected state")) {
+    if (!reject_profile(malformed, "unselected contract state")) {
         return false;
     }
 
@@ -915,7 +791,7 @@ bool RunBoundContractCases()
     return true;
 }
 
-bool RunMixedProfileBenchmark(bool mixed)
+bool RunCertifiedProfileBenchmark()
 {
     struct BenchmarkCase {
         uint32_t K;
@@ -944,10 +820,6 @@ bool RunMixedProfileBenchmark(bool mixed)
         for (uint32_t trial = 0; trial < c.Trials; ++trial)
         {
             wirehair_v2::MessagePrecodeEncoderOptions options;
-            if (mixed) {
-                options.Completion =
-                    wirehair_v2::CompletionField::MixedGF256GF16;
-            }
             wirehair_v2::MessagePrecodeEncoder encoder;
             std::chrono::steady_clock::time_point begin =
                 std::chrono::steady_clock::now();
@@ -1015,11 +887,11 @@ bool RunMixedProfileBenchmark(bool mixed)
             }
         }
         std::printf(
-            "mixed_profile_bench,profile=%s,K=%u,bb=%u,trials=%u,"
+            "precode_profile_bench,profile=certified,K=%u,bb=%u,trials=%u,"
             "create_ms=%.3f,encode_ns_per_packet=%.1f,decode_ms=%.3f,"
             "packets_per_trial=%.2f,intermediate_mib=%.3f,"
             "max_cold_capacity_mib=%.3f,attempt=%u\n",
-            mixed ? "mixed" : "certified", c.K, c.BlockBytes, c.Trials,
+            c.K, c.BlockBytes, c.Trials,
             create_ns / 1000000.0 / c.Trials,
             packets == 0u ? 0.0 : (double)encode_ns / packets,
             decode_ns / 1000000.0 / c.Trials,
@@ -1036,22 +908,17 @@ bool RunMixedProfileBenchmark(bool mixed)
 int main(int argc, char** argv)
 {
     if (argc == 2 &&
-        (std::strcmp(argv[1], "--benchmark-certified") == 0 ||
-         std::strcmp(argv[1], "--benchmark-mixed") == 0))
+        std::strcmp(argv[1], "--benchmark-certified") == 0)
     {
-        return RunMixedProfileBenchmark(
-            std::strcmp(argv[1], "--benchmark-mixed") == 0) ? 0 : 1;
+        return RunCertifiedProfileBenchmark() ? 0 : 1;
     }
     if (argc != 1) return 2;
     bool ok = true;
     ok = RunFacadeLossCase(64u, 37u, 13u, 7u, false) && ok;
     ok = RunFacadeLossCase(96u, 128u, 91u, 9u, true) && ok;
     ok = RunFacadeLossCase(320u, 17u, 5u, 11u, false) && ok;
-    ok = RunFacadeLossCase(64u, 16u, 7u, 7u, false, true) && ok;
-    ok = RunFacadeLossCase(64u, 16u, 16u, 7u, true, true) && ok;
     ok = RunDirectLifecycleCase() && ok;
     ok = RunForcedNeedMoreResumeCase() && ok;
-    ok = RunMixedColdRetryCase() && ok;
     ok = RunUnauthenticatedCorruptionBoundary() && ok;
     ok = RunBoundContractCases() && ok;
     return ok ? 0 : 1;

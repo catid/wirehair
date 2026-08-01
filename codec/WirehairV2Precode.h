@@ -1,7 +1,5 @@
 #pragma once
 
-#include "WirehairV2GF16.h"
-
 #include <stdint.h>
 
 #include <vector>
@@ -54,8 +52,6 @@ struct PrecodeParams
     uint32_t DenseRows = 0;    ///< D2: Shuffle-2 dense binary rows
     uint32_t HeavyRows = 0;    ///< H: Cauchy heavy rows
     uint32_t SourceHits = 0;   ///< N1: staircase parities per source column
-    CompletionField Field = CompletionField::GF256;
-
     /**
         Identity-corner dense variant: the Shuffle-2 deck spans only the
         K + S source/staircase columns and dense row r additionally
@@ -85,9 +81,6 @@ struct PrecodeParams
 /// Certified rule: S = GetDenseCount(K), D2 = 12, H = 12,
 /// N1 = 2 below K=10000 and N1 = 3 from K=10000 upward
 PrecodeParams MakeCertifiedParams(uint32_t block_count, uint64_t seed);
-
-/// Versioned mixed 10-row GF(256) + 2-row GF(2^16) completion rule.
-PrecodeParams MakeMixedParams(uint32_t block_count, uint64_t seed);
 
 struct PrecodeSystem
 {
@@ -158,96 +151,6 @@ uint8_t HeavyCoefficient(
     uint32_t heavy_row,
     uint32_t ge_column,
     uint32_t heavy_rows);
-
-static const uint32_t kMixedPackedCoefficientWords =
-    (kMixedGF256RowsMax + kMixedGF16RowsMax + 3u) / 4u;
-
-enum class MixedCoefficientGeometry : uint32_t
-{
-    FrozenPowerX = 0,
-    SharedCauchyX = 1
-};
-
-enum class MixedResidueSchedule : uint32_t
-{
-    Constant = 0,
-    Ramp = 1,
-    Hashed = 2
-};
-
-/// Immutable row-major coefficient period shared by mixed encode, solve, and
-/// verification paths.  The accessor initializes both fields and returns null
-/// only if their arithmetic tables could not be initialized.
-struct MixedCoefficientRows
-{
-    uint8_t Subfield[kMixedGF256RowsMax][kMixedCoefficientPeriod];
-    uint16_t Extension[kMixedGF16RowsMax][kMixedCoefficientPeriod];
-};
-
-const MixedCoefficientRows* GetMixedCoefficientRows();
-
-/// The same mixed coefficient period packed as four uint16 lanes per word,
-/// residue-major.  This separate lazy cache prevents encode/verify callers
-/// from paying the solve-only packing cost on first use.
-struct MixedPackedCoefficients
-{
-    uint64_t ByResidue[
-        kMixedCoefficientPeriod][kMixedPackedCoefficientWords];
-};
-
-const MixedPackedCoefficients* GetMixedPackedCoefficients();
-
-/**
-    Active mixed coefficient period.
-
-    Production builds always return kMixedCoefficientPeriod.  Test builds may
-    select a smaller period on the current thread to measure the speed/rank
-    tradeoff without changing any named or serialized wire profile.
-*/
-uint32_t ActiveMixedCoefficientPeriod();
-/// Coefficient residue for a GE column under the active balanced block skew.
-uint32_t ActiveMixedCoefficientResidue(uint32_t column);
-/// Residue used by extension-field rows.  Production aliases the shared
-/// residue; test builds may select an independently keyed schedule.
-uint32_t ActiveMixedExtensionCoefficientResidue(uint32_t column);
-/// Rotation applied to one complete period-sized block.
-uint32_t ActiveMixedResidueBlockShift(uint32_t block_index);
-uint32_t ActiveMixedExtensionResidueBlockShift(uint32_t block_index);
-uint32_t ActiveMixedResidueSkew();
-MixedResidueSchedule ActiveMixedResidueSchedule();
-uint32_t ActiveMixedResidueHashSeed();
-bool ActiveMixedResiduesRotated();
-bool ActiveMixedIndependentExtensionResidues();
-MixedCoefficientGeometry ActiveMixedCoefficientGeometry();
-uint32_t ActiveMixedGF256Rows();
-uint32_t ActiveMixedGF16Rows();
-uint32_t ActiveMixedPackedCoefficientWords();
-
-#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-/// Set the current thread's experiment-only period in [H, 244].
-bool SetMixedCoefficientPeriodForTesting(uint32_t period);
-/// Rotate each period block by a corner-preserving skew in [0, P-H].
-bool SetMixedResidueSkewForTesting(uint32_t skew);
-/// Select a constant, ramp, or hashed corner-safe residue schedule.
-bool SetMixedResidueScheduleForTesting(MixedResidueSchedule schedule);
-/// Select the deterministic hashed-schedule sequence (benchmark/test only).
-void SetMixedResidueHashSeedForTesting(uint32_t seed);
-/// Derive and activate the first K-keyed hashed schedule with a full cycle.
-bool SelectFullCycleMixedResidueKeyedSeedForTesting(
-    uint32_t base_seed,
-    uint32_t block_count,
-    uint32_t& selected_seed);
-/// Give GF(2^16) rows an independently keyed full-cycle hashed schedule.
-bool SetMixedIndependentExtensionResiduesForTesting(bool enabled);
-/// Select the XOR used to derive the independent extension schedule seed.
-void SetMixedIndependentExtensionSeedXorForTesting(uint32_t seed_xor);
-/// Select frozen or shared-X mixed coefficients on the current test thread.
-bool SetMixedCoefficientGeometryForTesting(MixedCoefficientGeometry geometry);
-/// Select 10/11 rows generally, or a validated 12+4-row test geometry.
-bool SetMixedGF256RowsForTesting(uint32_t rows);
-/// Select two, three, or four extension rows; twelve GF(256) rows require four.
-bool SetMixedGF16RowsForTesting(uint32_t rows);
-#endif
 
 /// Coefficient dispatch for actual encoder/decoder equations.  Alternate
 /// families are confined to explicitly constructed experiment systems.

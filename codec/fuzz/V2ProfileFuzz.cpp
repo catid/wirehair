@@ -28,7 +28,6 @@ bool SameParams(
         a.DenseRows == b.DenseRows &&
         a.HeavyRows == b.HeavyRows &&
         a.SourceHits == b.SourceHits &&
-        a.Field == b.Field &&
         a.HeavyFamily == b.HeavyFamily &&
         a.DenseIdentityCorner == b.DenseIdentityCorner &&
         a.Seed == b.Seed;
@@ -85,10 +84,12 @@ bool FuzzParams(wirehair_v2::fuzz::Input& input, std::string& failure)
         expected_valid = true;
         break;
     case 14:
-        params.Field = static_cast<wirehair_v2::CompletionField>(UINT32_MAX);
+        params.HeavyFamily =
+            static_cast<wirehair_v2::HeavyCoefficientFamily>(UINT32_MAX);
         break;
     default:
-        params = wirehair_v2::MakeMixedParams(K, params.Seed);
+        params.HeavyFamily =
+            wirehair_v2::HeavyCoefficientFamily::HashedNonzero;
         expected_valid = true;
         break;
     }
@@ -175,20 +176,14 @@ bool FuzzProfileContract(
     std::string& failure)
 {
     const uint32_t K = 16u + input.U8() % 17u;
-    uint32_t block_bytes = 1u + input.U8() % 64u;
-    const bool mixed = input.Bool();
-    if (mixed) block_bytes += block_bytes & 1u;
+    const uint32_t block_bytes = 1u + input.U8() % 64u;
     wirehair_v2::SeedProfile profile =
         wirehair_v2::SelectSeedProfile(K, block_bytes);
     wirehair_v2::MessagePrecodeEncoderOptions options;
     options.PrecodeSeedSalt = input.U64();
     options.RecoveryRowSeedSalt = input.U64();
     options.DenseIdentityCorner = input.Bool();
-    options.Completion = mixed ?
-        wirehair_v2::CompletionField::MixedGF256GF16 :
-        wirehair_v2::CompletionField::GF256;
-    options.RecoveryMixCount = mixed && input.Bool() ? 2u :
-        wirehair_v2::kCertifiedPacketMixCount;
+    options.RecoveryMixCount = wirehair_v2::kCertifiedPacketMixCount;
 
     wirehair_v2::MessagePrecodeEncoderOptions resolved;
     wirehair_v2::PrecodeParams params;
@@ -230,35 +225,31 @@ bool FuzzProfileContract(
     case 2: ++bad.V2StaircaseCount; break;
     case 3: ++bad.V2DenseRowCount; break;
     case 4: ++bad.V2HeavyRowCount; break;
-    case 5:
-        bad.V2CompletionField =
-            static_cast<wirehair_v2::CompletionField>(UINT32_MAX);
-        break;
-    case 6: ++bad.V2SourceHits; break;
-    case 7: bad.V2PrecodeSeed ^= 1u; break;
-    case 8: bad.V2PacketPeelSeed ^= 1u; break;
-    case 9: bad.V2RecoveryMixCount = 0u; break;
-    case 10: bad.V2DenseIdentityCorner = !bad.V2DenseIdentityCorner; break;
-    case 11: bad.V2PrecodeSeedSalt ^= 1u; break;
-    case 12: bad.V2RecoveryRowSeedSalt ^= 1u; break;
-    case 13: bad.V2SeedAttempt = wirehair_v2::kMaxPacketSeedAttempts; break;
-    case 14: bad.DenseCount ^= 1u; break;
-    case 15:
+    case 5: ++bad.V2SourceHits; break;
+    case 6: bad.V2PrecodeSeed ^= 1u; break;
+    case 7: bad.V2PacketPeelSeed ^= 1u; break;
+    case 8: bad.V2RecoveryMixCount = 0u; break;
+    case 9: bad.V2DenseIdentityCorner = !bad.V2DenseIdentityCorner; break;
+    case 10: bad.V2PrecodeSeedSalt ^= 1u; break;
+    case 11: bad.V2RecoveryRowSeedSalt ^= 1u; break;
+    case 12: bad.V2SeedAttempt = wirehair_v2::kMaxPacketSeedAttempts; break;
+    case 13: bad.DenseCount ^= 1u; break;
+    case 14:
         bad.V2SeedSelected = false;
         break;
-    case 16:
+    case 15:
         requested.PrecodeSeedSalt ^= 1u;
         break;
+    case 16:
+        requested.RecoveryMixCount ^= 1u;
+        break;
     default:
-        requested.Completion = requested.Completion ==
-                wirehair_v2::CompletionField::MixedGF256GF16 ?
-            wirehair_v2::CompletionField::GF256 :
-            wirehair_v2::CompletionField::MixedGF256GF16;
+        requested.DenseIdentityCorner = !requested.DenseIdentityCorner;
         break;
     }
     wirehair_v2::MessagePrecodeEncoderOptions ignored_options;
     const wirehair_v2::MessagePrecodeEncoderOptions* requested_pointer =
-        mutation >= 16u ? &requested : nullptr;
+        mutation >= 15u ? &requested : nullptr;
     if (wirehair_v2::ResolveMessagePrecodeOptions(
             bad, requested_pointer, ignored_options))
     {

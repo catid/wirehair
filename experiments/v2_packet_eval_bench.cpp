@@ -1000,9 +1000,8 @@ int main(int argc, char** argv)
             return ok ? 0 : 1;
         }
         ok = RunSize(system, config, 1u, 4096u, samples) && ok;
-        // The mixed completion candidate requires even block bytes.  Keep a
-        // short sub-cacheline sweep so wrapper overhead at bb=1 cannot conceal
-        // a regression (or win) in the smallest reachable production packets.
+        // Keep a short sub-cacheline sweep so wrapper overhead at bb=1 cannot
+        // conceal a regression (or win) in small production packets.
         ok = RunSize(system, config, 2u, 4096u, samples) && ok;
         ok = RunSize(system, config, 8u, 4096u, samples) && ok;
         ok = RunSize(system, config, 32u, 4096u, samples) && ok;

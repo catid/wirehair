@@ -1005,7 +1005,6 @@ bool InitializeCompletedRecoveryFixture(
     uint32_t tail_bytes,
     bool cache_systematic,
     bool omit_final_systematic,
-    wirehair_v2::CompletionField completion,
     std::vector<uint8_t>& message,
     wirehair_v2::MessagePrecodeEncoder& encoder,
     wirehair_v2::MessagePrecodeDecoder& decoder)
@@ -1015,7 +1014,6 @@ bool InitializeCompletedRecoveryFixture(
     message = MakeMessage((size_t)message_bytes);
     wirehair_v2::MessagePrecodeEncoderOptions options;
     options.CacheReceivedSystematicPackets = cache_systematic;
-    options.Completion = completion;
     if (encoder.InitializeResult(
             message.data(), message_bytes, block_bytes, nullptr, &options) !=
                 Wirehair_Success ||
@@ -1068,35 +1066,16 @@ bool CheckDirectRecoveryOutput()
         bool CacheSystematic;
         bool OmitFinalSystematic;
         bool ReleaseCacheBeforeRecover;
-        wirehair_v2::CompletionField Completion;
         bool ExpectScratchAllocation;
         const char* Name;
     };
     const RecoveryCase cases[] = {
-        {block_bytes, false, false, false,
-            wirehair_v2::CompletionField::GF256,
-            false, "uncached exact"},
-        {11u, false, false, false,
-            wirehair_v2::CompletionField::GF256,
-            true, "uncached partial"},
-        {block_bytes, true, false, false,
-            wirehair_v2::CompletionField::GF256,
-            false, "cached exact"},
-        {11u, true, false, false,
-            wirehair_v2::CompletionField::GF256,
-            false, "cached partial"},
-        {11u, true, true, false,
-            wirehair_v2::CompletionField::GF256,
-            true, "cached missing partial"},
-        {11u, true, false, true,
-            wirehair_v2::CompletionField::GF256,
-            true, "cached partial after release"},
-        {11u, true, false, false,
-            wirehair_v2::CompletionField::MixedGF256GF16,
-            false, "mixed cached partial"},
-        {11u, true, true, false,
-            wirehair_v2::CompletionField::MixedGF256GF16,
-            true, "mixed cached missing partial"}
+        {block_bytes, false, false, false, false, "uncached exact"},
+        {11u, false, false, false, true, "uncached partial"},
+        {block_bytes, true, false, false, false, "cached exact"},
+        {11u, true, false, false, false, "cached partial"},
+        {11u, true, true, false, true, "cached missing partial"},
+        {11u, true, false, true, true, "cached partial after release"}
     };
 
     for (const RecoveryCase& c : cases)
@@ -1106,8 +1085,7 @@ bool CheckDirectRecoveryOutput()
         wirehair_v2::MessagePrecodeDecoder decoder;
         if (!InitializeCompletedRecoveryFixture(
                 K, block_bytes, c.TailBytes, c.CacheSystematic,
-                c.OmitFinalSystematic, c.Completion,
-                message, encoder, decoder))
+                c.OmitFinalSystematic, message, encoder, decoder))
         {
             std::fprintf(stderr,
                 "direct recovery fixture failed: %s\n", c.Name);

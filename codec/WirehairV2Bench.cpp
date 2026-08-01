@@ -370,87 +370,6 @@ enum CompareProfileMode
     CompareProfileAuto
 };
 
-enum PrecodeProfileMode
-{
-    PrecodeProfileCertified,
-    PrecodeProfileMixed,
-    PrecodeProfileBoth
-};
-
-const char* PrecodeProfileModeName(PrecodeProfileMode mode)
-{
-    switch (mode)
-    {
-    case PrecodeProfileCertified: return "certified";
-    case PrecodeProfileMixed:     return "mixed";
-    case PrecodeProfileBoth:      return "both";
-    }
-    return "unknown";
-}
-
-bool PrecodeProfileIncludes(
-    PrecodeProfileMode mode,
-    wirehair_v2::CompletionField completion)
-{
-    if (mode == PrecodeProfileBoth) {
-        return true;
-    }
-    return completion == wirehair_v2::CompletionField::MixedGF256GF16 ?
-        mode == PrecodeProfileMixed : mode == PrecodeProfileCertified;
-}
-
-const char* MixedCoefficientGeometryName(
-    wirehair_v2::MixedCoefficientGeometry geometry)
-{
-    return geometry == wirehair_v2::MixedCoefficientGeometry::SharedCauchyX ?
-        "shared-x" : "frozen";
-}
-
-bool ParseMixedCoefficientGeometry(
-    const char* text,
-    wirehair_v2::MixedCoefficientGeometry& geometry)
-{
-    if (!std::strcmp(text, "frozen")) {
-        geometry = wirehair_v2::MixedCoefficientGeometry::FrozenPowerX;
-        return true;
-    }
-    if (!std::strcmp(text, "shared-x")) {
-        geometry = wirehair_v2::MixedCoefficientGeometry::SharedCauchyX;
-        return true;
-    }
-    return false;
-}
-
-const char* MixedResidueScheduleName(
-    wirehair_v2::MixedResidueSchedule schedule)
-{
-    switch (schedule)
-    {
-    case wirehair_v2::MixedResidueSchedule::Ramp: return "ramp";
-    case wirehair_v2::MixedResidueSchedule::Hashed: return "hashed";
-    default: return "constant";
-    }
-}
-
-bool ParseMixedResidueSchedule(
-    const char* text,
-    wirehair_v2::MixedResidueSchedule& schedule)
-{
-    if (!std::strcmp(text, "constant")) {
-        schedule = wirehair_v2::MixedResidueSchedule::Constant;
-        return true;
-    }
-    if (!std::strcmp(text, "ramp")) {
-        schedule = wirehair_v2::MixedResidueSchedule::Ramp;
-        return true;
-    }
-    if (!std::strcmp(text, "hashed")) {
-        schedule = wirehair_v2::MixedResidueSchedule::Hashed;
-        return true;
-    }
-    return false;
-}
-
 struct CompareOptions
 {
     CompareProfileMode ProfileMode = CompareProfileBase;
@@ -731,8 +650,8 @@ bool ValidatePayloadE2EInputs(
         // its output and residual scratch.  Bound all block-sized storage:
         // 2*K covers message+delivery, 2*L covers the retained intermediate
         // and active solve values, 2*R covers the main and deficient-quotient
-        // pivot RHS buffers, and the fixed margin covers successful mixed
-        // quotient RHS, heavy buckets, and block temporaries.
+        // pivot RHS buffers, and the fixed margin covers quotient RHS, heavy
+        // buckets, and block temporaries.
         const wirehair_v2::SeedProfile profile =
             wirehair_v2::SelectSeedProfile((uint32_t)n, (uint32_t)bb);
         const uint64_t L = (uint64_t)n + profile.DenseCount + 24u;
@@ -1061,12 +980,8 @@ TrialResult RunV2PrecodeTrial(
     double loss_rate,
     uint64_t seed,
     const std::vector<uint32_t>* packet_schedule = nullptr,
-    wirehair_v2::CompletionField completion =
-        wirehair_v2::CompletionField::GF256,
     bool cache_encoder_source = false,
-    bool cache_decoder_systematic = false,
-    uint32_t recovery_mix_count =
-        wirehair_v2::kCertifiedPacketMixCount)
+    bool cache_decoder_systematic = false)
 {
     TrialResult tr = {};
     tr.TerminalResult = Wirehair_Error;
@@ -1080,13 +995,9 @@ TrialResult RunV2PrecodeTrial(
     wirehair_v2::Codec enc;
     wirehair_v2::Codec dec;
     wirehair_v2::MessagePrecodeEncoderOptions encoder_options;
-    encoder_options.Completion = completion;
-    encoder_options.RecoveryMixCount = recovery_mix_count;
     encoder_options.CacheSystematicSource = cache_encoder_source;
     encoder_options.CacheReceivedSystematicPackets = cache_decoder_systematic;
-    const bool use_encoder_options =
-        completion != wirehair_v2::CompletionField::GF256 ||
-        cache_encoder_source;
+    const bool use_encoder_options = cache_encoder_source;
     const double c0 = NowSeconds();
     WirehairResult result = enc.InitializePrecodeEncoder(
         message.data(), message_bytes, block_bytes, nullptr,
@@ -1101,10 +1012,10 @@ TrialResult RunV2PrecodeTrial(
             message_bytes, block_bytes, &enc.Profile(),
             cache_decoder_systematic ? &encoder_options : nullptr);
         if (result == Wirehair_Success &&
-            (enc.Profile().V2CompletionField != completion ||
-             dec.Profile().V2CompletionField != completion ||
-             enc.Profile().V2RecoveryMixCount != recovery_mix_count ||
-             dec.Profile().V2RecoveryMixCount != recovery_mix_count ||
+            (enc.Profile().V2RecoveryMixCount !=
+                    wirehair_v2::kCertifiedPacketMixCount ||
+             dec.Profile().V2RecoveryMixCount !=
+                    wirehair_v2::kCertifiedPacketMixCount ||
              dec.Profile().V2SeedAttempt != enc.Profile().V2SeedAttempt ||
              dec.Profile().V2PacketPeelSeed !=
                 enc.Profile().V2PacketPeelSeed ||
@@ -1805,34 +1716,10 @@ int CmdCompare(int argc, char** argv)
     bool cache_encoder_source = false;
     bool cache_decoder_systematic = false;
     bool trial_details = false;
-    PrecodeProfileMode precode_profile = PrecodeProfileCertified;
-    bool precode_profile_explicit = false;
     PacketScheduleKind schedule_kind = PacketScheduleKind::Iid;
     CompareOptions compare_options;
-    bool mixed_residue_hash_keyed = false;
-    bool mixed_independent_extension_residues = false;
-    uint32_t mixed_mix_count = wirehair_v2::kCertifiedPacketMixCount;
     uint32_t packet_row_seed_multiplier = 1u;
     bool packet_row_seed_avalanche = false;
-#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-    bool mixed_mix_count_explicit = false;
-    uint32_t mixed_period = wirehair_v2::kMixedCoefficientPeriod;
-    bool mixed_period_explicit = false;
-    uint32_t mixed_gf256_rows = wirehair_v2::kMixedGF256Rows;
-    bool mixed_gf256_rows_explicit = false;
-    uint32_t mixed_gf16_rows = wirehair_v2::kMixedGF16Rows;
-    bool mixed_gf16_rows_explicit = false;
-    wirehair_v2::MixedCoefficientGeometry mixed_geometry =
-        wirehair_v2::MixedCoefficientGeometry::FrozenPowerX;
-    bool mixed_geometry_explicit = false;
-    uint32_t mixed_residue_skew = 0u;
-    bool mixed_residue_skew_explicit = false;
-    wirehair_v2::MixedResidueSchedule mixed_residue_schedule =
-        wirehair_v2::MixedResidueSchedule::Constant;
-    bool mixed_residue_schedule_explicit = false;
-    uint32_t mixed_residue_hash_seed = 0u;
-    bool mixed_residue_hash_seed_explicit = false;
-#endif
 
     for (int i = 0; i < argc; ++i)
     {
@@ -1881,132 +1768,10 @@ int CmdCompare(int argc, char** argv)
             include_precode_cache = true;
             cache_decoder_systematic = true;
         }
-        else if (!std::strcmp(argv[i], "--precode-profile")) {
-            if (!TakeArg(
-                    "compare", "--precode-profile", argc, argv, i, value))
-            {
-                return 1;
-            }
-            precode_profile_explicit = true;
-            if (!std::strcmp(value, "certified")) {
-                precode_profile = PrecodeProfileCertified;
-            }
-            else if (!std::strcmp(value, "mixed")) {
-                precode_profile = PrecodeProfileMixed;
-            }
-            else if (!std::strcmp(value, "both")) {
-                precode_profile = PrecodeProfileBoth;
-            }
-            else
-            {
-                std::fprintf(stderr,
-                    "unknown --precode-profile '%s' "
-                    "(expected certified, mixed, or both)\n",
-                    value);
-                return 1;
-            }
-        }
         else if (!std::strcmp(argv[i], "--trial-details")) {
             trial_details = true;
         }
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-        else if (!std::strcmp(argv[i], "--mixed-mix-count")) {
-            if (!TakeArg(
-                    "compare", "--mixed-mix-count", argc, argv, i, value) ||
-                !ParseU32Arg(
-                    "--mixed-mix-count", value, mixed_mix_count))
-            {
-                return 1;
-            }
-            mixed_mix_count_explicit = true;
-        }
-        else if (!std::strcmp(argv[i], "--mixed-gf16-rows")) {
-            if (!TakeArg(
-                    "compare", "--mixed-gf16-rows", argc, argv, i, value) ||
-                !ParseU32Arg("--mixed-gf16-rows", value, mixed_gf16_rows))
-            {
-                return 1;
-            }
-            mixed_gf16_rows_explicit = true;
-        }
-        else if (!std::strcmp(argv[i], "--mixed-gf256-rows")) {
-            if (!TakeArg(
-                    "compare", "--mixed-gf256-rows", argc, argv, i, value) ||
-                !ParseU32Arg(
-                    "--mixed-gf256-rows", value, mixed_gf256_rows))
-            {
-                return 1;
-            }
-            mixed_gf256_rows_explicit = true;
-        }
-        else if (!std::strcmp(argv[i], "--mixed-period")) {
-            if (!TakeArg(
-                    "compare", "--mixed-period", argc, argv, i, value) ||
-                !ParseU32Arg("--mixed-period", value, mixed_period))
-            {
-                return 1;
-            }
-            mixed_period_explicit = true;
-        }
-        else if (!std::strcmp(argv[i], "--mixed-geometry")) {
-            if (!TakeArg(
-                    "compare", "--mixed-geometry", argc, argv, i, value) ||
-                !ParseMixedCoefficientGeometry(value, mixed_geometry))
-            {
-                std::fprintf(stderr,
-                    "compare unknown --mixed-geometry token %s "
-                    "(expected frozen or shared-x)\n",
-                    value ? value : "");
-                return 1;
-            }
-            mixed_geometry_explicit = true;
-        }
-        else if (!std::strcmp(argv[i], "--mixed-residue-skew")) {
-            if (!TakeArg(
-                    "compare", "--mixed-residue-skew",
-                    argc, argv, i, value) ||
-                !ParseU32Arg(
-                    "--mixed-residue-skew", value, mixed_residue_skew))
-            {
-                return 1;
-            }
-            mixed_residue_skew_explicit = true;
-        }
-        else if (!std::strcmp(argv[i], "--mixed-residue-schedule")) {
-            if (!TakeArg(
-                    "compare", "--mixed-residue-schedule",
-                    argc, argv, i, value) ||
-                !ParseMixedResidueSchedule(value, mixed_residue_schedule))
-            {
-                std::fprintf(stderr,
-                    "compare unknown --mixed-residue-schedule token %s "
-                    "(expected constant, ramp, or hashed)\n",
-                    value ? value : "");
-                return 1;
-            }
-            mixed_residue_schedule_explicit = true;
-        }
-        else if (!std::strcmp(argv[i], "--mixed-residue-hash-seed")) {
-            if (!TakeArg(
-                    "compare", "--mixed-residue-hash-seed",
-                    argc, argv, i, value) ||
-                !ParseU32Arg(
-                    "--mixed-residue-hash-seed", value,
-                    mixed_residue_hash_seed))
-            {
-                return 1;
-            }
-            mixed_residue_hash_seed_explicit = true;
-        }
-        else if (!std::strcmp(argv[i], "--mixed-residue-hash-keyed")) {
-            mixed_residue_hash_keyed = true;
-        }
-        else if (!std::strcmp(
-                     argv[i],
-                     "--mixed-independent-extension-residues"))
-        {
-            mixed_independent_extension_residues = true;
-        }
         else if (!std::strcmp(
                      argv[i], "--packet-row-seed-multiplier"))
         {
@@ -2122,117 +1887,7 @@ int CmdCompare(int argc, char** argv)
     if (!ValidateLoss(loss, "compare")) {
         return 1;
     }
-    if (precode_profile_explicit &&
-        !include_precode && !include_precode_cache)
-    {
-        std::fprintf(stderr,
-            "--precode-profile requires --precode or a precode cache arm\n");
-        return 1;
-    }
-    const bool include_mixed = PrecodeProfileIncludes(
-        precode_profile, wirehair_v2::CompletionField::MixedGF256GF16);
-    const bool include_certified = PrecodeProfileIncludes(
-        precode_profile, wirehair_v2::CompletionField::GF256);
-    if (include_mixed)
-    {
-        for (int bb_value : block_bytes_list)
-        {
-            if ((bb_value & 1) != 0)
-            {
-                std::fprintf(stderr,
-                    "compare mixed precode profile requires even block bytes "
-                    "(odd bb=%d)\n",
-                    bb_value);
-                return 1;
-            }
-        }
-    }
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-    else if (mixed_mix_count_explicit || mixed_period_explicit ||
-             mixed_geometry_explicit ||
-             mixed_gf256_rows_explicit || mixed_gf16_rows_explicit ||
-             mixed_residue_skew_explicit ||
-             mixed_residue_schedule_explicit ||
-             mixed_residue_hash_seed_explicit ||
-             mixed_residue_hash_keyed ||
-             mixed_independent_extension_residues)
-    {
-        std::fprintf(stderr,
-            "compare mixed experiment flags require a mixed precode "
-            "profile\n");
-        return 1;
-    }
-    if (mixed_mix_count < 2u ||
-        mixed_mix_count > wirehair_v2::kCertifiedPacketMixCount)
-    {
-        std::fprintf(stderr,
-            "compare --mixed-mix-count must be in [2,%u]\n",
-            wirehair_v2::kCertifiedPacketMixCount);
-        return 1;
-    }
-    if (!wirehair_v2::SetMixedCoefficientGeometryForTesting(mixed_geometry)) {
-        return 1;
-    }
-    if (!wirehair_v2::SetMixedGF16RowsForTesting(mixed_gf16_rows))
-    {
-        std::fprintf(stderr,
-            "compare --mixed-gf16-rows must be in [%u,%u] and fit the "
-            "active period\n",
-            wirehair_v2::kMixedGF16Rows,
-            wirehair_v2::kMixedGF16RowsMax);
-        return 1;
-    }
-    if (!wirehair_v2::SetMixedCoefficientPeriodForTesting(mixed_period))
-    {
-        std::fprintf(stderr,
-            "compare --mixed-period must be in [%u,%u]\n",
-            wirehair_v2::ActiveMixedGF256Rows() +
-                wirehair_v2::ActiveMixedGF16Rows(),
-            wirehair_v2::kMixedCoefficientPeriod);
-        return 1;
-    }
-    if (!wirehair_v2::SetMixedGF256RowsForTesting(mixed_gf256_rows))
-    {
-        std::fprintf(stderr,
-            "compare --mixed-gf256-rows must be in [%u,%u], fit the "
-            "active period, use shared-x for an extra row, and use the "
-            "validated 12+4 geometry for twelve rows\n",
-            wirehair_v2::kMixedGF256Rows,
-            wirehair_v2::kMixedGF256RowsMax);
-        return 1;
-    }
-    if (!wirehair_v2::SetMixedResidueSkewForTesting(mixed_residue_skew)) {
-        std::fprintf(stderr,
-            "compare --mixed-residue-skew must be a corner-preserving "
-            "shared-x skew in [0,P-H]\n");
-        return 1;
-    }
-    if (!wirehair_v2::SetMixedResidueScheduleForTesting(
-            mixed_residue_schedule))
-    {
-        std::fprintf(stderr,
-            "compare nonconstant --mixed-residue-schedule requires shared-x, "
-            "P>H, and zero constant skew\n");
-        return 1;
-    }
-    if ((mixed_residue_hash_seed_explicit || mixed_residue_hash_keyed) &&
-        mixed_residue_schedule != wirehair_v2::MixedResidueSchedule::Hashed)
-    {
-        std::fprintf(stderr,
-            "compare residue hash seed/keying requires hashed "
-            "--mixed-residue-schedule\n");
-        return 1;
-    }
-    wirehair_v2::SetMixedResidueHashSeedForTesting(
-        mixed_residue_hash_seed);
-    if (!wirehair_v2::SetMixedIndependentExtensionResiduesForTesting(
-            mixed_independent_extension_residues))
-    {
-        std::fprintf(stderr,
-            "compare independent extension residues require "
-            "shared-x hashed scheduling with P>H\n");
-        return 1;
-    }
     if (!wirehair_v2::SetPacketRowSeedMultiplierForTesting(
             packet_row_seed_multiplier))
     {
@@ -2311,13 +1966,8 @@ int CmdCompare(int argc, char** argv)
         "auto_trials=%u auto_min_delta=%.4f tune_seed=0x%llx "
         "auto_seed=0x%llx dense_override=%u dense_delta=%d "
         "dense_candidate=%u precode=%u precode_cache=%u "
-        "precode_profile=%s encoder_cache=%u decoder_cache=%u schedule=%s "
-        "schedule_seed=0x%llx mixed_mix_count=%u mixed_period=%u "
-        "mixed_gf256_rows=%u mixed_gf16_rows=%u "
-        "mixed_geometry=%s mixed_residue_skew=%u "
-        "mixed_residue_schedule=%s mixed_residue_hash_seed=0x%x "
-        "mixed_residue_hash_keyed=%u "
-        "mixed_independent_extension_residues=%u "
+        "encoder_cache=%u decoder_cache=%u schedule=%s "
+        "schedule_seed=0x%llx "
         "packet_row_seed_multiplier=0x%x "
         "packet_row_seed_avalanche=%u "
         "loss_trace=common-id-v2 "
@@ -2340,23 +1990,10 @@ int CmdCompare(int argc, char** argv)
         compare_options.DenseCandidate,
         include_precode ? 1u : 0u,
         include_precode_cache ? 1u : 0u,
-        PrecodeProfileModeName(precode_profile),
         cache_encoder_source ? 1u : 0u,
         cache_decoder_systematic ? 1u : 0u,
         PacketScheduleName(schedule_kind),
         (unsigned long long)seed,
-        mixed_mix_count,
-        wirehair_v2::ActiveMixedCoefficientPeriod(),
-        wirehair_v2::ActiveMixedGF256Rows(),
-        wirehair_v2::ActiveMixedGF16Rows(),
-        MixedCoefficientGeometryName(
-            wirehair_v2::ActiveMixedCoefficientGeometry()),
-        wirehair_v2::ActiveMixedResidueSkew(),
-        MixedResidueScheduleName(
-            wirehair_v2::ActiveMixedResidueSchedule()),
-        wirehair_v2::ActiveMixedResidueHashSeed(),
-        mixed_residue_hash_keyed ? 1u : 0u,
-        mixed_independent_extension_residues ? 1u : 0u,
         packet_row_seed_multiplier,
         packet_row_seed_avalanche ? 1u : 0u);
     std::printf(
@@ -2398,37 +2035,13 @@ int CmdCompare(int argc, char** argv)
         Accum baseline;
         Accum v2;
         Accum certified_precode;
-        Accum mixed_precode;
         Accum certified_precode_cache;
-        Accum mixed_precode_cache;
         std::map<uint64_t, CachedCompareProfile> profile_cache;
         for (uint32_t trial = 0; trial < trials; ++trial)
         {
             const uint32_t N =
                 sample_nlo + (rng.U32() % (capped_nhi - sample_nlo + 1u));
             const uint64_t trial_seed = rng.Next();
-#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-            if (mixed_residue_hash_keyed)
-            {
-                uint32_t selected_hash_seed = 0u;
-                if (!wirehair_v2::
-                        SelectFullCycleMixedResidueKeyedSeedForTesting(
-                        mixed_residue_hash_seed, N, selected_hash_seed))
-                {
-                    std::fprintf(stderr,
-                        "compare could not select a full-cycle keyed "
-                        "residue hash seed for N=%u\n",
-                        N);
-                    return 1;
-                }
-            }
-            if (!wirehair_v2::
-                    SetMixedIndependentExtensionResiduesForTesting(
-                        mixed_independent_extension_residues))
-            {
-                return 1;
-            }
-#endif
             const wirehair_v2::SeedProfile* profile =
                 SelectCompareProfile(
                     N, block_bytes, loss, compare_options, profile_cache);
@@ -2448,72 +2061,24 @@ int CmdCompare(int argc, char** argv)
             const TrialResult v2_result = RunV2Trial(
                 N, block_bytes, loss, trial_seed, profile, &packet_schedule);
             TrialResult certified_precode_result = {};
-            TrialResult mixed_precode_result = {};
             TrialResult certified_cache_result = {};
-            TrialResult mixed_cache_result = {};
-            const auto run_precode_profile = [&](
-                wirehair_v2::CompletionField completion,
-                TrialResult& precode_result,
-                TrialResult& cache_result)
-            {
-                if (include_precode) {
-                    precode_result = RunV2PrecodeTrial(
-                        N, block_bytes, loss, trial_seed, &packet_schedule,
-                        completion, false, false,
-                        completion ==
-                                wirehair_v2::CompletionField::MixedGF256GF16 ?
-                            mixed_mix_count :
-                            wirehair_v2::kCertifiedPacketMixCount);
-                }
-                if (include_precode_cache) {
-                    cache_result = RunV2PrecodeTrial(
-                        N, block_bytes, loss, trial_seed, &packet_schedule,
-                        completion,
-                        cache_encoder_source, cache_decoder_systematic,
-                        completion ==
-                                wirehair_v2::CompletionField::MixedGF256GF16 ?
-                            mixed_mix_count :
-                            wirehair_v2::kCertifiedPacketMixCount);
-                }
-            };
-            const bool mixed_first =
-                precode_profile == PrecodeProfileBoth && (trial & 1u) != 0u;
-            if (mixed_first)
-            {
-                run_precode_profile(
-                    wirehair_v2::CompletionField::MixedGF256GF16,
-                    mixed_precode_result, mixed_cache_result);
-                run_precode_profile(
-                    wirehair_v2::CompletionField::GF256,
-                    certified_precode_result, certified_cache_result);
+            if (include_precode) {
+                certified_precode_result = RunV2PrecodeTrial(
+                    N, block_bytes, loss, trial_seed, &packet_schedule);
             }
-            else
-            {
-                if (include_certified) {
-                    run_precode_profile(
-                        wirehair_v2::CompletionField::GF256,
-                        certified_precode_result, certified_cache_result);
-                }
-                if (include_mixed) {
-                    run_precode_profile(
-                        wirehair_v2::CompletionField::MixedGF256GF16,
-                        mixed_precode_result, mixed_cache_result);
-                }
+            if (include_precode_cache) {
+                certified_cache_result = RunV2PrecodeTrial(
+                    N, block_bytes, loss, trial_seed, &packet_schedule,
+                    cache_encoder_source, cache_decoder_systematic);
             }
             AddTrial(baseline, N, baseline_result);
             AddTrial(v2, N, v2_result);
-            if (include_precode && include_certified) {
+            if (include_precode) {
                 AddTrial(certified_precode, N, certified_precode_result);
             }
-            if (include_precode && include_mixed) {
-                AddTrial(mixed_precode, N, mixed_precode_result);
-            }
-            if (include_precode_cache && include_certified) {
+            if (include_precode_cache) {
                 AddTrial(
                     certified_precode_cache, N, certified_cache_result);
-            }
-            if (include_precode_cache && include_mixed) {
-                AddTrial(mixed_precode_cache, N, mixed_cache_result);
             }
             if (trial_details)
             {
@@ -2555,14 +2120,10 @@ int CmdCompare(int argc, char** argv)
                         include_precode_cache && baseline_result.Ok &&
                             cache_result.Ok ? cached_oh - baseline_oh : 0);
                 };
-                if (include_certified) {
+                if (include_precode || include_precode_cache) {
                     print_precode_detail(
                         "certified", certified_precode_result,
                         certified_cache_result);
-                }
-                if (include_mixed) {
-                    print_precode_detail(
-                        "mixed", mixed_precode_result, mixed_cache_result);
                 }
             }
         }
@@ -2572,19 +2133,12 @@ int CmdCompare(int argc, char** argv)
             "v2_auto",
             block_bytes,
             v2);
-        if (include_precode && include_certified) {
+        if (include_precode) {
             PrintAccum("v2_precode", block_bytes, certified_precode);
         }
-        if (include_precode && include_mixed) {
-            PrintAccum("v2_mixed", block_bytes, mixed_precode);
-        }
-        if (include_precode_cache && include_certified) {
+        if (include_precode_cache) {
             PrintAccum(
                 "v2_cached", block_bytes, certified_precode_cache);
-        }
-        if (include_precode_cache && include_mixed) {
-            PrintAccum(
-                "v2_mixed_cached", block_bytes, mixed_precode_cache);
         }
     }
     return 0;
@@ -3703,410 +3257,6 @@ uint64_t TotalSolveNanoseconds(
         stats.BackSubNanoseconds;
 }
 
-#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-bool SameNonTimingSolveStats(
-    const wirehair_v2::PrecodeSolveStats& a,
-    const wirehair_v2::PrecodeSolveStats& b)
-{
-    return a.PacketRows == b.PacketRows &&
-        a.PeeledColumns == b.PeeledColumns &&
-        a.InactivatedColumns == b.InactivatedColumns &&
-        a.ResidualRows == b.ResidualRows &&
-        a.ResidualRank == b.ResidualRank &&
-        a.BinaryResidualRank == b.BinaryResidualRank &&
-        a.BinaryRowReferences == b.BinaryRowReferences &&
-        a.BinaryRowStorageBytes == b.BinaryRowStorageBytes &&
-        a.BinaryAdjacencyStorageBytes == b.BinaryAdjacencyStorageBytes &&
-        a.BinaryRowStorageAllocations == b.BinaryRowStorageAllocations &&
-        a.BinaryAdjacencyStorageAllocations ==
-            b.BinaryAdjacencyStorageAllocations &&
-        a.BlockXors == b.BlockXors &&
-        a.BlockMulAdds == b.BlockMulAdds &&
-        a.PacketSeedAttempt == b.PacketSeedAttempt;
-}
-
-class MixedNullWitnessScope
-{
-public:
-    explicit MixedNullWitnessScope(
-        wirehair_v2::MixedNullWitnessDiagnostic* diagnostic)
-        : Active(diagnostic != nullptr)
-    {
-        if (Active) {
-            wirehair_v2::SetMixedNullWitnessDiagnosticForTesting(diagnostic);
-        }
-    }
-
-    ~MixedNullWitnessScope()
-    {
-        Disable();
-    }
-
-    void Disable()
-    {
-        if (Active) {
-            wirehair_v2::SetMixedNullWitnessDiagnosticForTesting(nullptr);
-            Active = false;
-        }
-    }
-
-private:
-    bool Active;
-};
-
-enum class MixedNullReplayStatus
-{
-    None,
-    Captured,
-    Skipped,
-    Error
-};
-
-static const int kMixedNullReplayInternalErrorExitCode = 3;
-
-int MixedNullReplayExitCode(MixedNullReplayStatus status)
-{
-    return status == MixedNullReplayStatus::Error ?
-        kMixedNullReplayInternalErrorExitCode : 0;
-}
-
-const char* MixedNullReplayStatusName(MixedNullReplayStatus status)
-{
-    switch (status)
-    {
-    case MixedNullReplayStatus::None: return "none";
-    case MixedNullReplayStatus::Captured: return "captured";
-    case MixedNullReplayStatus::Skipped: return "skipped";
-    default: return "error";
-    }
-}
-
-struct MixedNullBucket
-{
-    uint32_t Count = 0u;
-    uint16_t Sum = 0u;
-};
-
-struct MixedNullBucketSummary
-{
-    uint32_t Occupied = 0u;
-    uint32_t Cancelled = 0u;
-    uint32_t CancelledTerms = 0u;
-    uint32_t Maximum = 0u;
-    uint64_t Hash = 0u;
-    std::string Top;
-};
-
-void HashMixedNullByte(uint8_t value, uint64_t& hash)
-{
-    hash ^= value;
-    hash *= UINT64_C(0x100000001b3);
-}
-
-void HashMixedNullU32(uint32_t value, uint64_t& hash)
-{
-    for (uint32_t byte = 0u; byte < 4u; ++byte) {
-        HashMixedNullByte((uint8_t)(value >> (8u * byte)), hash);
-    }
-}
-
-MixedNullBucketSummary SummarizeMixedNullBuckets(
-    uint8_t domain,
-    uint32_t row,
-    uint32_t period,
-    const std::vector<MixedNullBucket>& buckets,
-    bool include_top)
-{
-    MixedNullBucketSummary summary;
-    summary.Hash = UINT64_C(0xcbf29ce484222325);
-    HashMixedNullByte(domain, summary.Hash);
-    HashMixedNullU32(row, summary.Hash);
-    HashMixedNullU32(period, summary.Hash);
-    std::vector<uint32_t> occupied;
-    occupied.reserve(include_top ? period : 0u);
-    for (uint32_t index = 0u; index < (uint32_t)buckets.size(); ++index)
-    {
-        const MixedNullBucket& bucket = buckets[index];
-        HashMixedNullU32(index, summary.Hash);
-        HashMixedNullU32(bucket.Count, summary.Hash);
-        HashMixedNullByte((uint8_t)bucket.Sum, summary.Hash);
-        HashMixedNullByte((uint8_t)(bucket.Sum >> 8), summary.Hash);
-        if (bucket.Count == 0u) continue;
-        ++summary.Occupied;
-        summary.Maximum = std::max(summary.Maximum, bucket.Count);
-        if (bucket.Sum == 0u) {
-            ++summary.Cancelled;
-            summary.CancelledTerms += bucket.Count;
-        }
-        if (include_top) occupied.push_back(index);
-    }
-    std::sort(occupied.begin(), occupied.end(), [&](uint32_t a, uint32_t b) {
-        if (buckets[a].Count != buckets[b].Count) {
-            return buckets[a].Count > buckets[b].Count;
-        }
-        return a < b;
-    });
-    const size_t top_count = std::min<size_t>(8u, occupied.size());
-    for (size_t i = 0u; i < top_count; ++i)
-    {
-        const uint32_t residue = occupied[i];
-        const MixedNullBucket& bucket = buckets[residue];
-        char item[48];
-        std::snprintf(
-            item, sizeof(item), "%s%u:%u:%04x",
-            i == 0u ? "" : "|", residue, bucket.Count, bucket.Sum);
-        summary.Top += item;
-    }
-    if (summary.Top.empty()) summary.Top = "-";
-    return summary;
-}
-
-bool BuildMixedNullClassification(
-    uint32_t source_count,
-    const wirehair_v2::MixedNullWitnessDiagnostic& witness,
-    std::vector<std::string>& lines)
-{
-    const uint32_t L = witness.ColumnCount;
-    const uint32_t d = witness.KernelDimension;
-    const uint32_t period = wirehair_v2::ActiveMixedCoefficientPeriod();
-    const bool basis_size_overflow = d != 0u &&
-        (size_t)L > std::numeric_limits<size_t>::max() / d;
-    if (witness.Status != wirehair_v2::MixedNullWitnessStatus::Captured ||
-        d == 0u ||
-        d > wirehair_v2::kMaxMixedNullWitnessQuotientColumns ||
-        period == 0u || period > 244u ||
-        basis_size_overflow || source_count > L ||
-        witness.InactiveMask.size() != L ||
-        witness.CanonicalBasis.size() != (size_t)d * L)
-    {
-        return false;
-    }
-    uint32_t inactive_count = 0u;
-    for (uint8_t inactive : witness.InactiveMask)
-    {
-        if (inactive > 1u) return false;
-        inactive_count += inactive;
-    }
-    if (inactive_count != witness.InactiveCount) return false;
-    std::vector<MixedNullBucket> subfield(period), extension(period);
-    std::vector<MixedNullBucket> joint((size_t)period * period);
-    lines.clear();
-    lines.reserve(d);
-    for (uint32_t row = 0u; row < d; ++row)
-    {
-        std::fill(subfield.begin(), subfield.end(), MixedNullBucket{});
-        std::fill(extension.begin(), extension.end(), MixedNullBucket{});
-        std::fill(joint.begin(), joint.end(), MixedNullBucket{});
-        uint32_t parts[4] = {};
-        uint32_t gf256_values = 0u;
-        uint32_t gf16_values = 0u;
-        const uint16_t* vector = witness.CanonicalBasis.data() +
-            (size_t)row * L;
-        for (uint32_t column = 0u; column < L; ++column)
-        {
-            const uint16_t value = vector[column];
-            if (value == 0u) continue;
-            const bool source = column < source_count;
-            const bool inactive = witness.InactiveMask[column] != 0u;
-            ++parts[(source ? 0u : 2u) + (inactive ? 1u : 0u)];
-            if ((value >> 8) == 0u) ++gf256_values;
-            else ++gf16_values;
-            const uint32_t sf =
-                wirehair_v2::ActiveMixedCoefficientResidue(column);
-            const uint32_t ex =
-                wirehair_v2::ActiveMixedExtensionCoefficientResidue(column);
-            if (sf >= period || ex >= period) return false;
-            ++subfield[sf].Count;
-            subfield[sf].Sum ^= value;
-            ++extension[ex].Count;
-            extension[ex].Sum ^= value;
-            MixedNullBucket& pair = joint[(size_t)sf * period + ex];
-            ++pair.Count;
-            pair.Sum ^= value;
-        }
-        const uint32_t support =
-            parts[0] + parts[1] + parts[2] + parts[3];
-        const MixedNullBucketSummary sf = SummarizeMixedNullBuckets(
-            UINT8_C(0x53), row, period, subfield, true);
-        const MixedNullBucketSummary ex = SummarizeMixedNullBuckets(
-            UINT8_C(0x45), row, period, extension, true);
-        const MixedNullBucketSummary pair = SummarizeMixedNullBuckets(
-            UINT8_C(0x4a), row, period, joint, false);
-        if (support != gf256_values + gf16_values ||
-            pair.Occupied < std::max(sf.Occupied, ex.Occupied) ||
-            pair.Occupied > support)
-        {
-            return false;
-        }
-        char line[2048];
-        const int written = std::snprintf(
-            line, sizeof(line),
-            "# mixed_null_row,v=1,row=%u,nz=%u,source=%u,precode=%u,"
-            "source_peeled=%u,source_inactive=%u,"
-            "precode_peeled=%u,precode_inactive=%u,"
-            "gf256=%u,gf16=%u,sf_occ=%u,sf_cancel=%u,"
-            "sf_cancel_terms=%u,sf_max=%u,sf_hash=%016llx,"
-            "ex_occ=%u,ex_cancel=%u,ex_cancel_terms=%u,ex_max=%u,"
-            "ex_hash=%016llx,pair_occ=%u,pair_cancel=%u,"
-            "pair_cancel_terms=%u,pair_max=%u,pair_hash=%016llx,"
-            "sf_top=%s,ex_top=%s",
-            row, support, parts[0] + parts[1], parts[2] + parts[3],
-            parts[0], parts[1], parts[2], parts[3],
-            gf256_values, gf16_values,
-            sf.Occupied, sf.Cancelled, sf.CancelledTerms, sf.Maximum,
-            (unsigned long long)sf.Hash,
-            ex.Occupied, ex.Cancelled, ex.CancelledTerms, ex.Maximum,
-            (unsigned long long)ex.Hash,
-            pair.Occupied, pair.Cancelled, pair.CancelledTerms, pair.Maximum,
-            (unsigned long long)pair.Hash,
-            sf.Top.c_str(), ex.Top.c_str());
-        if (written < 0 || (size_t)written >= sizeof(line)) return false;
-        lines.push_back(line);
-    }
-    return true;
-}
-#endif
-
-const char* HeavyFamilyName(wirehair_v2::HeavyCoefficientFamily family);
-
-enum class PrecodeFailCompletion
-{
-    Certified,
-    Mixed
-};
-
-const char* PrecodeFailCompletionName(PrecodeFailCompletion completion)
-{
-    return completion == PrecodeFailCompletion::Mixed ?
-        "mixed" : "certified";
-}
-
-bool ParsePrecodeFailCompletion(
-    const char* text,
-    PrecodeFailCompletion& completion)
-{
-    if (!std::strcmp(text, "certified")) {
-        completion = PrecodeFailCompletion::Certified;
-        return true;
-    }
-    if (!std::strcmp(text, "mixed")) {
-        completion = PrecodeFailCompletion::Mixed;
-        return true;
-    }
-    return false;
-}
-
-struct PairedMixOutcomes
-{
-    std::vector<bool> Mix2Failures;
-    std::vector<bool> Mix3Failures;
-    uint32_t Mix2SeedAttempt = UINT32_MAX;
-    uint32_t Mix3SeedAttempt = UINT32_MAX;
-};
-
-void Wilson95(
-    uint32_t failures,
-    uint32_t trials,
-    double& lower,
-    double& upper)
-{
-    if (trials == 0u) {
-        lower = upper = 0.0;
-        return;
-    }
-    static const double z = 1.959963984540054;
-    const double n = (double)trials;
-    const double p = (double)failures / n;
-    const double z2_over_n = z * z / n;
-    const double center = (p + z2_over_n / 2.0) / (1.0 + z2_over_n);
-    const double radius = z * std::sqrt(
-        (p * (1.0 - p) / n) + z * z / (4.0 * n * n)) /
-        (1.0 + z2_over_n);
-    lower = std::max(0.0, center - radius);
-    upper = std::min(1.0, center + radius);
-}
-
-double ExactMcNemarP(uint32_t first_only, uint32_t second_only)
-{
-    const uint32_t discordant = first_only + second_only;
-    if (discordant == 0u) {
-        return 1.0;
-    }
-    const uint32_t tail = std::min(first_only, second_only);
-    const long double n = (long double)discordant;
-    const long double k = (long double)tail;
-    const long double log_probability_at_tail =
-        std::lgamma(n + 1.0L) - std::lgamma(k + 1.0L) -
-        std::lgamma(n - k + 1.0L) - n * std::log(2.0L);
-    long double relative_sum = 1.0L;
-    long double relative_term = 1.0L;
-    for (uint32_t j = tail; j > 0u; --j)
-    {
-        relative_term *= (long double)j /
-            (long double)(discordant - j + 1u);
-        relative_sum += relative_term;
-    }
-    const long double doubled_tail = 2.0L * std::exp(
-        log_probability_at_tail + std::log(relative_sum));
-    return (double)std::min(1.0L, doubled_tail);
-}
-
-void PrintPairedMixOutcomes(
-    uint32_t K,
-    uint32_t block_bytes,
-    PrecodeFailCompletion completion,
-    wirehair_v2::HeavyCoefficientFamily heavy_family,
-    uint32_t overhead,
-    const PairedMixOutcomes& outcomes)
-{
-    if (outcomes.Mix2Failures.empty() ||
-        outcomes.Mix2Failures.size() != outcomes.Mix3Failures.size())
-    {
-        return;
-    }
-    uint32_t both_success = 0u;
-    uint32_t both_failure = 0u;
-    uint32_t mix2_only = 0u;
-    uint32_t mix3_only = 0u;
-    for (size_t i = 0; i < outcomes.Mix2Failures.size(); ++i)
-    {
-        const bool mix2_failed = outcomes.Mix2Failures[i] != 0u;
-        const bool mix3_failed = outcomes.Mix3Failures[i] != 0u;
-        if (mix2_failed && mix3_failed) {
-            ++both_failure;
-        }
-        else if (mix2_failed) {
-            ++mix2_only;
-        }
-        else if (mix3_failed) {
-            ++mix3_only;
-        }
-        else {
-            ++both_success;
-        }
-    }
-    const uint32_t trials = (uint32_t)outcomes.Mix2Failures.size();
-    const uint32_t mix2_failures = both_failure + mix2_only;
-    const uint32_t mix3_failures = both_failure + mix3_only;
-    double mix2_lower = 0.0, mix2_upper = 0.0;
-    double mix3_lower = 0.0, mix3_upper = 0.0;
-    Wilson95(mix2_failures, trials, mix2_lower, mix2_upper);
-    Wilson95(mix3_failures, trials, mix3_lower, mix3_upper);
-    std::printf(
-        "# precodefail_paired: N=%u bb=%u completion=%s heavy_family=%s "
-        "overhead=%u trials=%u mix2_fail=%u mix3_fail=%u both_fail=%u "
-        "mix2_only=%u mix3_only=%u both_success=%u mcnemar_p=%.12g "
-        "mix2_seed_attempt=%u mix3_seed_attempt=%u "
-        "mix2_wilson95=[%.8f,%.8f] mix3_wilson95=[%.8f,%.8f]\n",
-        K, block_bytes, PrecodeFailCompletionName(completion),
-        HeavyFamilyName(heavy_family), overhead, trials,
-        mix2_failures, mix3_failures, both_failure,
-        mix2_only, mix3_only, both_success,
-        ExactMcNemarP(mix2_only, mix3_only),
-        outcomes.Mix2SeedAttempt, outcomes.Mix3SeedAttempt,
-        mix2_lower, mix2_upper, mix3_lower, mix3_upper);
-}
-
 const char* HeavyFamilyName(wirehair_v2::HeavyCoefficientFamily family)
 {
     return family == wirehair_v2::HeavyCoefficientFamily::PeriodicCauchy ?
@@ -4287,142 +3437,6 @@ private:
     std::vector<std::thread>& Threads;
 };
 
-uint32_t NormalizedH15V1PacketPeelSeedXor(uint32_t K)
-{
-    // Offline hard-loss tuning for the normalized 1280-byte seed profile.
-    // Unlisted K values deliberately retain the base packet graph.
-    switch (K)
-    {
-    case 4u:  return 57u;
-    case 5u:  return 105u;
-    case 6u:  return 23u;
-    case 7u:  return 83u;
-    case 9u:  return 51u;
-    case 11u: return 168u;
-    case 12u: return 250u;
-    case 13u: return 123u;
-    case 14u: return 157u;
-    case 15u: return 55u;
-    case 17u: return 185u;
-    case 18u: return 37u;
-    case 19u: return 194u;
-    case 22u: return 204u;
-    case 25u: return 104u;
-    case 28u: return 122u;
-    case 29u: return 242u;
-    case 31u: return 129u;
-    case 32u: return 56u;
-    case 33u: return 110u;
-    case 37u: return 172u;
-    case 39u: return 148u;
-    case 41u: return 125u;
-    default:  return 0u;
-    }
-}
-
-uint32_t NormalizedH15V2PacketPeelSeedXor(uint32_t K)
-{
-    // Fresh-seed and cross-payload holdouts for large-K resonances.  Keep v1
-    // immutable so previously recorded benchmark commands remain replayable.
-    switch (K)
-    {
-    case 1683u:  return 19u;
-    case 15182u: return 98u;
-    case 21394u: return 26u;
-    case 24432u: return 75u;
-    case 34207u: return 213u;
-    case 62039u: return 2u;
-    default:     return NormalizedH15V1PacketPeelSeedXor(K);
-    }
-}
-
-uint32_t NormalizedH15V3PacketPeelSeedXor(uint32_t K)
-{
-    // Independent hard-loss holdouts for residual v2 all-K hotspots.  Keep
-    // both earlier tables immutable so recorded experiments remain replayable.
-    switch (K)
-    {
-    case 10u:    return 139u;
-    case 20u:    return 140u;
-    case 11414u: return 86u;
-    case 48567u: return 209u;
-    case 49312u: return 52u;
-    case 49842u: return 188u;
-    case 50281u: return 121u;
-    case 51375u: return 192u;
-    case 53503u: return 238u;
-    default:     return NormalizedH15V2PacketPeelSeedXor(K);
-    }
-}
-
-uint32_t NormalizedH15V4PacketPeelSeedXor(uint32_t K)
-{
-    // Discovery-selected rank-one salts, independently validated by a frozen
-    // hard-loss holdout over recurrent v3 hotspots.  Preserve every earlier
-    // table entry and leave all other packet graphs unchanged.
-    switch (K)
-    {
-    case 16u:    return 6u;
-    case 39559u: return 60u;
-    case 40831u: return 179u;
-    case 43742u: return 27u;
-    case 43751u: return 99u;
-    case 45168u: return 108u;
-    case 45464u: return 34u;
-    case 45857u: return 49u;
-    case 45903u: return 58u;
-    case 46296u: return 4u;
-    case 46606u: return 235u;
-    case 46933u: return 106u;
-    case 47029u: return 117u;
-    case 47105u: return 81u;
-    case 47307u: return 178u;
-    case 48231u: return 225u;
-    case 48311u: return 122u;
-    case 48466u: return 87u;
-    case 49124u: return 237u;
-    case 49412u: return 173u;
-    case 49486u: return 142u;
-    case 49627u: return 172u;
-    case 49727u: return 143u;
-    case 49865u: return 255u;
-    case 50689u: return 142u;
-    case 50885u: return 63u;
-    case 50899u: return 12u;
-    case 51494u: return 208u;
-    case 52935u: return 8u;
-    case 53613u: return 30u;
-    case 53697u: return 204u;
-    case 53804u: return 169u;
-    default:     return NormalizedH15V3PacketPeelSeedXor(K);
-    }
-}
-
-enum class PacketPeelSeedTable : uint32_t
-{
-    None = 0,
-    NormalizedH15V1 = 1,
-    NormalizedH15V2 = 2,
-    NormalizedH15V3 = 3,
-    NormalizedH15V4 = 4
-};
-
-const char* PacketPeelSeedTableName(PacketPeelSeedTable table)
-{
-    switch (table)
-    {
-    case PacketPeelSeedTable::NormalizedH15V1:
-        return "normalized-h15-v1";
-    case PacketPeelSeedTable::NormalizedH15V2:
-        return "normalized-h15-v2";
-    case PacketPeelSeedTable::NormalizedH15V3:
-        return "normalized-h15-v3";
-    case PacketPeelSeedTable::NormalizedH15V4:
-        return "normalized-h15-v4";
-    default:
-        return "none";
-    }
-}
 
 int CmdPrecodeFail(int argc, char** argv)
 {
@@ -4431,7 +3445,6 @@ int CmdPrecodeFail(int argc, char** argv)
     std::string overhead_list = "0,1";
     std::string heavy_family_list = "periodic";
     std::string mix_count_list = "3";
-    PrecodeFailCompletion completion = PrecodeFailCompletion::Certified;
     bool payload_e2e = false;
     bool full_payload_solve = false;
     uint32_t trials = 100u;
@@ -4439,45 +3452,20 @@ int CmdPrecodeFail(int argc, char** argv)
     double loss = 0.10;
     uint64_t seed = UINT64_C(0x5eedf411);
     PacketScheduleKind schedule_kind = PacketScheduleKind::Iid;
-    bool mixed_residue_hash_keyed = false;
-    bool mixed_independent_extension_residues = false;
-    uint32_t mixed_extension_residue_seed_xor = 78u;
     uint32_t source_hits_override = 0u;
     uint32_t binary_dense_rows_override = 0u;
     uint32_t gf256_heavy_rows_override = 0u;
     uint32_t packet_peel_seed_xor = 0u;
-    PacketPeelSeedTable packet_peel_seed_table =
-        PacketPeelSeedTable::None;
     uint32_t odd_packet_peel_seed_xor = 0u;
     uint32_t packet_row_seed_multiplier = 1u;
     bool packet_row_seed_avalanche = false;
     uint32_t seed_block_bytes_override = 0u;
     bool paired_overhead_stream = false;
-    bool mixed_null_witnesses = false;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-    bool mixed_null_witness_internal_error = false;
     uint32_t fail_thread_launch_after = UINT32_MAX;
     bool source_hits_explicit = false;
     bool binary_dense_rows_explicit = false;
     bool gf256_heavy_rows_explicit = false;
-    bool packet_peel_seed_xor_explicit = false;
-    uint32_t mixed_period = wirehair_v2::kMixedCoefficientPeriod;
-    bool mixed_period_explicit = false;
-    uint32_t mixed_gf256_rows = wirehair_v2::kMixedGF256Rows;
-    bool mixed_gf256_rows_explicit = false;
-    uint32_t mixed_gf16_rows = wirehair_v2::kMixedGF16Rows;
-    bool mixed_gf16_rows_explicit = false;
-    wirehair_v2::MixedCoefficientGeometry mixed_geometry =
-        wirehair_v2::MixedCoefficientGeometry::FrozenPowerX;
-    bool mixed_geometry_explicit = false;
-    uint32_t mixed_residue_skew = 0u;
-    bool mixed_residue_skew_explicit = false;
-    wirehair_v2::MixedResidueSchedule mixed_residue_schedule =
-        wirehair_v2::MixedResidueSchedule::Constant;
-    bool mixed_residue_schedule_explicit = false;
-    uint32_t mixed_residue_hash_seed = 0u;
-    bool mixed_residue_hash_seed_explicit = false;
-    bool mixed_extension_residue_seed_xor_explicit = false;
     bool seed_block_bytes_explicit = false;
 #endif
 
@@ -4521,21 +3509,6 @@ int CmdPrecodeFail(int argc, char** argv)
                 return 1;
             }
             mix_count_list = value;
-        }
-        else if (!std::strcmp(argv[i], "--completion")) {
-            if (!TakeArg(
-                    "precodefail", "--completion", argc, argv, i, value))
-            {
-                return 1;
-            }
-            if (!ParsePrecodeFailCompletion(value, completion))
-            {
-                std::fprintf(stderr,
-                    "precodefail unknown --completion token %s "
-                    "(expected certified or mixed)\n",
-                    value);
-                return 1;
-            }
         }
         else if (!std::strcmp(argv[i], "--payload-e2e")) {
             payload_e2e = true;
@@ -4589,9 +3562,6 @@ int CmdPrecodeFail(int argc, char** argv)
         else if (!std::strcmp(argv[i], "--full-payload-solve")) {
             full_payload_solve = true;
         }
-        else if (!std::strcmp(argv[i], "--mixed-null-witnesses")) {
-            mixed_null_witnesses = true;
-        }
         else if (!std::strcmp(argv[i], "--source-hits")) {
             if (!TakeArg(
                     "precodefail", "--source-hits", argc, argv, i, value) ||
@@ -4636,40 +3606,6 @@ int CmdPrecodeFail(int argc, char** argv)
             {
                 return 1;
             }
-            packet_peel_seed_xor_explicit = true;
-        }
-        else if (!std::strcmp(argv[i], "--packet-peel-seed-table")) {
-            if (!TakeArg(
-                    "precodefail", "--packet-peel-seed-table",
-                    argc, argv, i, value))
-            {
-                return 1;
-            }
-            if (std::strcmp(value, "normalized-h15-v1") == 0) {
-                packet_peel_seed_table =
-                    PacketPeelSeedTable::NormalizedH15V1;
-            }
-            else if (std::strcmp(value, "normalized-h15-v2") == 0) {
-                packet_peel_seed_table =
-                    PacketPeelSeedTable::NormalizedH15V2;
-            }
-            else if (std::strcmp(value, "normalized-h15-v3") == 0) {
-                packet_peel_seed_table =
-                    PacketPeelSeedTable::NormalizedH15V3;
-            }
-            else if (std::strcmp(value, "normalized-h15-v4") == 0) {
-                packet_peel_seed_table =
-                    PacketPeelSeedTable::NormalizedH15V4;
-            }
-            else
-            {
-                std::fprintf(stderr,
-                    "precodefail unknown --packet-peel-seed-table %s "
-                    "(expected normalized-h15-v1, normalized-h15-v2, "
-                    "normalized-h15-v3, or normalized-h15-v4)\n",
-                    value);
-                return 1;
-            }
         }
         else if (!std::strcmp(
                      argv[i], "--odd-packet-peel-seed-xor"))
@@ -4704,111 +3640,6 @@ int CmdPrecodeFail(int argc, char** argv)
         }
         else if (!std::strcmp(argv[i], "--paired-overhead-stream")) {
             paired_overhead_stream = true;
-        }
-        else if (!std::strcmp(argv[i], "--mixed-gf16-rows")) {
-            if (!TakeArg(
-                    "precodefail", "--mixed-gf16-rows",
-                    argc, argv, i, value) ||
-                !ParseU32Arg(
-                    "--mixed-gf16-rows", value, mixed_gf16_rows))
-            {
-                return 1;
-            }
-            mixed_gf16_rows_explicit = true;
-        }
-        else if (!std::strcmp(argv[i], "--mixed-gf256-rows")) {
-            if (!TakeArg(
-                    "precodefail", "--mixed-gf256-rows",
-                    argc, argv, i, value) ||
-                !ParseU32Arg(
-                    "--mixed-gf256-rows", value, mixed_gf256_rows))
-            {
-                return 1;
-            }
-            mixed_gf256_rows_explicit = true;
-        }
-        else if (!std::strcmp(argv[i], "--mixed-period")) {
-            if (!TakeArg(
-                    "precodefail", "--mixed-period", argc, argv, i, value) ||
-                !ParseU32Arg("--mixed-period", value, mixed_period))
-            {
-                return 1;
-            }
-            mixed_period_explicit = true;
-        }
-        else if (!std::strcmp(argv[i], "--mixed-geometry")) {
-            if (!TakeArg(
-                    "precodefail", "--mixed-geometry",
-                    argc, argv, i, value) ||
-                !ParseMixedCoefficientGeometry(value, mixed_geometry))
-            {
-                std::fprintf(stderr,
-                    "precodefail unknown --mixed-geometry token %s "
-                    "(expected frozen or shared-x)\n",
-                    value ? value : "");
-                return 1;
-            }
-            mixed_geometry_explicit = true;
-        }
-        else if (!std::strcmp(argv[i], "--mixed-residue-skew")) {
-            if (!TakeArg(
-                    "precodefail", "--mixed-residue-skew",
-                    argc, argv, i, value) ||
-                !ParseU32Arg(
-                    "--mixed-residue-skew", value, mixed_residue_skew))
-            {
-                return 1;
-            }
-            mixed_residue_skew_explicit = true;
-        }
-        else if (!std::strcmp(argv[i], "--mixed-residue-schedule")) {
-            if (!TakeArg(
-                    "precodefail", "--mixed-residue-schedule",
-                    argc, argv, i, value) ||
-                !ParseMixedResidueSchedule(value, mixed_residue_schedule))
-            {
-                std::fprintf(stderr,
-                    "precodefail unknown --mixed-residue-schedule token %s "
-                    "(expected constant, ramp, or hashed)\n",
-                    value ? value : "");
-                return 1;
-            }
-            mixed_residue_schedule_explicit = true;
-        }
-        else if (!std::strcmp(argv[i], "--mixed-residue-hash-seed")) {
-            if (!TakeArg(
-                    "precodefail", "--mixed-residue-hash-seed",
-                    argc, argv, i, value) ||
-                !ParseU32Arg(
-                    "--mixed-residue-hash-seed", value,
-                    mixed_residue_hash_seed))
-            {
-                return 1;
-            }
-            mixed_residue_hash_seed_explicit = true;
-        }
-        else if (!std::strcmp(argv[i], "--mixed-residue-hash-keyed")) {
-            mixed_residue_hash_keyed = true;
-        }
-        else if (!std::strcmp(
-                     argv[i],
-                     "--mixed-independent-extension-residues"))
-        {
-            mixed_independent_extension_residues = true;
-        }
-        else if (!std::strcmp(
-                     argv[i], "--mixed-extension-residue-seed-xor"))
-        {
-            if (!TakeArg(
-                    "precodefail", "--mixed-extension-residue-seed-xor",
-                    argc, argv, i, value) ||
-                !ParseU32Arg(
-                    "--mixed-extension-residue-seed-xor", value,
-                    mixed_extension_residue_seed_xor))
-            {
-                return 1;
-            }
-            mixed_extension_residue_seed_xor_explicit = true;
         }
         else if (!std::strcmp(argv[i], "--seed-block-bytes")) {
             if (!TakeArg(
@@ -4888,63 +3719,7 @@ int CmdPrecodeFail(int argc, char** argv)
             return 1;
         }
     }
-    const bool pair_mix_counts =
-        std::find(mix_counts.begin(), mix_counts.end(), 2) !=
-            mix_counts.end() &&
-        std::find(mix_counts.begin(), mix_counts.end(), 3) !=
-            mix_counts.end();
-    if (completion == PrecodeFailCompletion::Mixed)
-    {
-        for (int bb : BBs)
-        {
-            if ((bb & 1) != 0)
-            {
-                std::fprintf(stderr,
-                    "precodefail mixed completion requires even block bytes, "
-                    "got %d\n",
-                    bb);
-                return 1;
-            }
-        }
-        for (wirehair_v2::HeavyCoefficientFamily family : heavy_families)
-        {
-            if (family !=
-                wirehair_v2::HeavyCoefficientFamily::PeriodicCauchy)
-            {
-                std::fprintf(stderr,
-                    "precodefail mixed completion requires periodic "
-                    "heavy family\n");
-                return 1;
-            }
-        }
-    }
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-    else if (mixed_null_witnesses || mixed_period_explicit ||
-             mixed_geometry_explicit ||
-             mixed_gf256_rows_explicit || mixed_gf16_rows_explicit ||
-             mixed_residue_skew_explicit ||
-             mixed_residue_schedule_explicit ||
-             mixed_residue_hash_seed_explicit ||
-             mixed_residue_hash_keyed ||
-             mixed_independent_extension_residues)
-    {
-        std::fprintf(stderr,
-            "precodefail mixed experiment flags require --completion "
-            "mixed\n");
-        return 1;
-    }
-    if (!wirehair_v2::SetMixedCoefficientGeometryForTesting(mixed_geometry)) {
-        return 1;
-    }
-    if (!wirehair_v2::SetMixedGF16RowsForTesting(mixed_gf16_rows))
-    {
-        std::fprintf(stderr,
-            "precodefail --mixed-gf16-rows must be in [%u,%u] and fit "
-            "the active period\n",
-            wirehair_v2::kMixedGF16Rows,
-            wirehair_v2::kMixedGF16RowsMax);
-        return 1;
-    }
     if (source_hits_explicit &&
         (source_hits_override == 0u || source_hits_override > 8u))
     {
@@ -4968,76 +3743,6 @@ int CmdPrecodeFail(int argc, char** argv)
             "precodefail --gf256-heavy-rows must be in [1,128]\n");
         return 1;
     }
-    if (gf256_heavy_rows_override != 0u &&
-        completion != PrecodeFailCompletion::Certified)
-    {
-        std::fprintf(stderr,
-            "precodefail --gf256-heavy-rows requires --completion "
-            "certified\n");
-        return 1;
-    }
-    if (!wirehair_v2::SetMixedCoefficientPeriodForTesting(mixed_period))
-    {
-        std::fprintf(stderr,
-            "precodefail --mixed-period must be in [%u,%u]\n",
-            wirehair_v2::ActiveMixedGF256Rows() +
-                wirehair_v2::ActiveMixedGF16Rows(),
-            wirehair_v2::kMixedCoefficientPeriod);
-        return 1;
-    }
-    if (!wirehair_v2::SetMixedGF256RowsForTesting(mixed_gf256_rows))
-    {
-        std::fprintf(stderr,
-            "precodefail --mixed-gf256-rows must be in [%u,%u], fit the "
-            "active period, use shared-x for an extra row, and use the "
-            "validated 12+4 geometry for twelve rows\n",
-            wirehair_v2::kMixedGF256Rows,
-            wirehair_v2::kMixedGF256RowsMax);
-        return 1;
-    }
-    if (!wirehair_v2::SetMixedResidueSkewForTesting(mixed_residue_skew)) {
-        std::fprintf(stderr,
-            "precodefail --mixed-residue-skew must be a corner-preserving "
-            "shared-x skew in [0,P-H]\n");
-        return 1;
-    }
-    if (!wirehair_v2::SetMixedResidueScheduleForTesting(
-            mixed_residue_schedule))
-    {
-        std::fprintf(stderr,
-            "precodefail nonconstant --mixed-residue-schedule requires "
-            "shared-x, "
-            "P>H, and zero constant skew\n");
-        return 1;
-    }
-    if ((mixed_residue_hash_seed_explicit || mixed_residue_hash_keyed) &&
-        mixed_residue_schedule != wirehair_v2::MixedResidueSchedule::Hashed)
-    {
-        std::fprintf(stderr,
-            "precodefail residue hash seed/keying requires hashed "
-            "--mixed-residue-schedule\n");
-        return 1;
-    }
-    if (mixed_extension_residue_seed_xor_explicit &&
-        !mixed_independent_extension_residues)
-    {
-        std::fprintf(stderr,
-            "precodefail --mixed-extension-residue-seed-xor requires "
-            "--mixed-independent-extension-residues\n");
-        return 1;
-    }
-    wirehair_v2::SetMixedResidueHashSeedForTesting(
-        mixed_residue_hash_seed);
-    wirehair_v2::SetMixedIndependentExtensionSeedXorForTesting(
-        mixed_extension_residue_seed_xor);
-    if (!wirehair_v2::SetMixedIndependentExtensionResiduesForTesting(
-            mixed_independent_extension_residues))
-    {
-        std::fprintf(stderr,
-            "precodefail independent extension residues require "
-            "shared-x hashed scheduling with P>H\n");
-        return 1;
-    }
     if (!wirehair_v2::SetPacketRowSeedMultiplierForTesting(
             packet_row_seed_multiplier))
     {
@@ -5056,112 +3761,28 @@ int CmdPrecodeFail(int argc, char** argv)
             "precodefail --seed-block-bytes must be nonzero\n");
         return 1;
     }
-    if (packet_peel_seed_table != PacketPeelSeedTable::None &&
-        packet_peel_seed_xor_explicit)
-    {
-        std::fprintf(stderr,
-            "precodefail --packet-peel-seed-table conflicts with "
-            "--packet-peel-seed-xor\n");
-        return 1;
-    }
-    if (packet_peel_seed_table != PacketPeelSeedTable::None &&
-        (completion != PrecodeFailCompletion::Mixed ||
-         mix_counts.size() != 1u || mix_counts[0] != 2 ||
-         seed_block_bytes_override != 1280u ||
-         mixed_gf256_rows != 11u || mixed_gf16_rows != 4u ||
-         mixed_period != 32u ||
-         mixed_geometry !=
-            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX ||
-         mixed_residue_schedule !=
-            wirehair_v2::MixedResidueSchedule::Hashed ||
-         mixed_residue_hash_seed != 68u ||
-         !mixed_residue_hash_keyed ||
-         !mixed_independent_extension_residues ||
-         mixed_extension_residue_seed_xor != 78u ||
-         source_hits_override != 0u || binary_dense_rows_override != 0u ||
-         odd_packet_peel_seed_xor != 0u ||
-         packet_row_seed_multiplier != 1u ||
-         packet_row_seed_avalanche))
-    {
-        std::fprintf(stderr,
-            "precodefail normalized H15 packet seed table requires "
-            "its normalized H15/mix2 geometry\n");
-        return 1;
-    }
 #endif
 
-    if (completion == PrecodeFailCompletion::Certified)
-    {
-        std::printf(
-            "# precodefail: trials=%u threads=%u loss=%.17g seed=0x%llx "
-            "source_hits_override=%u packet_peel_seed_xor=0x%x "
-            "packet_peel_seed_table=%s "
-            "binary_dense_rows_override=%u gf256_heavy_rows_override=%u "
-            "odd_packet_peel_seed_xor=0x%x "
-            "packet_row_seed_multiplier=0x%x "
-            "packet_row_seed_avalanche=%u seed_block_bytes_override=%u "
-            "overhead_stream=%s full_payload_solve=%u schedule=%s%s\n",
-            trials, threads, loss, (unsigned long long)seed,
-            source_hits_override,
-            packet_peel_seed_xor,
-            PacketPeelSeedTableName(packet_peel_seed_table),
-            binary_dense_rows_override,
-            gf256_heavy_rows_override,
-            odd_packet_peel_seed_xor,
-            packet_row_seed_multiplier,
-            packet_row_seed_avalanche ? 1u : 0u,
-            seed_block_bytes_override,
-            paired_overhead_stream ? "paired" : "salted",
-            full_payload_solve ? 1u : 0u,
-            PacketScheduleName(schedule_kind),
-            mixed_null_witnesses ? " mixed_null_witnesses=1" : "");
-    }
-    else
-    {
-        std::printf(
-            "# precodefail: trials=%u threads=%u loss=%.17g seed=0x%llx "
-            "completion=%s mixed_period=%u mixed_gf256_rows=%u "
-            "mixed_gf16_rows=%u "
-            "mixed_geometry=%s mixed_residue_skew=%u "
-            "mixed_residue_schedule=%s mixed_residue_hash_seed=0x%x "
-            "mixed_residue_hash_keyed=%u "
-            "mixed_independent_extension_residues=%u "
-            "mixed_extension_residue_seed_xor=0x%x "
-            "source_hits_override=%u packet_peel_seed_xor=0x%x "
-            "packet_peel_seed_table=%s "
-            "binary_dense_rows_override=%u gf256_heavy_rows_override=%u "
-            "odd_packet_peel_seed_xor=0x%x "
-            "packet_row_seed_multiplier=0x%x "
-            "packet_row_seed_avalanche=%u seed_block_bytes_override=%u "
-            "overhead_stream=%s full_payload_solve=%u schedule=%s%s\n",
-            trials, threads, loss, (unsigned long long)seed,
-            PrecodeFailCompletionName(completion),
-            wirehair_v2::ActiveMixedCoefficientPeriod(),
-            wirehair_v2::ActiveMixedGF256Rows(),
-            wirehair_v2::ActiveMixedGF16Rows(),
-            MixedCoefficientGeometryName(
-                wirehair_v2::ActiveMixedCoefficientGeometry()),
-            wirehair_v2::ActiveMixedResidueSkew(),
-            MixedResidueScheduleName(
-                wirehair_v2::ActiveMixedResidueSchedule()),
-            wirehair_v2::ActiveMixedResidueHashSeed(),
-            mixed_residue_hash_keyed ? 1u : 0u,
-            mixed_independent_extension_residues ? 1u : 0u,
-            mixed_extension_residue_seed_xor,
-            source_hits_override,
-            packet_peel_seed_xor,
-            PacketPeelSeedTableName(packet_peel_seed_table),
-            binary_dense_rows_override,
-            gf256_heavy_rows_override,
-            odd_packet_peel_seed_xor,
-            packet_row_seed_multiplier,
-            packet_row_seed_avalanche ? 1u : 0u,
-            seed_block_bytes_override,
-            paired_overhead_stream ? "paired" : "salted",
-            full_payload_solve ? 1u : 0u,
-            PacketScheduleName(schedule_kind),
-            mixed_null_witnesses ? " mixed_null_witnesses=1" : "");
-    }
+    std::printf(
+        "# precodefail: trials=%u threads=%u loss=%.17g seed=0x%llx "
+        "source_hits_override=%u packet_peel_seed_xor=0x%x "
+        "binary_dense_rows_override=%u gf256_heavy_rows_override=%u "
+        "odd_packet_peel_seed_xor=0x%x "
+        "packet_row_seed_multiplier=0x%x "
+        "packet_row_seed_avalanche=%u seed_block_bytes_override=%u "
+        "overhead_stream=%s full_payload_solve=%u schedule=%s\n",
+        trials, threads, loss, (unsigned long long)seed,
+        source_hits_override,
+        packet_peel_seed_xor,
+        binary_dense_rows_override,
+        gf256_heavy_rows_override,
+        odd_packet_peel_seed_xor,
+        packet_row_seed_multiplier,
+        packet_row_seed_avalanche ? 1u : 0u,
+        seed_block_bytes_override,
+        paired_overhead_stream ? "paired" : "salted",
+        full_payload_solve ? 1u : 0u,
+        PacketScheduleName(schedule_kind));
     std::printf(
         "N,bb,heavy_family,mix_count,overhead,trials,success,rank_fail,error,"
         "fail_rate,"
@@ -5175,63 +3796,11 @@ int CmdPrecodeFail(int argc, char** argv)
     {
         const uint32_t K = (uint32_t)n_value;
         const uint32_t bb = (uint32_t)bb_value;
-        uint32_t active_packet_peel_seed_xor = packet_peel_seed_xor;
-        if (packet_peel_seed_table ==
-            PacketPeelSeedTable::NormalizedH15V1)
-        {
-            active_packet_peel_seed_xor =
-                NormalizedH15V1PacketPeelSeedXor(K);
-        }
-        else if (packet_peel_seed_table ==
-                 PacketPeelSeedTable::NormalizedH15V2)
-        {
-            active_packet_peel_seed_xor =
-                NormalizedH15V2PacketPeelSeedXor(K);
-        }
-        else if (packet_peel_seed_table ==
-                 PacketPeelSeedTable::NormalizedH15V3)
-        {
-            active_packet_peel_seed_xor =
-                NormalizedH15V3PacketPeelSeedXor(K);
-        }
-        else if (packet_peel_seed_table ==
-                 PacketPeelSeedTable::NormalizedH15V4)
-        {
-            active_packet_peel_seed_xor =
-                NormalizedH15V4PacketPeelSeedXor(K);
-        }
+        const uint32_t active_packet_peel_seed_xor =
+            packet_peel_seed_xor;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-        uint32_t active_hash_seed = mixed_residue_hash_seed;
-        if (mixed_residue_hash_keyed &&
-            !wirehair_v2::SelectFullCycleMixedResidueKeyedSeedForTesting(
-                mixed_residue_hash_seed, K, active_hash_seed))
-        {
-            std::fprintf(stderr,
-                "precodefail could not select a full-cycle keyed residue "
-                "hash seed for N=%u\n",
-                K);
-            return 1;
-        }
         const auto configure_test_thread = [&]() -> bool {
-            return wirehair_v2::SetMixedCoefficientGeometryForTesting(
-                       mixed_geometry) &&
-                wirehair_v2::SetMixedGF16RowsForTesting(mixed_gf16_rows) &&
-                wirehair_v2::SetMixedCoefficientPeriodForTesting(
-                    mixed_period) &&
-                wirehair_v2::SetMixedGF256RowsForTesting(mixed_gf256_rows) &&
-                wirehair_v2::SetMixedResidueSkewForTesting(
-                    mixed_residue_skew) &&
-                wirehair_v2::SetMixedResidueScheduleForTesting(
-                    mixed_residue_schedule) &&
-                (wirehair_v2::SetMixedResidueHashSeedForTesting(
-                     active_hash_seed), true) &&
-                (wirehair_v2::
-                     SetMixedIndependentExtensionSeedXorForTesting(
-                         mixed_extension_residue_seed_xor), true) &&
-                wirehair_v2::
-                    SetMixedIndependentExtensionResiduesForTesting(
-                        mixed_independent_extension_residues) &&
-                wirehair_v2::SetPacketRowSeedMultiplierForTesting(
+            return wirehair_v2::SetPacketRowSeedMultiplierForTesting(
                     packet_row_seed_multiplier) &&
                 (wirehair_v2::SetPacketRowSeedAvalancheForTesting(
                      packet_row_seed_avalanche), true) &&
@@ -5258,16 +3827,13 @@ int CmdPrecodeFail(int argc, char** argv)
         const uint64_t matrix_seed = wirehair_v2::MatrixSeedFromProfile(
             seed_profile, 0u, wirehair_v2::kMessagePrecodeSeedSalt);
         const wirehair_v2::PrecodeParams canonical_params =
-            completion == PrecodeFailCompletion::Mixed ?
-                wirehair_v2::MakeMixedParams(K, matrix_seed) :
-                wirehair_v2::MakeCertifiedParams(K, matrix_seed);
+            wirehair_v2::MakeCertifiedParams(K, matrix_seed);
         wirehair_v2::PacketRowConfig base_config;
         base_config.PeelSeed = wirehair_v2::PacketPeelSeedFromProfile(
             seed_profile, wirehair_v2::kMessageRecoveryRowSeedSalt) ^
             active_packet_peel_seed_xor;
         for (wirehair_v2::HeavyCoefficientFamily heavy_family : heavy_families)
         {
-        std::map<uint32_t, PairedMixOutcomes> paired_outcomes;
         for (int mix_count_value : mix_counts)
         {
             base_config.MixCount = (uint32_t)mix_count_value;
@@ -5333,8 +3899,7 @@ int CmdPrecodeFail(int argc, char** argv)
         for (int overhead_value : overheads)
         {
             const uint32_t overhead = (uint32_t)overhead_value;
-            uint32_t solve_block_bytes =
-                completion == PrecodeFailCompletion::Mixed ? 2u : 1u;
+            uint32_t solve_block_bytes = 1u;
             if (full_payload_solve) solve_block_bytes = bb;
             const auto populate_trial_packets = [&, overhead](
                 uint32_t trial,
@@ -5375,19 +3940,6 @@ int CmdPrecodeFail(int argc, char** argv)
                 return true;
             };
             std::vector<MatrixFailureTrial> results(trials);
-#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-            // Preserve the compact always-on benchmark record.  Full solver
-            // metadata is only allocated and written for witness runs.
-            std::vector<wirehair_v2::PrecodeSolveStats> witness_trial_stats;
-            if (mixed_null_witnesses) witness_trial_stats.resize(trials);
-            wirehair_v2::MixedNullWitnessDiagnostic captured_witness;
-            uint32_t captured_witness_trial = UINT32_MAX;
-            MixedNullReplayStatus witness_status =
-                MixedNullReplayStatus::None;
-            const char* witness_reason = "no_need_more";
-            bool witness_replay_stats_ok = false;
-            std::vector<std::string> witness_classification_lines;
-#endif
             std::atomic<uint32_t> next_trial(0u);
             std::atomic<bool> cancel_workers(false);
             std::atomic<bool> worker_failed(false);
@@ -5464,11 +4016,6 @@ int CmdPrecodeFail(int argc, char** argv)
                                     solve_stats.ResidualNanoseconds;
                                 result.BackSubNanoseconds =
                                     solve_stats.BackSubNanoseconds;
-#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-                                if (mixed_null_witnesses) {
-                                    witness_trial_stats[trial] = solve_stats;
-                                }
-#endif
                             }
                         }
                         catch (...) {
@@ -5490,124 +4037,6 @@ int CmdPrecodeFail(int argc, char** argv)
                 std::fprintf(stderr, "precodefail worker failed\n");
                 return 2;
             }
-
-#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-            if (mixed_null_witnesses)
-            {
-                uint32_t first_need_more = UINT32_MAX;
-                for (uint32_t trial = 0u; trial < trials; ++trial)
-                {
-                    const MatrixFailureTrial& candidate = results[trial];
-                    if (candidate.Result != Wirehair_NeedMore) continue;
-                    if (first_need_more == UINT32_MAX) first_need_more = trial;
-                    const wirehair_v2::PrecodeSolveStats& stats =
-                        witness_trial_stats[trial];
-                    if (stats.InactivatedColumns <
-                            stats.BinaryResidualRank ||
-                        stats.ResidualRank < stats.BinaryResidualRank)
-                    {
-                        continue;
-                    }
-                    const uint32_t q = stats.InactivatedColumns -
-                        stats.BinaryResidualRank;
-                    const uint32_t quotient_rank = stats.ResidualRank -
-                        stats.BinaryResidualRank;
-                    if (q != 0u &&
-                        q <= wirehair_v2::
-                            kMaxMixedNullWitnessQuotientColumns &&
-                        q <= system.Params.HeavyRows && quotient_rank < q)
-                    {
-                        captured_witness_trial = trial;
-                        break;
-                    }
-                }
-                if (captured_witness_trial == UINT32_MAX)
-                {
-                    if (first_need_more != UINT32_MAX) {
-                        captured_witness_trial = first_need_more;
-                        witness_status = MixedNullReplayStatus::Skipped;
-                        witness_reason = "ineligible_need_more";
-                    }
-                }
-                else
-                {
-                    try
-                    {
-                        std::vector<wirehair_v2::SolvePacket> packets(
-                            (size_t)K + overhead);
-                        const std::vector<uint8_t> replay_zero(
-                            solve_block_bytes, uint8_t{0});
-                        if (!configure_test_thread()) {
-                            witness_status = MixedNullReplayStatus::Error;
-                            witness_reason = "replay_config";
-                        }
-                        else if (!populate_trial_packets(
-                                     captured_witness_trial,
-                                     replay_zero.data(), packets))
-                        {
-                            witness_status = MixedNullReplayStatus::Error;
-                            witness_reason = "replay_schedule";
-                        }
-                        else
-                        {
-                            std::vector<uint8_t> intermediate;
-                            wirehair_v2::PrecodeSolveStats replay_stats;
-                            WirehairResult replay_result;
-                            {
-                                MixedNullWitnessScope witness_scope(
-                                    &captured_witness);
-                                replay_result = wirehair_v2::
-                                    SolvePrecodeSystemForValidatedSystemWithRuntime(
-                                        system, config, runtime, packets,
-                                        solve_block_bytes, intermediate,
-                                        &replay_stats);
-                            }
-                            const MatrixFailureTrial& original =
-                                results[captured_witness_trial];
-                            witness_replay_stats_ok =
-                                replay_result == original.Result &&
-                                SameNonTimingSolveStats(
-                                    replay_stats,
-                                    witness_trial_stats[
-                                        captured_witness_trial]);
-                            if (!witness_replay_stats_ok) {
-                                witness_status = MixedNullReplayStatus::Error;
-                                witness_reason = "replay_mismatch";
-                            }
-                            else if (captured_witness.Status !=
-                                     wirehair_v2::
-                                         MixedNullWitnessStatus::Captured)
-                            {
-                                witness_status = MixedNullReplayStatus::Error;
-                                witness_reason = "diagnostic_failed";
-                            }
-                            else {
-                                witness_status =
-                                    MixedNullReplayStatus::Captured;
-                                witness_reason = "verified";
-                                if (!BuildMixedNullClassification(
-                                        K, captured_witness,
-                                        witness_classification_lines))
-                                {
-                                    witness_classification_lines.clear();
-                                    witness_status =
-                                        MixedNullReplayStatus::Error;
-                                    witness_reason = "classification_failed";
-                                }
-                            }
-                        }
-                    }
-                    catch (...) {
-                        witness_classification_lines.clear();
-                        witness_status = MixedNullReplayStatus::Error;
-                        witness_reason = "replay_exception";
-                    }
-                }
-                if (witness_status == MixedNullReplayStatus::Error) {
-                    mixed_null_witness_internal_error = true;
-                }
-            }
-#endif
 
             uint32_t successes = 0u;
             uint32_t rank_failures = 0u;
@@ -5683,21 +4112,6 @@ int CmdPrecodeFail(int argc, char** argv)
                     ++heavy_shortfalls;
                 }
             }
-            if (pair_mix_counts &&
-                (mix_count_value == 2 || mix_count_value == 3))
-            {
-                PairedMixOutcomes& paired = paired_outcomes[overhead];
-                std::vector<bool>& failures = mix_count_value == 2 ?
-                    paired.Mix2Failures : paired.Mix3Failures;
-                uint32_t& paired_seed_attempt = mix_count_value == 2 ?
-                    paired.Mix2SeedAttempt : paired.Mix3SeedAttempt;
-                paired_seed_attempt = seed_attempt;
-                failures.resize(trials);
-                for (uint32_t trial = 0; trial < trials; ++trial) {
-                    failures[trial] = results[trial].Result ==
-                        Wirehair_Success ? 0u : 1u;
-                }
-            }
             const std::string binary_hist_text =
                 CountHistogram(binary_def_hist);
             const std::string heavy_hist_text = CountHistogram(heavy_gain_hist);
@@ -5729,137 +4143,15 @@ int CmdPrecodeFail(int argc, char** argv)
                     -1 : (int)first_rank_failure,
                 binary_hist_text.c_str(), heavy_hist_text.c_str(),
                 failure_trials.c_str(), active_packet_peel_seed_xor);
-#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-            if (mixed_null_witnesses)
-            {
-                const wirehair_v2::MixedNullWitnessDiagnostic& witness =
-                    captured_witness;
-                const bool have_trial = captured_witness_trial < trials;
-                const bool have_diagnostic =
-                    witness_status == MixedNullReplayStatus::Captured;
-                const wirehair_v2::PrecodeSolveStats* selected_stats =
-                    have_trial ?
-                        &witness_trial_stats[captured_witness_trial] : nullptr;
-                const uint32_t selected_R = selected_stats ?
-                    selected_stats->InactivatedColumns : 0u;
-                const uint32_t selected_binary_rank = selected_stats ?
-                    selected_stats->BinaryResidualRank : 0u;
-                const uint32_t selected_rank = selected_stats ?
-                    selected_stats->ResidualRank : 0u;
-                const uint32_t selected_q =
-                    selected_R >= selected_binary_rank ?
-                    selected_R - selected_binary_rank : 0u;
-                const uint32_t selected_qrank =
-                    selected_rank >= selected_binary_rank ?
-                    selected_rank - selected_binary_rank : 0u;
-                const uint32_t L = have_diagnostic ?
-                    witness.ColumnCount : K + precode_count;
-                const uint32_t R = have_diagnostic ?
-                    witness.InactiveCount : selected_R;
-                const uint32_t binary_rank = have_diagnostic ?
-                    witness.BinaryRank : selected_binary_rank;
-                const uint32_t q = have_diagnostic ?
-                    witness.QuotientColumns : selected_q;
-                const uint32_t qrank = have_diagnostic ?
-                    witness.QuotientRank : selected_qrank;
-                const uint32_t d = have_diagnostic ?
-                    witness.KernelDimension :
-                    (q >= qrank ? q - qrank : 0u);
-                const uint64_t expected_words = (uint64_t)d * L;
-                const size_t exact_words = have_diagnostic ?
-                    witness.CanonicalBasis.size() : 0u;
-                const uint64_t hash_high = have_diagnostic ?
-                    witness.BasisHashHigh : 0u;
-                const uint64_t hash_low = have_diagnostic ?
-                    witness.BasisHashLow : 0u;
-                std::printf(
-                    "# mixed_null_witness,v=2,N=%u,bb=%u,trial=%d,"
-                    "status=%s,reason=%s,diagnostic_status=%u,"
-                    "replay_stats_ok=%u,period=%u,schedule=%s,"
-                    "hash_seed=0x%x,extension_seed_xor=0x%x,"
-                    "independent_extension=%u,L=%u,R=%u,binary_rank=%u,q=%u,"
-                    "quotient_rank=%u,d=%u,q_ok=%u,A_ok=%u,C_ok=%u,"
-                    "canonical_ok=%u,exact_words=%zu,exact_size_ok=%u,"
-                    "hash=%016llx%016llx\n",
-                    K, bb, have_trial ? (int)captured_witness_trial : -1,
-                    MixedNullReplayStatusName(witness_status),
-                    witness_reason, (uint32_t)witness.Status,
-                    witness_replay_stats_ok ? 1u : 0u,
-                    wirehair_v2::ActiveMixedCoefficientPeriod(),
-                    MixedResidueScheduleName(
-                        wirehair_v2::ActiveMixedResidueSchedule()),
-                    active_hash_seed, mixed_extension_residue_seed_xor,
-                    mixed_independent_extension_residues ? 1u : 0u,
-                    L, R, binary_rank, q, qrank, d,
-                    have_diagnostic && witness.QuotientVerified ? 1u : 0u,
-                    have_diagnostic && witness.BinaryVerified ? 1u : 0u,
-                    have_diagnostic && witness.CompletionVerified ? 1u : 0u,
-                    have_diagnostic && witness.CanonicalVerified ? 1u : 0u,
-                    exact_words,
-                    have_diagnostic && expected_words == exact_words ?
-                        1u : 0u,
-                    (unsigned long long)hash_high,
-                    (unsigned long long)hash_low);
-                if (witness_status == MixedNullReplayStatus::Captured) {
-                    for (const std::string& line :
-                         witness_classification_lines)
-                    {
-                        std::printf("%s\n", line.c_str());
-                    }
-                }
-            }
-#endif
         }
-        }
-        for (const std::pair<const uint32_t, PairedMixOutcomes>& paired :
-            paired_outcomes)
-        {
-            PrintPairedMixOutcomes(
-                K, bb, completion, heavy_family, paired.first, paired.second);
         }
         }
     }
-#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-    return MixedNullReplayExitCode(
-        mixed_null_witness_internal_error ? MixedNullReplayStatus::Error :
-            MixedNullReplayStatus::None);
-#else
     return 0;
-#endif
 }
 
 int CmdSelfTest()
 {
-#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-    if (kMixedNullReplayInternalErrorExitCode != 3 ||
-        MixedNullReplayExitCode(MixedNullReplayStatus::None) != 0 ||
-        MixedNullReplayExitCode(MixedNullReplayStatus::Captured) != 0 ||
-        MixedNullReplayExitCode(MixedNullReplayStatus::Skipped) != 0 ||
-        MixedNullReplayExitCode(MixedNullReplayStatus::Error) !=
-            kMixedNullReplayInternalErrorExitCode)
-    {
-        std::fprintf(stderr, "mixed null-witness exit policy mismatch\n");
-        return 1;
-    }
-    std::printf("mixed null-witness exit policy: PASS\n");
-#endif
-
-    double wilson_lower = 0.0;
-    double wilson_upper = 0.0;
-    Wilson95(0u, 4u, wilson_lower, wilson_upper);
-    const double mcnemar_02 = ExactMcNemarP(0u, 2u);
-    const double mcnemar_15 = ExactMcNemarP(1u, 5u);
-    if (!std::isfinite(mcnemar_02) || !std::isfinite(mcnemar_15) ||
-        !std::isfinite(wilson_lower) || !std::isfinite(wilson_upper) ||
-        std::fabs(mcnemar_02 - 0.5) > 1e-12 ||
-        std::fabs(mcnemar_15 - 0.21875) > 1e-12 ||
-        std::fabs(wilson_lower) > 1e-12 ||
-        std::fabs(wilson_upper - 0.4898908364545973) > 1e-12)
-    {
-        std::fprintf(stderr, "paired-statistics oracle mismatch\n");
-        return 1;
-    }
-
     const double losses[] = {0.0, 0.99};
     const uint32_t expected_drops[] = {0u, 9890u};
     for (size_t case_index = 0; case_index < 2u; ++case_index)

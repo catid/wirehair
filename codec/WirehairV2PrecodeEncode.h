@@ -86,21 +86,9 @@ struct PrecodeEncodeStats
     /// direct)
     uint64_t HeavyMulAdds = 0;
 
-    /// Row-level block ops (muladd/div/copy) solving the H x H completion
-    /// corner.  These are GF(256) for the legacy profile and planar
-    /// GF(2^16) for the mixed profile.
+    /// GF(256) row-level block ops (muladd/div/copy) solving the H x H
+    /// completion corner.
     uint64_t HeavySolveBlockOps = 0;
-
-    /// Subset of HeavyMulAdds evaluated with extension-field coefficients.
-    /// The other mixed-profile rows are ordinary GF(256) muladds.
-    uint64_t MixedGF16MulAdds = 0;
-
-    /// Mixed-profile planar GF(2^16) scale/muladd/copy operations used by
-    /// the 12 x 12 completion solve.
-    uint64_t MixedGF16SolveBlockOps = 0;
-
-    /// Full-block deinterleave/interleave conversions in the mixed path.
-    uint64_t MixedPlaneConversions = 0;
 };
 
 /**
@@ -277,16 +265,13 @@ private:
 
 struct MessagePrecodeEncoderOptions
 {
-    // Named version-4 packet contracts bind this value together with the
-    // completion field: three columns for the original profiles, or two for
-    // the opt-in mixed/mix2 profile.  Keep it explicit so supplied options can
-    // be checked against a selected profile rather than silently ignored.
+    // Named packet contracts bind this value to the certified GF(256)
+    // equation system. Keep it explicit so supplied options can be checked
+    // against a selected profile rather than silently ignored.
     uint32_t RecoveryMixCount = kDefaultRecoveryMixCount;
     bool DenseIdentityCorner = false;
     uint64_t PrecodeSeedSalt = kMessagePrecodeSeedSalt;
     uint64_t RecoveryRowSeedSalt = kMessageRecoveryRowSeedSalt;
-    CompletionField Completion = CompletionField::GF256;
-
     // Local codec policy, deliberately excluded from the serialized packet
     // contract.  The encoder retains exact message bytes for direct packet
     // copies.  The decoder retains accepted systematic payloads so Recover
@@ -295,7 +280,7 @@ struct MessagePrecodeEncoderOptions
     bool CacheReceivedSystematicPackets = false;
 };
 
-/** True when any selected or mixed V2 precode contract state is present. */
+/** True when any selected V2 precode contract state is present. */
 bool HasMessagePrecodeContractState(const SeedProfile& profile);
 
 /**
@@ -340,14 +325,13 @@ void BindMessagePrecodeProfile(
     systematic block ids emit only the original byte count for the final
     partial block, while recovery block ids emit a full block.
 
-    The packet degree distribution is fixed by the version-4 contract to the
+    The packet degree distribution is fixed by the packet contract to the
     production Wirehair integer sampler.  Each named profile also binds its
-    precode mix count: three for the original profiles and two for the opt-in
-    mixed/mix2 profile, rather than an unbound runtime policy.  The default
-    path preserves the certified full-span dense rows.  It solves
-    K deterministic systematic packet equations together with all precode
-    constraints for the complete intermediate vector, so it does not require
-    the dense parity corner to be independently invertible.  The
+    certified precode mix count rather than leaving it as an unbound runtime
+    policy.  The default path preserves the certified full-span dense rows.
+    It solves K deterministic systematic packet equations together with all
+    precode constraints for the complete intermediate vector, so it does not
+    require the dense parity corner to be independently invertible.  The
     DenseIdentityCorner option remains an experimental oracle variant.
 
     Initialization is transactional: any invalid, singular, or allocation

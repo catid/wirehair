@@ -94,23 +94,35 @@ static int wirehair_package_v2_selector_failures(
     const uint8_t* message,
     uint32_t message_bytes)
 {
+    static const uint64_t retired_profile_ids[] = {
+        UINT64_C(0xe161ce5d456f9bb7),
+        UINT64_C(0x20a4f27a870612a2)
+    };
     uint8_t profile[WIREHAIR_V2_PROFILE_SERIALIZED_BYTES];
     uint32_t profile_bytes = 0;
     WirehairV2Codec codec;
     uint32_t i;
+    uint32_t retired;
 
-    memset(profile, 0xa5, sizeof(profile));
-    codec = (WirehairV2Codec)(uintptr_t)1u;
-    if (wirehair_v2_encoder_create_profile_id(
-            WIREHAIR_V2_PROFILE_MIXED_2026_07,
-            message, message_bytes, 31u,
-            profile, sizeof(profile), &profile_bytes, &codec) !=
-                WirehairV2_InvalidDimensions || codec != 0)
+    for (retired = 0;
+         retired < sizeof(retired_profile_ids) / sizeof(retired_profile_ids[0]);
+         ++retired)
     {
-        return 1;
-    }
-    for (i = 0; i < sizeof(profile); ++i) {
-        if (profile[i] != 0xa5u) return 2;
+        memset(profile, 0xa5, sizeof(profile));
+        profile_bytes = 0;
+        codec = (WirehairV2Codec)(uintptr_t)1u;
+        if (wirehair_v2_encoder_create_profile_id(
+                retired_profile_ids[retired],
+                message, message_bytes, 32u,
+                profile, sizeof(profile), &profile_bytes, &codec) !=
+                    WirehairV2_UnsupportedProfile ||
+            profile_bytes != sizeof(profile) || codec != 0)
+        {
+            return 1;
+        }
+        for (i = 0; i < sizeof(profile); ++i) {
+            if (profile[i] != 0xa5u) return 2;
+        }
     }
 
     memset(profile, 0x5a, sizeof(profile));
@@ -258,16 +270,10 @@ int wirehair_package_round_trip(void)
     {
         return 9;
     }
-    if (wirehair_package_v2_round_trip(
-            message, MessageBytes, BlockBytes, BlockCount,
-            WIREHAIR_V2_PROFILE_MIXED_2026_07) != 0)
-    {
-        return 10;
-    }
     if (wirehair_package_v2_selector_failures(
             message, MessageBytes) != 0)
     {
-        return 11;
+        return 10;
     }
     return 0;
 }

@@ -218,8 +218,6 @@ bool ComputePrecodeValues(
     }
     if (!source_blocks || !parity_blocks ||
         block_bytes == 0u || block_bytes > 0x7fffffffu ||
-        (system.Params.Field == CompletionField::MixedGF256GF16 &&
-         (block_bytes & 1u) != 0u) ||
         system.Params.HeavyFamily !=
             HeavyCoefficientFamily::PeriodicCauchy ||
         !ValidatePrecodeSystem(system))
@@ -368,446 +366,6 @@ bool ComputePrecodeValues(
                 block_bytes);
             ++st.DenseSolveBlockOps;
         }
-    }
-
-    // --- Mixed GF(256) subfield + GF(2^16) completion rows ---
-    if (H > 0u &&
-        system.Params.Field == CompletionField::MixedGF256GF16)
-    {
-        const uint32_t subfield_rows = ActiveMixedGF256Rows();
-        const uint32_t extension_rows = ActiveMixedGF16Rows();
-        if (H != subfield_rows + extension_rows ||
-            !InitializeGF16())
-        {
-            return false;
-        }
-        const uint32_t window = ActiveMixedCoefficientPeriod();
-        const bool rotate_residues = ActiveMixedResiduesRotated();
-        const bool independent_extension_residues =
-            ActiveMixedIndependentExtensionResidues();
-        const uint32_t elements = block_bytes / 2u;
-        const int plane_bytes = (int)elements;
-
-        // Every mixed encoder needs the same complete coefficient period.
-        // Publish it once instead of rebuilding it for each message.
-        const MixedCoefficientRows* cached_rows = GetMixedCoefficientRows();
-        if (!cached_rows) {
-            return false;
-        }
-        const uint8_t* gf8_coefficient_rows[kMixedGF256RowsMax];
-        const uint16_t* gf16_coefficient_rows[kMixedGF16RowsMax];
-        for (uint32_t r = 0; r < subfield_rows; ++r) {
-            gf8_coefficient_rows[r] = cached_rows->Subfield[r];
-        }
-        for (uint32_t r = 0; r < extension_rows; ++r) {
-            gf16_coefficient_rows[r] = cached_rows->Extension[r];
-        }
-
-        // Accumulate the subfield rows interleaved: one GF(256) scale acts
-        // on both bytes of each extension element.  Keep all quotient RHS
-        // rows planar for the extension operations and the corner solve.
-        std::vector<uint8_t> gf8_rhs(
-            (size_t)subfield_rows * block_bytes, 0u);
-        std::vector<uint8_t> rhs_low((size_t)H * elements, 0u);
-        std::vector<uint8_t> rhs_high((size_t)H * elements, 0u);
-        std::vector<uint8_t> source_low(elements);
-        std::vector<uint8_t> source_high(elements);
-        void* gf8_destinations[kMixedGF256RowsMax];
-        uint8_t gf8_scales[kMixedGF256RowsMax];
-        for (uint32_t r = 0; r < subfield_rows; ++r) {
-            gf8_destinations[r] =
-                gf8_rhs.data() + (size_t)r * block_bytes;
-        }
-
-        const auto accumulate_subfield_residue = [&](
-            uint32_t m, const uint8_t* value) -> bool
-        {
-            for (uint32_t r = 0; r < subfield_rows; ++r) {
-                gf8_scales[r] = gf8_coefficient_rows[r][m];
-            }
-            gf256_muladd_multi_mem(
-                gf8_destinations, gf8_scales,
-                (int)subfield_rows, value, bytes);
-            st.HeavyMulAdds += subfield_rows;
-
-            return true;
-        };
-
-        const auto accumulate_extension_residue = [&](
-            uint32_t m, const uint8_t* value) -> bool
-        {
-            if (!GF16Deinterleave(
-                    value, source_low.data(), source_high.data(), block_bytes))
-            {
-                return false;
-            }
-            ++st.MixedPlaneConversions;
-            static_assert(
-                kMixedGF16Rows >= 2u,
-                "mixed completion pair kernel requires two GF16 rows");
-            const uint32_t row0 = subfield_rows;
-            const uint32_t row1 = row0 + 1u;
-            if (!GF16MulAddPlanar2(
-                    rhs_low.data() + (size_t)row0 * elements,
-                    rhs_high.data() + (size_t)row0 * elements,
-                    gf16_coefficient_rows[0][m],
-                    rhs_low.data() + (size_t)row1 * elements,
-                    rhs_high.data() + (size_t)row1 * elements,
-                    gf16_coefficient_rows[1][m],
-                    source_low.data(), source_high.data(), elements))
-            {
-                return false;
-            }
-#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-            for (uint32_t er = 2u; er < extension_rows; ++er)
-            {
-                const uint32_t row = subfield_rows + er;
-                if (!GF16MulAddPlanar(
-                        rhs_low.data() + (size_t)row * elements,
-                        rhs_high.data() + (size_t)row * elements,
-                        gf16_coefficient_rows[er][m],
-                        source_low.data(), source_high.data(), elements))
-                {
-                    return false;
-                }
-            }
-#endif
-            st.HeavyMulAdds += extension_rows;
-            st.MixedGF16MulAdds += extension_rows;
-            return true;
-        };
-
-        const auto accumulate_residue = [&](
-            uint32_t m, const uint8_t* value) -> bool
-        {
-            return accumulate_subfield_residue(m, value) &&
-                (independent_extension_residues ||
-                 accumulate_extension_residue(m, value));
-        };
-
-        const bool use_residue_buckets = heavy_base >= 2u * window;
-        const bool use_full_bucket_storage =
-            use_residue_buckets &&
-            (uint64_t)window * block_bytes <=
-                GetHeavyBucketStorageLimit();
-        if (use_full_bucket_storage)
-        {
-            std::vector<uint8_t> bucket((size_t)window * block_bytes, 0u);
-            if (!rotate_residues)
-            {
-                uint32_t m = 0u;
-                for (uint32_t c = 0; c < heavy_base; ++c)
-                {
-                    gf256_add_mem(
-                        bucket.data() + (size_t)m * block_bytes,
-                        column_value(c), bytes);
-                    ++st.HeavyBucketXors;
-                    if (++m == window) m = 0u;
-                }
-            }
-            else
-            {
-                uint32_t m = 0u;
-                uint32_t block_index = 0u;
-                uint32_t block_column = 0u;
-                for (uint32_t c = 0; c < heavy_base; ++c)
-                {
-                    gf256_add_mem(
-                        bucket.data() + (size_t)m * block_bytes,
-                        column_value(c), bytes);
-                    ++st.HeavyBucketXors;
-                    if (++block_column == window)
-                    {
-                        block_column = 0u;
-                        m = ActiveMixedResidueBlockShift(++block_index);
-                    }
-                    else if (++m == window) m = 0u;
-                }
-            }
-            for (uint32_t m = 0u; m < window; ++m) {
-                if (!accumulate_residue(
-                        m, bucket.data() + (size_t)m * block_bytes))
-                {
-                    return false;
-                }
-            }
-        }
-        else if (use_residue_buckets)
-        {
-            std::vector<uint8_t> bucket(block_bytes, 0u);
-            for (uint32_t m = 0; m < window; ++m)
-            {
-                std::fill(bucket.begin(), bucket.end(), uint8_t{0});
-                if (!rotate_residues)
-                {
-                    for (uint32_t c = m; c < heavy_base; c += window)
-                    {
-                        gf256_add_mem(bucket.data(), column_value(c), bytes);
-                        ++st.HeavyBucketXors;
-                    }
-                }
-                else
-                {
-                    uint32_t block_index = 0u;
-                    for (uint32_t block_base = 0u;
-                         block_base < heavy_base;
-                         block_base += window)
-                    {
-                        const uint32_t block_shift =
-                            ActiveMixedResidueBlockShift(block_index++);
-                        const uint32_t unshifted = m >= block_shift ?
-                            m - block_shift : m + window - block_shift;
-                        const uint32_t c = block_base + unshifted;
-                        if (c >= heavy_base) continue;
-                        gf256_add_mem(bucket.data(), column_value(c), bytes);
-                        ++st.HeavyBucketXors;
-                    }
-                }
-                if (!accumulate_residue(m, bucket.data())) return false;
-            }
-        }
-        else
-        {
-            if (!rotate_residues)
-            {
-                uint32_t m = 0u;
-                for (uint32_t c = 0; c < heavy_base; ++c)
-                {
-                    if (!accumulate_residue(m, column_value(c))) return false;
-                    if (++m == window) m = 0u;
-                }
-            }
-            else
-            {
-                uint32_t m = 0u;
-                uint32_t block_index = 0u;
-                uint32_t block_column = 0u;
-                for (uint32_t c = 0; c < heavy_base; ++c)
-                {
-                    if (!accumulate_residue(m, column_value(c))) return false;
-                    if (++block_column == window)
-                    {
-                        block_column = 0u;
-                        m = ActiveMixedResidueBlockShift(++block_index);
-                    }
-                    else if (++m == window) m = 0u;
-                }
-            }
-        }
-
-        if (independent_extension_residues)
-        {
-            if (use_full_bucket_storage)
-            {
-                std::vector<uint8_t> bucket(
-                    (size_t)window * block_bytes, 0u);
-                for (uint32_t c = 0u; c < heavy_base; ++c)
-                {
-                    const uint32_t m =
-                        ActiveMixedExtensionCoefficientResidue(c);
-                    gf256_add_mem(
-                        bucket.data() + (size_t)m * block_bytes,
-                        column_value(c), bytes);
-                    ++st.HeavyBucketXors;
-                }
-                for (uint32_t m = 0u; m < window; ++m) {
-                    if (!accumulate_extension_residue(
-                            m, bucket.data() + (size_t)m * block_bytes))
-                    {
-                        return false;
-                    }
-                }
-            }
-            else if (use_residue_buckets)
-            {
-                std::vector<uint8_t> bucket(block_bytes, 0u);
-                for (uint32_t m = 0u; m < window; ++m)
-                {
-                    std::fill(
-                        bucket.begin(), bucket.end(), uint8_t{0});
-                    uint32_t block_index = 0u;
-                    for (uint32_t block_base = 0u;
-                         block_base < heavy_base;
-                         block_base += window)
-                    {
-                        const uint32_t block_shift =
-                            ActiveMixedExtensionResidueBlockShift(
-                                block_index++);
-                        const uint32_t unshifted = m >= block_shift ?
-                            m - block_shift : m + window - block_shift;
-                        const uint32_t c = block_base + unshifted;
-                        if (c >= heavy_base) continue;
-                        gf256_add_mem(
-                            bucket.data(), column_value(c), bytes);
-                        ++st.HeavyBucketXors;
-                    }
-                    if (!accumulate_extension_residue(m, bucket.data())) {
-                        return false;
-                    }
-                }
-            }
-            else
-            {
-                for (uint32_t c = 0u; c < heavy_base; ++c) {
-                    if (!accumulate_extension_residue(
-                            ActiveMixedExtensionCoefficientResidue(c),
-                            column_value(c)))
-                    {
-                        return false;
-                    }
-                }
-            }
-        }
-
-        // Convert the active GF(256) row RHS blocks once, after their fast
-        // interleaved accumulation.  The extension rows are already in
-        // their final planar representation.
-        for (uint32_t r = 0; r < subfield_rows; ++r)
-        {
-            if (!GF16Deinterleave(
-                    gf8_rhs.data() + (size_t)r * block_bytes,
-                    rhs_low.data() + (size_t)r * elements,
-                    rhs_high.data() + (size_t)r * elements,
-                    block_bytes))
-            {
-                return false;
-            }
-            ++st.MixedPlaneConversions;
-        }
-
-        std::vector<uint16_t> corner((size_t)H * H);
-        for (uint32_t r = 0; r < subfield_rows; ++r) {
-            for (uint32_t j = 0; j < H; ++j) {
-                corner[(size_t)r * H + j] =
-                    gf8_coefficient_rows[r][
-                        ActiveMixedCoefficientResidue(heavy_base + j)];
-            }
-        }
-        for (uint32_t er = 0; er < extension_rows; ++er) {
-            const uint32_t r = subfield_rows + er;
-            for (uint32_t j = 0; j < H; ++j) {
-                corner[(size_t)r * H + j] =
-                    gf16_coefficient_rows[er][
-                        ActiveMixedExtensionCoefficientResidue(
-                            heavy_base + j)];
-            }
-        }
-
-        std::vector<uint32_t> pivot_row(H);
-        std::vector<uint8_t> used(H, 0u);
-        std::vector<uint8_t> scale_scratch(elements);
-        for (uint32_t j = 0; j < H; ++j)
-        {
-            uint32_t p = H;
-            for (uint32_t r = 0; r < H; ++r) {
-                if (!used[r] && corner[(size_t)r * H + j] != 0u) {
-                    p = r;
-                    break;
-                }
-            }
-            if (p >= H) return false;
-            used[p] = 1u;
-            pivot_row[j] = p;
-
-            const uint16_t pivot = corner[(size_t)p * H + j];
-            if (pivot != 1u)
-            {
-                const uint16_t inv = GF16InverseInitialized(pivot);
-                if (inv == 0u) return false;
-                for (uint32_t k = 0; k < H; ++k) {
-                    corner[(size_t)p * H + k] = GF16MultiplyInitialized(
-                        corner[(size_t)p * H + k], inv);
-                }
-                if (!GF16ScalePlanar(
-                        rhs_low.data() + (size_t)p * elements,
-                        rhs_high.data() + (size_t)p * elements,
-                        inv, scale_scratch.data(), elements))
-                {
-                    return false;
-                }
-                ++st.HeavySolveBlockOps;
-                ++st.MixedGF16SolveBlockOps;
-            }
-
-            uint8_t* pending_low = nullptr;
-            uint8_t* pending_high = nullptr;
-            uint16_t pending_scale = 0u;
-            for (uint32_t r = 0; r < H; ++r)
-            {
-                const uint16_t scale = corner[(size_t)r * H + j];
-                if (r == p || scale == 0u) continue;
-                for (uint32_t k = 0; k < H; ++k) {
-                    corner[(size_t)r * H + k] ^= GF16MultiplyInitialized(
-                        scale, corner[(size_t)p * H + k]);
-                }
-                uint8_t* const destination_low =
-                    rhs_low.data() + (size_t)r * elements;
-                uint8_t* const destination_high =
-                    rhs_high.data() + (size_t)r * elements;
-                const uint8_t* const source_low_row =
-                    rhs_low.data() + (size_t)p * elements;
-                const uint8_t* const source_high_row =
-                    rhs_high.data() + (size_t)p * elements;
-                if (!pending_low)
-                {
-                    pending_low = destination_low;
-                    pending_high = destination_high;
-                    pending_scale = scale;
-                }
-                else
-                {
-                    if (!GF16MulAddPlanar2(
-                            pending_low, pending_high, pending_scale,
-                            destination_low, destination_high, scale,
-                            source_low_row, source_high_row, elements))
-                    {
-                        return false;
-                    }
-                    pending_low = nullptr;
-                    st.HeavySolveBlockOps += 2u;
-                    st.MixedGF16SolveBlockOps += 2u;
-                }
-            }
-            if (pending_low)
-            {
-                const uint8_t* const source_low_row =
-                    rhs_low.data() + (size_t)p * elements;
-                const uint8_t* const source_high_row =
-                    rhs_high.data() + (size_t)p * elements;
-                if (pending_scale == 1u)
-                {
-                    gf256_add_mem(
-                        pending_low, source_low_row, plane_bytes);
-                    gf256_add_mem(
-                        pending_high, source_high_row, plane_bytes);
-                }
-                else if (!GF16MulAddPlanar(
-                        pending_low, pending_high, pending_scale,
-                        source_low_row, source_high_row, elements))
-                {
-                    return false;
-                }
-                ++st.HeavySolveBlockOps;
-                ++st.MixedGF16SolveBlockOps;
-            }
-        }
-
-        for (uint32_t j = 0; j < H; ++j)
-        {
-            const uint32_t p = pivot_row[j];
-            if (!GF16Interleave(
-                    rhs_low.data() + (size_t)p * elements,
-                    rhs_high.data() + (size_t)p * elements,
-                    parity_blocks + (size_t)(S + D2 + j) * block_bytes,
-                    block_bytes))
-            {
-                return false;
-            }
-            ++st.HeavySolveBlockOps;
-            ++st.MixedGF16SolveBlockOps;
-            ++st.MixedPlaneConversions;
-        }
-        return true;
     }
 
     // --- Cauchy heavy rows ---
@@ -1263,9 +821,7 @@ WirehairResult PrecodeEncoder::InitializeResult(
     if (gf256_init() != 0) {
         return Wirehair_UnsupportedPlatform;
     }
-    if (!source_blocks || block_bytes == 0u || block_bytes > 0x7fffffffu ||
-        (system.Params.Field == CompletionField::MixedGF256GF16 &&
-         (block_bytes & 1u) != 0u))
+    if (!source_blocks || block_bytes == 0u || block_bytes > 0x7fffffffu)
     {
         return Wirehair_InvalidInput;
     }
@@ -1463,13 +1019,9 @@ MessagePrecodeEncoder::MessagePrecodeEncoder()
 
 namespace {
 
-bool IsSupportedMessagePrecodeContract(
-    CompletionField completion,
-    uint32_t recovery_mix_count)
+bool IsSupportedMessagePrecodeContract(uint32_t recovery_mix_count)
 {
-    return recovery_mix_count == kCertifiedPacketMixCount ||
-        (completion == CompletionField::MixedGF256GF16 &&
-         recovery_mix_count == 2u);
+    return recovery_mix_count == kCertifiedPacketMixCount;
 }
 
 uint64_t MessagePrecodeMatrixSeed(
@@ -1495,9 +1047,7 @@ PrecodeParams MakeMessagePrecodeParams(
     const MessagePrecodeEncoderOptions& options)
 {
     const uint64_t seed = MessagePrecodeMatrixSeed(profile, options);
-    return options.Completion == CompletionField::MixedGF256GF16 ?
-        MakeMixedParams(profile.BlockCount, seed) :
-        MakeCertifiedParams(profile.BlockCount, seed);
+    return MakeCertifiedParams(profile.BlockCount, seed);
 }
 
 } // namespace
@@ -1510,7 +1060,6 @@ bool HasMessagePrecodeContractState(const SeedProfile& profile)
         profile.V2StaircaseCount != 0u ||
         profile.V2DenseRowCount != 0u ||
         profile.V2HeavyRowCount != 0u ||
-        profile.V2CompletionField != CompletionField::GF256 ||
         profile.V2SourceHits != 0u ||
         profile.V2PrecodeSeed != 0u ||
         profile.V2PacketPeelSeed != 0u ||
@@ -1532,27 +1081,20 @@ bool ResolveMessagePrecodeOptions(
         }
         resolved_options = requested_options ? *requested_options :
             MessagePrecodeEncoderOptions();
-        return (resolved_options.Completion == CompletionField::GF256 ||
-                resolved_options.Completion ==
-                    CompletionField::MixedGF256GF16) &&
-            IsSupportedMessagePrecodeContract(
-                resolved_options.Completion,
-                resolved_options.RecoveryMixCount);
+        return IsSupportedMessagePrecodeContract(
+            resolved_options.RecoveryMixCount);
     }
 
     if (profile.V2SeedAttempt >= kMaxPacketSeedAttempts ||
-        (profile.V2CompletionField != CompletionField::GF256 &&
-         profile.V2CompletionField != CompletionField::MixedGF256GF16) ||
         profile.V2PrecodeContractVersion !=
-            PrecodeContractVersion(profile.V2CompletionField) ||
+            PrecodeContractVersion() ||
         profile.V2PacketRowContractVersion != kPacketRowContractVersion ||
         profile.V2StaircaseCount == 0u ||
         profile.V2StaircaseCount != profile.DenseCount ||
         profile.V2DenseRowCount == 0u ||
         profile.V2HeavyRowCount == 0u ||
         profile.V2SourceHits == 0u ||
-        !IsSupportedMessagePrecodeContract(
-            profile.V2CompletionField, profile.V2RecoveryMixCount))
+        !IsSupportedMessagePrecodeContract(profile.V2RecoveryMixCount))
     {
         return false;
     }
@@ -1562,17 +1104,11 @@ bool ResolveMessagePrecodeOptions(
     bound.DenseIdentityCorner = profile.V2DenseIdentityCorner;
     bound.PrecodeSeedSalt = profile.V2PrecodeSeedSalt;
     bound.RecoveryRowSeedSalt = profile.V2RecoveryRowSeedSalt;
-    bound.Completion = profile.V2CompletionField;
     if (requested_options &&
         (requested_options->RecoveryMixCount != bound.RecoveryMixCount ||
          requested_options->DenseIdentityCorner != bound.DenseIdentityCorner ||
          requested_options->PrecodeSeedSalt != bound.PrecodeSeedSalt ||
          requested_options->RecoveryRowSeedSalt != bound.RecoveryRowSeedSalt))
-    {
-        return false;
-    }
-    if (requested_options &&
-        requested_options->Completion != bound.Completion)
     {
         return false;
     }
@@ -1596,12 +1132,6 @@ bool ResolveMessagePrecodeConfiguration(
     MessagePrecodeEncoderOptions validated_options;
     if (!ResolveMessagePrecodeOptions(
             profile, &options, validated_options))
-    {
-        return false;
-    }
-    if (validated_options.Completion ==
-            CompletionField::MixedGF256GF16 &&
-        (profile.BlockBytes & 1u) != 0u)
     {
         return false;
     }
@@ -1631,7 +1161,6 @@ bool ResolveMessagePrecodeConfiguration(
         if (profile.V2StaircaseCount != expected.Staircase ||
             profile.V2DenseRowCount != expected.DenseRows ||
             profile.V2HeavyRowCount != expected.HeavyRows ||
-            profile.V2CompletionField != expected.Field ||
             profile.V2SourceHits != expected.SourceHits ||
             profile.V2PrecodeSeed != expected.Seed ||
             profile.V2PacketPeelSeed != expected_packet.PeelSeed ||
@@ -1673,13 +1202,11 @@ void BindMessagePrecodeProfile(
     profile.DenseCount = (uint16_t)system.Params.Staircase;
     profile.V2SeedSelected = true;
     profile.V2SeedAttempt = packet_seed_attempt;
-    profile.V2PrecodeContractVersion =
-        PrecodeContractVersion(system.Params.Field);
+    profile.V2PrecodeContractVersion = PrecodeContractVersion();
     profile.V2PacketRowContractVersion = kPacketRowContractVersion;
     profile.V2StaircaseCount = system.Params.Staircase;
     profile.V2DenseRowCount = system.Params.DenseRows;
     profile.V2HeavyRowCount = system.Params.HeavyRows;
-    profile.V2CompletionField = system.Params.Field;
     profile.V2SourceHits = system.Params.SourceHits;
     profile.V2PrecodeSeed = system.Params.Seed;
     profile.V2PacketPeelSeed = packet_config.PeelSeed;

@@ -391,394 +391,165 @@ bool CheckNonzeroAttemptProfile()
     return ok;
 }
 
-bool CheckMixedDescriptorContract(
+bool CheckExplicitCertifiedProfile(
     const std::vector<uint8_t>& message,
-    const uint8_t* old_golden,
+    const uint8_t* golden,
     WirehairV2Codec default_encoder)
 {
-    static const uint8_t MixedGolden[
-        WIREHAIR_V2_PROFILE_SERIALIZED_BYTES] = {
-        0x57, 0x48, 0x56, 0x32, 0x01, 0x00, 0x20, 0x00,
-        0xb7, 0x9b, 0x6f, 0x45, 0x5d, 0xce, 0x61, 0xe1,
-        0x75, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-    };
-    WirehairV2Profile mixed = {};
-    mixed.struct_bytes = (uint32_t)sizeof(mixed);
-    mixed.profile_version = WIREHAIR_V2_PROFILE_VERSION;
-    mixed.profile_id = WIREHAIR_V2_PROFILE_MIXED_2026_07;
-    mixed.message_bytes = message.size();
-    mixed.block_bytes = 16u;
-    uint8_t serialized[WIREHAIR_V2_PROFILE_SERIALIZED_BYTES] = {};
+    uint8_t selected[WIREHAIR_V2_PROFILE_SERIALIZED_BYTES] = {};
     uint32_t serialized_bytes = 0u;
-    WirehairV2Profile parsed = {};
-    if (!Check(wirehair_v2_profile_serialize(
-            &mixed, serialized, sizeof(serialized), &serialized_bytes) ==
-                WirehairV2_Success &&
-            serialized_bytes == sizeof(serialized) &&
-            std::memcmp(serialized, MixedGolden, sizeof(serialized)) == 0,
-            "mixed descriptor golden") ||
-        !Check(wirehair_v2_profile_deserialize(
-            serialized, sizeof(serialized), &parsed) ==
-                WirehairV2_Success &&
-            parsed.profile_id == WIREHAIR_V2_PROFILE_MIXED_2026_07 &&
-            parsed.block_bytes == 16u,
-            "mixed descriptor roundtrip"))
-    {
-        return false;
-    }
-
-    uint8_t untouched[WIREHAIR_V2_PROFILE_SERIALIZED_BYTES];
-    const auto reset_untouched = [&]() {
-        std::memset(untouched, 0x5a, sizeof(untouched));
-    };
-    const auto all_untouched = [&]() {
-        for (uint8_t value : untouched) {
-            if (value != 0x5au) return false;
-        }
-        return true;
-    };
-    reset_untouched();
-    mixed.block_bytes = 15u;
-    if (!Check(wirehair_v2_profile_serialize(
-            &mixed, untouched, sizeof(untouched), &serialized_bytes) ==
-                WirehairV2_InvalidDimensions && all_untouched(),
-            "mixed odd block rejected transactionally"))
-    {
-        return false;
-    }
-
-    WirehairV2Codec rejected =
-        reinterpret_cast<WirehairV2Codec>(uintptr_t(1));
-    serialized_bytes = 0u;
-    reset_untouched();
-    if (!Check(wirehair_v2_encoder_create_profile_id(
-            WIREHAIR_V2_PROFILE_MIXED_2026_07,
-            message.data(), message.size(), 15u,
-            untouched, sizeof(untouched), &serialized_bytes, &rejected) ==
-                WirehairV2_InvalidDimensions &&
-            rejected == nullptr && all_untouched(),
-            "mixed selector rejects odd block before output write"))
-    {
-        return false;
-    }
-    rejected = reinterpret_cast<WirehairV2Codec>(uintptr_t(1));
-    reset_untouched();
-    if (!Check(wirehair_v2_encoder_create_profile_id(
-            UINT64_C(0x0123456789abcdef),
-            message.data(), message.size(), 16u,
-            untouched, sizeof(untouched), &serialized_bytes, &rejected) ==
-                WirehairV2_UnsupportedProfile &&
-            rejected == nullptr && all_untouched(),
-            "selector rejects unknown profile transactionally"))
-    {
-        return false;
-    }
-
-    uint8_t selected_mixed[WIREHAIR_V2_PROFILE_SERIALIZED_BYTES] = {};
-    WirehairV2Codec mixed_encoder = nullptr;
-    WirehairV2Codec mixed_decoder = nullptr;
-    serialized_bytes = 0u;
-    if (!Check(wirehair_v2_encoder_create_profile_id(
-            WIREHAIR_V2_PROFILE_MIXED_2026_07,
-            message.data(), message.size(), 16u,
-            selected_mixed, sizeof(selected_mixed), &serialized_bytes,
-            &mixed_encoder) == WirehairV2_Success &&
-            serialized_bytes == sizeof(selected_mixed) &&
-            std::memcmp(
-                selected_mixed, MixedGolden, sizeof(selected_mixed)) == 0,
-            "mixed selector creates canonical encoder") ||
-        !Check(wirehair_v2_decoder_create(
-            selected_mixed, sizeof(selected_mixed), &mixed_decoder) ==
-                WirehairV2_Success,
-            "mixed descriptor creates decoder"))
-    {
-        wirehair_v2_free(mixed_encoder);
-        wirehair_v2_free(mixed_decoder);
-        return false;
-    }
-    const uint32_t mixed_block_count =
-        (uint32_t)((message.size() + 15u) / 16u);
-    WirehairV2Result decode_result = WirehairV2_NeedMore;
-    uint8_t mixed_block[16] = {};
-    for (uint32_t id = 0; id < mixed_block_count; ++id)
-    {
-        if (id == 3u) continue;
-        uint32_t data_bytes = 0u;
-        if (!Check(wirehair_v2_encode(
-                mixed_encoder, id, mixed_block, sizeof(mixed_block),
-                &data_bytes) == WirehairV2_Success,
-                "mixed systematic encode"))
-        {
-            wirehair_v2_free(mixed_encoder);
-            wirehair_v2_free(mixed_decoder);
-            return false;
-        }
-        decode_result = wirehair_v2_decode(
-            mixed_decoder, id, mixed_block, data_bytes);
-    }
-    for (uint32_t id = mixed_block_count;
-         decode_result == WirehairV2_NeedMore &&
-         id < mixed_block_count + 64u; ++id)
-    {
-        uint32_t data_bytes = 0u;
-        if (!Check(wirehair_v2_encode(
-                mixed_encoder, id, mixed_block, sizeof(mixed_block),
-                &data_bytes) == WirehairV2_Success,
-                "mixed repair encode"))
-        {
-            wirehair_v2_free(mixed_encoder);
-            wirehair_v2_free(mixed_decoder);
-            return false;
-        }
-        decode_result = wirehair_v2_decode(
-            mixed_decoder, id, mixed_block, data_bytes);
-    }
-    std::vector<uint8_t> mixed_recovered(message.size(), 0u);
-    uint64_t mixed_recovered_bytes = 0u;
-    const bool mixed_e2e_ok = Check(
-        decode_result == WirehairV2_Success &&
-        wirehair_v2_recover(
-            mixed_decoder, mixed_recovered.data(), mixed_recovered.size(),
-            &mixed_recovered_bytes) == WirehairV2_Success &&
-        mixed_recovered_bytes == message.size() &&
-        mixed_recovered == message,
-        "mixed public loss/repair recovery");
-    wirehair_v2_free(mixed_encoder);
-    wirehair_v2_free(mixed_decoder);
-    if (!mixed_e2e_ok) return false;
-
-    uint8_t selected_old[WIREHAIR_V2_PROFILE_SERIALIZED_BYTES] = {};
-    WirehairV2Codec old_encoder = nullptr;
-    const bool old_ok = Check(wirehair_v2_encoder_create_profile_id(
+    WirehairV2Codec explicit_encoder = nullptr;
+    const bool created = Check(wirehair_v2_encoder_create_profile_id(
             WIREHAIR_V2_PROFILE_CERTIFIED_2026_07,
             message.data(), message.size(), 16u,
-            selected_old, sizeof(selected_old), &serialized_bytes,
-            &old_encoder) == WirehairV2_Success,
-            "explicit old-profile selection") &&
-        Check(std::memcmp(
-            selected_old, old_golden, sizeof(selected_old)) == 0,
-            "explicit old selector preserves golden");
-    bool old_payload_ok = old_ok;
+            selected, sizeof(selected), &serialized_bytes,
+            &explicit_encoder) == WirehairV2_Success,
+            "explicit certified-profile selection") &&
+        Check(serialized_bytes == sizeof(selected) &&
+            std::memcmp(selected, golden, sizeof(selected)) == 0,
+            "explicit certified selector preserves descriptor golden");
+
+    bool payload_ok = created;
     const uint32_t compare_ids[] = {0u, 12345u};
     for (uint32_t id : compare_ids)
     {
-        uint8_t selected_block[16] = {};
+        uint8_t explicit_block[16] = {};
         uint8_t default_block[16] = {};
-        uint32_t selected_bytes = 0u;
+        uint32_t explicit_bytes = 0u;
         uint32_t default_bytes = 0u;
-        old_payload_ok = old_payload_ok && Check(
+        payload_ok = payload_ok && Check(
             wirehair_v2_encode(
-                old_encoder, id, selected_block, sizeof(selected_block),
-                &selected_bytes) == WirehairV2_Success &&
+                explicit_encoder, id, explicit_block, sizeof(explicit_block),
+                &explicit_bytes) == WirehairV2_Success &&
             wirehair_v2_encode(
                 default_encoder, id, default_block, sizeof(default_block),
                 &default_bytes) == WirehairV2_Success &&
-            selected_bytes == default_bytes &&
-            std::memcmp(selected_block, default_block, selected_bytes) == 0,
+            explicit_bytes == default_bytes &&
+            std::memcmp(explicit_block, default_block, explicit_bytes) == 0,
             id == 0u ?
-                "explicit old selector systematic equation identity" :
-                "explicit old selector repair equation identity");
+                "explicit certified systematic equation identity" :
+                "explicit certified repair equation identity");
     }
-    wirehair_v2_free(old_encoder);
+    wirehair_v2_free(explicit_encoder);
+
     wirehair::v2::SerializedProfile cpp_profile;
     wirehair::v2::Encoder cpp_encoder;
-    return old_payload_ok && Check(cpp_encoder.Create(
+    return payload_ok && Check(cpp_encoder.Create(
             WIREHAIR_V2_PROFILE_CERTIFIED_2026_07,
             message.data(), message.size(), 16u, cpp_profile) ==
                 WirehairV2_Success,
-            "C++ explicit old-profile selection") &&
+            "C++ explicit certified-profile selection") &&
         Check(std::memcmp(
-            cpp_profile.data(), old_golden, cpp_profile.size()) == 0,
-            "C++ explicit selector preserves golden");
+            cpp_profile.data(), golden, cpp_profile.size()) == 0,
+            "C++ explicit certified selector preserves golden");
 }
 
-bool CheckMix2DescriptorContract(const std::vector<uint8_t>& message)
+bool CheckRetiredProfileRejection(
+    const std::vector<uint8_t>& message,
+    const uint8_t* certified_golden)
 {
-    static const uint8_t Mix2Golden[
-        WIREHAIR_V2_PROFILE_SERIALIZED_BYTES] = {
-        0x57, 0x48, 0x56, 0x32, 0x01, 0x00, 0x20, 0x00,
-        0xa2, 0x12, 0x06, 0x87, 0x7a, 0xf2, 0xa4, 0x20,
-        0x75, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-    };
-    static const uint8_t ExpectedMix2Repair12345[16] = {
-        0x58, 0x40, 0x5d, 0x91, 0x8b, 0x25, 0x4e, 0xf3,
-        0xc0, 0xb9, 0x7e, 0x74, 0x96, 0x4f, 0x76, 0x10
-    };
-    static const uint8_t ExpectedMix3Repair12345[16] = {
-        0x85, 0x10, 0x24, 0xef, 0xe4, 0x8d, 0x79, 0x3a,
-        0x8f, 0xdd, 0x5d, 0xbc, 0x76, 0x8b, 0x5d, 0x1e
+    // These identifiers were once assigned to experimental equation systems.
+    // Keep them as private tombstones: they must never be accepted or reused.
+    static const uint64_t RetiredProfileIds[] = {
+        UINT64_C(0xe161ce5d456f9bb7),
+        UINT64_C(0x20a4f27a870612a2)
     };
 
-    WirehairV2Profile native = {};
-    native.struct_bytes = (uint32_t)sizeof(native);
-    native.profile_version = WIREHAIR_V2_PROFILE_VERSION;
-    native.profile_id = WIREHAIR_V2_PROFILE_MIXED_MIX2_2026_07;
-    native.message_bytes = message.size();
-    native.block_bytes = 16u;
-    uint8_t serialized[WIREHAIR_V2_PROFILE_SERIALIZED_BYTES] = {};
-    uint32_t serialized_bytes = 0u;
-    WirehairV2Profile parsed = {};
-    if (!Check(wirehair_v2_profile_serialize(
-            &native, serialized, sizeof(serialized), &serialized_bytes) ==
-                WirehairV2_Success &&
-            serialized_bytes == sizeof(serialized) &&
-            std::memcmp(serialized, Mix2Golden, sizeof(serialized)) == 0,
-            "mixed/mix2 descriptor golden") ||
-        !Check(wirehair_v2_profile_validate(
-            serialized, sizeof(serialized)) == WirehairV2_Success,
-            "mixed/mix2 descriptor validation") ||
-        !Check(wirehair_v2_profile_deserialize(
-            serialized, sizeof(serialized), &parsed) == WirehairV2_Success &&
-            parsed.profile_id ==
-                WIREHAIR_V2_PROFILE_MIXED_MIX2_2026_07 &&
-            parsed.message_bytes == message.size() &&
-            parsed.block_bytes == 16u && parsed.seed_attempt == 0u,
-            "mixed/mix2 descriptor roundtrip"))
+    for (uint64_t retired_id : RetiredProfileIds)
     {
-        return false;
-    }
+        WirehairV2Profile native = {};
+        native.struct_bytes = (uint32_t)sizeof(native);
+        native.profile_version = WIREHAIR_V2_PROFILE_VERSION;
+        native.profile_id = retired_id;
+        native.message_bytes = message.size();
+        native.block_bytes = 16u;
 
-    uint8_t untouched[WIREHAIR_V2_PROFILE_SERIALIZED_BYTES];
-    std::memset(untouched, 0x5a, sizeof(untouched));
-    WirehairV2Codec rejected =
-        reinterpret_cast<WirehairV2Codec>(uintptr_t(1));
-    if (!Check(wirehair_v2_encoder_create_profile_id(
-            WIREHAIR_V2_PROFILE_MIXED_MIX2_2026_07,
-            message.data(), message.size(), 15u,
-            untouched, sizeof(untouched), &serialized_bytes, &rejected) ==
-                WirehairV2_InvalidDimensions && rejected == nullptr &&
-            std::all_of(
-                untouched, untouched + sizeof(untouched),
-                [](uint8_t value) { return value == 0x5au; }),
-            "mixed/mix2 selector rejects odd block transactionally"))
-    {
-        return false;
-    }
+        uint8_t output[WIREHAIR_V2_PROFILE_SERIALIZED_BYTES];
+        const auto reset_output = [&](uint8_t value) {
+            std::memset(output, value, sizeof(output));
+        };
+        const auto output_is = [&](uint8_t value) {
+            return std::all_of(
+                output, output + sizeof(output),
+                [=](uint8_t byte) { return byte == value; });
+        };
 
-    WirehairV2Codec encoder = nullptr;
-    WirehairV2Codec recreated = nullptr;
-    WirehairV2Codec decoder = nullptr;
-    uint8_t selected[WIREHAIR_V2_PROFILE_SERIALIZED_BYTES] = {};
-    serialized_bytes = 0u;
-    if (!Check(wirehair_v2_encoder_create_profile_id(
-            WIREHAIR_V2_PROFILE_MIXED_MIX2_2026_07,
-            message.data(), message.size(), 16u,
-            selected, sizeof(selected), &serialized_bytes, &encoder) ==
-                WirehairV2_Success &&
-            serialized_bytes == sizeof(selected) &&
-            std::memcmp(selected, Mix2Golden, sizeof(selected)) == 0,
-            "mixed/mix2 selector creates canonical encoder") ||
-        !Check(wirehair_v2_encoder_create_profile(
-            message.data(), selected, sizeof(selected), &recreated) ==
-                WirehairV2_Success,
-            "mixed/mix2 descriptor recreates encoder") ||
-        !Check(wirehair_v2_decoder_create(
-            selected, sizeof(selected), &decoder) == WirehairV2_Success,
-            "mixed/mix2 descriptor creates decoder"))
-    {
-        wirehair_v2_free(encoder);
-        wirehair_v2_free(recreated);
-        wirehair_v2_free(decoder);
-        return false;
-    }
-
-    const uint32_t block_count = (uint32_t)((message.size() + 15u) / 16u);
-    WirehairV2Result decode_result = WirehairV2_NeedMore;
-    uint8_t block[16] = {};
-    uint8_t recreated_block[16] = {};
-    for (uint32_t id = block_count;
-         decode_result == WirehairV2_NeedMore &&
-         id < block_count + 96u; ++id)
-    {
-        uint32_t block_bytes = 0u;
-        uint32_t recreated_bytes = 0u;
-        if (!Check(wirehair_v2_encode(
-                encoder, id, block, sizeof(block), &block_bytes) ==
-                    WirehairV2_Success && block_bytes == sizeof(block),
-                "mixed/mix2 repair-only encode") ||
-            !Check(wirehair_v2_encode(
-                recreated, id, recreated_block, sizeof(recreated_block),
-                &recreated_bytes) == WirehairV2_Success &&
-                recreated_bytes == block_bytes &&
-                std::memcmp(block, recreated_block, block_bytes) == 0,
-                "mixed/mix2 descriptor equation reproduction"))
+        uint32_t output_bytes = 0u;
+        reset_output(0x5au);
+        if (!Check(wirehair_v2_profile_serialize(
+                &native, output, sizeof(output), &output_bytes) ==
+                    WirehairV2_UnsupportedProfile &&
+                output_bytes == sizeof(output) && output_is(0x5au),
+                "retired profile serialization rejected transactionally"))
         {
-            wirehair_v2_free(encoder);
-            wirehair_v2_free(recreated);
-            wirehair_v2_free(decoder);
             return false;
         }
-        decode_result = wirehair_v2_decode(
-            decoder, id, block, block_bytes);
+
+        uint8_t serialized[WIREHAIR_V2_PROFILE_SERIALIZED_BYTES];
+        std::memcpy(serialized, certified_golden, sizeof(serialized));
+        for (unsigned byte = 0; byte < 8u; ++byte) {
+            serialized[8u + byte] =
+                (uint8_t)(retired_id >> (8u * byte));
+        }
+
+        if (!Check(wirehair_v2_profile_validate(
+                serialized, sizeof(serialized)) ==
+                    WirehairV2_UnsupportedProfile,
+                "retired serialized profile validation rejected"))
+        {
+            return false;
+        }
+
+        WirehairV2Profile parsed;
+        std::memset(&parsed, 0xa5, sizeof(parsed));
+        if (!Check(wirehair_v2_profile_deserialize(
+                serialized, sizeof(serialized), &parsed) ==
+                    WirehairV2_UnsupportedProfile &&
+                IsZeroProfile(parsed),
+                "retired serialized profile parse rejected transactionally"))
+        {
+            return false;
+        }
+
+        WirehairV2Codec codec =
+            reinterpret_cast<WirehairV2Codec>(uintptr_t(1));
+        if (!Check(wirehair_v2_encoder_create_profile(
+                message.data(), serialized, sizeof(serialized), &codec) ==
+                    WirehairV2_UnsupportedProfile &&
+                codec == nullptr,
+                "retired descriptor encoder rejected transactionally"))
+        {
+            return false;
+        }
+
+        codec = reinterpret_cast<WirehairV2Codec>(uintptr_t(1));
+        if (!Check(wirehair_v2_decoder_create(
+                serialized, sizeof(serialized), &codec) ==
+                    WirehairV2_UnsupportedProfile &&
+                codec == nullptr,
+                "retired descriptor decoder rejected transactionally"))
+        {
+            return false;
+        }
+
+        output_bytes = 0u;
+        reset_output(0xa5u);
+        codec = reinterpret_cast<WirehairV2Codec>(uintptr_t(1));
+        if (!Check(wirehair_v2_encoder_create_profile_id(
+                retired_id,
+                message.data(), message.size(), 16u,
+                output, sizeof(output), &output_bytes, &codec) ==
+                    WirehairV2_UnsupportedProfile &&
+                output_bytes == sizeof(output) && output_is(0xa5u) &&
+                codec == nullptr,
+                "retired selector rejected transactionally"))
+        {
+            return false;
+        }
     }
 
-    std::vector<uint8_t> recovered(message.size(), 0u);
-    uint64_t recovered_bytes = 0u;
-    const bool recovered_ok = Check(
-        decode_result == WirehairV2_Success &&
-        wirehair_v2_recover(
-            decoder, recovered.data(), recovered.size(), &recovered_bytes) ==
-                WirehairV2_Success &&
-        recovered_bytes == message.size() && recovered == message,
-        "mixed/mix2 public repair-only recovery");
-    if (!recovered_ok)
-    {
-        wirehair_v2_free(encoder);
-        wirehair_v2_free(recreated);
-        wirehair_v2_free(decoder);
-        return false;
-    }
-
-    WirehairV2Codec mix3_encoder = nullptr;
-    uint8_t mix3_profile[WIREHAIR_V2_PROFILE_SERIALIZED_BYTES] = {};
-    uint8_t mix2_repair[16] = {};
-    uint8_t mix3_repair[16] = {};
-    uint32_t mix2_bytes = 0u;
-    uint32_t mix3_bytes = 0u;
-    const bool separated = Check(wirehair_v2_encoder_create_profile_id(
-            WIREHAIR_V2_PROFILE_MIXED_2026_07,
-            message.data(), message.size(), 16u,
-            mix3_profile, sizeof(mix3_profile), &serialized_bytes,
-            &mix3_encoder) == WirehairV2_Success,
-            "frozen mixed/mix3 selector remains available") &&
-        Check(wirehair_v2_encode(
-            encoder, 12345u, mix2_repair, sizeof(mix2_repair), &mix2_bytes) ==
-                WirehairV2_Success && mix2_bytes == sizeof(mix2_repair),
-            "mixed/mix2 repair-vector generation") &&
-        Check(wirehair_v2_encode(
-            mix3_encoder, 12345u, mix3_repair, sizeof(mix3_repair),
-            &mix3_bytes) == WirehairV2_Success && mix3_bytes == mix2_bytes,
-            "frozen mixed/mix3 repair-vector generation") &&
-        Check(std::memcmp(
-            mix2_repair, ExpectedMix2Repair12345,
-            sizeof(ExpectedMix2Repair12345)) == 0,
-            "mixed/mix2 repair-vector golden") &&
-        Check(std::memcmp(
-            mix3_repair, ExpectedMix3Repair12345,
-            sizeof(ExpectedMix3Repair12345)) == 0,
-            "frozen mixed/mix3 repair-vector golden") &&
-        Check(std::memcmp(mix2_repair, mix3_repair, mix2_bytes) != 0,
-            "mixed profile IDs bind distinct packet equations");
-    wirehair_v2_free(mix3_encoder);
-    wirehair_v2_free(encoder);
-    wirehair_v2_free(recreated);
-    wirehair_v2_free(decoder);
-    if (!separated) return false;
-
-    wirehair::v2::SerializedProfile cpp_profile;
-    wirehair::v2::Encoder cpp_encoder;
-    return Check(cpp_encoder.Create(
-            WIREHAIR_V2_PROFILE_MIXED_MIX2_2026_07,
-            message.data(), message.size(), 16u, cpp_profile) ==
-                WirehairV2_Success,
-            "C++ mixed/mix2 explicit profile selection") &&
-        Check(std::memcmp(
-            cpp_profile.data(), Mix2Golden, cpp_profile.size()) == 0,
-            "C++ mixed/mix2 selector preserves golden");
+    return true;
 }
-
 } // namespace
 
 int main()
@@ -1096,10 +867,10 @@ int main()
     if (!CheckNonzeroAttemptProfile()) {
         return fail_after_create();
     }
-    if (!CheckMixedDescriptorContract(message, ExpectedProfile, encoder)) {
+    if (!CheckExplicitCertifiedProfile(message, ExpectedProfile, encoder)) {
         return fail_after_create();
     }
-    if (!CheckMix2DescriptorContract(message)) {
+    if (!CheckRetiredProfileRejection(message, ExpectedProfile)) {
         return fail_after_create();
     }
 

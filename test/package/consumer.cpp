@@ -21,7 +21,7 @@ int CppV2RoundTrip()
     wirehair::v2::Encoder encoder;
     wirehair::v2::Decoder decoder;
     if (encoder.Create(
-            WIREHAIR_V2_PROFILE_MIXED_2026_07,
+            WIREHAIR_V2_PROFILE_CERTIFIED_2026_07,
             message.data(), message.size(), 16u, profile) !=
                 WirehairV2_Success ||
         decoder.Create(profile) != WirehairV2_Success)
@@ -31,7 +31,7 @@ int CppV2RoundTrip()
     WirehairV2Profile parsed{};
     if (wirehair_v2_profile_deserialize(
             profile.data(), profile.size(), &parsed) != WirehairV2_Success ||
-        parsed.profile_id != WIREHAIR_V2_PROFILE_MIXED_2026_07)
+        parsed.profile_id != WIREHAIR_V2_PROFILE_CERTIFIED_2026_07)
     {
         return 4;
     }
