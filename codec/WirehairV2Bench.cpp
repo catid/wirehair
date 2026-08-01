@@ -4877,6 +4877,21 @@ bool ParseCanonicalU64Arg(
         BadArg(option, text);
 }
 
+// Raw architecture campaigns must not inherit the production per-K seed
+// repair tables.  This versioned policy is intentionally simple: the same
+// caller-supplied 64-bit construction seed is the precode matrix seed for
+// every K, and the packet peel seed is its XOR-folded 32-bit value.  K may
+// still select structural geometry such as GetDenseCount(K), but it never
+// participates in either seed derivation.
+static const char kUniformConstructionSeedPolicy[] =
+    "matrix-c-peel-lo32-xor-hi32-v1";
+
+uint32_t UniformConstructionPeelSeed(uint64_t construction_seed)
+{
+    return (uint32_t)construction_seed ^
+        (uint32_t)(construction_seed >> 32);
+}
+
 // Shared by the timing and reliability test-hook commands.  Keeping the
 // complete TLS recipe in one helper prevents either harness from silently
 // measuring a different grouped completion matrix.
@@ -4986,6 +5001,94 @@ bool ConfigureGroupedTimingArm(const GroupedTimingArm& arm)
         return false;
     }
     return true;
+}
+
+bool BuildUniformAttemptZeroSystem(
+    const GroupedTimingArm& arm,
+    uint32_t K,
+    uint64_t construction_seed,
+    wirehair_v2::PrecodeParams& base_params,
+    wirehair_v2::PacketRowConfig& base_config,
+    wirehair_v2::PrecodeSystem& system,
+    wirehair_v2::PacketRowConfig& config)
+{
+    if (!GroupedTimingRowMaskIsValid(arm) ||
+        !ConfigureGroupedTimingArm(arm))
+    {
+        return false;
+    }
+    const uint32_t dense_count = wirehair::GetDenseCount(K);
+    if (dense_count == 0u) return false;
+
+    base_params = wirehair_v2::MakeMixedParams(K, construction_seed);
+    base_params.Staircase = dense_count;
+    base_params.DenseRows = 12u;
+    base_params.DenseIdentityCorner = false;
+    base_params.DenseTwoAnchor = true;
+    base_params.DenseTwoAnchorPhase = 0u;
+    base_params.HeavyFamily =
+        wirehair_v2::HeavyCoefficientFamily::PeriodicCauchy;
+    base_config.PeelSeed =
+        UniformConstructionPeelSeed(construction_seed);
+    base_config.MixCount = 2u;
+
+    // Literal attempt zero is part of the experiment definition.  In
+    // particular, do not call SelectSeedProfile or
+    // SelectSystematicConfiguration here: either would apply production
+    // per-K repairs and make architecture arms incomparable across roots.
+    const wirehair_v2::PrecodeParams params =
+        wirehair_v2::PrecodeParamsForAttempt(base_params, 0u);
+    config = wirehair_v2::PacketConfigForAttempt(base_config, 0u);
+    if (!wirehair_v2::BuildPrecodeSystem(params, system)) return false;
+
+    const uint32_t expected_heavy =
+        arm.GF256Rows + wirehair_v2::kMixedGF16Rows;
+    return system.Params.BlockCount == K &&
+        system.Params.Staircase == dense_count &&
+        system.Params.DenseRows == 12u &&
+        system.Params.HeavyRows == expected_heavy &&
+        system.Params.SourceHits == base_params.SourceHits &&
+        system.Params.Field ==
+            wirehair_v2::CompletionField::MixedGF256GF16 &&
+        !system.Params.DenseIdentityCorner &&
+        system.Params.DenseTwoAnchor &&
+        system.Params.DenseTwoAnchorPhase == 0u &&
+        system.Params.HeavyFamily ==
+            wirehair_v2::HeavyCoefficientFamily::PeriodicCauchy &&
+        system.Params.Seed == construction_seed &&
+        base_params.Seed == construction_seed &&
+        config.PeelSeed == UniformConstructionPeelSeed(construction_seed) &&
+        base_config.PeelSeed == config.PeelSeed &&
+        config.MixCount == 2u && base_config.MixCount == config.MixCount;
+}
+
+WirehairResult ProbeUniformAttemptZeroSystematic(
+    const wirehair_v2::PrecodeSystem& system,
+    const wirehair_v2::PacketRowConfig& config)
+{
+    try
+    {
+        const uint32_t K = system.Params.BlockCount;
+        const uint8_t zero[2] = {0u, 0u};
+        const uint32_t probe_bytes =
+            system.Params.Field ==
+                    wirehair_v2::CompletionField::MixedGF256GF16 ?
+                2u : 1u;
+        std::vector<wirehair_v2::SolvePacket> packets(K);
+        for (uint32_t block_id = 0u; block_id < K; ++block_id) {
+            packets[block_id].BlockId = block_id;
+            packets[block_id].Data = zero;
+        }
+        std::vector<uint8_t> intermediate;
+        return wirehair_v2::SolvePrecodeSystem(
+            system, config, packets, probe_bytes, intermediate);
+    }
+    catch (const std::bad_alloc&) {
+        return Wirehair_OOM;
+    }
+    catch (const std::length_error&) {
+        return Wirehair_OOM;
+    }
 }
 #endif
 
@@ -6470,6 +6573,7 @@ struct PreferredTimingCell
     std::vector<wirehair_v2::SolvePacket> Packets;
     std::vector<uint8_t> PayloadStorage;
     uint8_t* Payload = nullptr;
+    uint64_t TraceSeed = 0u;
     std::string TraceSha256;
 };
 
@@ -6477,6 +6581,7 @@ bool BuildFullPayloadTimingCell(
     const wirehair_v2::PrecodeParams& params,
     const wirehair_v2::PacketRowConfig& config,
     uint32_t block_bytes,
+    uint32_t seed_block_bytes,
     uint32_t overhead,
     double loss,
     uint64_t external_seed,
@@ -6502,9 +6607,10 @@ bool BuildFullPayloadTimingCell(
     }
     const uint64_t loss_seed = external_seed ^
         ((uint64_t)K * UINT64_C(0x9e3779b97f4a7c15)) ^
-        ((uint64_t)block_bytes * UINT64_C(0xbf58476d1ce4e5b9)) ^
+        ((uint64_t)seed_block_bytes * UINT64_C(0xbf58476d1ce4e5b9)) ^
         ((uint64_t)(salt_overhead ? overhead : 0u) *
             UINT64_C(0x94d049bb133111eb));
+    cell.TraceSeed = loss_seed;
     const std::vector<uint32_t> ids = BuildPacketSchedule(
         K, (uint32_t)delivered_wide, loss, loss_seed, schedule);
     if (ids.size() != (size_t)delivered_wide) return false;
@@ -6531,7 +6637,7 @@ bool BuildFullPayloadTimingCell(
     cell.Packets.resize((size_t)delivered_wide);
     std::ostringstream trace;
     trace << trace_tag << "\n"
-          << "K=" << K << "\nblock_bytes=" << block_bytes
+          << "K=" << K << "\nblock_bytes=" << seed_block_bytes
           << "\nseed=" << external_seed << "\nloss="
           << std::setprecision(17) << loss << "\nschedule="
           << PacketScheduleName(schedule) << "\nids=";
@@ -6556,7 +6662,8 @@ bool BuildPreferredTimingCell(
     PreferredTimingCell& cell)
 {
     return BuildFullPayloadTimingCell(
-        params, config, block_bytes, 4u, loss, external_seed, schedule,
+        params, config, block_bytes, block_bytes, 4u, loss, external_seed,
+        schedule,
         false, "wirehair-wh2-preferred-timing-trace-v1", cell);
 }
 
@@ -7095,6 +7202,7 @@ int CmdGroupedTiming(int argc, char** argv)
     uint64_t eviction_bytes = 0u;
     double loss = 0.0;
     uint64_t seed = 0u;
+    uint64_t construction_seed = 0u;
     PacketScheduleKind schedule = PacketScheduleKind::Burst;
     GroupedTimingCacheState cache_state = GroupedTimingCacheState::Cold;
     GroupedTimingArm control_arm;
@@ -7116,6 +7224,7 @@ int CmdGroupedTiming(int argc, char** argv)
     bool have_cache_state = false;
     bool have_loss = false;
     bool have_seed = false;
+    bool have_construction_seed = false;
     bool have_schedule = false;
     bool have_cycle_index = false;
 
@@ -7315,6 +7424,23 @@ int CmdGroupedTiming(int argc, char** argv)
                 !ParseCanonicalU64Arg("--seed", value, seed)) return 1;
             have_seed = true;
         }
+        else if (!std::strcmp(argv[i], "--construction-seed")) {
+            if (have_construction_seed) {
+                std::fprintf(stderr,
+                    "groupedtiming --construction-seed specified more than "
+                    "once\n");
+                return 1;
+            }
+            if (!TakeArg(
+                    "groupedtiming", "--construction-seed",
+                    argc, argv, i, value) ||
+                !ParseCanonicalU64Arg(
+                    "--construction-seed", value, construction_seed))
+            {
+                return 1;
+            }
+            have_construction_seed = true;
+        }
         else if (!std::strcmp(argv[i], "--schedule")) {
             if (have_schedule || !TakeArg(
                     "groupedtiming", "--schedule", argc, argv, i, value) ||
@@ -7337,7 +7463,8 @@ int CmdGroupedTiming(int argc, char** argv)
         !have_control_buckets || !have_candidate_period ||
         !have_candidate_gf256_rows || !have_candidate_rows ||
         !have_candidate_row_mask || !have_candidate_buckets || !have_eviction ||
-        !have_cache_state || !have_loss || !have_seed || !have_schedule)
+        !have_cache_state || !have_loss || !have_seed ||
+        !have_construction_seed || !have_schedule)
     {
         std::fprintf(stderr,
             "groupedtiming requires --N, --bb, --overhead, "
@@ -7346,8 +7473,8 @@ int CmdGroupedTiming(int argc, char** argv)
             "--control-buckets, --candidate-period, "
             "--candidate-gf256-rows, --candidate-grouped-rows, "
             "--candidate-grouped-row-mask, --candidate-buckets, "
-            "--evict-bytes, --cache-state, --loss, --seed, and "
-            "--schedule\n");
+            "--evict-bytes, --cache-state, --loss, --seed, "
+            "--construction-seed, and --schedule\n");
         return 1;
     }
     const auto invalid_arm = [](const GroupedTimingArm& arm) {
@@ -7397,44 +7524,32 @@ int CmdGroupedTiming(int argc, char** argv)
     wirehair_v2::PacketRowConfig control_config;
     wirehair_v2::PrecodeSystem candidate_system;
     wirehair_v2::PacketRowConfig candidate_config;
-    uint32_t control_attempt = 0u;
-    uint32_t candidate_attempt = 0u;
     uint32_t control_grouped_hash_seed = 0u;
     uint32_t candidate_grouped_hash_seed = 0u;
-    if (!ConfigureGroupedTimingArm(control_arm) ||
-        !MakeH12Q0Configuration(
-            K, block_bytes, control_base_params, control_base_config))
+    if (!BuildUniformAttemptZeroSystem(
+            control_arm, K, construction_seed,
+            control_base_params, control_base_config,
+            control_system, control_config))
     {
         std::fprintf(stderr,
-            "groupedtiming could not construct the control arm\n");
+            "groupedtiming could not construct uniform attempt0 control "
+            "arm\n");
         return 2;
     }
-    // The grouped reliability campaign used the raw two-anchor architecture
-    // at every K, rather than the later adaptive named-profile cutoff.
-    control_base_params.DenseTwoAnchor = true;
     if (control_arm.GroupedRows != 0u) {
         control_grouped_hash_seed =
             wirehair_v2::ActiveMixedGroupedGF256HashSeed();
     }
-    const WirehairResult control_select =
-        wirehair_v2::SelectSystematicConfiguration(
-            control_base_params, control_base_config,
-            control_system, control_config, &control_attempt);
-    if (control_select != Wirehair_Success) {
-        std::fprintf(stderr,
-            "groupedtiming control seed selection failed result=%d\n",
-            (int)control_select);
-        return 2;
-    }
-    if (!ConfigureGroupedTimingArm(candidate_arm) ||
-        !MakeH12Q0Configuration(
-            K, block_bytes, candidate_base_params, candidate_base_config))
+    if (!BuildUniformAttemptZeroSystem(
+            candidate_arm, K, construction_seed,
+            candidate_base_params, candidate_base_config,
+            candidate_system, candidate_config))
     {
         std::fprintf(stderr,
-            "groupedtiming could not construct the candidate arm\n");
+            "groupedtiming could not construct uniform attempt0 candidate "
+            "arm\n");
         return 2;
     }
-    candidate_base_params.DenseTwoAnchor = true;
     if (candidate_arm.GroupedRows != 0u) {
         candidate_grouped_hash_seed =
             wirehair_v2::ActiveMixedGroupedGF256HashSeed();
@@ -7447,32 +7562,47 @@ int CmdGroupedTiming(int argc, char** argv)
             "groupedtiming arms do not share one base graph/configuration\n");
         return 2;
     }
-    const WirehairResult candidate_select =
-        wirehair_v2::SelectSystematicConfiguration(
-            candidate_base_params, candidate_base_config,
-            candidate_system, candidate_config, &candidate_attempt);
-    if (candidate_select != Wirehair_Success) {
-        std::fprintf(stderr,
-            "groupedtiming candidate seed selection failed result=%d\n",
-            (int)candidate_select);
-        return 2;
-    }
-    if (control_attempt != candidate_attempt ||
-        !SameGroupedTimingBaseGraph(
+    if (!SameGroupedTimingBaseGraph(
             control_system.Params, control_config,
             candidate_system.Params, candidate_config))
     {
         std::fprintf(stderr,
-            "groupedtiming selected arms do not share one binary base "
+            "groupedtiming attempt0 arms do not share one binary base "
             "graph\n");
+        return 2;
+    }
+    if (!ConfigureGroupedTimingArm(control_arm)) {
+        std::fprintf(stderr,
+            "groupedtiming could not configure attempt0 control probe\n");
+        return 2;
+    }
+    const WirehairResult control_systematic_probe =
+        ProbeUniformAttemptZeroSystematic(control_system, control_config);
+    if (!ConfigureGroupedTimingArm(candidate_arm)) {
+        std::fprintf(stderr,
+            "groupedtiming could not configure attempt0 candidate probe\n");
+        return 2;
+    }
+    const WirehairResult candidate_systematic_probe =
+        ProbeUniformAttemptZeroSystematic(candidate_system, candidate_config);
+    if ((control_systematic_probe != Wirehair_Success &&
+         control_systematic_probe != Wirehair_NeedMore) ||
+        (candidate_systematic_probe != Wirehair_Success &&
+         candidate_systematic_probe != Wirehair_NeedMore))
+    {
+        std::fprintf(stderr,
+            "groupedtiming attempt0 systematic probe failed control=%d "
+            "candidate=%d\n",
+            (int)control_systematic_probe,
+            (int)candidate_systematic_probe);
         return 2;
     }
 
     PreferredTimingCell cell;
     if (!BuildFullPayloadTimingCell(
-            control_system.Params, control_config, block_bytes, overhead, loss,
-            seed, schedule, true,
-            "wirehair-wh2-grouped-timing-trace-v2", cell))
+            control_system.Params, control_config, block_bytes, 64u,
+            overhead, loss, seed, schedule, false,
+            "wirehair-wh2-grouped-timing-trace-v3", cell))
     {
         std::fprintf(stderr, "groupedtiming solve setup failed\n");
         return 2;
@@ -7541,11 +7671,19 @@ int CmdGroupedTiming(int argc, char** argv)
     const uint64_t packet_payload_bytes =
         ((uint64_t)K + overhead) * block_bytes;
     std::printf(
-        "# groupedtiming: schema=v2 policy=h12-h13-q0-grouped "
+        "# groupedtiming: schema=v3 policy=h12-h13-q0-grouped "
         "timing_scope=solve cycles=%u order=ABBABAAB discard_cycle=0 "
         "cycle_mode=%s cycle_index=%s N=%u bb=%u overhead=%u "
-        "loss=%.17g seed=%llu schedule=%s cache_state=%s "
-        "overhead_stream=salted "
+        "loss=%.17g seed=%llu seed_role=loss-trace-root "
+        "seed_block_bytes=64 solve_block_bytes=%u payload_block_bytes=%u "
+        "schedule=%s cache_state=%s overhead_stream=paired "
+        "packet_trace_schema=wirehair-wh2-grouped-timing-trace-v3 "
+        "packet_trace_seed=0x%llx "
+        "construction_seed_policy=%s construction_seed=%llu "
+        "production_seed_fixups_applied=0 construction_attempt=0 "
+        "systematic_probe=direct-attempt0 "
+        "control_systematic_probe_result=%d "
+        "candidate_systematic_probe_result=%d "
         "evict_bytes=%llu eviction_prefaulted=1 "
         "control_period=%u control_gf256_rows=%u "
         "control_heavy_rows=%u control_precode_count=%u "
@@ -7562,9 +7700,11 @@ int CmdGroupedTiming(int argc, char** argv)
         "candidate_final_h_a_columns=%u gf16_rows=%u "
         "dense_two_anchor=1 binary_base_graph_shared=1 "
         "heavy_rows_arm_specific=1 "
-        "arm_runtimes=separate-precode-count-v1 control_attempt=%u "
+        "arm_runtimes=separate-precode-count-v1 control_attempt=0 "
+        "control_base_matrix_seed=0x%llx control_base_peel_seed=0x%x "
         "control_matrix_seed=0x%llx control_peel_seed=0x%x "
-        "candidate_attempt=%u candidate_matrix_seed=0x%llx "
+        "candidate_attempt=0 candidate_base_matrix_seed=0x%llx "
+        "candidate_base_peel_seed=0x%x candidate_matrix_seed=0x%llx "
         "candidate_peel_seed=0x%x mix=2 "
         "payload=distinct-packet-zero-v1 payload_count=%u "
         "payload_bytes=%llu payload_alignment=64 payload_prefaulted=1 "
@@ -7573,12 +7713,18 @@ int CmdGroupedTiming(int argc, char** argv)
         "grouped_schedule_prefix=materialized-per-slot-outside-timer "
         "allocator_tls_state=preflight-warmed "
         "preflight_control_result=%d preflight_candidate_result=%d "
-        "cell_class=%s common_success=%u trace_sha256=%s\n",
+        "cell_class=%s common_success=%u packet_trace_sha256=%s\n",
         have_cycle_index ? 1u : 4u,
         have_cycle_index ? "replacement" : "full",
         cycle_index_text.c_str(), K, block_bytes, overhead, loss,
-        (unsigned long long)seed, PacketScheduleName(schedule),
+        (unsigned long long)seed, block_bytes, block_bytes,
+        PacketScheduleName(schedule),
         GroupedTimingCacheStateName(cache_state),
+        (unsigned long long)cell.TraceSeed,
+        kUniformConstructionSeedPolicy,
+        (unsigned long long)construction_seed,
+        (int)control_systematic_probe,
+        (int)candidate_systematic_probe,
         (unsigned long long)eviction_bytes,
         control_arm.Period, control_arm.GF256Rows,
         control_system.Params.HeavyRows, control_precode_count,
@@ -7595,9 +7741,12 @@ int CmdGroupedTiming(int argc, char** argv)
         candidate_arm.GroupedRows != 0u ?
             candidate_system.Params.HeavyRows : 0u,
         wirehair_v2::kMixedGF16Rows,
-        control_attempt,
+        (unsigned long long)control_base_params.Seed,
+        control_base_config.PeelSeed,
         (unsigned long long)control_system.Params.Seed,
-        control_config.PeelSeed, candidate_attempt,
+        control_config.PeelSeed,
+        (unsigned long long)candidate_base_params.Seed,
+        candidate_base_config.PeelSeed,
         (unsigned long long)candidate_system.Params.Seed,
         candidate_config.PeelSeed,
         K + overhead,
@@ -7608,8 +7757,11 @@ int CmdGroupedTiming(int argc, char** argv)
     std::printf(
         "N,bb,overhead,schedule,seed,loss,cache_state,cycle,slot,arm,"
         "period,gf256_rows,gf16_rows,heavy_rows,precode_count,grouped_rows,"
-        "grouped_gf256_row_mask,buckets_requested,seed_attempt,matrix_seed,"
-        "peel_seed,preflight_result,cell_class,common_success,result,"
+        "grouped_gf256_row_mask,buckets_requested,construction_attempt,"
+        "construction_seed_policy,construction_seed,"
+        "production_seed_fixups_applied,systematic_probe_result,"
+        "base_matrix_seed,base_peel_seed,matrix_seed,peel_seed,"
+        "preflight_result,cell_class,common_success,result,"
         "outcome_stable,elapsed_ns,saturated,"
         "cpu_before,cpu_after,cpu_migrated,minflt_delta,majflt_delta,"
         "fault_contaminated,inactivated,binary_def,heavy_gain,block_xors,"
@@ -7635,8 +7787,12 @@ int CmdGroupedTiming(int argc, char** argv)
                 cell.Runtime : candidate_runtime;
             const uint32_t active_precode_count = control ?
                 control_precode_count : candidate_precode_count;
-            const uint32_t active_attempt = control ?
-                control_attempt : candidate_attempt;
+            const wirehair_v2::PrecodeParams& active_base_params = control ?
+                control_base_params : candidate_base_params;
+            const wirehair_v2::PacketRowConfig& active_base_config = control ?
+                control_base_config : candidate_base_config;
+            const WirehairResult systematic_probe_result = control ?
+                control_systematic_probe : candidate_systematic_probe;
             const WirehairResult preflight_result = control ?
                 control_preflight.Result : candidate_preflight.Result;
             if (!ConfigureGroupedTimingArm(arm)) {
@@ -7681,7 +7837,8 @@ int CmdGroupedTiming(int argc, char** argv)
             const bool outcome_stable = result == preflight_result;
             std::printf(
                 "%u,%u,%u,%s,%llu,%.17g,%s,%u,%u,%s,%u,%u,%u,%u,%u,"
-                "%u,0x%x,%s,%u,0x%llx,0x%x,%d,%s,%u,%d,%u,%llu,%u,%d,"
+                "%u,0x%x,%s,0,%s,%llu,0,%d,0x%llx,0x%x,0x%llx,0x%x,%d,%s,"
+                "%u,%d,%u,%llu,%u,%d,"
                 "%d,%d,%lld,%lld,%d,%u,%u,%u,%llu,%llu,%llu,%llu,%llu,"
                 "%llu,%llu,%llu,%llu,%llu,%u,%llu,%llu,%llu,%llu,"
                 "%zu\n",
@@ -7693,7 +7850,11 @@ int CmdGroupedTiming(int argc, char** argv)
                 active_system.Params.HeavyRows, active_precode_count,
                 arm.GroupedRows, arm.GroupedRowMask,
                 MixedResidueBucketModeName(arm.Buckets),
-                active_attempt,
+                kUniformConstructionSeedPolicy,
+                (unsigned long long)construction_seed,
+                (int)systematic_probe_result,
+                (unsigned long long)active_base_params.Seed,
+                active_base_config.PeelSeed,
                 (unsigned long long)active_system.Params.Seed,
                 active_config.PeelSeed,
                 (int)preflight_result, outcome_class,
@@ -7739,21 +7900,6 @@ int CmdGroupedTiming(int argc, char** argv)
 #endif // test hooks && !WIREHAIR_V2_BENCH_DISABLE_PREFERRED_ATTEMPT
 
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-// Raw architecture campaigns must not inherit the production per-K seed
-// repair tables.  This versioned policy is intentionally simple: the same
-// caller-supplied 64-bit construction seed is the precode matrix seed for
-// every K, and the packet peel seed is its XOR-folded 32-bit value.  K may
-// still select structural geometry such as GetDenseCount(K), but it never
-// participates in either seed derivation.
-static const char kUniformConstructionSeedPolicy[] =
-    "matrix-c-peel-lo32-xor-hi32-v1";
-
-uint32_t UniformConstructionPeelSeed(uint64_t construction_seed)
-{
-    return (uint32_t)construction_seed ^
-        (uint32_t)(construction_seed >> 32);
-}
-
 struct PrecodeFailRawTraceReceipt
 {
     uint64_t Seed = 0u;
@@ -7805,35 +7951,6 @@ bool BuildPrecodeFailRawTraceReceipt(
     trace << '\n';
     receipt.Sha256 = Sha256Hex(trace.str());
     return true;
-}
-
-WirehairResult ProbePrecodeFailRawSystematicAttemptZero(
-    const wirehair_v2::PrecodeSystem& system,
-    const wirehair_v2::PacketRowConfig& config)
-{
-    try
-    {
-        const uint32_t K = system.Params.BlockCount;
-        const uint8_t zero[2] = {0u, 0u};
-        const uint32_t probe_bytes =
-            system.Params.Field ==
-                    wirehair_v2::CompletionField::MixedGF256GF16 ?
-                2u : 1u;
-        std::vector<wirehair_v2::SolvePacket> packets(K);
-        for (uint32_t block_id = 0u; block_id < K; ++block_id) {
-            packets[block_id].BlockId = block_id;
-            packets[block_id].Data = zero;
-        }
-        std::vector<uint8_t> intermediate;
-        return wirehair_v2::SolvePrecodeSystem(
-            system, config, packets, probe_bytes, intermediate);
-    }
-    catch (const std::bad_alloc&) {
-        return Wirehair_OOM;
-    }
-    catch (const std::length_error&) {
-        return Wirehair_OOM;
-    }
 }
 
 struct GroupedRecoveryArmObservation
@@ -7986,54 +8103,22 @@ bool RunGroupedRecoveryArm(
 {
     observation = GroupedRecoveryArmObservation{};
     observation.Arm = arm;
-    if (!GroupedTimingRowMaskIsValid(arm) ||
-        !ConfigureGroupedTimingArm(arm))
-    {
-        std::fprintf(stderr,
-            "groupedrecovery could not configure %s for N=%u\n",
-            arm_name, K);
-        return false;
-    }
-    observation.GroupedHashSeed =
-        wirehair_v2::ActiveMixedGroupedGF256HashSeed();
-
-    const uint32_t dense_count = wirehair::GetDenseCount(K);
-    if (dense_count == 0u)
-    {
-        std::fprintf(stderr,
-            "groupedrecovery invalid structural dense count for %s N=%u\n",
-            arm_name, K);
-        return false;
-    }
-    observation.BaseParams = wirehair_v2::MakeMixedParams(
-        K, construction_seed);
-    observation.BaseParams.Staircase = dense_count;
-    observation.BaseParams.DenseRows = 12u;
-    observation.BaseParams.DenseIdentityCorner = false;
-    observation.BaseParams.DenseTwoAnchor = true;
-    observation.BaseParams.DenseTwoAnchorPhase = 0u;
-    observation.BaseParams.HeavyFamily =
-        wirehair_v2::HeavyCoefficientFamily::PeriodicCauchy;
-    observation.BaseConfig.PeelSeed =
-        UniformConstructionPeelSeed(construction_seed);
-    observation.BaseConfig.MixCount = 2u;
-
-    // This command deliberately never calls SelectSystematicConfiguration:
-    // q0 means the literal attempt-zero graph, even when it needs more rows.
-    observation.Params = wirehair_v2::PrecodeParamsForAttempt(
-        observation.BaseParams, 0u);
-    observation.Config = wirehair_v2::PacketConfigForAttempt(
-        observation.BaseConfig, 0u);
     wirehair_v2::PrecodeSystem system;
-    if (!wirehair_v2::BuildPrecodeSystem(observation.Params, system))
+    if (!BuildUniformAttemptZeroSystem(
+            arm, K, construction_seed,
+            observation.BaseParams, observation.BaseConfig,
+            system, observation.Config))
     {
         std::fprintf(stderr,
             "groupedrecovery could not build attempt0 %s for N=%u\n",
             arm_name, K);
         return false;
     }
+    observation.GroupedHashSeed =
+        wirehair_v2::ActiveMixedGroupedGF256HashSeed();
+    observation.Params = system.Params;
     observation.SystematicProbeResult =
-        ProbePrecodeFailRawSystematicAttemptZero(
+        ProbeUniformAttemptZeroSystematic(
             system, observation.Config);
     if (observation.SystematicProbeResult != Wirehair_Success &&
         observation.SystematicProbeResult != Wirehair_NeedMore)
@@ -8044,30 +8129,6 @@ bool RunGroupedRecoveryArm(
             arm_name, K, (int)observation.SystematicProbeResult);
         return false;
     }
-    const uint32_t expected_heavy =
-        arm.GF256Rows + wirehair_v2::kMixedGF16Rows;
-    if (system.Params.BlockCount != K ||
-        system.Params.Staircase != dense_count ||
-        system.Params.DenseRows != 12u ||
-        system.Params.HeavyRows != expected_heavy ||
-        system.Params.SourceHits != observation.BaseParams.SourceHits ||
-        system.Params.Field !=
-            wirehair_v2::CompletionField::MixedGF256GF16 ||
-        system.Params.DenseIdentityCorner ||
-        !system.Params.DenseTwoAnchor ||
-        system.Params.DenseTwoAnchorPhase != 0u ||
-        system.Params.HeavyFamily !=
-            wirehair_v2::HeavyCoefficientFamily::PeriodicCauchy ||
-        system.Params.Seed != observation.BaseParams.Seed ||
-        observation.Config.PeelSeed != observation.BaseConfig.PeelSeed ||
-        observation.Config.MixCount != 2u)
-    {
-        std::fprintf(stderr,
-            "groupedrecovery attempt0 geometry mismatch for %s N=%u\n",
-            arm_name, K);
-        return false;
-    }
-    observation.Params = system.Params;
     const uint64_t precode_count_wide =
         (uint64_t)system.Params.Staircase + system.Params.DenseRows +
         system.Params.HeavyRows;
@@ -9663,7 +9724,7 @@ int CmdPrecodeFail(int argc, char** argv)
                     config = wirehair_v2::PacketConfigForAttempt(
                         base_config, 0u);
                     systematic_probe_result =
-                        ProbePrecodeFailRawSystematicAttemptZero(
+                        ProbeUniformAttemptZeroSystematic(
                             system, config);
                     if (systematic_probe_result != Wirehair_Success &&
                         systematic_probe_result != Wirehair_NeedMore)

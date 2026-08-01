@@ -135,15 +135,29 @@ cost rather than relying on a peel-only proxy.
 Test builds also expose `groupedtiming` for promotion-grade, paired timing of
 the raw grouped-GF(256) completion experiments.  Each invocation binds one
 hard packet schedule (`--N`, `--bb`, `--overhead`, `--loss`, `--seed`, and
-`--schedule`) and compares explicit control/candidate period, GF(256)-row,
-grouped-row, logical grouped-row-mask, and residue-bucket settings via the
-corresponding `--control-*` and `--candidate-*` options.  Both
+`--schedule`) plus a required canonical-decimal `--construction-seed C`, and
+compares explicit control/candidate period, GF(256)-row, grouped-row, logical
+grouped-row-mask, and residue-bucket settings via the corresponding
+`--control-*` and `--candidate-*` options.  `--seed` is only the loss-trace
+root.  The packet-ID schedule always derives from seed block width 64 and an
+unsalted (`overhead_stream=paired`) overhead prefix, so a fixed
+K/root/schedule selects identical packet IDs at 64-, 1280-, and 4096-byte
+payload widths.  Both
 `--control-grouped-row-mask` and `--candidate-grouped-row-mask` are required,
 preventing an H13 arm from silently replacing the intended logical rows with
-its different default suffix.  The arms share the selected
-binary-base construction (every parameter except `H`), packet-ID/payload trace,
-and payload addresses while using separate packet runtimes for their derived
-`S+D+H` precode counts.  It uses distinct 64-byte-aligned, prefaulted packet
+its different default suffix.
+
+The raw construction is literal attempt zero: matrix seed `C`, peel seed
+`lo32(C) XOR hi32(C)`, `S = GetDenseCount(K)`, `D = 12`, dense two-anchor
+enabled at phase zero, and no production `SelectSeedProfile` or
+`SelectSystematicConfiguration` repair/escalation.  A direct systematic probe
+records whether that unmodified graph is weak; the benchmark does not repair
+it.  Schema-v3 preambles and every CSV row receipt the construction policy,
+root, attempt, base and actual seeds, probe result, and
+`production_seed_fixups_applied=0`.  The arms share this binary-base
+construction (every parameter except `H`), packet-ID/payload trace, and payload
+addresses while using separate packet runtimes for their derived `S+D+H`
+precode counts.  It uses distinct 64-byte-aligned, prefaulted packet
 payloads, preflights both arms, then emits four `ABBABAAB` cycles (or one
 requested replacement cycle) with raw nanoseconds, internal solve phases, work
 counters, CPU migration, and fault receipts.  The active H12/H13 row and packed

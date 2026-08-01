@@ -2003,6 +2003,7 @@ expect_failure("bad --seed value" preferredtiming
 # under the hard trace, but every physical observation must reproduce its
 # arm's preflight result so the common-success classification remains
 # trustworthy.
+set(grouped_timing_construction_seed 2611923443488327891)
 run_bench(grouped_timing_result grouped_timing grouped_timing_err
     groupedtiming --N 4096 --bb 64 --overhead 4
     --control-period 48 --control-gf256-rows 10
@@ -2011,17 +2012,19 @@ run_bench(grouped_timing_result grouped_timing grouped_timing_err
     --candidate-period 48 --candidate-gf256-rows 11
     --candidate-grouped-rows 3 --candidate-grouped-row-mask 0x380
     --candidate-buckets separate --evict-bytes 4096 --cache-state cold
-    --loss 0.5 --seed 4660 --schedule adversarial)
+    --loss 0.5 --seed 4660
+    --construction-seed ${grouped_timing_construction_seed}
+    --schedule adversarial)
 string(REGEX MATCHALL
     "\n4096,64,4,adversarial,4660,0.5,cold," grouped_timing_rows
     "${grouped_timing}")
 list(LENGTH grouped_timing_rows grouped_timing_row_count)
 string(REGEX MATCHALL
-    "\n4096,64,4,adversarial,4660,0.5,cold,[0-3],[0-7],control,48,10,2,12,[0-9]+,3,0x380,separate,[0-9]+,0x[0-9a-f]+,0x[0-9a-f]+,[01],(common-success|control-only|candidate-only|common-failure),[01],[01],1,[0-9]+,0,"
+    "\n4096,64,4,adversarial,4660,0.5,cold,[0-3],[0-7],control,48,10,2,12,[0-9]+,3,0x380,separate,0,matrix-c-peel-lo32-xor-hi32-v1,2611923443488327891,0,[01],0x243f6a8885a308d3,0xa19c625b,0x243f6a8885a308d3,0xa19c625b,[01],(common-success|control-only|candidate-only|common-failure),[01],[01],1,[0-9]+,0,"
     grouped_timing_control_rows "${grouped_timing}")
 list(LENGTH grouped_timing_control_rows grouped_timing_control_row_count)
 string(REGEX MATCHALL
-    "\n4096,64,4,adversarial,4660,0.5,cold,[0-3],[0-7],candidate,48,11,2,13,[0-9]+,3,0x380,separate,[0-9]+,0x[0-9a-f]+,0x[0-9a-f]+,[01],(common-success|control-only|candidate-only|common-failure),[01],[01],1,[0-9]+,0,"
+    "\n4096,64,4,adversarial,4660,0.5,cold,[0-3],[0-7],candidate,48,11,2,13,[0-9]+,3,0x380,separate,0,matrix-c-peel-lo32-xor-hi32-v1,2611923443488327891,0,[01],0x243f6a8885a308d3,0xa19c625b,0x243f6a8885a308d3,0xa19c625b,[01],(common-success|control-only|candidate-only|common-failure),[01],[01],1,[0-9]+,0,"
     grouped_timing_candidate_rows "${grouped_timing}")
 list(LENGTH grouped_timing_candidate_rows
     grouped_timing_candidate_row_count)
@@ -2030,16 +2033,63 @@ if(NOT grouped_timing_result EQUAL 0 OR grouped_timing_err OR
    NOT grouped_timing_control_row_count EQUAL 16 OR
    NOT grouped_timing_candidate_row_count EQUAL 16 OR
    NOT grouped_timing MATCHES
-       "schema=v2.*timing_scope=solve.*cycles=4 order=ABBABAAB discard_cycle=0.*cycle_mode=full cycle_index=all.*overhead=4.*overhead_stream=salted.*control_period=48 control_gf256_rows=10 control_heavy_rows=12 control_precode_count=94 control_grouped_rows=3 control_grouped_gf256_row_mask=0x380 control_buckets=separate control_grouped_hash_seed=0xb7e15162 control_final_h_a_columns=12.*candidate_period=48 candidate_gf256_rows=11 candidate_heavy_rows=13 candidate_precode_count=95 candidate_grouped_rows=3 candidate_grouped_gf256_row_mask=0x380 candidate_buckets=separate candidate_grouped_hash_seed=0xb7e15163 candidate_final_h_a_columns=13 gf16_rows=2.*binary_base_graph_shared=1 heavy_rows_arm_specific=1 arm_runtimes=separate-precode-count-v1 control_attempt=0 control_matrix_seed=0x136889600063cbf control_peel_seed=0x382fe3a7 candidate_attempt=0 candidate_matrix_seed=0x136889600063cbf candidate_peel_seed=0x382fe3a7.*payload=distinct-packet-zero-v1.*payload_count=4100.*payload_alignment=64 payload_prefaulted=1.*system_build=outside-timer tls_reapply=full-per-slot-outside-timer coefficient_layout=materialized-per-slot-outside-timer grouped_schedule_prefix=materialized-per-slot-outside-timer allocator_tls_state=preflight-warmed.*trace_sha256=adcd246a3988d9e24655575c51b7552661649ba470df4367e4fc02a362fb6db7" OR
+       "schema=v3.*timing_scope=solve.*cycles=4 order=ABBABAAB discard_cycle=0.*cycle_mode=full cycle_index=all.*overhead=4.*seed=4660 seed_role=loss-trace-root seed_block_bytes=64 solve_block_bytes=64 payload_block_bytes=64.*overhead_stream=paired packet_trace_schema=wirehair-wh2-grouped-timing-trace-v3 packet_trace_seed=0xa18a4cb39ef82c74 construction_seed_policy=matrix-c-peel-lo32-xor-hi32-v1 construction_seed=2611923443488327891 production_seed_fixups_applied=0 construction_attempt=0 systematic_probe=direct-attempt0 control_systematic_probe_result=0 candidate_systematic_probe_result=0.*control_period=48 control_gf256_rows=10 control_heavy_rows=12 control_precode_count=94 control_grouped_rows=3 control_grouped_gf256_row_mask=0x380 control_buckets=separate control_grouped_hash_seed=0xb7e15162 control_final_h_a_columns=12.*candidate_period=48 candidate_gf256_rows=11 candidate_heavy_rows=13 candidate_precode_count=95 candidate_grouped_rows=3 candidate_grouped_gf256_row_mask=0x380 candidate_buckets=separate candidate_grouped_hash_seed=0xb7e15163 candidate_final_h_a_columns=13 gf16_rows=2.*binary_base_graph_shared=1 heavy_rows_arm_specific=1 arm_runtimes=separate-precode-count-v1 control_attempt=0 control_base_matrix_seed=0x243f6a8885a308d3 control_base_peel_seed=0xa19c625b control_matrix_seed=0x243f6a8885a308d3 control_peel_seed=0xa19c625b candidate_attempt=0 candidate_base_matrix_seed=0x243f6a8885a308d3 candidate_base_peel_seed=0xa19c625b candidate_matrix_seed=0x243f6a8885a308d3 candidate_peel_seed=0xa19c625b.*payload=distinct-packet-zero-v1.*payload_count=4100.*payload_alignment=64 payload_prefaulted=1.*system_build=outside-timer tls_reapply=full-per-slot-outside-timer coefficient_layout=materialized-per-slot-outside-timer grouped_schedule_prefix=materialized-per-slot-outside-timer allocator_tls_state=preflight-warmed.*packet_trace_sha256=d29d9dc251af8f87c4f690c6777a3b38193899fe858791c68048abd44c33e58b" OR
    NOT grouped_timing MATCHES
-       "N,bb,overhead,schedule,seed,loss,cache_state,cycle,slot,arm,period,gf256_rows,gf16_rows,heavy_rows,precode_count,grouped_rows,grouped_gf256_row_mask,buckets_requested,seed_attempt,matrix_seed,peel_seed,preflight_result,cell_class,common_success,result,outcome_stable,elapsed_ns,saturated,cpu_before,cpu_after,cpu_migrated,minflt_delta,majflt_delta,fault_contaminated,inactivated,binary_def,heavy_gain,block_xors,block_muladds,build_ns,peel_ns,project_ns,residual_ns,backsub_ns,joint_source_xors,joint_marginal_xors,joint_marginal_copies,joint_active_deltas,joint_scratch_bytes,dual_source_columns,source_bytes,packet_payload_bytes,intermediate_bytes" OR
+       "N,bb,overhead,schedule,seed,loss,cache_state,cycle,slot,arm,period,gf256_rows,gf16_rows,heavy_rows,precode_count,grouped_rows,grouped_gf256_row_mask,buckets_requested,construction_attempt,construction_seed_policy,construction_seed,production_seed_fixups_applied,systematic_probe_result,base_matrix_seed,base_peel_seed,matrix_seed,peel_seed,preflight_result,cell_class,common_success,result,outcome_stable,elapsed_ns,saturated,cpu_before,cpu_after,cpu_migrated,minflt_delta,majflt_delta,fault_contaminated,inactivated,binary_def,heavy_gain,block_xors,block_muladds,build_ns,peel_ns,project_ns,residual_ns,backsub_ns,joint_source_xors,joint_marginal_xors,joint_marginal_copies,joint_active_deltas,joint_scratch_bytes,dual_source_columns,source_bytes,packet_payload_bytes,intermediate_bytes" OR
    NOT grouped_timing MATCHES
-       ",control,48,10,2,12,94,3,0x380,separate,0,0x136889600063cbf,0x382fe3a7,0,common-success,1,0,1,[0-9]+,0,-?[0-9]+,-?[0-9]+,-?[0-9]+,-?[0-9]+,-?[0-9]+,-?[0-9]+,117,8,8,94847,1974," OR
+       ",control,48,10,2,12,94,3,0x380,separate,0,matrix-c-peel-lo32-xor-hi32-v1,2611923443488327891,0,0,0x243f6a8885a308d3,0xa19c625b,0x243f6a8885a308d3,0xa19c625b,0,common-success,1,0,1,[0-9]+,0,-?[0-9]+,-?[0-9]+,-?[0-9]+,-?[0-9]+,-?[0-9]+,-?[0-9]+,121,8,8,96221,2022," OR
    NOT grouped_timing MATCHES
-       ",candidate,48,11,2,13,95,3,0x380,separate,0,0x136889600063cbf,0x382fe3a7,0,common-success,1,0,1,[0-9]+,0,-?[0-9]+,-?[0-9]+,-?[0-9]+,-?[0-9]+,-?[0-9]+,-?[0-9]+,121,9,9,95635,2189,")
+       ",candidate,48,11,2,13,95,3,0x380,separate,0,matrix-c-peel-lo32-xor-hi32-v1,2611923443488327891,0,0,0x243f6a8885a308d3,0xa19c625b,0x243f6a8885a308d3,0xa19c625b,0,common-success,1,0,1,[0-9]+,0,-?[0-9]+,-?[0-9]+,-?[0-9]+,-?[0-9]+,-?[0-9]+,-?[0-9]+,130,9,9,96949,2306,")
     message(FATAL_ERROR
         "grouped cold timing fixture failed\n"
         "${grouped_timing}\n${grouped_timing_err}")
+endif()
+string(REPLACE "\r\n" "\n" grouped_timing "${grouped_timing}")
+string(REPLACE "\n" ";" grouped_timing_lines "${grouped_timing}")
+set(grouped_timing_parsed_row_count 0)
+foreach(grouped_timing_line IN LISTS grouped_timing_lines)
+    if(grouped_timing_line MATCHES "^[0-9]+,")
+        math(EXPR grouped_timing_parsed_row_count
+            "${grouped_timing_parsed_row_count} + 1")
+        string(REPLACE "," ";" grouped_timing_fields
+            "${grouped_timing_line}")
+        list(LENGTH grouped_timing_fields grouped_timing_field_count)
+        if(NOT grouped_timing_field_count EQUAL 59)
+            message(FATAL_ERROR
+                "grouped timing row field count is not 59: "
+                "${grouped_timing_line}")
+        endif()
+        list(GET grouped_timing_fields 18 grouped_timing_attempt)
+        list(GET grouped_timing_fields 19 grouped_timing_policy)
+        list(GET grouped_timing_fields 20 grouped_timing_construction)
+        list(GET grouped_timing_fields 21 grouped_timing_fixups)
+        list(GET grouped_timing_fields 22 grouped_timing_probe)
+        list(GET grouped_timing_fields 23 grouped_timing_base_matrix)
+        list(GET grouped_timing_fields 24 grouped_timing_base_peel)
+        list(GET grouped_timing_fields 25 grouped_timing_matrix)
+        list(GET grouped_timing_fields 26 grouped_timing_peel)
+        if(NOT grouped_timing_attempt STREQUAL "0" OR
+           NOT grouped_timing_policy STREQUAL
+               "matrix-c-peel-lo32-xor-hi32-v1" OR
+           NOT grouped_timing_construction STREQUAL
+               "${grouped_timing_construction_seed}" OR
+           NOT grouped_timing_fixups STREQUAL "0" OR
+           NOT grouped_timing_probe MATCHES "^[01]$" OR
+           NOT grouped_timing_base_matrix STREQUAL
+               "0x243f6a8885a308d3" OR
+           NOT grouped_timing_base_peel STREQUAL "0xa19c625b" OR
+           NOT grouped_timing_matrix STREQUAL grouped_timing_base_matrix OR
+           NOT grouped_timing_peel STREQUAL grouped_timing_base_peel)
+            message(FATAL_ERROR
+                "grouped timing construction receipt mismatch: "
+                "${grouped_timing_line}")
+        endif()
+    endif()
+endforeach()
+if(NOT grouped_timing_parsed_row_count EQUAL 32)
+    message(FATAL_ERROR
+        "grouped timing exact row parser saw "
+        "${grouped_timing_parsed_row_count}, expected 32")
 endif()
 foreach(cycle RANGE 0 3)
     foreach(slot RANGE 0 7)
@@ -2066,7 +2116,9 @@ run_bench(grouped_warm_result grouped_warm grouped_warm_err groupedtiming
     --candidate-period 32 --candidate-gf256-rows 10
     --candidate-grouped-rows 7 --candidate-grouped-row-mask 0x3f8
     --candidate-buckets joint-delta --evict-bytes 4096 --cache-state warm
-    --cycle-index 2 --loss 0.5 --seed 4660 --schedule repair-only)
+    --cycle-index 2 --loss 0.5 --seed 4660
+    --construction-seed ${grouped_timing_construction_seed}
+    --schedule repair-only)
 string(REGEX MATCHALL
     "\n3200,64,0,repair-only,4660,0.5,warm,2," grouped_warm_rows
     "${grouped_warm}")
@@ -2075,17 +2127,67 @@ if(NOT grouped_warm_result EQUAL 0 OR grouped_warm_err OR
    NOT grouped_warm_row_count EQUAL 8 OR NOT grouped_warm MATCHES
        "cycles=1 order=ABBABAAB discard_cycle=0 cycle_mode=replacement cycle_index=2.*control_period=48 control_gf256_rows=10 control_heavy_rows=12 control_precode_count=[0-9]+ control_grouped_rows=0 control_grouped_gf256_row_mask=0x0 control_buckets=auto.*candidate_period=32 candidate_gf256_rows=10 candidate_heavy_rows=12 candidate_precode_count=[0-9]+ candidate_grouped_rows=7 candidate_grouped_gf256_row_mask=0x3f8 candidate_buckets=joint-delta.*dense_two_anchor=1 binary_base_graph_shared=1" OR
    NOT grouped_warm MATCHES
-       ",candidate,32,10,2,12,[0-9]+,7,0x3f8,joint-delta,0,0x13a1a9dd5eb58b9d,0xf226e3bc,0,common-success,1,0,1,[0-9]+,0,-?[0-9]+,-?[0-9]+,-?[0-9]+,-?[0-9]+,-?[0-9]+,-?[0-9]+,115,12,12,73665,1756,[0-9]+,[0-9]+,[0-9]+,[0-9]+,[0-9]+,3172,1984,64,32,6144,0,204800,204800,210304")
+       ",candidate,32,10,2,12,86,7,0x3f8,joint-delta,0,matrix-c-peel-lo32-xor-hi32-v1,2611923443488327891,0,0,0x243f6a8885a308d3,0xa19c625b,0x243f6a8885a308d3,0xa19c625b,0,common-success,1,0,1,[0-9]+,0,-?[0-9]+,-?[0-9]+,-?[0-9]+,-?[0-9]+,-?[0-9]+,-?[0-9]+,129,12,12,76635,1926,[0-9]+,[0-9]+,[0-9]+,[0-9]+,[0-9]+,3159,1984,64,32,6144,0,204800,204800,210304")
     message(FATAL_ERROR
         "grouped warm replacement fixture failed\n"
         "${grouped_warm}\n${grouped_warm_err}")
 endif()
 
+# A known weak attempt-zero root must remain visible rather than being repaired
+# by either production selector.  The hard trace may still decode at OH4;
+# systematic_probe_result is the independent literal-q0 sentinel.
+set(grouped_timing_h13_common
+    --control-period 48 --control-gf256-rows 10
+    --control-grouped-rows 3 --control-grouped-row-mask 0x380
+    --control-buckets separate
+    --candidate-period 48 --candidate-gf256-rows 11
+    --candidate-grouped-rows 3 --candidate-grouped-row-mask 0x380
+    --candidate-buckets separate --evict-bytes 4096 --cache-state warm
+    --cycle-index 0 --loss 0.5 --seed 4660
+    --construction-seed ${grouped_timing_construction_seed}
+    --schedule adversarial)
+run_bench(grouped_q0_result grouped_q0 grouped_q0_err groupedtiming
+    --N 4 --bb 64 --overhead 4 ${grouped_timing_h13_common})
+string(REGEX MATCHALL
+    "\n4,64,4,adversarial,4660,0.5,warm,0,[0-7],(control|candidate),[^\n]*,0,matrix-c-peel-lo32-xor-hi32-v1,2611923443488327891,0,1,0x243f6a8885a308d3,0xa19c625b,0x243f6a8885a308d3,0xa19c625b,"
+    grouped_q0_rows "${grouped_q0}")
+list(LENGTH grouped_q0_rows grouped_q0_row_count)
+if(NOT grouped_q0_result EQUAL 0 OR grouped_q0_err OR
+   NOT grouped_q0_row_count EQUAL 8 OR NOT grouped_q0 MATCHES
+       "systematic_probe=direct-attempt0 control_systematic_probe_result=1 candidate_systematic_probe_result=1")
+    message(FATAL_ERROR
+        "grouped timing literal attempt0 sentinel failed\n"
+        "${grouped_q0}\n${grouped_q0_err}")
+endif()
+
+# Payload width changes timed byte work, never the Stage-A/Stage-B packet-ID
+# prefix.  Pin both the derived seed and the digest of the shared ID trace.
+foreach(grouped_trace_bb IN ITEMS 64 1280 4096)
+    run_bench(grouped_trace_result grouped_trace grouped_trace_err
+        groupedtiming --N 128 --bb ${grouped_trace_bb} --overhead 4
+        ${grouped_timing_h13_common})
+    string(REGEX MATCH
+        "packet_trace_seed=(0x[0-9a-f]+).*packet_trace_sha256=([0-9a-f]+)"
+        grouped_trace_receipt "${grouped_trace}")
+    set(grouped_trace_seed "${CMAKE_MATCH_1}")
+    set(grouped_trace_sha256 "${CMAKE_MATCH_2}")
+    if(NOT grouped_trace_result EQUAL 0 OR grouped_trace_err OR
+       NOT grouped_trace MATCHES
+           "seed_block_bytes=64 solve_block_bytes=${grouped_trace_bb} payload_block_bytes=${grouped_trace_bb}.*overhead_stream=paired" OR
+       NOT grouped_trace_seed STREQUAL "0xcdad07f89c0776f4" OR
+       NOT grouped_trace_sha256 STREQUAL
+           "f952cfd33574c954749a0eb0b50b12964db556309beb495e53eac124d21dcb84")
+        message(FATAL_ERROR
+            "grouped timing packet trace changed at bb=${grouped_trace_bb}\n"
+            "${grouped_trace}\n${grouped_trace_err}")
+    endif()
+endforeach()
+
 # Arm configuration must be order-independent even when the second arm uses
 # the shortest valid H12 period after an H13 control.  The TLS setters reject
 # P12 while H13 is still active, so groupedtiming normalizes geometry first.
 expect_success(
-    "control_period=48 control_gf256_rows=11.*candidate_period=12 candidate_gf256_rows=10"
+    "construction_seed=18446744073709551615 production_seed_fixups_applied=0 construction_attempt=0.*control_period=48 control_gf256_rows=11.*candidate_period=12 candidate_gf256_rows=10.*control_attempt=0 control_base_matrix_seed=0xffffffffffffffff control_base_peel_seed=0x0 control_matrix_seed=0xffffffffffffffff control_peel_seed=0x0 candidate_attempt=0 candidate_base_matrix_seed=0xffffffffffffffff candidate_base_peel_seed=0x0 candidate_matrix_seed=0xffffffffffffffff candidate_peel_seed=0x0"
     groupedtiming --N 128 --bb 64 --overhead 0
     --control-period 48 --control-gf256-rows 11
     --control-grouped-rows 0 --control-grouped-row-mask 0
@@ -2093,9 +2195,30 @@ expect_success(
     --candidate-period 12 --candidate-gf256-rows 10
     --candidate-grouped-rows 0 --candidate-grouped-row-mask 0
     --candidate-buckets auto --evict-bytes 4096 --cache-state warm
-    --cycle-index 0 --loss 0.5 --seed 4660 --schedule repair-only)
+    --cycle-index 0 --loss 0.5 --seed 4660
+    --construction-seed 18446744073709551615 --schedule repair-only)
 
 expect_failure("requires --N" groupedtiming)
+expect_failure_without_output("requires .*--construction-seed" groupedtiming
+    --N 4 --bb 64 --overhead 4
+    --control-period 48 --control-gf256-rows 10
+    --control-grouped-rows 3 --control-grouped-row-mask 0x380
+    --control-buckets separate
+    --candidate-period 48 --candidate-gf256-rows 11
+    --candidate-grouped-rows 3 --candidate-grouped-row-mask 0x380
+    --candidate-buckets separate --evict-bytes 4096 --cache-state warm
+    --cycle-index 0 --loss 0.5 --seed 4660 --schedule adversarial)
+expect_failure_without_output("--construction-seed requires a value"
+    groupedtiming --construction-seed)
+expect_failure_without_output(
+    "--construction-seed specified more than once"
+    groupedtiming --construction-seed 0 --construction-seed 1)
+foreach(grouped_bad_construction_seed IN ITEMS
+        "00" "01" "+1" "0x1" "-1" "18446744073709551616")
+    expect_failure_without_output("bad --construction-seed value"
+        groupedtiming
+        --construction-seed ${grouped_bad_construction_seed})
+endforeach()
 expect_failure("--control-grouped-row-mask" groupedtiming
     --N 4096 --bb 64 --overhead 4
     --control-period 48 --control-gf256-rows 10
@@ -2103,6 +2226,7 @@ expect_failure("--control-grouped-row-mask" groupedtiming
     --candidate-period 48 --candidate-gf256-rows 11
     --candidate-grouped-rows 3 --candidate-buckets separate
     --evict-bytes 4096 --cache-state cold --loss 0.5 --seed 4660
+    --construction-seed ${grouped_timing_construction_seed}
     --schedule burst)
 expect_failure("--candidate-grouped-row-mask" groupedtiming
     --N 4096 --bb 64 --overhead 4
@@ -2112,6 +2236,7 @@ expect_failure("--candidate-grouped-row-mask" groupedtiming
     --candidate-period 48 --candidate-gf256-rows 11
     --candidate-grouped-rows 3 --candidate-buckets separate
     --evict-bytes 4096 --cache-state cold --loss 0.5 --seed 4660
+    --construction-seed ${grouped_timing_construction_seed}
     --schedule burst)
 expect_failure("argument domain mismatch" groupedtiming
     --N 4096 --bb 64 --overhead 4
@@ -2121,7 +2246,8 @@ expect_failure("argument domain mismatch" groupedtiming
     --candidate-period 48 --candidate-gf256-rows 10
     --candidate-grouped-rows 3 --candidate-grouped-row-mask 0x380
     --candidate-buckets separate --evict-bytes 4096 --cache-state cold
-    --loss 0.5 --seed 4660 --schedule burst)
+    --loss 0.5 --seed 4660
+    --construction-seed ${grouped_timing_construction_seed} --schedule burst)
 expect_failure("argument domain mismatch" groupedtiming
     --N 4096 --bb 64 --overhead 4
     --control-period 48 --control-gf256-rows 10
@@ -2130,7 +2256,8 @@ expect_failure("argument domain mismatch" groupedtiming
     --candidate-period 48 --candidate-gf256-rows 10
     --candidate-grouped-rows 3 --candidate-grouped-row-mask 0x380
     --candidate-buckets separate --evict-bytes 4096 --cache-state cold
-    --loss 0.5 --seed 4660 --schedule burst)
+    --loss 0.5 --seed 4660
+    --construction-seed ${grouped_timing_construction_seed} --schedule burst)
 expect_failure("argument domain mismatch" groupedtiming
     --N 4096 --bb 64 --overhead 4
     --control-period 48 --control-gf256-rows 10
@@ -2139,7 +2266,8 @@ expect_failure("argument domain mismatch" groupedtiming
     --candidate-period 48 --candidate-gf256-rows 10
     --candidate-grouped-rows 10 --candidate-grouped-row-mask 0x3ff
     --candidate-buckets separate --evict-bytes 4096 --cache-state cold
-    --loss 0.5 --seed 4660 --schedule burst)
+    --loss 0.5 --seed 4660
+    --construction-seed ${grouped_timing_construction_seed} --schedule burst)
 expect_failure("bad --seed value" groupedtiming
     --N 4096 --bb 64 --overhead 4
     --control-period 48 --control-gf256-rows 10
@@ -2148,7 +2276,8 @@ expect_failure("bad --seed value" groupedtiming
     --candidate-period 48 --candidate-gf256-rows 10
     --candidate-grouped-rows 3 --candidate-grouped-row-mask 0x380
     --candidate-buckets separate --evict-bytes 4096 --cache-state cold
-    --loss 0.5 --seed 0x1234 --schedule burst)
+    --loss 0.5 --seed 0x1234
+    --construction-seed ${grouped_timing_construction_seed} --schedule burst)
 expect_failure("cache-state must be cold or warm" groupedtiming
     --N 4096 --bb 64 --overhead 4
     --control-period 48 --control-gf256-rows 10
@@ -2157,7 +2286,8 @@ expect_failure("cache-state must be cold or warm" groupedtiming
     --candidate-period 48 --candidate-gf256-rows 10
     --candidate-grouped-rows 3 --candidate-grouped-row-mask 0x380
     --candidate-buckets separate --evict-bytes 4096 --cache-state tepid
-    --loss 0.5 --seed 4660 --schedule burst)
+    --loss 0.5 --seed 4660
+    --construction-seed ${grouped_timing_construction_seed} --schedule burst)
 
 run_bench(route_result route_mixed route_err preferredattempt --mode route
     --N 3,4096 --bb-list 64
