@@ -35,6 +35,25 @@ timed out, retry it once with the same scoped prompt and a sufficiently long
 session/wall-time allowance. Do not treat authentication, quota, model, or
 substantive command failures as timeout-only failures.
 
+## WH2 Field Architecture
+
+WH2 must not use GF(2^16), GF(65536), extension-field completion rows, or the
+former mixed GF(256)/GF(2^16) profile in production code, experiments,
+benchmarks, documentation, or future Beads work. The project objective is no
+more than 1% decode failure under a frozen loss/overhead contract, zero bad
+construction seeds across hard-pattern validation for every K, and encoder and
+decoder performance faster than Wirehair1 throughout the validated K ranges.
+GF(256) is sufficient for that target. Prefer GF(256) rows, denser binary
+structure, scheduling improvements, and post-selection seed repair. Retain
+cheap, bounded experiments that can quickly screen plausible improvements, but
+require a passing short screen before launching expensive all-K campaigns.
+
+Treat all historical mixed-field results as rejected, non-promotional evidence.
+Do not revive, port, optimize, benchmark, or create follow-up tasks for GF(2^16)
+without an explicit new user instruction reversing this decision. Retired wire
+profile identifiers must fail safely and must never be silently reinterpreted as
+a different equation system.
+
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:7510c1e2 -->
 ## Beads Issue Tracker
 
