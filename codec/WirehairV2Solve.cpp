@@ -4787,8 +4787,12 @@ static WirehairResult SolvePrecodeSystemImpl(
                 if (rhs.empty()) {
                     rhs.resize(block_bytes);
                 }
-                BatchedBlockXorInitializer rhs_xor(
-                    rhs.data(), block_bytes, rows[r].Data);
+                std::fill(rhs.begin(), rhs.end(), uint8_t{0});
+                if (rows[r].Data) {
+                    std::memcpy(rhs.data(), rows[r].Data, block_bytes);
+                }
+                BatchedBlockXorAccumulator rhs_xor(
+                    rhs.data(), block_bytes);
                 for (uint32_t column : rows[r].Columns) {
                     rhs_xor.Add(
                         values.data() + (size_t)column * block_bytes);
@@ -4861,8 +4865,11 @@ static WirehairResult SolvePrecodeSystemImpl(
             ++st.ResidualRows;
             std::fill(
                 accumulator.begin(), accumulator.end(), uint64_t{0});
-            BatchedBlockXorInitializer rhs_xor(
-                rhs.data(), block_bytes, rows[r].Data);
+            std::fill(rhs.begin(), rhs.end(), uint8_t{0});
+            if (rows[r].Data) {
+                std::memcpy(rhs.data(), rows[r].Data, block_bytes);
+            }
+            BatchedBlockXorAccumulator rhs_xor(rhs.data(), block_bytes);
             BatchedProjectionXorAccumulator projection_xor(
                 accumulator.data(), projection.data(), words);
             for (uint32_t column : rows[r].Columns)
