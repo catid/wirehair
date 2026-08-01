@@ -135,11 +135,20 @@ cost rather than relying on a peel-only proxy.
 Test builds also expose `groupedtiming` for promotion-grade, paired timing of
 the raw grouped-GF(256) completion experiments.  Each invocation binds one
 hard packet schedule (`--N`, `--bb`, `--overhead`, `--loss`, `--seed`, and
-`--schedule`) and compares explicit control/candidate period, grouped-row, and
-residue-bucket settings.  It uses distinct 64-byte-aligned, prefaulted packet
+`--schedule`) and compares explicit control/candidate period, GF(256)-row,
+grouped-row, logical grouped-row-mask, and residue-bucket settings via the
+corresponding `--control-*` and `--candidate-*` options.  Both
+`--control-grouped-row-mask` and `--candidate-grouped-row-mask` are required,
+preventing an H13 arm from silently replacing the intended logical rows with
+its different default suffix.  The arms share the selected
+binary-base construction (every parameter except `H`), packet-ID/payload trace,
+and payload addresses while using separate packet runtimes for their derived
+`S+D+H` precode counts.  It uses distinct 64-byte-aligned, prefaulted packet
 payloads, preflights both arms, then emits four `ABBABAAB` cycles (or one
-requested replacement cycle) with raw nanoseconds, internal solve phases,
-work counters, CPU migration, and fault receipts.  `--cache-state cold`
+requested replacement cycle) with raw nanoseconds, internal solve phases, work
+counters, CPU migration, and fault receipts.  The active H12/H13 row and packed
+coefficient layouts and grouped-schedule prefix are materialized after each arm
+switch but before the timer; `--cache-state cold`
 evicts the requested `--evict-bytes` before every sample; `warm` retains the
 working set.  Here `cold` means data-cache-cold after both arm preflights;
 the command intentionally does not measure fresh-process allocator or first-
@@ -450,16 +459,19 @@ nonsingular corner.
 `--mixed-extension-residue-seed-xor U32` with this mode to screen alternate
 full-cycle extension derivations without changing the base GF(256) schedule;
 the default XOR is 78.
-For the grouped two-schedule H12 experiment, `compare` and `precodefail`
+For the grouped two-schedule H12/H13 experiment, `compare` and `precodefail`
 accept `--mixed-grouped-gf256-rows R` and optional
-`--mixed-grouped-gf256-row-mask MASK`.  The low ten mask bits name the Cauchy
-Y coordinates assigned to schedule C and must contain exactly R set bits.
+`--mixed-grouped-gf256-row-mask MASK`.  The low active GF(256) mask bits name
+the ten H12 or eleven H13 logical Cauchy-Y rows assigned to schedule C and must
+contain exactly R set bits.
 Omitting the mask retains the historical final-R-row suffix.  Arbitrary masks
 are implemented as an equation-row permutation into the same compact A prefix
 and C suffix, so every mask at fixed P/R has exactly the same two source scans,
 bucket scratch, muladd count, and SIMD group sizes.  The final H columns remain
-on canonical schedule A.  These are test hooks only; no named profile selects
-grouped rows or a row mask.
+on canonical schedule A.  In particular, mask `0x380` keeps logical rows 7..9
+grouped in both H12 and H13, leaving H13 logical row 10 as the eighth independent
+primary GF(256) row.  These are test hooks only; no named profile selects grouped
+rows or a row mask.
 With independent extension residues, test-hook `compare` and `precodefail`
 also accept
 `--mixed-residue-buckets auto|separate|dual|joint-delta`.  The preamble labels

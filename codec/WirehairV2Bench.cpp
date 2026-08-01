@@ -2418,10 +2418,13 @@ int CmdCompare(int argc, char** argv)
     {
         std::fprintf(stderr,
             "compare --mixed-grouped-gf256-rows must be in [0,9]; "
-            "nonzero grouping requires shared-x constant-A 10+2 geometry, "
+            "nonzero grouping requires shared-x constant-A 10-or-11 "
+            "GF256 + 2 GF16 geometry, "
             "P>H, and no independent extension residues; "
-            "--mixed-grouped-gf256-row-mask must use only the low ten "
-            "bits and contain exactly that many set bits\n");
+            "--mixed-grouped-gf256-row-mask must use only the low %u "
+            "active logical GF256 row bits and contain exactly that many "
+            "set bits\n",
+            wirehair_v2::ActiveMixedGF256Rows());
         return 1;
     }
 #endif
@@ -6904,10 +6907,25 @@ const char* GroupedTimingCacheStateName(GroupedTimingCacheState state)
 struct GroupedTimingArm
 {
     uint32_t Period = 0u;
+    uint32_t GF256Rows = 0u;
     uint32_t GroupedRows = 0u;
+    uint32_t GroupedRowMask = 0u;
     wirehair_v2::MixedResidueBucketMode Buckets =
         wirehair_v2::MixedResidueBucketMode::Automatic;
 };
+
+bool GroupedTimingRowMaskIsValid(const GroupedTimingArm& arm)
+{
+    if (arm.GF256Rows == 0u || arm.GF256Rows >= 32u) return false;
+    const uint32_t valid_mask =
+        (UINT32_C(1) << arm.GF256Rows) - 1u;
+    if ((arm.GroupedRowMask & ~valid_mask) != 0u) return false;
+    uint32_t bit_count = 0u;
+    for (uint32_t mask = arm.GroupedRowMask; mask != 0u; mask >>= 1u) {
+        bit_count += mask & 1u;
+    }
+    return bit_count == arm.GroupedRows;
+}
 
 bool ConfigureGroupedTimingArm(const GroupedTimingArm& arm)
 {
@@ -6915,12 +6933,28 @@ bool ConfigureGroupedTimingArm(const GroupedTimingArm& arm)
     // solve.  Several setters deliberately clear secondary schedules, so the
     // grouped suffix must remain last.  None of this setup is timed.
     if (!wirehair_v2::SetMixedCoefficientGeometryForTesting(
-            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX) ||
+            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX))
+    {
+        return false;
+    }
+    // Normalize through the base GF256 count before raising the period.  The
+    // H16 test geometry accepts only P31/P32, while a short-period H12 state
+    // cannot grow directly to H13.  This order reaches a common safe state
+    // from either one without weakening any setter validation.
+    if (wirehair_v2::ActiveMixedGF256Rows() >=
+            wirehair_v2::kMixedGF256Rows + 2u &&
+        !wirehair_v2::SetMixedGF256RowsForTesting(
+            wirehair_v2::kMixedGF256Rows))
+    {
+        return false;
+    }
+    if (!wirehair_v2::SetMixedCoefficientPeriodForTesting(
+            wirehair_v2::kMixedCoefficientPeriod) ||
+        !wirehair_v2::SetMixedGF256RowsForTesting(
+            arm.GF256Rows) ||
         !wirehair_v2::SetMixedGF16RowsForTesting(
             wirehair_v2::kMixedGF16Rows) ||
         !wirehair_v2::SetMixedCoefficientPeriodForTesting(arm.Period) ||
-        !wirehair_v2::SetMixedGF256RowsForTesting(
-            wirehair_v2::kMixedGF256Rows) ||
         !wirehair_v2::SetMixedResidueSkewForTesting(0u) ||
         !wirehair_v2::SetMixedResidueScheduleForTesting(
             wirehair_v2::MixedResidueSchedule::Constant))
@@ -6938,14 +6972,16 @@ bool ConfigureGroupedTimingArm(const GroupedTimingArm& arm)
     wirehair_v2::SetPacketRowSeedAvalancheForTesting(false);
     wirehair_v2::SetOddPacketPeelSeedXorForTesting(0u);
     if (!wirehair_v2::SetMixedGroupedGF256RowsForTesting(
-            arm.GroupedRows))
+            arm.GroupedRows) ||
+        !wirehair_v2::SetMixedGroupedGF256RowMaskForTesting(
+            arm.GroupedRowMask))
     {
         return false;
     }
-    return wirehair_v2::ActiveMixedCoefficientGeometry() ==
+    const bool state_matches =
+        wirehair_v2::ActiveMixedCoefficientGeometry() ==
             wirehair_v2::MixedCoefficientGeometry::SharedCauchyX &&
-        wirehair_v2::ActiveMixedGF256Rows() ==
-            wirehair_v2::kMixedGF256Rows &&
+        wirehair_v2::ActiveMixedGF256Rows() == arm.GF256Rows &&
         wirehair_v2::ActiveMixedGF16Rows() ==
             wirehair_v2::kMixedGF16Rows &&
         wirehair_v2::ActiveMixedCoefficientPeriod() == arm.Period &&
@@ -6954,7 +6990,27 @@ bool ConfigureGroupedTimingArm(const GroupedTimingArm& arm)
             wirehair_v2::MixedResidueSchedule::Constant &&
         !wirehair_v2::ActiveMixedIndependentExtensionResidues() &&
         wirehair_v2::ActiveMixedGroupedGF256Rows() == arm.GroupedRows &&
+        wirehair_v2::ActiveMixedGroupedGF256RowMask() ==
+            arm.GroupedRowMask &&
         wirehair_v2::ActiveMixedResidueBucketModeForTesting() == arm.Buckets;
+    if (!state_matches) return false;
+
+    // H12/H13 alternating samples share one thread but use distinct packed
+    // coefficient layouts.  Materialize the active layout here so a cache-key
+    // transition is never charged to the timed solve.  Cold samples evict it
+    // afterward; warm samples retain it, matching the requested cache policy.
+    if (wirehair_v2::GetMixedCoefficientRows() == nullptr ||
+        wirehair_v2::GetMixedPackedCoefficients() == nullptr)
+    {
+        return false;
+    }
+    if (arm.GroupedRows != 0u &&
+        wirehair_v2::ActiveMixedGroupedGF256ResidueBlockShift(0u) >=
+            arm.Period)
+    {
+        return false;
+    }
+    return true;
 }
 
 bool SameGroupedTimingBaseGraph(
@@ -6966,7 +7022,6 @@ bool SameGroupedTimingBaseGraph(
     return a_params.BlockCount == b_params.BlockCount &&
         a_params.Staircase == b_params.Staircase &&
         a_params.DenseRows == b_params.DenseRows &&
-        a_params.HeavyRows == b_params.HeavyRows &&
         a_params.SourceHits == b_params.SourceHits &&
         a_params.Field == b_params.Field &&
         a_params.DenseIdentityCorner == b_params.DenseIdentityCorner &&
@@ -6988,6 +7043,7 @@ bool RunGroupedTimingObservation(
     const GroupedTimingArm& arm,
     const wirehair_v2::PrecodeSystem& system,
     const wirehair_v2::PacketRowConfig& config,
+    const wirehair_v2::PacketRowRuntime& runtime,
     const PreferredTimingCell& cell,
     uint32_t block_bytes,
     GroupedTimingObservation& observation)
@@ -6997,7 +7053,7 @@ bool RunGroupedTimingObservation(
     observation = GroupedTimingObservation{};
     observation.Result =
         wirehair_v2::SolvePrecodeSystemForValidatedSystemWithRuntime(
-            system, config, cell.Runtime, cell.Packets, block_bytes,
+            system, config, runtime, cell.Packets, block_bytes,
             intermediate, &observation.Stats);
     return observation.Result == Wirehair_Success ||
         observation.Result == Wirehair_NeedMore;
@@ -7045,10 +7101,14 @@ int CmdGroupedTiming(int argc, char** argv)
     bool have_block_bytes = false;
     bool have_overhead = false;
     bool have_control_period = false;
+    bool have_control_gf256_rows = false;
     bool have_control_rows = false;
+    bool have_control_row_mask = false;
     bool have_control_buckets = false;
     bool have_candidate_period = false;
+    bool have_candidate_gf256_rows = false;
     bool have_candidate_rows = false;
+    bool have_candidate_row_mask = false;
     bool have_candidate_buckets = false;
     bool have_eviction = false;
     bool have_cache_state = false;
@@ -7092,6 +7152,18 @@ int CmdGroupedTiming(int argc, char** argv)
             }
             have_control_period = true;
         }
+        else if (!std::strcmp(argv[i], "--control-gf256-rows")) {
+            if (have_control_gf256_rows || !TakeArg(
+                    "groupedtiming", "--control-gf256-rows",
+                    argc, argv, i, value) ||
+                !ParseCanonicalU32Arg(
+                    "--control-gf256-rows", value,
+                    control_arm.GF256Rows))
+            {
+                return 1;
+            }
+            have_control_gf256_rows = true;
+        }
         else if (!std::strcmp(argv[i], "--control-grouped-rows")) {
             if (have_control_rows || !TakeArg(
                     "groupedtiming", "--control-grouped-rows",
@@ -7103,6 +7175,18 @@ int CmdGroupedTiming(int argc, char** argv)
                 return 1;
             }
             have_control_rows = true;
+        }
+        else if (!std::strcmp(argv[i], "--control-grouped-row-mask")) {
+            if (have_control_row_mask || !TakeArg(
+                    "groupedtiming", "--control-grouped-row-mask",
+                    argc, argv, i, value) ||
+                !ParseU32MaskArg(
+                    "--control-grouped-row-mask", value,
+                    control_arm.GroupedRowMask))
+            {
+                return 1;
+            }
+            have_control_row_mask = true;
         }
         else if (!std::strcmp(argv[i], "--control-buckets")) {
             if (have_control_buckets || !TakeArg(
@@ -7128,6 +7212,18 @@ int CmdGroupedTiming(int argc, char** argv)
             }
             have_candidate_period = true;
         }
+        else if (!std::strcmp(argv[i], "--candidate-gf256-rows")) {
+            if (have_candidate_gf256_rows || !TakeArg(
+                    "groupedtiming", "--candidate-gf256-rows",
+                    argc, argv, i, value) ||
+                !ParseCanonicalU32Arg(
+                    "--candidate-gf256-rows", value,
+                    candidate_arm.GF256Rows))
+            {
+                return 1;
+            }
+            have_candidate_gf256_rows = true;
+        }
         else if (!std::strcmp(argv[i], "--candidate-grouped-rows")) {
             if (have_candidate_rows || !TakeArg(
                     "groupedtiming", "--candidate-grouped-rows",
@@ -7139,6 +7235,18 @@ int CmdGroupedTiming(int argc, char** argv)
                 return 1;
             }
             have_candidate_rows = true;
+        }
+        else if (!std::strcmp(argv[i], "--candidate-grouped-row-mask")) {
+            if (have_candidate_row_mask || !TakeArg(
+                    "groupedtiming", "--candidate-grouped-row-mask",
+                    argc, argv, i, value) ||
+                !ParseU32MaskArg(
+                    "--candidate-grouped-row-mask", value,
+                    candidate_arm.GroupedRowMask))
+            {
+                return 1;
+            }
+            have_candidate_row_mask = true;
         }
         else if (!std::strcmp(argv[i], "--candidate-buckets")) {
             if (have_candidate_buckets || !TakeArg(
@@ -7222,28 +7330,35 @@ int CmdGroupedTiming(int argc, char** argv)
         }
     }
     if (!have_K || !have_block_bytes || !have_overhead ||
-        !have_control_period || !have_control_rows ||
+        !have_control_period || !have_control_gf256_rows ||
+        !have_control_rows || !have_control_row_mask ||
         !have_control_buckets || !have_candidate_period ||
-        !have_candidate_rows || !have_candidate_buckets || !have_eviction ||
+        !have_candidate_gf256_rows || !have_candidate_rows ||
+        !have_candidate_row_mask || !have_candidate_buckets || !have_eviction ||
         !have_cache_state || !have_loss || !have_seed || !have_schedule)
     {
         std::fprintf(stderr,
             "groupedtiming requires --N, --bb, --overhead, "
-            "--control-period, --control-grouped-rows, --control-buckets, "
-            "--candidate-period, --candidate-grouped-rows, "
-            "--candidate-buckets, --evict-bytes, --cache-state, --loss, "
-            "--seed, and --schedule\n");
+            "--control-period, --control-gf256-rows, "
+            "--control-grouped-rows, --control-grouped-row-mask, "
+            "--control-buckets, --candidate-period, "
+            "--candidate-gf256-rows, --candidate-grouped-rows, "
+            "--candidate-grouped-row-mask, --candidate-buckets, "
+            "--evict-bytes, --cache-state, --loss, --seed, and "
+            "--schedule\n");
         return 1;
     }
     const auto invalid_arm = [](const GroupedTimingArm& arm) {
-        return arm.Period <
-                wirehair_v2::kMixedGF256Rows +
-                    wirehair_v2::kMixedGF16Rows ||
+        const uint32_t heavy_rows =
+            arm.GF256Rows + wirehair_v2::kMixedGF16Rows;
+        return (arm.GF256Rows != wirehair_v2::kMixedGF256Rows &&
+                arm.GF256Rows != wirehair_v2::kMixedGF256Rows + 1u) ||
+            arm.Period < heavy_rows ||
             arm.Period > wirehair_v2::kMixedCoefficientPeriod ||
             arm.GroupedRows > 9u ||
+            !GroupedTimingRowMaskIsValid(arm) ||
             (arm.GroupedRows != 0u &&
-             arm.Period <= wirehair_v2::kMixedGF256Rows +
-                wirehair_v2::kMixedGF16Rows) ||
+             arm.Period <= heavy_rows) ||
             (arm.GroupedRows == 0u &&
              arm.Buckets !=
                 wirehair_v2::MixedResidueBucketMode::Automatic);
@@ -7340,29 +7455,58 @@ int CmdGroupedTiming(int argc, char** argv)
             (int)candidate_select);
         return 2;
     }
+    if (control_attempt != candidate_attempt ||
+        !SameGroupedTimingBaseGraph(
+            control_system.Params, control_config,
+            candidate_system.Params, candidate_config))
+    {
+        std::fprintf(stderr,
+            "groupedtiming selected arms do not share one binary base "
+            "graph\n");
+        return 2;
+    }
 
     PreferredTimingCell cell;
     if (!BuildFullPayloadTimingCell(
             control_system.Params, control_config, block_bytes, overhead, loss,
             seed, schedule, true,
-            "wirehair-wh2-grouped-timing-trace-v1", cell))
+            "wirehair-wh2-grouped-timing-trace-v2", cell))
     {
         std::fprintf(stderr, "groupedtiming solve setup failed\n");
         return 2;
     }
+    const uint64_t control_precode_wide =
+        (uint64_t)control_system.Params.Staircase +
+        control_system.Params.DenseRows + control_system.Params.HeavyRows;
     const uint64_t candidate_precode_wide =
         (uint64_t)candidate_system.Params.Staircase +
         candidate_system.Params.DenseRows + candidate_system.Params.HeavyRows;
-    if (candidate_precode_wide > UINT32_MAX ||
+    wirehair_v2::PacketRowRuntime candidate_runtime;
+    if (control_precode_wide > UINT32_MAX ||
+        candidate_precode_wide > UINT32_MAX ||
+        control_system.Params.HeavyRows !=
+            control_arm.GF256Rows + wirehair_v2::kMixedGF16Rows ||
+        candidate_system.Params.HeavyRows !=
+            candidate_arm.GF256Rows + wirehair_v2::kMixedGF16Rows ||
+        control_precode_wide + candidate_arm.GF256Rows !=
+            candidate_precode_wide + control_arm.GF256Rows ||
         !cell.Runtime.IsValidFor(
+            K, (uint32_t)control_precode_wide,
+            control_config.MixCount) ||
+        !candidate_runtime.Initialize(
             K, (uint32_t)candidate_precode_wide,
             candidate_config.MixCount) ||
         cell.Packets.size() != (size_t)K + overhead)
     {
         std::fprintf(stderr,
-            "groupedtiming selected arms do not share one packet domain\n");
+            "groupedtiming could not construct exact arm runtimes over one "
+            "packet domain\n");
         return 2;
     }
+    const uint32_t control_precode_count =
+        (uint32_t)control_precode_wide;
+    const uint32_t candidate_precode_count =
+        (uint32_t)candidate_precode_wide;
 
     // Allocate and prefault the eviction working set before either preflight.
     // In warm mode, touching it afterward would make the first recorded solve
@@ -7373,11 +7517,11 @@ int CmdGroupedTiming(int argc, char** argv)
     GroupedTimingObservation control_preflight;
     GroupedTimingObservation candidate_preflight;
     if (!RunGroupedTimingObservation(
-            control_arm, control_system, control_config, cell, block_bytes,
-            control_preflight) ||
+            control_arm, control_system, control_config, cell.Runtime,
+            cell, block_bytes, control_preflight) ||
         !RunGroupedTimingObservation(
-            candidate_arm, candidate_system, candidate_config, cell,
-            block_bytes,
+            candidate_arm, candidate_system, candidate_config,
+            candidate_runtime, cell, block_bytes,
             candidate_preflight))
     {
         std::fprintf(stderr, "groupedtiming preflight failed\n");
@@ -7395,25 +7539,36 @@ int CmdGroupedTiming(int argc, char** argv)
     const uint64_t packet_payload_bytes =
         ((uint64_t)K + overhead) * block_bytes;
     std::printf(
-        "# groupedtiming: schema=v1 policy=h12-q0-grouped "
+        "# groupedtiming: schema=v2 policy=h12-h13-q0-grouped "
         "timing_scope=solve cycles=%u order=ABBABAAB discard_cycle=0 "
         "cycle_mode=%s cycle_index=%s N=%u bb=%u overhead=%u "
         "loss=%.17g seed=%llu schedule=%s cache_state=%s "
         "overhead_stream=salted "
         "evict_bytes=%llu eviction_prefaulted=1 "
-        "control_period=%u control_grouped_rows=%u "
+        "control_period=%u control_gf256_rows=%u "
+        "control_heavy_rows=%u control_precode_count=%u "
+        "control_grouped_rows=%u "
+        "control_grouped_gf256_row_mask=0x%x "
         "control_buckets=%s control_grouped_hash_seed=0x%x "
-        "control_final_h_a_columns=%u candidate_period=%u "
-        "candidate_grouped_rows=%u candidate_buckets=%s "
+        "control_final_h_a_columns=%u "
+        "candidate_period=%u candidate_gf256_rows=%u "
+        "candidate_heavy_rows=%u candidate_precode_count=%u "
+        "candidate_grouped_rows=%u "
+        "candidate_grouped_gf256_row_mask=0x%x "
+        "candidate_buckets=%s "
         "candidate_grouped_hash_seed=0x%x "
-        "candidate_final_h_a_columns=%u gf256_rows=10 gf16_rows=2 "
-        "dense_two_anchor=1 control_attempt=%u "
+        "candidate_final_h_a_columns=%u gf16_rows=%u "
+        "dense_two_anchor=1 binary_base_graph_shared=1 "
+        "heavy_rows_arm_specific=1 "
+        "arm_runtimes=separate-precode-count-v1 control_attempt=%u "
         "control_matrix_seed=0x%llx control_peel_seed=0x%x "
         "candidate_attempt=%u candidate_matrix_seed=0x%llx "
         "candidate_peel_seed=0x%x mix=2 "
         "payload=distinct-packet-zero-v1 payload_count=%u "
         "payload_bytes=%llu payload_alignment=64 payload_prefaulted=1 "
         "system_build=outside-timer tls_reapply=full-per-slot-outside-timer "
+        "coefficient_layout=materialized-per-slot-outside-timer "
+        "grouped_schedule_prefix=materialized-per-slot-outside-timer "
         "allocator_tls_state=preflight-warmed "
         "preflight_control_result=%d preflight_candidate_result=%d "
         "cell_class=%s common_success=%u trace_sha256=%s\n",
@@ -7423,16 +7578,21 @@ int CmdGroupedTiming(int argc, char** argv)
         (unsigned long long)seed, PacketScheduleName(schedule),
         GroupedTimingCacheStateName(cache_state),
         (unsigned long long)eviction_bytes,
-        control_arm.Period, control_arm.GroupedRows,
+        control_arm.Period, control_arm.GF256Rows,
+        control_system.Params.HeavyRows, control_precode_count,
+        control_arm.GroupedRows, control_arm.GroupedRowMask,
         MixedResidueBucketModeName(control_arm.Buckets),
         control_grouped_hash_seed,
         control_arm.GroupedRows != 0u ?
             control_system.Params.HeavyRows : 0u,
-        candidate_arm.Period, candidate_arm.GroupedRows,
+        candidate_arm.Period, candidate_arm.GF256Rows,
+        candidate_system.Params.HeavyRows, candidate_precode_count,
+        candidate_arm.GroupedRows, candidate_arm.GroupedRowMask,
         MixedResidueBucketModeName(candidate_arm.Buckets),
         candidate_grouped_hash_seed,
         candidate_arm.GroupedRows != 0u ?
             candidate_system.Params.HeavyRows : 0u,
+        wirehair_v2::kMixedGF16Rows,
         control_attempt,
         (unsigned long long)control_system.Params.Seed,
         control_config.PeelSeed, candidate_attempt,
@@ -7445,7 +7605,8 @@ int CmdGroupedTiming(int argc, char** argv)
         cell.TraceSha256.c_str());
     std::printf(
         "N,bb,overhead,schedule,seed,loss,cache_state,cycle,slot,arm,"
-        "period,grouped_rows,buckets_requested,seed_attempt,matrix_seed,"
+        "period,gf256_rows,gf16_rows,heavy_rows,precode_count,grouped_rows,"
+        "grouped_gf256_row_mask,buckets_requested,seed_attempt,matrix_seed,"
         "peel_seed,preflight_result,cell_class,common_success,result,"
         "outcome_stable,elapsed_ns,saturated,"
         "cpu_before,cpu_after,cpu_migrated,minflt_delta,majflt_delta,"
@@ -7468,6 +7629,10 @@ int CmdGroupedTiming(int argc, char** argv)
                 control_system : candidate_system;
             const wirehair_v2::PacketRowConfig& active_config = control ?
                 control_config : candidate_config;
+            const wirehair_v2::PacketRowRuntime& active_runtime = control ?
+                cell.Runtime : candidate_runtime;
+            const uint32_t active_precode_count = control ?
+                control_precode_count : candidate_precode_count;
             const uint32_t active_attempt = control ?
                 control_attempt : candidate_attempt;
             const WirehairResult preflight_result = control ?
@@ -7490,7 +7655,7 @@ int CmdGroupedTiming(int argc, char** argv)
             const WirehairResult result =
                 wirehair_v2::SolvePrecodeSystemForValidatedSystemWithRuntime(
                     active_system, active_config,
-                    cell.Runtime, cell.Packets, block_bytes,
+                    active_runtime, cell.Packets, block_bytes,
                     intermediate, &stats);
             const Clock::time_point end = Clock::now();
             const int cpu_after = PreferredTimingCurrentCpu();
@@ -7513,15 +7678,19 @@ int CmdGroupedTiming(int argc, char** argv)
                 stats.ResidualRank - stats.BinaryResidualRank : 0u;
             const bool outcome_stable = result == preflight_result;
             std::printf(
-                "%u,%u,%u,%s,%llu,%.17g,%s,%u,%u,%s,%u,%u,%s,%u,"
-                "0x%llx,0x%x,%d,%s,%u,%d,%u,%llu,%u,%d,%d,%d,%lld,%lld,"
-                "%d,%u,%u,%u,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,"
-                "%llu,%llu,%u,%llu,%llu,%llu,%llu,%zu\n",
+                "%u,%u,%u,%s,%llu,%.17g,%s,%u,%u,%s,%u,%u,%u,%u,%u,"
+                "%u,0x%x,%s,%u,0x%llx,0x%x,%d,%s,%u,%d,%u,%llu,%u,%d,"
+                "%d,%d,%lld,%lld,%d,%u,%u,%u,%llu,%llu,%llu,%llu,%llu,"
+                "%llu,%llu,%llu,%llu,%llu,%u,%llu,%llu,%llu,%llu,"
+                "%zu\n",
                 K, block_bytes, overhead, PacketScheduleName(schedule),
                 (unsigned long long)seed, loss,
                 GroupedTimingCacheStateName(cache_state), cycle, slot,
                 control ? "control" : "candidate", arm.Period,
-                arm.GroupedRows, MixedResidueBucketModeName(arm.Buckets),
+                arm.GF256Rows, wirehair_v2::kMixedGF16Rows,
+                active_system.Params.HeavyRows, active_precode_count,
+                arm.GroupedRows, arm.GroupedRowMask,
+                MixedResidueBucketModeName(arm.Buckets),
                 active_attempt,
                 (unsigned long long)active_system.Params.Seed,
                 active_config.PeelSeed,
@@ -8413,10 +8582,13 @@ int CmdPrecodeFail(int argc, char** argv)
     {
         std::fprintf(stderr,
             "precodefail --mixed-grouped-gf256-rows must be in [0,9]; "
-            "nonzero grouping requires shared-x constant-A 10+2 geometry, "
+            "nonzero grouping requires shared-x constant-A 10-or-11 "
+            "GF256 + 2 GF16 geometry, "
             "P>H, and no independent extension residues; "
-            "--mixed-grouped-gf256-row-mask must use only the low ten "
-            "bits and contain exactly that many set bits\n");
+            "--mixed-grouped-gf256-row-mask must use only the low %u "
+            "active logical GF256 row bits and contain exactly that many "
+            "set bits\n",
+            wirehair_v2::ActiveMixedGF256Rows());
         return 1;
     }
     if (seed_block_bytes_explicit && seed_block_bytes_override == 0u)

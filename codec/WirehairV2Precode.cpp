@@ -525,9 +525,12 @@ const MixedCoefficientRows* GetMixedCoefficientRows()
             build_rows(MixedCoefficientGeometry::SharedCauchyX);
         const uint32_t grouped_rows = ActiveMixedGroupedGF256Rows();
         const uint32_t row_mask = ActiveMixedGroupedGF256RowMask();
+        const uint32_t subfield_rows = ActiveMixedGF256Rows();
+        const uint32_t active_h =
+            subfield_rows + ActiveMixedGF16Rows();
         const uint32_t suffix_mask = grouped_rows == 0u ? 0u :
             ((UINT32_C(1) << grouped_rows) - 1u) <<
-                (kMixedGF256Rows - grouped_rows);
+                (subfield_rows - grouped_rows);
         if (row_mask != suffix_mask)
         {
             // The grouped kernels deliberately retain one compact A prefix
@@ -537,12 +540,13 @@ const MixedCoefficientRows* GetMixedCoefficientRows()
             // and avoids adding membership branches to any payload loop.
             static thread_local MixedCoefficientRows permuted_rows = {};
             static thread_local uint32_t cached_row_mask = UINT32_MAX;
-            if (cached_row_mask != row_mask)
+            static thread_local uint32_t cached_h = 0u;
+            if (cached_h != active_h || cached_row_mask != row_mask)
             {
                 permuted_rows = shared_rows;
                 uint32_t destination = 0u;
                 for (uint32_t source = 0u;
-                     source < kMixedGF256Rows; ++source)
+                     source < subfield_rows; ++source)
                 {
                     if ((row_mask & (UINT32_C(1) << source)) != 0u) {
                         continue;
@@ -554,7 +558,7 @@ const MixedCoefficientRows* GetMixedCoefficientRows()
                         permuted_rows.Subfield[destination++]);
                 }
                 for (uint32_t source = 0u;
-                     source < kMixedGF256Rows; ++source)
+                     source < subfield_rows; ++source)
                 {
                     if ((row_mask & (UINT32_C(1) << source)) == 0u) {
                         continue;
@@ -565,7 +569,8 @@ const MixedCoefficientRows* GetMixedCoefficientRows()
                             kMixedCoefficientPeriod,
                         permuted_rows.Subfield[destination++]);
                 }
-                CAT_DEBUG_ASSERT(destination == kMixedGF256Rows);
+                CAT_DEBUG_ASSERT(destination == subfield_rows);
+                cached_h = active_h;
                 cached_row_mask = row_mask;
             }
             return &permuted_rows;
@@ -618,9 +623,14 @@ const MixedPackedCoefficients* GetMixedPackedCoefficients()
             // caches below remain canonical for every ungrouped caller.
             static thread_local MixedPackedCoefficients grouped_packed = {};
             static thread_local uint32_t cached_row_mask = UINT32_MAX;
+            static thread_local uint32_t cached_h = 0u;
             const uint32_t row_mask = ActiveMixedGroupedGF256RowMask();
-            if (cached_row_mask != row_mask) {
-                grouped_packed = pack_rows(rows, kMixedGF256Rows);
+            const uint32_t subfield_rows = ActiveMixedGF256Rows();
+            const uint32_t active_h =
+                subfield_rows + ActiveMixedGF16Rows();
+            if (cached_h != active_h || cached_row_mask != row_mask) {
+                grouped_packed = pack_rows(rows, subfield_rows);
+                cached_h = active_h;
                 cached_row_mask = row_mask;
             }
             return &grouped_packed;
@@ -909,13 +919,15 @@ void SetMixedIndependentExtensionSeedXorForTesting(uint32_t seed_xor)
 
 bool SetMixedGroupedGF256RowsForTesting(uint32_t rows)
 {
+    const uint32_t active_h =
+        MixedGF256RowsForTesting + MixedGF16RowsForTesting;
     if (rows > 9u ||
         (rows != 0u &&
          (MixedGeometryForTesting != MixedCoefficientGeometry::SharedCauchyX ||
-          MixedGF256RowsForTesting != kMixedGF256Rows ||
+          (MixedGF256RowsForTesting != kMixedGF256Rows &&
+           MixedGF256RowsForTesting != kMixedGF256Rows + 1u) ||
           MixedGF16RowsForTesting != kMixedGF16Rows ||
-          MixedCoefficientPeriodForTesting <=
-              kMixedGF256Rows + kMixedGF16Rows ||
+          MixedCoefficientPeriodForTesting <= active_h ||
           MixedResidueSkewForTesting != 0u ||
           MixedResidueScheduleForTesting != MixedResidueSchedule::Constant ||
           MixedIndependentExtensionResiduesForTesting)))
@@ -925,23 +937,23 @@ bool SetMixedGroupedGF256RowsForTesting(uint32_t rows)
     if (rows != 0u &&
         !SelectGroupedGF256ResidueSeed(
             MixedCoefficientPeriodForTesting,
-            MixedCoefficientPeriodForTesting -
-                kMixedGF256Rows - kMixedGF16Rows,
+            MixedCoefficientPeriodForTesting - active_h,
             MixedGroupedGF256ResidueHashSeedForTesting))
     {
         return false;
     }
     MixedGroupedGF256RowsForTesting = rows;
     MixedGroupedGF256RowMaskForTesting = rows == 0u ? 0u :
-        ((UINT32_C(1) << rows) - 1u) << (kMixedGF256Rows - rows);
+        ((UINT32_C(1) << rows) - 1u) <<
+            (MixedGF256RowsForTesting - rows);
     return true;
 }
 
 bool SetMixedGroupedGF256RowMaskForTesting(uint32_t row_mask)
 {
-    static const uint32_t kValidRowMask =
-        (UINT32_C(1) << kMixedGF256Rows) - 1u;
-    if ((row_mask & ~kValidRowMask) != 0u ||
+    const uint32_t valid_row_mask =
+        (UINT32_C(1) << MixedGF256RowsForTesting) - 1u;
+    if ((row_mask & ~valid_row_mask) != 0u ||
         CountSetBits(row_mask) != MixedGroupedGF256RowsForTesting)
     {
         return false;
@@ -1203,14 +1215,18 @@ uint32_t ActiveMixedGroupedGF256ResidueBlockShift(uint32_t block_index)
         return ActiveMixedResidueBlockShift(block_index);
     }
     const uint32_t period = MixedCoefficientPeriodForTesting;
+    const uint32_t active_h =
+        MixedGF256RowsForTesting + MixedGF16RowsForTesting;
     const uint32_t step_count =
-        period - kMixedGF256Rows - kMixedGF16Rows;
+        period - active_h;
     if (step_count == 0u) return 0u;
     static const uint32_t kStepCycle = 127u;
     static thread_local uint32_t cached_period = 0u;
+    static thread_local uint32_t cached_step_count = 0u;
     static thread_local uint32_t cached_seed = UINT32_MAX;
     static thread_local uint64_t prefix[kStepCycle + 1u] = {};
     if (cached_period != period ||
+        cached_step_count != step_count ||
         cached_seed != MixedGroupedGF256ResidueHashSeedForTesting)
     {
         const uint32_t seed = MixedGroupedGF256ResidueHashSeedForTesting;
@@ -1225,6 +1241,7 @@ uint32_t ActiveMixedGroupedGF256ResidueBlockShift(uint32_t block_index)
             prefix[i + 1u] = prefix[i] + 1u + x % step_count;
         }
         cached_period = period;
+        cached_step_count = step_count;
         cached_seed = seed;
     }
     const uint64_t complete_cycles = block_index / kStepCycle;

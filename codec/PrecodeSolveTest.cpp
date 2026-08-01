@@ -1563,8 +1563,8 @@ bool CheckMixedProjectionResidueBucketsOracleForPeriod(
     MixedIndependentExtensionResiduesScope independent_scope(
         independent_extension_residues);
     MixedResidueBucketModeScope bucket_mode_scope(bucket_mode);
-    // The grouped suffix validates the complete H12/shared-X/constant-A
-    // configuration and prerequisite setters clear it, so configure it last.
+    // Grouped rows validate the complete H12/H13 shared-X/constant-A
+    // configuration and prerequisite setters clear them, so configure last.
     MixedGroupedGF256RowsScope grouped_scope(
         grouped_gf256_rows, grouped_gf256_row_mask);
     if (!geometry_scope.IsValid() || !subfield_scope.IsValid() ||
@@ -2003,6 +2003,49 @@ bool CheckMixedProjectionResidueBucketsOracle()
             wirehair_v2::kMixedGF256Rows,
             wirehair_v2::MixedResidueBucketMode::Automatic,
             true))
+    {
+        return false;
+    }
+    // Stage B assigns C to logical Y rows 7..9 across the same-thread
+    // P48 H12/H13/H12 transition.  Each call covers systematic recovery,
+    // repair recovery, verification, and the packed-vs-dense projection
+    // oracle, including Y=10 compacted into the H13 A group.
+    if (!CheckMixedProjectionResidueBucketsOracleForPeriod(
+            48u,
+            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,
+            wirehair_v2::kMixedGF16Rows,
+            0u,
+            wirehair_v2::MixedResidueSchedule::Constant,
+            false,
+            wirehair_v2::kMixedGF256Rows,
+            wirehair_v2::MixedResidueBucketMode::Automatic,
+            true,
+            3u,
+            UINT32_C(0x380)) ||
+        !CheckMixedProjectionResidueBucketsOracleForPeriod(
+            48u,
+            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,
+            wirehair_v2::kMixedGF16Rows,
+            0u,
+            wirehair_v2::MixedResidueSchedule::Constant,
+            false,
+            wirehair_v2::kMixedGF256Rows + 1u,
+            wirehair_v2::MixedResidueBucketMode::Automatic,
+            true,
+            3u,
+            UINT32_C(0x380)) ||
+        !CheckMixedProjectionResidueBucketsOracleForPeriod(
+            48u,
+            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,
+            wirehair_v2::kMixedGF16Rows,
+            0u,
+            wirehair_v2::MixedResidueSchedule::Constant,
+            false,
+            wirehair_v2::kMixedGF256Rows,
+            wirehair_v2::MixedResidueBucketMode::Automatic,
+            true,
+            3u,
+            UINT32_C(0x380)))
     {
         return false;
     }
