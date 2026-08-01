@@ -7739,6 +7739,21 @@ int CmdGroupedTiming(int argc, char** argv)
 #endif // test hooks && !WIREHAIR_V2_BENCH_DISABLE_PREFERRED_ATTEMPT
 
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+// Raw architecture campaigns must not inherit the production per-K seed
+// repair tables.  This versioned policy is intentionally simple: the same
+// caller-supplied 64-bit construction seed is the precode matrix seed for
+// every K, and the packet peel seed is its XOR-folded 32-bit value.  K may
+// still select structural geometry such as GetDenseCount(K), but it never
+// participates in either seed derivation.
+static const char kUniformConstructionSeedPolicy[] =
+    "matrix-c-peel-lo32-xor-hi32-v1";
+
+uint32_t UniformConstructionPeelSeed(uint64_t construction_seed)
+{
+    return (uint32_t)construction_seed ^
+        (uint32_t)(construction_seed >> 32);
+}
+
 struct PrecodeFailRawTraceReceipt
 {
     uint64_t Seed = 0u;
@@ -7892,14 +7907,23 @@ std::string GroupedRecoveryPairId(
     uint32_t K,
     uint32_t overhead,
     uint64_t external_seed,
+    uint64_t construction_seed,
     PacketScheduleKind schedule,
     const PrecodeFailRawTraceReceipt& trace)
 {
     std::ostringstream domain;
-    domain << "wirehair-wh2-grouped-recovery-pair-v1\n"
-           << "N=" << K << "\nbb=64\nseed_block_bytes=64"
+    domain << "wirehair-wh2-grouped-recovery-pair-v2\n"
+           << "N=" << K << "\nbb=64"
            << "\nsolve_block_bytes=2\noverhead=" << overhead
            << "\nloss=0.5\nexternal_seed=" << external_seed
+           << "\nexternal_seed_role=loss-trace-root"
+           << "\nconstruction_seed_policy="
+           << kUniformConstructionSeedPolicy
+           << "\nconstruction_seed=" << construction_seed
+           << "\nproduction_seed_fixups_applied=0"
+           << "\nbase_matrix_seed=" << construction_seed
+           << "\nbase_peel_seed="
+           << UniformConstructionPeelSeed(construction_seed)
            << "\nschedule=" << PacketScheduleName(schedule)
            << "\nperiod=48\ngeometry=shared-x"
            << "\nresidue_skew=0\nresidue_schedule=constant"
@@ -7912,10 +7936,11 @@ std::string GroupedRecoveryPairId(
            << "\nbuckets=separate\ndense_rows=12"
            << "\ndense_identity_corner=0"
            << "\ndense_two_anchor=1\ndense_two_anchor_phase=0"
-           << "\nsource_hits=profile\nstaircase_rows=profile-dense-count"
+           << "\nsource_hits=canonical-K-rule"
+           << "\nstaircase_rows=GetDenseCount(K)"
            << "\nfield=mixed-gf256-gf16"
            << "\nheavy_family=periodic-cauchy"
-           << "\nconstruction_attempt=0\nseed_repair=disabled\nmix=2"
+           << "\nconstruction_attempt=0\nmix=2"
            << "\noverhead_stream=paired"
            << "\npacket_row_seed_multiplier=1"
            << "\npacket_row_seed_avalanche=0"
@@ -7955,6 +7980,7 @@ bool RunGroupedRecoveryArm(
     const char* arm_name,
     const GroupedTimingArm& arm,
     uint32_t K,
+    uint64_t construction_seed,
     const std::vector<wirehair_v2::SolvePacket>& packets,
     GroupedRecoveryArmObservation& observation)
 {
@@ -7971,21 +7997,17 @@ bool RunGroupedRecoveryArm(
     observation.GroupedHashSeed =
         wirehair_v2::ActiveMixedGroupedGF256HashSeed();
 
-    const wirehair_v2::SeedProfile profile =
-        wirehair_v2::SelectSeedProfile(K, 64u);
-    if (profile.BlockCount != K || profile.BlockBytes != 64u ||
-        profile.DenseCount == 0u)
+    const uint32_t dense_count = wirehair::GetDenseCount(K);
+    if (dense_count == 0u)
     {
         std::fprintf(stderr,
-            "groupedrecovery invalid base seed profile for %s N=%u\n",
+            "groupedrecovery invalid structural dense count for %s N=%u\n",
             arm_name, K);
         return false;
     }
     observation.BaseParams = wirehair_v2::MakeMixedParams(
-        K,
-        wirehair_v2::MatrixSeedFromProfile(
-            profile, 0u, wirehair_v2::kMessagePrecodeSeedSalt));
-    observation.BaseParams.Staircase = profile.DenseCount;
+        K, construction_seed);
+    observation.BaseParams.Staircase = dense_count;
     observation.BaseParams.DenseRows = 12u;
     observation.BaseParams.DenseIdentityCorner = false;
     observation.BaseParams.DenseTwoAnchor = true;
@@ -7993,8 +8015,7 @@ bool RunGroupedRecoveryArm(
     observation.BaseParams.HeavyFamily =
         wirehair_v2::HeavyCoefficientFamily::PeriodicCauchy;
     observation.BaseConfig.PeelSeed =
-        wirehair_v2::PacketPeelSeedFromProfile(
-            profile, wirehair_v2::kMessageRecoveryRowSeedSalt);
+        UniformConstructionPeelSeed(construction_seed);
     observation.BaseConfig.MixCount = 2u;
 
     // This command deliberately never calls SelectSystematicConfiguration:
@@ -8026,7 +8047,7 @@ bool RunGroupedRecoveryArm(
     const uint32_t expected_heavy =
         arm.GF256Rows + wirehair_v2::kMixedGF16Rows;
     if (system.Params.BlockCount != K ||
-        system.Params.Staircase != profile.DenseCount ||
+        system.Params.Staircase != dense_count ||
         system.Params.DenseRows != 12u ||
         system.Params.HeavyRows != expected_heavy ||
         system.Params.SourceHits != observation.BaseParams.SourceHits ||
@@ -8114,6 +8135,7 @@ std::string GroupedRecoveryArmRow(
     const GroupedRecoveryPairObservation& pair,
     uint32_t overhead,
     uint64_t external_seed,
+    uint64_t construction_seed,
     PacketScheduleKind schedule,
     const char* arm_name,
     uint32_t pair_order_index,
@@ -8135,7 +8157,8 @@ std::string GroupedRecoveryArmRow(
         << std::hex << arm.Arm.GroupedRowMask << std::dec << ",separate,0x"
         << std::hex << arm.GroupedHashSeed << std::dec << ','
         << arm.Params.HeavyRows << ",0,"
-        << (int)arm.SystematicProbeResult << ",0x" << std::hex
+        << kUniformConstructionSeedPolicy << ',' << construction_seed
+        << ",0," << (int)arm.SystematicProbeResult << ",0x" << std::hex
         << arm.BaseParams.Seed << ",0x" << arm.BaseConfig.PeelSeed
         << ",0x" << arm.Params.Seed << ",0x" << arm.Config.PeelSeed
         << std::dec << ',' << arm.Params.Staircase << ','
@@ -8176,10 +8199,12 @@ int CmdGroupedRecovery(int argc, char** argv)
     std::string nlist;
     uint32_t overhead = 0u;
     uint64_t seed = 0u;
+    uint64_t construction_seed = 0u;
     PacketScheduleKind schedule = PacketScheduleKind::Iid;
     bool have_N = false;
     bool have_overhead = false;
     bool have_seed = false;
+    bool have_construction_seed = false;
     bool have_schedule = false;
     for (int i = 0; i < argc; ++i)
     {
@@ -8214,6 +8239,19 @@ int CmdGroupedRecovery(int argc, char** argv)
                 return 1;
             }
         }
+        else if (!std::strcmp(argv[i], "--construction-seed"))
+        {
+            if (!GroupedRecoveryOptionOnce(
+                    "--construction-seed", have_construction_seed) ||
+                !TakeArg(
+                    "groupedrecovery", "--construction-seed", argc,
+                    argv, i, value) ||
+                !ParseCanonicalU64Arg(
+                    "--construction-seed", value, construction_seed))
+            {
+                return 1;
+            }
+        }
         else if (!std::strcmp(argv[i], "--schedule"))
         {
             if (!GroupedRecoveryOptionOnce("--schedule", have_schedule) ||
@@ -8235,11 +8273,12 @@ int CmdGroupedRecovery(int argc, char** argv)
             return 1;
         }
     }
-    if (!have_N || !have_overhead || !have_seed || !have_schedule)
+    if (!have_N || !have_overhead || !have_seed ||
+        !have_construction_seed || !have_schedule)
     {
         std::fprintf(stderr,
-            "groupedrecovery requires --N, --overhead, --seed, and "
-            "--schedule\n");
+            "groupedrecovery requires --N, --overhead, --seed, "
+            "--construction-seed, and --schedule\n");
         return 1;
     }
     size_t n_count = nlist.empty() ? 0u : 1u;
@@ -8320,14 +8359,14 @@ int CmdGroupedRecovery(int argc, char** argv)
         pair.TraceSeed = trace.Seed;
         pair.TraceSha256 = trace.Sha256;
         pair.PairId = GroupedRecoveryPairId(
-            K, overhead, seed, schedule, trace);
+            K, overhead, seed, construction_seed, schedule, trace);
         if (!IsLowerHexDigest(pair.PairId) ||
             !pair_ids.insert(std::make_pair(
                 pair.PairId, (uint32_t)pair_index)).second ||
             !RunGroupedRecoveryArm(
-                "h12", h12_arm, K, packets, pair.H12) ||
+                "h12", h12_arm, K, construction_seed, packets, pair.H12) ||
             !RunGroupedRecoveryArm(
-                "h13", h13_arm, K, packets, pair.H13))
+                "h13", h13_arm, K, construction_seed, packets, pair.H13))
         {
             std::fprintf(stderr,
                 "groupedrecovery pair construction failed for N=%u\n", K);
@@ -8356,9 +8395,14 @@ int CmdGroupedRecovery(int argc, char** argv)
 
     std::ostringstream batch;
     batch
-        << "# groupedrecovery: schema=v1 pair_order=h12,h13 arms_per_N=2 "
+        << "# groupedrecovery: schema=v2 pair_order=h12,h13 arms_per_N=2 "
         << "N_count=" << observations.size() << " N=" << nlist
         << " overhead=" << overhead << " seed=" << seed
+        << " seed_role=loss-trace-root"
+        << " construction_seed_policy="
+        << kUniformConstructionSeedPolicy
+        << " construction_seed=" << construction_seed
+        << " production_seed_fixups_applied=0"
         << " schedule=" << PacketScheduleName(schedule) << ' '
         << "policy=h12-h13-q0-grouped-v1 period=48 geometry=shared-x "
         << "residue_skew=0 residue_schedule=constant residue_hash_seed=0x0 "
@@ -8369,11 +8413,10 @@ int CmdGroupedRecovery(int argc, char** argv)
         << "grouped_hash_seed=h12:0xb7e15162|h13:0xb7e15163 "
         << "grouped_final_h_a_columns=arm-heavy-rows "
         << "dense_rows=12 dense_identity_corner=0 dense_two_anchor=1 "
-        << "dense_two_anchor_phase=0 source_hits=profile "
-        << "staircase_rows=profile-dense-count field=mixed-gf256-gf16 "
+        << "dense_two_anchor_phase=0 source_hits=canonical-K-rule "
+        << "staircase_rows=GetDenseCount(K) field=mixed-gf256-gf16 "
         << "heavy_family=periodic-cauchy construction_attempt=0 "
-        << "systematic_probe=direct-attempt0 seed_repair=disabled mix=2 "
-        << "bb=64 seed_block_bytes=64 "
+        << "systematic_probe=direct-attempt0 mix=2 bb=64 "
         << "solve_block_bytes=2 loss=0.5 "
         << "overhead_stream=paired packet_row_seed_multiplier=0x1 "
         << "packet_row_seed_avalanche=0 odd_packet_peel_seed_xor=0x0 "
@@ -8388,7 +8431,9 @@ int CmdGroupedRecovery(int argc, char** argv)
         "external_seed,loss,period,geometry,residue_skew,residue_schedule,"
         "gf256_rows,gf16_rows,heavy_rows,grouped_rows,"
         "grouped_gf256_row_mask,buckets_requested,grouped_hash_seed,"
-        "final_h_a_columns,construction_attempt,systematic_probe_result,"
+        "final_h_a_columns,construction_attempt,construction_seed_policy,"
+        "construction_seed,production_seed_fixups_applied,"
+        "systematic_probe_result,"
         "base_matrix_seed,"
         "base_peel_seed,matrix_seed,peel_seed,staircase_rows,dense_rows,"
         "source_hits,dense_identity_corner,dense_two_anchor,"
@@ -8407,9 +8452,11 @@ int CmdGroupedRecovery(int argc, char** argv)
     for (const GroupedRecoveryPairObservation& pair : observations)
     {
         batch << GroupedRecoveryArmRow(
-            pair, overhead, seed, schedule, "h12", 0u, pair.H12) << '\n';
+            pair, overhead, seed, construction_seed, schedule,
+            "h12", 0u, pair.H12) << '\n';
         batch << GroupedRecoveryArmRow(
-            pair, overhead, seed, schedule, "h13", 1u, pair.H13) << '\n';
+            pair, overhead, seed, construction_seed, schedule,
+            "h13", 1u, pair.H13) << '\n';
     }
     const std::string output = batch.str();
     const size_t written = std::fwrite(
@@ -8460,6 +8507,8 @@ int CmdPrecodeFail(int argc, char** argv)
     uint32_t binary_dense_two_anchor_phase = 0u;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     bool raw_attempt0 = false;
+    uint64_t construction_seed = 0u;
+    bool construction_seed_explicit = false;
     bool mixed_null_witness_internal_error = false;
     uint32_t fail_thread_launch_after = UINT32_MAX;
     bool source_hits_explicit = false;
@@ -8604,6 +8653,24 @@ int CmdPrecodeFail(int argc, char** argv)
         }
         else if (!std::strcmp(argv[i], "--raw-attempt0")) {
             raw_attempt0 = true;
+        }
+        else if (!std::strcmp(argv[i], "--construction-seed")) {
+            if (construction_seed_explicit)
+            {
+                std::fprintf(stderr,
+                    "precodefail --construction-seed specified more than "
+                    "once\n");
+                return 1;
+            }
+            if (!TakeArg(
+                    "precodefail", "--construction-seed", argc, argv, i,
+                    value) ||
+                !ParseCanonicalU64Arg(
+                    "--construction-seed", value, construction_seed))
+            {
+                return 1;
+            }
+            construction_seed_explicit = true;
         }
         else if (!std::strcmp(argv[i], "--mixed-null-witnesses")) {
             mixed_null_witnesses = true;
@@ -9203,6 +9270,25 @@ int CmdPrecodeFail(int argc, char** argv)
             "precodefail --seed-block-bytes must be nonzero\n");
         return 1;
     }
+    if (construction_seed_explicit && !raw_attempt0)
+    {
+        std::fprintf(stderr,
+            "precodefail --construction-seed requires --raw-attempt0\n");
+        return 1;
+    }
+    if (raw_attempt0 && !construction_seed_explicit)
+    {
+        std::fprintf(stderr,
+            "precodefail --raw-attempt0 requires --construction-seed\n");
+        return 1;
+    }
+    if (construction_seed_explicit && seed_block_bytes_explicit)
+    {
+        std::fprintf(stderr,
+            "precodefail --construction-seed conflicts with "
+            "--seed-block-bytes\n");
+        return 1;
+    }
     if (packet_peel_seed_table != PacketPeelSeedTable::None &&
         packet_peel_seed_xor_explicit)
     {
@@ -9270,14 +9356,29 @@ int CmdPrecodeFail(int argc, char** argv)
          packet_peel_seed_table != PacketPeelSeedTable::None ||
          odd_packet_peel_seed_xor != 0u ||
          packet_row_seed_multiplier != 1u || packet_row_seed_avalanche ||
-         seed_block_bytes_override != 64u))
+         seed_block_bytes_override != 0u))
     {
         std::fprintf(stderr,
             "precodefail --raw-attempt0 requires the Stage-A P48 shared-x "
             "10-or-11 GF256 + 2 GF16, D12 two-anchor q0, mix2, one-trial "
-            "64-byte seed-width paired-overhead geometry with no seed fixes\n");
+            "64-byte paired-overhead geometry with one explicit uniform "
+            "construction seed and no production seed fixups\n");
         return 1;
     }
+#endif
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    std::ostringstream raw_seed_banner_stream;
+    if (raw_attempt0)
+    {
+        raw_seed_banner_stream
+            << " seed_role=loss-trace-root"
+            << " construction_seed_policy="
+            << kUniformConstructionSeedPolicy
+            << " construction_seed=" << construction_seed
+            << " production_seed_fixups_applied=0 raw_attempt0=1";
+    }
+    const std::string raw_seed_banner = raw_seed_banner_stream.str();
 #endif
 
     if (completion == PrecodeFailCompletion::Certified)
@@ -9313,7 +9414,7 @@ int CmdPrecodeFail(int argc, char** argv)
     else
     {
         std::printf(
-            "# precodefail: trials=%u threads=%u loss=%.17g seed=0x%llx "
+            "# precodefail: trials=%u threads=%u loss=%.17g seed=0x%llx%s "
             "completion=%s mixed_period=%u mixed_gf256_rows=%u "
             "mixed_gf16_rows=%u "
             "mixed_geometry=%s mixed_residue_skew=%u "
@@ -9334,8 +9435,13 @@ int CmdPrecodeFail(int argc, char** argv)
             "odd_packet_peel_seed_xor=0x%x "
             "packet_row_seed_multiplier=0x%x "
             "packet_row_seed_avalanche=%u seed_block_bytes_override=%u "
-            "overhead_stream=%s full_payload_solve=%u schedule=%s%s%s\n",
+            "overhead_stream=%s full_payload_solve=%u schedule=%s%s\n",
             trials, threads, loss, (unsigned long long)seed,
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            raw_seed_banner.c_str(),
+#else
+            "",
+#endif
             PrecodeFailCompletionName(completion),
             wirehair_v2::ActiveMixedCoefficientPeriod(),
             wirehair_v2::ActiveMixedGF256Rows(),
@@ -9374,18 +9480,14 @@ int CmdPrecodeFail(int argc, char** argv)
             paired_overhead_stream ? "paired" : "salted",
             full_payload_solve ? 1u : 0u,
             PacketScheduleName(schedule_kind),
-            mixed_null_witnesses ? " mixed_null_witnesses=1" : "",
-#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-            raw_attempt0 ? " raw_attempt0=1" : ""
-#else
-            ""
-#endif
-            );
+            mixed_null_witnesses ? " mixed_null_witnesses=1" : "");
     }
     const char* raw_receipt_header =
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
         raw_attempt0 ?
-            ",construction_attempt,base_matrix_seed,base_peel_seed,"
+            ",construction_attempt,construction_seed_policy,"
+            "construction_seed,production_seed_fixups_applied,"
+            "base_matrix_seed,base_peel_seed,"
             "matrix_seed,peel_seed,actual_staircase_rows,"
             "actual_dense_rows,actual_heavy_rows,actual_source_hits,"
             "actual_dense_two_anchor,actual_dense_two_anchor_phase,"
@@ -9488,25 +9590,40 @@ int CmdPrecodeFail(int argc, char** argv)
             return 1;
         }
 #endif
-        const wirehair_v2::SeedProfile profile =
-            wirehair_v2::SelectSeedProfile(K, bb);
-        // Research graph portability without changing the payload width used
-        // by E2E validation, loss-stream pairing, or full-payload solving.
-        const wirehair_v2::SeedProfile seed_profile =
-            seed_block_bytes_override != 0u ?
-                wirehair_v2::SelectSeedProfile(
-                    K, seed_block_bytes_override) :
-                profile;
-        const uint64_t matrix_seed = wirehair_v2::MatrixSeedFromProfile(
-            seed_profile, 0u, wirehair_v2::kMessagePrecodeSeedSalt);
-        const wirehair_v2::PrecodeParams canonical_params =
-            completion == PrecodeFailCompletion::Mixed ?
+        uint64_t matrix_seed = 0u;
+        wirehair_v2::PrecodeParams canonical_params;
+        wirehair_v2::PacketRowConfig base_config;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        if (raw_attempt0)
+        {
+            matrix_seed = construction_seed;
+            canonical_params = wirehair_v2::MakeMixedParams(K, matrix_seed);
+            canonical_params.Staircase = wirehair::GetDenseCount(K);
+            base_config.PeelSeed =
+                UniformConstructionPeelSeed(construction_seed);
+        }
+        else
+#endif
+        {
+            const wirehair_v2::SeedProfile profile =
+                wirehair_v2::SelectSeedProfile(K, bb);
+            // Research graph portability without changing the payload width
+            // used by E2E validation, loss-stream pairing, or full-payload
+            // solving.
+            const wirehair_v2::SeedProfile seed_profile =
+                seed_block_bytes_override != 0u ?
+                    wirehair_v2::SelectSeedProfile(
+                        K, seed_block_bytes_override) :
+                    profile;
+            matrix_seed = wirehair_v2::MatrixSeedFromProfile(
+                seed_profile, 0u, wirehair_v2::kMessagePrecodeSeedSalt);
+            canonical_params = completion == PrecodeFailCompletion::Mixed ?
                 wirehair_v2::MakeMixedParams(K, matrix_seed) :
                 wirehair_v2::MakeCertifiedParams(K, matrix_seed);
-        wirehair_v2::PacketRowConfig base_config;
-        base_config.PeelSeed = wirehair_v2::PacketPeelSeedFromProfile(
-            seed_profile, wirehair_v2::kMessageRecoveryRowSeedSalt) ^
-            active_packet_peel_seed_xor;
+            base_config.PeelSeed = wirehair_v2::PacketPeelSeedFromProfile(
+                seed_profile, wirehair_v2::kMessageRecoveryRowSeedSalt) ^
+                active_packet_peel_seed_xor;
+        }
         for (wirehair_v2::HeavyCoefficientFamily heavy_family : heavy_families)
         {
         std::map<uint32_t, PairedMixOutcomes> paired_outcomes;
@@ -10140,8 +10257,10 @@ int CmdPrecodeFail(int argc, char** argv)
             if (raw_attempt0)
             {
                 std::printf(
-                    ",0,0x%llx,0x%x,0x%llx,0x%x,%u,%u,%u,%u,%u,%u,"
+                    ",0,%s,%llu,0,0x%llx,0x%x,0x%llx,0x%x,%u,%u,%u,%u,%u,%u,"
                     "%d,%u,0x%llx,%s",
+                    kUniformConstructionSeedPolicy,
+                    (unsigned long long)construction_seed,
                     (unsigned long long)base_params.Seed,
                     base_config.PeelSeed,
                     (unsigned long long)system.Params.Seed,

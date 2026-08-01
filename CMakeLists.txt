@@ -766,7 +766,7 @@ if(BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
             set_tests_properties(wh2_h13_stage_a_test
                 PROPERTIES
                     ENVIRONMENT
-                        "PYTHONPATH=${PROJECT_SOURCE_DIR}/bench;PYTHONDONTWRITEBYTECODE=1"
+                        "PYTHONPATH=${PROJECT_SOURCE_DIR}/bench;PYTHONDONTWRITEBYTECODE=1;WIREHAIR_V2_BENCH=$<TARGET_FILE:wirehair_v2_bench>"
                     LABELS "v2;research;state-machine;h13"
                     TIMEOUT 60)
             add_test(

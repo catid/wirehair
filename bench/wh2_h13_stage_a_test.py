@@ -10,6 +10,7 @@ import io
 import json
 import os
 from pathlib import Path
+import queue
 import shutil
 import signal
 import subprocess
@@ -48,10 +49,10 @@ def read_pid_when_ready(path: Path, timeout: float = 5.0) -> int:
 
 
 def task(arm: str, ks: tuple[int, ...] = (2,), *, overhead: int = 0,
-         job: int | None = None) -> campaign.Task:
+         job: int | None = None, construction_index: int = 0) -> campaign.Task:
     return campaign._new_task(
         overhead, (0 if arm == "h12" else 1) if job is None else job,
-        0, arm, 0, "burst", ks,
+        0, arm, construction_index, 0, "burst", ks,
     )
 
 
@@ -88,9 +89,17 @@ def row_for(
         "mixed_joint_active_deltas_mu": "7.000",
         "mixed_joint_scratch_bytes_mu": "8.000",
         "mixed_dual_source_columns_mu": "9.000",
-        "construction_attempt": "0", "base_matrix_seed": "0x1234",
-        "base_peel_seed": "0x5678", "matrix_seed": "0x1234",
-        "peel_seed": "0x5678", "actual_staircase_rows": str(K),
+        "construction_attempt": "0",
+        "construction_seed_policy": campaign.CONSTRUCTION_SEED_POLICY,
+        "construction_seed": str(value.construction_seed),
+        "production_seed_fixups_applied": "0",
+        "base_matrix_seed": hex(value.construction_seed),
+        "base_peel_seed": hex(campaign.construction_peel_seed(
+            value.construction_seed)),
+        "matrix_seed": hex(value.construction_seed),
+        "peel_seed": hex(campaign.construction_peel_seed(
+            value.construction_seed)),
+        "actual_staircase_rows": str(K),
         "actual_dense_rows": "12",
         "actual_heavy_rows": "12" if value.arm == "h12" else "13",
         "actual_source_hits": "2" if K < 10000 else "3",
@@ -164,22 +173,62 @@ class PlannerTests(unittest.TestCase):
         self.assertIn("--raw-attempt0", left)
         self.assertIn("--paired-overhead-stream", left)
         self.assertIn("--binary-dense-two-anchor", left)
-        self.assertEqual(left[left.index("--seed-block-bytes") + 1], "64")
+        self.assertNotIn("--seed-block-bytes", left)
         self.assertNotIn("--seed-width", left)
+        self.assertEqual(
+            left[left.index("--construction-seed") + 1],
+            str(campaign.CONSTRUCTION_SEEDS[0]),
+        )
+
+    def test_exact_uniform_seed_preamble_line_and_mapping(self) -> None:
+        value = task("h12", construction_index=2)
+        line = campaign.expected_preamble_line(value)
+        self.assertIn(
+            " seed=0xd1b54a32d192ed03 seed_role=loss-trace-root "
+            "construction_seed_policy=matrix-c-peel-lo32-xor-hi32-v1 "
+            f"construction_seed={campaign.CONSTRUCTION_SEEDS[2]} "
+            "production_seed_fixups_applied=0 raw_attempt0=1 completion=mixed ",
+            line,
+        )
+        self.assertEqual(
+            campaign.construction_peel_seed(campaign.CONSTRUCTION_SEEDS[2]),
+            ((campaign.CONSTRUCTION_SEEDS[2] & 0xffffffff) ^
+             (campaign.CONSTRUCTION_SEEDS[2] >> 32)),
+        )
+
+    def test_construction_roots_are_crossed_without_per_k_changes(self) -> None:
+        for construction_index, construction_seed in enumerate(
+                campaign.CONSTRUCTION_SEEDS):
+            value = campaign._new_task(
+                0, 0, 0, "h12", construction_index, 1, "adversarial",
+                (2, 64000),
+            )
+            self.assertEqual(value.construction_seed, construction_seed)
+            argv = campaign.make_benchmark_argv(Path("/bench"), value)
+            self.assertEqual(
+                argv[argv.index("--construction-seed") + 1],
+                str(construction_seed),
+            )
+            rows = campaign.parse_output(output_for(value), value)
+            self.assertEqual(
+                {row["base_matrix_seed"] for row in rows},
+                {hex(construction_seed)},
+            )
 
     def test_nested_planner_runs_both_arms_only_on_union(self) -> None:
         cohort = {(0, "burst", 2), (0, "burst", 64000),
                   (2, "repair-only", 41)}
-        tasks = campaign.build_tasks(17, cohort)
+        tasks = campaign.build_tasks(17, 2, cohort)
         self.assertEqual(len(tasks), 4)
         actual = {
             (value.seed_index, value.schedule, K)
             for value in tasks for K in value.ks
         }
         self.assertEqual(actual, cohort)
+        self.assertTrue(all(value.construction_index == 2 for value in tasks))
         self.assertEqual([value.arm for value in tasks], ["h12", "h13"] * 2)
         with self.assertRaises(campaign.CampaignError):
-            campaign.build_tasks(18, [
+            campaign.build_tasks(18, 2, [
                 (0, "burst", 2), (0, "burst", 2),
             ])
 
@@ -258,11 +307,17 @@ class PlannerTests(unittest.TestCase):
             contract = campaign.load_contract(
                 result_dir.resolve(), require_frozen_controller=False,
             )
-            self.assertEqual(contract["paired_cells"], 575991)
-            self.assertEqual(contract["outcomes_per_arm"], 575991)
-            tasks = campaign.load_manifest(campaign.stage_path(result_dir, 0), 0)
-            self.assertEqual(len(tasks), 4608)
-            self.assertIn('"oh0_jobs":4608', output.getvalue())
+            self.assertEqual(contract["r0_paired_cells"], 575991)
+            self.assertEqual(contract["r1_paired_cells"], 1151982)
+            self.assertEqual(contract["full_paired_cells"], 1727973)
+            self.assertEqual(contract["production_seed_fixups_applied"], 0)
+            for construction_index in range(3):
+                tasks = campaign.load_manifest(
+                    campaign.stage_path(result_dir, construction_index, 0),
+                    construction_index, 0,
+                )
+                self.assertEqual(len(tasks), 4608)
+            self.assertIn('"full_oh0_jobs":13824', output.getvalue())
 
     def test_oh0_manifest_rejects_a_resealed_truncated_census(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -270,10 +325,10 @@ class PlannerTests(unittest.TestCase):
             tasks = campaign.build_tasks(0)
             campaign.write_sealed_once(
                 stage / "manifest.json", f"{campaign.SCHEMA}.stage_manifest",
-                campaign.manifest_payload(0, tasks[:-2]),
+                campaign.manifest_payload(0, 0, tasks[:-2]),
             )
             with self.assertRaises(campaign.CampaignError):
-                campaign.load_manifest(stage, 0)
+                campaign.load_manifest(stage, 0, 0)
 
     def test_exclusive_campaign_lock_rejects_second_controller(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -332,7 +387,7 @@ class SignalLifecycleTests(unittest.TestCase):
             "sys.stdout.write(output_path.read_text(encoding='ascii'))\n",
             encoding="utf-8",
         )
-        binary.chmod(0o755)
+        binary.chmod(0o555)
         taskset = root / "taskset"
         taskset.write_text(
             f"#!{sys.executable}\n"
@@ -341,7 +396,7 @@ class SignalLifecycleTests(unittest.TestCase):
             "os.execv(sys.argv[3], sys.argv[3:])\n",
             encoding="utf-8",
         )
-        taskset.chmod(0o755)
+        taskset.chmod(0o555)
         harness = root / "harness.py"
         harness.write_text(
             "from pathlib import Path\n"
@@ -352,7 +407,7 @@ class SignalLifecycleTests(unittest.TestCase):
             f"root = Path({str(root)!r})\n"
             f"binary = Path({str(binary)!r})\n"
             f"taskset = Path({str(taskset)!r})\n"
-            "value = campaign._new_task(0, 0, 0, 'h12', 0, 'burst', (2,))\n"
+            "value = campaign._new_task(0, 0, 0, 'h12', 0, 0, 'burst', (2,))\n"
             "cpus = queue.Queue()\n"
             "cpus.put(2)\n"
             "try:\n"
@@ -478,13 +533,46 @@ class ParserTests(unittest.TestCase):
         right_rows = campaign.parse_output(output_for(right), right)
         paired = campaign.pair_rows(((left, left_rows), (right, right_rows)))
         self.assertEqual(len(paired), 1)
-        bad_right = campaign.parse_output(output_for(
-            right, overrides={2: {
-                "base_matrix_seed": "0x999", "matrix_seed": "0x999",
-            }},
-        ), right)
         with self.assertRaises(campaign.CampaignError):
-            campaign.pair_rows(((left, left_rows), (right, bad_right)))
+                campaign.parse_output(output_for(
+                    right, overrides={2: {
+                        "base_matrix_seed": "0x999", "matrix_seed": "0x999",
+                    }},
+                ), right)
+
+
+@unittest.skipUnless(
+    os.environ.get("WIREHAIR_V2_BENCH"),
+    "set WIREHAIR_V2_BENCH to exercise the native receipt contract",
+)
+class NativeIntegrationTests(unittest.TestCase):
+    def test_uniform_construction_roots_and_k_boundaries(self) -> None:
+        binary = Path(os.environ["WIREHAIR_V2_BENCH"]).resolve(strict=True)
+        for construction_index in range(len(campaign.CONSTRUCTION_SEEDS)):
+            paired: list[tuple[campaign.Task, list[dict[str, str]]]] = []
+            for arm in campaign.ARMS:
+                value = campaign._new_task(
+                    0, construction_index * len(campaign.ARMS) +
+                    campaign.ARMS.index(arm), 0, arm, construction_index,
+                    1, "adversarial", (2, 9999, 10000, 64000),
+                )
+                process = subprocess.run(
+                    campaign.make_benchmark_argv(binary, value),
+                    capture_output=True, text=True, timeout=60, check=False,
+                )
+                self.assertEqual(process.returncode, 0, process.stderr)
+                self.assertEqual(process.stderr, "")
+                rows = campaign.parse_output(process.stdout, value)
+                self.assertEqual(
+                    {row["construction_seed"] for row in rows},
+                    {str(campaign.CONSTRUCTION_SEEDS[construction_index])},
+                )
+                self.assertEqual(
+                    {row["production_seed_fixups_applied"] for row in rows},
+                    {"0"},
+                )
+                paired.append((value, rows))
+            self.assertEqual(len(campaign.pair_rows(paired)), 4)
 
 
 class ReceiptAndReducerTests(unittest.TestCase):
@@ -556,6 +644,66 @@ class ReceiptAndReducerTests(unittest.TestCase):
                 campaign.validate_shard(
                     stage, value, binary, digest, taskset, {2},
                 )
+
+    def test_authenticated_fds_survive_visible_path_substitution(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            stage = root / "stage"
+            value = task("h12")
+            expected = root / "expected.csv"
+            expected.write_text(output_for(value), encoding="ascii")
+            binary = root / "wirehair_v2_bench"
+            binary.write_text(
+                f"#!{sys.executable}\n"
+                "from pathlib import Path\n"
+                "import sys\n"
+                f"sys.stdout.write(Path({str(expected)!r}).read_text(encoding='ascii'))\n",
+                encoding="utf-8",
+            )
+            taskset_source = Path(shutil.which("taskset") or "")
+            self.assertTrue(taskset_source.is_file())
+            taskset = root / "taskset"
+            shutil.copyfile(taskset_source, taskset)
+            binary.chmod(0o555)
+            taskset.chmod(0o555)
+            binary_sha = campaign.sha256_file(binary)
+            taskset_sha = campaign.sha256_file(taskset)
+            binary_fd = campaign.open_authenticated_executable(
+                binary, binary_sha,
+            )
+            taskset_fd = campaign.open_authenticated_executable(
+                taskset, taskset_sha,
+            )
+            try:
+                binary.rename(root / "authenticated-binary")
+                taskset.rename(root / "authenticated-taskset")
+                shutil.copyfile("/bin/false", binary)
+                shutil.copyfile("/bin/false", taskset)
+                binary.chmod(0o555)
+                taskset.chmod(0o555)
+                cpu = next(
+                    value for value in sorted(os.sched_getaffinity(0))
+                    if value != 127
+                )
+                cpus: queue.Queue[int] = queue.Queue()
+                cpus.put(cpu)
+                campaign.execute_task(
+                    root, stage, value, binary, binary_sha, taskset,
+                    taskset_sha, cpus, 10.0, campaign.ActiveChildren(), {cpu},
+                    binary_fd, taskset_fd,
+                )
+            finally:
+                os.close(taskset_fd)
+                os.close(binary_fd)
+            rows = campaign.validate_shard(
+                stage, value, binary, binary_sha, taskset, {cpu},
+            )
+            self.assertEqual(len(rows), 1)
+            receipt = campaign.load_sealed(
+                campaign.shard_path(stage, value) / "receipt.json",
+                f"{campaign.SCHEMA}.job_receipt",
+            )
+            self.assertEqual(receipt["execution_mode"], campaign.EXECUTION_MODE)
 
     def test_cross_arm_receipt_substitution_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -637,6 +785,86 @@ class ReceiptAndReducerTests(unittest.TestCase):
             ["mixed_joint_source_xors_mu"], "1",
         )
 
+    def test_weak_k_construction_and_full_k_multiplicity_domains(self) -> None:
+        cells = {}
+        for construction_index in range(3):
+            for seed_index in range(3):
+                for schedule in campaign.SCHEDULES:
+                    left_task = campaign._new_task(
+                        0, 0, 0, "h12", construction_index, seed_index,
+                        schedule, (2,),
+                    )
+                    right_task = campaign._new_task(
+                        0, 1, 0, "h13", construction_index, seed_index,
+                        schedule, (2,),
+                    )
+                    cells[(construction_index, seed_index, schedule, 2)] = {
+                        "h12": row_for(left_task, 2, outcome="rank_fail"),
+                        "h13": row_for(
+                            right_task, 2,
+                            outcome=("rank_fail"
+                                     if construction_index == 0 else "success"),
+                        ),
+                    }
+        report = campaign.aggregate_cells(cells)
+        h12 = report["arms"]["h12"]
+        h13 = report["arms"]["h13"]
+        self.assertEqual(
+            h12["failure_strata_histogram_per_K_construction_0_to_9"]["9"], 3,
+        )
+        self.assertEqual(
+            h12["failure_strata_histogram_per_K_0_to_27"]["27"], 1,
+        )
+        self.assertEqual(
+            h13["failure_strata_histogram_per_K_construction_0_to_9"]["9"], 1,
+        )
+        self.assertEqual(
+            h13["failure_strata_histogram_per_K_0_to_27"]["9"], 1,
+        )
+        scopes = report["descriptive_scopes"]
+        self.assertEqual(len(scopes["by_construction_seed"]), 3)
+        self.assertEqual(len(scopes["by_packet_trace_root"]), 3)
+        self.assertEqual(len(scopes["by_schedule"]), 3)
+        self.assertEqual(set(scopes["by_K_band"]), {"2-63"})
+        self.assertEqual(len(scopes["by_construction_loss_schedule"]), 27)
+        self.assertEqual(
+            report["comparison"]["K_cluster_descriptive"]["clusters"], 1,
+        )
+
+    def test_round_gates_are_strict_and_heldout_confirmation_can_reject(self) -> None:
+        def metrics(h12: int, h13: int) -> dict[str, Any]:
+            return {"arms": {
+                "h12": {"rank_fail": h12, "error": 0},
+                "h13": {"rank_fail": h13, "error": 0},
+            }}
+        equal = campaign.failure_gate("R0", [0], {0: metrics(7, 7)})
+        self.assertFalse(equal["h13_strictly_fewer_failures"])
+        root_records = [
+            {"construction_seed_index": index} for index in range(3)
+        ]
+        terminal = campaign.terminal_payload(
+            "confirmation_complete", root_records,
+            {0: metrics(7, 6), 1: metrics(1, 2), 2: metrics(1, 2)},
+        )
+        self.assertTrue(terminal["gates"]["R0"][
+            "h13_strictly_fewer_failures"])
+        self.assertFalse(terminal["gates"]["R1"][
+            "h13_strictly_fewer_failures"])
+        self.assertFalse(terminal["architecture_accepted"])
+
+    def test_failure_record_distinguishes_error_from_rank_failure(self) -> None:
+        left = row_for(task("h12"), 2, outcome="rank_fail")
+        right = row_for(task("h13"), 2, outcome="success")
+        left["rank_fail"] = "0"
+        left["error"] = "1"
+        report = campaign.aggregate_cells({
+            (0, 0, "burst", 2): {"h12": left, "h13": right},
+        })
+        failure = report["arms"]["h12"][
+            "weak_K_construction_records"
+        ][0]["failures"][0]
+        self.assertEqual(failure["cause"], "error")
+
     def test_sealed_record_never_replaces_different_content(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "record.json"
@@ -674,7 +902,7 @@ class ReceiptAndReducerTests(unittest.TestCase):
     def test_orphan_seal_temporaries_are_safely_restartable(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            stage = campaign.stage_path(root, 0)
+            stage = campaign.stage_path(root, 0, 0)
             stage.mkdir(parents=True)
             root_orphan = root / ".terminal.json.create-dead"
             root_orphan.write_bytes(b"pre-link\n")
@@ -695,59 +923,75 @@ class ReceiptAndReducerTests(unittest.TestCase):
             with self.assertRaises(campaign.CampaignError):
                 campaign.cleanup_orphan_seal_temporaries(root)
 
-    def test_terminal_seal_rejects_missing_shard_repair(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
+    def _write_predeclared_tiny_plans(self, root: Path) -> None:
+        for construction_index in range(3):
+            values = [
+                task("h12", construction_index=construction_index),
+                task("h13", construction_index=construction_index),
+            ]
+            campaign.write_sealed_once(
+                campaign.stage_path(root, construction_index, 0) /
+                    "manifest.json",
+                f"{campaign.SCHEMA}.stage_manifest",
+                campaign.manifest_payload(construction_index, 0, values),
+            )
+
+    def test_r0_rejection_is_terminal_and_heldout_plans_stay_unexecuted(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.multiple(
+                campaign, OH0_JOBS=2, OH0_JOBS_PER_ROOT=2,
+                TOTAL_ARM_OUTCOMES=2, PAIRED_CELLS=1,
+                PAIRED_CELLS_PER_ROOT=1, R0_PAIRED_CELLS=1):
             root = Path(temporary)
             binary = root / "bench"
             taskset = root / "taskset"
             binary.write_bytes(b"binary-v1")
             taskset.write_bytes(b"taskset-v1")
-            tasks = [task("h12"), task("h13")]
-            stage = campaign.stage_path(root, 0)
-            campaign.write_sealed_once(
-                stage / "manifest.json", f"{campaign.SCHEMA}.stage_manifest",
-                campaign.manifest_payload(0, tasks),
-            )
-            for value in tasks:
-                self._write_shard(stage, value, binary, taskset)
-            completed = campaign.complete_stage(
-                stage, 0, tasks, binary, campaign.sha256_file(binary), taskset,
-                {2},
-            )
-            self.assertFalse(completed["union_failures"])
-            campaign.write_sealed_once(
-                root / "terminal.json", f"{campaign.SCHEMA}.terminal",
-                campaign.terminal_payload(stage, 0, 0),
-            )
-            contract = {
-                "binary": str(binary),
-                "binary_sha256": campaign.sha256_file(binary),
-                "taskset": str(taskset),
-            }
-            self._verify_tiny_terminal(root, contract)
-            stage_extra = stage / "unsealed-smoke.csv"
-            stage_extra.write_text("out of ledger\n", encoding="ascii")
-            with self.assertRaises(campaign.CampaignError):
-                self._verify_tiny_terminal(root, contract)
-            stage_extra.unlink()
-            root_extra = root / "out-of-ledger.txt"
-            root_extra.write_text("out of ledger\n", encoding="ascii")
-            with self.assertRaises(campaign.CampaignError):
-                self._verify_tiny_terminal(root, contract)
-            root_extra.unlink()
-            skipped = campaign.stage_path(root, 999)
-            skipped.mkdir()
-            with self.assertRaises(campaign.CampaignError):
-                self._verify_tiny_terminal(root, contract)
-            skipped.rmdir()
-            extra = stage / "shards" / "out-of-ledger-smoke"
-            extra.mkdir()
-            with self.assertRaises(campaign.CampaignError):
-                self._verify_tiny_terminal(root, contract)
-            extra.rmdir()
+            self._write_predeclared_tiny_plans(root)
+            stage = campaign.stage_path(root, 0, 0)
+            def tiny_build(overhead: int, construction_index: int,
+                           cohort=None):
+                self.assertEqual(overhead, 0)
+                self.assertIsNone(cohort)
+                return [
+                    task("h12", construction_index=construction_index),
+                    task("h13", construction_index=construction_index),
+                ]
+            with mock.patch.object(
+                    campaign, "build_tasks", side_effect=tiny_build):
+                tasks = campaign.load_manifest(stage, 0, 0)
+                for value in tasks:
+                    self._write_shard(stage, value, binary, taskset)
+                completed = campaign.complete_stage(
+                    stage, 0, tasks, binary, campaign.sha256_file(binary),
+                    taskset, {2},
+                )
+                root_terminal = campaign.root_terminal_payload(0, stage, 0, 0)
+                terminal = campaign.terminal_payload(
+                    "r0_rejected", [root_terminal], {0: completed["metrics"]},
+                )
+                campaign.write_sealed_once(
+                    root / "terminal.json", f"{campaign.SCHEMA}.terminal",
+                    terminal,
+                )
+                contract = {
+                    "binary": str(binary),
+                    "binary_sha256": campaign.sha256_file(binary),
+                    "taskset": str(taskset),
+                }
+                verified = campaign.verify_terminal_campaign(root, contract, {2})
+            self.assertEqual(verified["disposition"], "r0_rejected")
+            self.assertFalse(verified["architecture_accepted"])
+            for construction_index in (1, 2):
+                heldout = campaign.stage_path(root, construction_index, 0)
+                self.assertEqual(
+                    {entry.name for entry in heldout.iterdir()},
+                    {"manifest.json"},
+                )
             shutil.rmtree(campaign.shard_path(stage, tasks[0]))
-            with self.assertRaises(campaign.CampaignError):
-                self._verify_tiny_terminal(root, contract)
+            with mock.patch.object(
+                    campaign, "build_tasks", side_effect=tiny_build):
+                with self.assertRaises(campaign.CampaignError):
+                    campaign.verify_terminal_campaign(root, contract, {2})
 
     def test_campaign_completion_cross_seal_and_null_inventory(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -759,18 +1003,21 @@ class ReceiptAndReducerTests(unittest.TestCase):
                 root / "controller_affinity.json", "test.affinity",
                 {"cpus": [2]},
             )
-            stage = campaign.stage_path(root, 0)
-            campaign.write_sealed_once(
-                stage / "manifest.json", "test.manifest", {"overhead": 0},
-            )
-            campaign.write_sealed_once(
-                stage / "complete.json", "test.complete", {"overhead": 0},
-            )
+            for construction_index in range(3):
+                stage = campaign.stage_path(root, construction_index, 0)
+                campaign.write_sealed_once(
+                    stage / "manifest.json", "test.manifest",
+                    {"construction_seed_index": construction_index},
+                )
+                if construction_index == 0:
+                    campaign.write_sealed_once(
+                        stage / "complete.json", "test.complete", {"overhead": 0},
+                    )
+            stage = campaign.stage_path(root, 0, 0)
             campaign.write_sealed_once(
                 root / "terminal.json", f"{campaign.SCHEMA}.terminal",
-                {"terminal_overhead": 0, "unresolved_paired_cells": 0,
-                 "last_stage_complete_sha256": campaign.sha256_file(
-                     stage / "complete.json")},
+                {"root_terminals": [{"construction_seed_index": 0,
+                                      "terminal_overhead": 0}]},
             )
             campaign.atomic_write(root / "telemetry_start.json", b"stray\n")
             with self.assertRaises(campaign.CampaignError):
@@ -782,55 +1029,12 @@ class ReceiptAndReducerTests(unittest.TestCase):
                 root, {"external_telemetry": {"path": None}}, None, None,
             )
             self.assertEqual(verified, completed)
-            self.assertEqual(completed["stage_count"], 1)
+            self.assertEqual(completed["stage_entry_count"], 3)
             (stage / "manifest.json").write_bytes(b"changed\n")
             with self.assertRaises(campaign.CampaignError):
                 campaign.verify_campaign_completion(
                     root, {"external_telemetry": {"path": None}}, None, None,
                 )
-
-    def test_terminal_rejects_empty_stage_after_union_resolved(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            binary = root / "bench"
-            taskset = root / "taskset"
-            binary.write_bytes(b"binary-v1")
-            taskset.write_bytes(b"taskset-v1")
-            tasks = [task("h12"), task("h13")]
-            first = campaign.stage_path(root, 0)
-            campaign.write_sealed_once(
-                first / "manifest.json", f"{campaign.SCHEMA}.stage_manifest",
-                campaign.manifest_payload(0, tasks),
-            )
-            for value in tasks:
-                self._write_shard(first, value, binary, taskset)
-            completed = campaign.complete_stage(
-                first, 0, tasks, binary, campaign.sha256_file(binary), taskset,
-                {2},
-            )
-            self.assertFalse(completed["union_failures"])
-
-            second = campaign.stage_path(root, 1)
-            campaign.write_sealed_once(
-                second / "manifest.json", f"{campaign.SCHEMA}.stage_manifest",
-                campaign.manifest_payload(1, []),
-            )
-            (second / "shards").mkdir()
-            campaign.complete_stage(
-                second, 1, [], binary, campaign.sha256_file(binary), taskset,
-                {2},
-            )
-            campaign.write_sealed_once(
-                root / "terminal.json", f"{campaign.SCHEMA}.terminal",
-                campaign.terminal_payload(second, 1, 0),
-            )
-            contract = {
-                "binary": str(binary),
-                "binary_sha256": campaign.sha256_file(binary),
-                "taskset": str(taskset),
-            }
-            with self.assertRaises(campaign.CampaignError):
-                self._verify_tiny_terminal(root, contract)
 
     def test_terminal_rejects_per_arm_success_reversal(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -845,30 +1049,13 @@ class ReceiptAndReducerTests(unittest.TestCase):
                 "taskset": str(taskset),
             }
 
-            first_tasks = [task("h12"), task("h13")]
-            first = campaign.stage_path(root, 0)
-            campaign.write_sealed_once(
-                first / "manifest.json", f"{campaign.SCHEMA}.stage_manifest",
-                campaign.manifest_payload(0, first_tasks),
-            )
-            self._write_shard(
-                first, first_tasks[0], binary, taskset, outcome="success",
-            )
-            self._write_shard(
-                first, first_tasks[1], binary, taskset, outcome="rank_fail",
-            )
-            campaign.complete_stage(
-                first, 0, first_tasks, binary,
-                campaign.sha256_file(binary), taskset, {2},
-            )
-
             second_tasks = [
                 task("h12", overhead=1), task("h13", overhead=1),
             ]
-            second = campaign.stage_path(root, 1)
+            second = campaign.stage_path(root, 0, 1)
             campaign.write_sealed_once(
                 second / "manifest.json", f"{campaign.SCHEMA}.stage_manifest",
-                campaign.manifest_payload(1, second_tasks),
+                campaign.manifest_payload(0, 1, second_tasks),
             )
             self._write_shard(
                 second, second_tasks[0], binary, taskset,
@@ -881,21 +1068,20 @@ class ReceiptAndReducerTests(unittest.TestCase):
                 second, 1, second_tasks, binary,
                 campaign.sha256_file(binary), taskset, {2},
             )
-            campaign.write_sealed_once(
-                root / "terminal.json", f"{campaign.SCHEMA}.terminal",
-                campaign.terminal_payload(second, 1, 1),
-            )
-            with mock.patch.multiple(
-                    campaign, OH0_JOBS=2, TOTAL_ARM_OUTCOMES=2,
-                    MAX_OVERHEAD=1):
-                with self.assertRaisesRegex(
-                        campaign.CampaignError, "reverted h12 success"):
-                    campaign.verify_terminal_campaign(root, contract, {2})
+            previous = {(0, 0, "burst", 2): {"h12": False, "h13": True}}
+            with self.assertRaisesRegex(
+                    campaign.CampaignError, "reverted h12 success"):
+                campaign.validate_nested_arm_monotonicity(
+                    second, second_tasks, binary, campaign.sha256_file(binary),
+                    taskset, {2}, previous,
+                )
 
     def test_legal_nested_reduction_accounts_repairs_and_censoring(self) -> None:
         with tempfile.TemporaryDirectory() as temporary, mock.patch.multiple(
-                campaign, PAIRED_CELLS=2, TOTAL_ARM_OUTCOMES=4,
-                OH0_JOBS=2, MAX_OVERHEAD=2):
+                campaign, PAIRED_CELLS=2, PAIRED_CELLS_PER_ROOT=2,
+                R0_PAIRED_CELLS=2, R1_PAIRED_CELLS=4,
+                FULL_PAIRED_CELLS=6, TOTAL_ARM_OUTCOMES=4,
+                OH0_JOBS=2, OH0_JOBS_PER_ROOT=2, MAX_OVERHEAD=2):
             root = Path(temporary)
             binary = root / "bench"
             taskset = root / "taskset"
@@ -904,19 +1090,22 @@ class ReceiptAndReducerTests(unittest.TestCase):
             digest = campaign.sha256_file(binary)
 
             def make_stage(
-                overhead: int, ks: tuple[int, ...],
+                construction_index: int, overhead: int, ks: tuple[int, ...],
                 left_outcomes: dict[int, str],
                 right_outcomes: dict[int, str],
             ) -> None:
                 tasks = [
-                    task("h12", ks, overhead=overhead),
-                    task("h13", ks, overhead=overhead),
+                    task("h12", ks, overhead=overhead,
+                         construction_index=construction_index),
+                    task("h13", ks, overhead=overhead,
+                         construction_index=construction_index),
                 ]
-                stage = campaign.stage_path(root, overhead)
+                stage = campaign.stage_path(root, construction_index, overhead)
                 campaign.write_sealed_once(
                     stage / "manifest.json",
                     f"{campaign.SCHEMA}.stage_manifest",
-                    campaign.manifest_payload(overhead, tasks),
+                    campaign.manifest_payload(
+                        construction_index, overhead, tasks),
                 )
                 self._write_shard(
                     stage, tasks[0], binary, taskset,
@@ -931,18 +1120,24 @@ class ReceiptAndReducerTests(unittest.TestCase):
                 )
 
             make_stage(
-                0, (2, 3),
+                0, 0, (2, 3),
                 {2: "rank_fail", 3: "rank_fail"},
                 {2: "success", 3: "rank_fail"},
             )
             make_stage(
-                1, (2, 3),
+                0, 1, (2, 3),
                 {2: "success", 3: "rank_fail"},
                 {2: "success", 3: "success"},
             )
             make_stage(
-                2, (3,), {3: "rank_fail"}, {3: "success"},
+                0, 2, (3,), {3: "rank_fail"}, {3: "success"},
             )
+            for construction_index in (1, 2):
+                make_stage(
+                    construction_index, 0, (2, 3),
+                    {2: "success", 3: "success"},
+                    {2: "success", 3: "success"},
+                )
             campaign.atomic_write(root / "campaign_complete.json", b"present\n")
             contract = {
                 "binary": str(binary), "binary_sha256": digest,
@@ -953,10 +1148,31 @@ class ReceiptAndReducerTests(unittest.TestCase):
                     "continuity": campaign.TELEMETRY_CONTINUITY,
                 },
             }
-            terminal = {"terminal_overhead": 2}
+            terminal = {
+                "disposition": "confirmation_complete",
+                "executed_construction_seed_indices": [0, 1, 2],
+                "root_terminals": [
+                    {"construction_seed_index": 0, "terminal_overhead": 2},
+                    {"construction_seed_index": 1, "terminal_overhead": 0},
+                    {"construction_seed_index": 2, "terminal_overhead": 0},
+                ],
+            }
+            def tiny_build(overhead: int, construction_index: int,
+                           cohort=None):
+                if cohort is None:
+                    ks = (2, 3)
+                else:
+                    ks = tuple(sorted({K for _, _, K in cohort}))
+                return [
+                    task("h12", ks, overhead=overhead,
+                         construction_index=construction_index),
+                    task("h13", ks, overhead=overhead,
+                         construction_index=construction_index),
+                ]
             with mock.patch.multiple(
                     campaign,
                     load_contract=mock.Mock(return_value=contract),
+                    build_tasks=mock.Mock(side_effect=tiny_build),
                     apply_sealed_controller_affinity=mock.Mock(return_value=[2]),
                     telemetry_start=mock.Mock(return_value=None),
                     verify_terminal_campaign=mock.Mock(return_value=terminal),
@@ -971,20 +1187,28 @@ class ReceiptAndReducerTests(unittest.TestCase):
             summary = campaign.load_sealed(
                 root / "analysis.json", f"{campaign.SCHEMA}.analysis_record",
             )
-            self.assertEqual(summary["oh0"]["comparison"]["repairs"], 1)
-            self.assertEqual(summary["oh0"]["comparison"]["introductions"], 0)
-            self.assertEqual(summary["oh0"]["comparison"]["both_fail"], 1)
+            r0 = summary["rounds"]["R0"]
+            self.assertEqual(r0["oh0"]["comparison"]["repairs"], 1)
+            self.assertEqual(r0["oh0"]["comparison"]["introductions"], 0)
+            self.assertEqual(r0["oh0"]["comparison"]["both_fail"], 1)
             self.assertEqual(
-                summary["minimum_success_overhead"]["h12"]["all_cells"],
+                r0["minimum_success_overhead"]["h12"]["all_cells"],
                 {"cells": 2, "p99": None, "censored": 1,
                  "maximum_observed": 1,
-                 "histogram": {"1": 1, "censored": 1}},
+                 "histogram": {"1": 1, "censored": 1},
+                 "survivors_after_observed_overhead": {"0": 2, "1": 1},
+                 "right_censored_values_are_null": True},
             )
             self.assertEqual(
-                summary["minimum_success_overhead"]["h13"]["all_cells"]
+                r0["minimum_success_overhead"]["h13"]["all_cells"]
                 ["histogram"], {"0": 1, "1": 1},
             )
-            self.assertEqual(summary["unresolved_union_failures_at_cap"], 1)
+            self.assertEqual(
+                summary["by_construction_seed"]["0"]
+                ["unresolved_union_failures"], 1,
+            )
+            self.assertEqual(summary["rounds"]["R1"]["paired_cells"], 4)
+            self.assertEqual(summary["rounds"]["FULL"]["paired_cells"], 6)
 
     def test_overhead_reports_distinguish_all_and_failure_cohorts(self) -> None:
         self.assertEqual(campaign.overhead_report([0, 0, 0])["p99"], 0)

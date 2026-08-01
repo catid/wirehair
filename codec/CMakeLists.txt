@@ -253,9 +253,10 @@ if(BUILD_TESTS AND WIREHAIR_BUILD_BENCHMARKS)
             -P ${CMAKE_CURRENT_SOURCE_DIR}/V2BenchCliTest.cmake)
     set_tests_properties(wirehair_v2_bench_cli_test PROPERTIES TIMEOUT 120)
 
-    # Compile the same CLI with only the new benchmark command suppressed.
-    # This exercises the exact preprocessor boundary used by BUILD_TESTS=OFF
-    # without needing a nested configure/build inside CTest.
+    # Compile the same test-hook CLI with only the preferred-attempt command
+    # block suppressed.  This exercises that preprocessor boundary (which is
+    # also suppressed by BUILD_TESTS=OFF) without pretending to be a complete
+    # production/no-hooks build.
     add_executable(wirehair_v2_bench_no_preferred_test WirehairV2Bench.cpp)
     target_compile_definitions(wirehair_v2_bench_no_preferred_test PRIVATE
         WIREHAIR_V2_BENCH_DISABLE_PREFERRED_ATTEMPT=1)

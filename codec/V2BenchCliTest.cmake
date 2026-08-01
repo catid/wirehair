@@ -890,12 +890,16 @@ expect_failure("use shared-x for an extra row" precodefail
 # Raw Stage A bypasses adaptive seed selection and authenticates the exact
 # attempt-0 construction and packet trace.  H12 and H13 must share every seed
 # and packet receipt while differing by exactly one precode row.
-set(raw_stage_a_common
-    precodefail --raw-attempt0 --paired-overhead-stream
+set(raw_stage_a_geometry
+    precodefail --raw-attempt0
+    --paired-overhead-stream
     --bb-list 64 --trials 1 --threads 1 --loss 0.5
-    --completion mixed --mix-count 2 --seed 0xd1b54a32d192ed03
+    --completion mixed --mix-count 2
     --mixed-period 48 --mixed-geometry shared-x
-    --mixed-gf16-rows 2 --binary-dense-two-anchor --seed-block-bytes 64)
+    --mixed-gf16-rows 2 --binary-dense-two-anchor)
+set(raw_stage_a_common ${raw_stage_a_geometry}
+    --seed 0xd1b54a32d192ed03
+    --construction-seed 2611923443488327891)
 
 function(capture_raw_stage_a_receipt output prefix expected_precode_count
          expected_staircase expected_heavy)
@@ -904,30 +908,48 @@ function(capture_raw_stage_a_receipt output prefix expected_precode_count
     else()
         set(expected_source_hits 2)
     endif()
+    if(ARGC GREATER 8)
+        set(expected_construction_seed "${ARGV6}")
+        set(expected_matrix_seed "${ARGV7}")
+        set(expected_peel_seed "${ARGV8}")
+    else()
+        set(expected_construction_seed "2611923443488327891")
+        set(expected_matrix_seed "0x243f6a8885a308d3")
+        set(expected_peel_seed "0xa19c625b")
+    endif()
     string(REGEX MATCH
-        ",0,0x[0-9a-f]+,0x[0-9a-f]+,0x[0-9a-f]+,0x[0-9a-f]+,[0-9]+,[0-9]+,[0-9]+,[0-9]+,[01],[0-9]+,[01],[0-9]+,0x[0-9a-f]+,[0-9a-f]+[\r\n]*$"
+        ",0,matrix-c-peel-lo32-xor-hi32-v1,[0-9]+,0,0x[0-9a-f]+,0x[0-9a-f]+,0x[0-9a-f]+,0x[0-9a-f]+,[0-9]+,[0-9]+,[0-9]+,[0-9]+,[01],[0-9]+,[01],[0-9]+,0x[0-9a-f]+,[0-9a-f]+[\r\n]*$"
         receipt "${output}")
     string(REGEX REPLACE "[\r\n]+$" "" receipt "${receipt}")
     string(SUBSTRING "${receipt}" 1 -1 receipt)
     string(REPLACE "," ";" receipt_fields "${receipt}")
     list(LENGTH receipt_fields receipt_field_count)
-    if(receipt_field_count EQUAL 15)
-        list(GET receipt_fields 1 base_matrix_seed)
-        list(GET receipt_fields 2 base_peel_seed)
-        list(GET receipt_fields 3 matrix_seed)
-        list(GET receipt_fields 4 peel_seed)
-        list(GET receipt_fields 5 actual_staircase)
-        list(GET receipt_fields 6 actual_dense)
-        list(GET receipt_fields 7 actual_heavy)
-        list(GET receipt_fields 8 actual_source_hits)
-        list(GET receipt_fields 9 actual_anchor)
-        list(GET receipt_fields 10 actual_phase)
-        list(GET receipt_fields 11 probe_result)
-        list(GET receipt_fields 12 precode_count)
-        list(GET receipt_fields 13 trace_seed)
-        list(GET receipt_fields 14 trace_sha256)
+    if(receipt_field_count EQUAL 18)
+        list(GET receipt_fields 1 construction_policy)
+        list(GET receipt_fields 2 construction_seed)
+        list(GET receipt_fields 3 production_fixups)
+        list(GET receipt_fields 4 base_matrix_seed)
+        list(GET receipt_fields 5 base_peel_seed)
+        list(GET receipt_fields 6 matrix_seed)
+        list(GET receipt_fields 7 peel_seed)
+        list(GET receipt_fields 8 actual_staircase)
+        list(GET receipt_fields 9 actual_dense)
+        list(GET receipt_fields 10 actual_heavy)
+        list(GET receipt_fields 11 actual_source_hits)
+        list(GET receipt_fields 12 actual_anchor)
+        list(GET receipt_fields 13 actual_phase)
+        list(GET receipt_fields 14 probe_result)
+        list(GET receipt_fields 15 precode_count)
+        list(GET receipt_fields 16 trace_seed)
+        list(GET receipt_fields 17 trace_sha256)
     endif()
-    if(NOT receipt OR NOT receipt_field_count EQUAL 15 OR
+    if(NOT receipt OR NOT receipt_field_count EQUAL 18 OR
+       NOT construction_policy STREQUAL
+           "matrix-c-peel-lo32-xor-hi32-v1" OR
+       NOT construction_seed STREQUAL expected_construction_seed OR
+       NOT production_fixups EQUAL 0 OR
+       NOT base_matrix_seed STREQUAL expected_matrix_seed OR
+       NOT base_peel_seed STREQUAL expected_peel_seed OR
        NOT base_matrix_seed STREQUAL matrix_seed OR
        NOT base_peel_seed STREQUAL peel_seed OR
        (expected_staircase GREATER_EQUAL 0 AND
@@ -965,11 +987,13 @@ run_bench(raw_h13_result raw_h13 raw_h13_err
 if(NOT raw_h12_result EQUAL 0 OR NOT raw_h13_result EQUAL 0 OR
    raw_h12_err OR raw_h13_err OR
    NOT raw_h12 MATCHES
-       "overhead_stream=paired.*schedule=adversarial raw_attempt0=1" OR
-   NOT raw_h13 MATCHES
-       "mixed_gf256_rows=11 mixed_gf16_rows=2.*raw_attempt0=1" OR
+       "seed=0xd1b54a32d192ed03 seed_role=loss-trace-root construction_seed_policy=matrix-c-peel-lo32-xor-hi32-v1 construction_seed=2611923443488327891 production_seed_fixups_applied=0 raw_attempt0=1 completion=mixed" OR
    NOT raw_h12 MATCHES
-       "matrix_seed,peel_seed,actual_staircase_rows,actual_dense_rows,actual_heavy_rows,actual_source_hits,actual_dense_two_anchor,actual_dense_two_anchor_phase,systematic_probe_result,precode_count,packet_trace_seed,packet_trace_sha256")
+       "overhead_stream=paired.*schedule=adversarial" OR
+   NOT raw_h13 MATCHES
+       "raw_attempt0=1 completion=mixed.*mixed_gf256_rows=11 mixed_gf16_rows=2" OR
+   NOT raw_h12 MATCHES
+       "construction_attempt,construction_seed_policy,construction_seed,production_seed_fixups_applied,base_matrix_seed,base_peel_seed,matrix_seed,peel_seed,actual_staircase_rows,actual_dense_rows,actual_heavy_rows,actual_source_hits,actual_dense_two_anchor,actual_dense_two_anchor_phase,systematic_probe_result,precode_count,packet_trace_seed,packet_trace_sha256")
     message(FATAL_ERROR
         "raw Stage-A H12/H13 command failed\n"
         "H12=${raw_h12}\nH12err=${raw_h12_err}\n"
@@ -987,10 +1011,46 @@ if(NOT raw_h12_matrix_seed STREQUAL raw_h13_matrix_seed OR
         "raw Stage-A H12/H13 seeds or packet trace diverged")
 endif()
 
-# K=3 attempt 0 is systematically rank-deficient for this receipt.  Raw mode
+# Prove the raw precode command keeps loss and construction coordinates
+# independent, rather than merely echoing the requested construction seed.
+run_bench(raw_loss_root_result raw_loss_root raw_loss_root_err
+    ${raw_stage_a_geometry} --seed 0
+    --construction-seed 2611923443488327891
+    --N 64 --overhead 0 --schedule adversarial --mixed-gf256-rows 10)
+capture_raw_stage_a_receipt("${raw_loss_root}" raw_loss_root 43 19 12)
+if(NOT raw_loss_root_result EQUAL 0 OR raw_loss_root_err OR
+   NOT raw_loss_root_matrix_seed STREQUAL raw_h12_matrix_seed OR
+   NOT raw_loss_root_peel_seed STREQUAL raw_h12_peel_seed OR
+   raw_loss_root_trace_seed STREQUAL raw_h12_trace_seed OR
+   raw_loss_root_trace_sha256 STREQUAL raw_h12_trace_sha256)
+    message(FATAL_ERROR
+        "raw loss root did not change only the packet trace\n"
+        "${raw_loss_root}\n${raw_loss_root_err}")
+endif()
+
+run_bench(raw_construction_root_result raw_construction_root
+    raw_construction_root_err ${raw_stage_a_geometry}
+    --seed 0xd1b54a32d192ed03
+    --construction-seed 1376283091369227076
+    --N 64 --overhead 0 --schedule adversarial --mixed-gf256-rows 10)
+capture_raw_stage_a_receipt(
+    "${raw_construction_root}" raw_construction_root 43 19 12 2
+    1376283091369227076 0x13198a2e03707344 0x1069f96a)
+if(NOT raw_construction_root_result EQUAL 0 OR
+   raw_construction_root_err OR
+   raw_construction_root_matrix_seed STREQUAL raw_h12_matrix_seed OR
+   raw_construction_root_peel_seed STREQUAL raw_h12_peel_seed OR
+   NOT raw_construction_root_trace_seed STREQUAL raw_h12_trace_seed OR
+   NOT raw_construction_root_trace_sha256 STREQUAL raw_h12_trace_sha256)
+    message(FATAL_ERROR
+        "raw construction root did not change only the graph seeds\n"
+        "${raw_construction_root}\n${raw_construction_root_err}")
+endif()
+
+# K=4 attempt 0 is systematically rank-deficient for this receipt.  Raw mode
 # must record NeedMore (1), still execute the requested hard trace, and exit 0.
 run_bench(raw_need_more_result raw_need_more raw_need_more_err
-    ${raw_stage_a_common} --N 3 --overhead 0 --schedule adversarial
+    ${raw_stage_a_common} --N 4 --overhead 0 --schedule adversarial
     --mixed-gf256-rows 10)
 capture_raw_stage_a_receipt("${raw_need_more}" raw_need_more 27 3 12)
 if(NOT raw_need_more_result EQUAL 0 OR raw_need_more_err OR
@@ -1055,12 +1115,13 @@ endforeach()
 # preserving the raw Stage-A attempt-zero trace, seed, probe, and rank-only
 # solve contracts above.
 set(grouped_recovery_preamble
-    "# groupedrecovery: schema=v1 pair_order=h12,h13 arms_per_N=2 N_count=2 N=3,64 overhead=0 seed=15111065706836454659 schedule=adversarial policy=h12-h13-q0-grouped-v1 period=48 geometry=shared-x residue_skew=0 residue_schedule=constant residue_hash_seed=0x0 extension_residue_seed_xor=0x4e independent_extension_residues=0 gf256_rows=h12:10|h13:11 gf16_rows=2 grouped_rows=3 grouped_gf256_row_mask=0x380 buckets=separate grouped_hash_seed=h12:0xb7e15162|h13:0xb7e15163 grouped_final_h_a_columns=arm-heavy-rows dense_rows=12 dense_identity_corner=0 dense_two_anchor=1 dense_two_anchor_phase=0 source_hits=profile staircase_rows=profile-dense-count field=mixed-gf256-gf16 heavy_family=periodic-cauchy construction_attempt=0 systematic_probe=direct-attempt0 seed_repair=disabled mix=2 bb=64 seed_block_bytes=64 solve_block_bytes=2 loss=0.5 overhead_stream=paired packet_row_seed_multiplier=0x1 packet_row_seed_avalanche=0 odd_packet_peel_seed_xor=0x0 packet_vector=one-shared-per-N payload=shared-zero-v1 packet_payload_bytes=2 packet_trace_schema=wirehair-wh2-precodefail-raw-packet-trace-v1 coefficient_layout=materialized-before-solve grouped_schedule_prefix=materialized-before-solve")
+    "# groupedrecovery: schema=v2 pair_order=h12,h13 arms_per_N=2 N_count=2 N=4,64 overhead=0 seed=15111065706836454659 seed_role=loss-trace-root construction_seed_policy=matrix-c-peel-lo32-xor-hi32-v1 construction_seed=2611923443488327891 production_seed_fixups_applied=0 schedule=adversarial policy=h12-h13-q0-grouped-v1 period=48 geometry=shared-x residue_skew=0 residue_schedule=constant residue_hash_seed=0x0 extension_residue_seed_xor=0x4e independent_extension_residues=0 gf256_rows=h12:10|h13:11 gf16_rows=2 grouped_rows=3 grouped_gf256_row_mask=0x380 buckets=separate grouped_hash_seed=h12:0xb7e15162|h13:0xb7e15163 grouped_final_h_a_columns=arm-heavy-rows dense_rows=12 dense_identity_corner=0 dense_two_anchor=1 dense_two_anchor_phase=0 source_hits=canonical-K-rule staircase_rows=GetDenseCount(K) field=mixed-gf256-gf16 heavy_family=periodic-cauchy construction_attempt=0 systematic_probe=direct-attempt0 mix=2 bb=64 solve_block_bytes=2 loss=0.5 overhead_stream=paired packet_row_seed_multiplier=0x1 packet_row_seed_avalanche=0 odd_packet_peel_seed_xor=0x0 packet_vector=one-shared-per-N payload=shared-zero-v1 packet_payload_bytes=2 packet_trace_schema=wirehair-wh2-precodefail-raw-packet-trace-v1 coefficient_layout=materialized-before-solve grouped_schedule_prefix=materialized-before-solve")
 set(grouped_recovery_header
-    "pair_id,pair_index,pair_order_index,arm,N,bb,solve_block_bytes,overhead,schedule,external_seed,loss,period,geometry,residue_skew,residue_schedule,gf256_rows,gf16_rows,heavy_rows,grouped_rows,grouped_gf256_row_mask,buckets_requested,grouped_hash_seed,final_h_a_columns,construction_attempt,systematic_probe_result,base_matrix_seed,base_peel_seed,matrix_seed,peel_seed,staircase_rows,dense_rows,source_hits,dense_identity_corner,dense_two_anchor,dense_two_anchor_phase,field,heavy_family,mix_count,precode_count,packet_count,packet_trace_seed,packet_trace_sha256,pair_class,pair_results_equal,result,result_name,packet_rows,peeled_columns,inactivated_columns,residual_rows,binary_residual_rank,residual_rank,binary_deficit,heavy_gain,binary_row_references,binary_row_storage_bytes,binary_adjacency_storage_bytes,binary_row_storage_allocations,binary_adjacency_storage_allocations,block_xors,block_muladds,build_ns,peel_ns,project_ns,residual_ns,backsub_ns,packet_seed_attempt,joint_source_xors,joint_marginal_xors,joint_marginal_copies,joint_active_deltas,joint_scratch_bytes,dual_source_columns,intermediate_bytes")
+    "pair_id,pair_index,pair_order_index,arm,N,bb,solve_block_bytes,overhead,schedule,external_seed,loss,period,geometry,residue_skew,residue_schedule,gf256_rows,gf16_rows,heavy_rows,grouped_rows,grouped_gf256_row_mask,buckets_requested,grouped_hash_seed,final_h_a_columns,construction_attempt,construction_seed_policy,construction_seed,production_seed_fixups_applied,systematic_probe_result,base_matrix_seed,base_peel_seed,matrix_seed,peel_seed,staircase_rows,dense_rows,source_hits,dense_identity_corner,dense_two_anchor,dense_two_anchor_phase,field,heavy_family,mix_count,precode_count,packet_count,packet_trace_seed,packet_trace_sha256,pair_class,pair_results_equal,result,result_name,packet_rows,peeled_columns,inactivated_columns,residual_rows,binary_residual_rank,residual_rank,binary_deficit,heavy_gain,binary_row_references,binary_row_storage_bytes,binary_adjacency_storage_bytes,binary_row_storage_allocations,binary_adjacency_storage_allocations,block_xors,block_muladds,build_ns,peel_ns,project_ns,residual_ns,backsub_ns,packet_seed_attempt,joint_source_xors,joint_marginal_xors,joint_marginal_copies,joint_active_deltas,joint_scratch_bytes,dual_source_columns,intermediate_bytes")
 run_bench(grouped_recovery_result grouped_recovery grouped_recovery_err
-    groupedrecovery --N 3,64 --overhead 0
-    --seed 15111065706836454659 --schedule adversarial)
+    groupedrecovery --N 4,64 --overhead 0
+    --seed 15111065706836454659
+    --construction-seed 2611923443488327891 --schedule adversarial)
 string(REPLACE "\r\n" "\n" grouped_recovery "${grouped_recovery}")
 string(FIND "${grouped_recovery}"
     "${grouped_recovery_preamble}\n${grouped_recovery_header}\n"
@@ -1077,18 +1138,18 @@ if(NOT grouped_recovery_result EQUAL 0 OR grouped_recovery_err OR
 endif()
 
 set(grouped_recovery_expected_prefixes
-    "7d97a55c56fb9fecbcb92a5e22bd34a6a467db7f3d4ef93787860806b7c6ac34,0,0,h12,3,64,2,0,adversarial,15111065706836454659,0.5,48,shared-x,0,constant,10,2,12,3,0x380,separate,0xb7e15162,12,0,1,0x679d20a06742baae,0x11f13757,0x679d20a06742baae,0x11f13757,3,12,2,0,1,0,mixed-gf256-gf16,periodic-cauchy,2,27,3,0xdd02fc599574f77c,a2d086103e34b13d877befe89379a93fafed066f5d97a452166a750d86d13707,both-need-more,1,1,need-more,"
-    "7d97a55c56fb9fecbcb92a5e22bd34a6a467db7f3d4ef93787860806b7c6ac34,0,1,h13,3,64,2,0,adversarial,15111065706836454659,0.5,48,shared-x,0,constant,11,2,13,3,0x380,separate,0xb7e15163,13,0,1,0x679d20a06742baae,0x11f13757,0x679d20a06742baae,0x11f13757,3,12,2,0,1,0,mixed-gf256-gf16,periodic-cauchy,2,28,3,0xdd02fc599574f77c,a2d086103e34b13d877befe89379a93fafed066f5d97a452166a750d86d13707,both-need-more,1,1,need-more,"
-    "1db283245379a4c48a74d9756e4577397df337a393b5cb826e217aa3bc9fd352,1,0,h12,64,64,2,0,adversarial,15111065706836454659,0.5,48,shared-x,0,constant,10,2,12,3,0x380,separate,0xb7e15162,12,0,0,0x176b76a38b0fe98d,0x9695c306,0x176b76a38b0fe98d,0x9695c306,19,12,2,0,1,0,mixed-gf256-gf16,periodic-cauchy,2,43,64,0x8a7aff2a3a348603,950134e9cef148fb82c6121e6e104329563e5a408bb6a607bea32b43cbfe5804,both-success,1,0,success,"
-    "1db283245379a4c48a74d9756e4577397df337a393b5cb826e217aa3bc9fd352,1,1,h13,64,64,2,0,adversarial,15111065706836454659,0.5,48,shared-x,0,constant,11,2,13,3,0x380,separate,0xb7e15163,13,0,0,0x176b76a38b0fe98d,0x9695c306,0x176b76a38b0fe98d,0x9695c306,19,12,2,0,1,0,mixed-gf256-gf16,periodic-cauchy,2,44,64,0x8a7aff2a3a348603,950134e9cef148fb82c6121e6e104329563e5a408bb6a607bea32b43cbfe5804,both-success,1,0,success,")
+    "9d0e08082baae1074616aa52c699ccc35587e61b0a52814ca84965d30e768c9d,0,0,h12,4,64,2,0,adversarial,15111065706836454659,0.5,48,shared-x,0,constant,10,2,12,3,0x380,separate,0xb7e15162,12,0,matrix-c-peel-lo32-xor-hi32-v1,2611923443488327891,0,1,0x243f6a8885a308d3,0xa19c625b,0x243f6a8885a308d3,0xa19c625b,3,12,2,0,1,0,mixed-gf256-gf16,periodic-cauchy,2,27,4,0x7f79779015827317,5b606537ef96b8cb7e70251f74d67f6e515219af9b5ec03c7e288454d0657e21,both-need-more,1,1,need-more,"
+    "9d0e08082baae1074616aa52c699ccc35587e61b0a52814ca84965d30e768c9d,0,1,h13,4,64,2,0,adversarial,15111065706836454659,0.5,48,shared-x,0,constant,11,2,13,3,0x380,separate,0xb7e15163,13,0,matrix-c-peel-lo32-xor-hi32-v1,2611923443488327891,0,1,0x243f6a8885a308d3,0xa19c625b,0x243f6a8885a308d3,0xa19c625b,3,12,2,0,1,0,mixed-gf256-gf16,periodic-cauchy,2,28,4,0x7f79779015827317,5b606537ef96b8cb7e70251f74d67f6e515219af9b5ec03c7e288454d0657e21,both-need-more,1,1,need-more,"
+    "3cd2976852d5b001586b2563fb212f545389c5e20a9d08b9a3e1430c49a5e8b8,1,0,h12,64,64,2,0,adversarial,15111065706836454659,0.5,48,shared-x,0,constant,10,2,12,3,0x380,separate,0xb7e15162,12,0,matrix-c-peel-lo32-xor-hi32-v1,2611923443488327891,0,0,0x243f6a8885a308d3,0xa19c625b,0x243f6a8885a308d3,0xa19c625b,19,12,2,0,1,0,mixed-gf256-gf16,periodic-cauchy,2,43,64,0x8a7aff2a3a348603,950134e9cef148fb82c6121e6e104329563e5a408bb6a607bea32b43cbfe5804,both-success,1,0,success,"
+    "3cd2976852d5b001586b2563fb212f545389c5e20a9d08b9a3e1430c49a5e8b8,1,1,h13,64,64,2,0,adversarial,15111065706836454659,0.5,48,shared-x,0,constant,11,2,13,3,0x380,separate,0xb7e15163,13,0,matrix-c-peel-lo32-xor-hi32-v1,2611923443488327891,0,0,0x243f6a8885a308d3,0xa19c625b,0x243f6a8885a308d3,0xa19c625b,19,12,2,0,1,0,mixed-gf256-gf16,periodic-cauchy,2,44,64,0x8a7aff2a3a348603,950134e9cef148fb82c6121e6e104329563e5a408bb6a607bea32b43cbfe5804,both-success,1,0,success,")
 set(grouped_recovery_stat_indices
-    46 47 48 49 50 51 52 53 54 55 56 57 58 59 60
-    66 67 68 69 70 71 72 73)
+    49 50 51 52 53 54 55 56 57 58 59 60 61 62 63
+    69 70 71 72 73 74 75 76)
 set(grouped_recovery_expected_stats
-    "3|13|17|5|4|4|13|0|126|872|752|3|2|46|0|0|0|0|0|0|0|0|0"
-    "3|13|18|5|4|4|14|0|126|872|760|3|2|60|0|0|0|0|0|0|0|0|0"
-    "64|73|34|34|22|34|12|12|1248|6756|5856|3|2|1620|982|0|0|0|0|0|0|0|214"
-    "64|70|38|38|25|38|13|13|1248|6756|5864|3|2|1597|1115|0|0|0|0|0|0|0|216")
+    "4|14|17|5|4|4|13|0|141|956|820|3|2|49|0|0|0|0|0|0|0|0|0"
+    "4|14|18|5|4|4|14|0|141|956|828|3|2|60|0|0|0|0|0|0|0|0|0"
+    "64|70|37|37|25|37|12|12|1244|6796|5840|3|2|1583|1018|0|0|0|0|0|0|0|214"
+    "64|67|41|41|28|41|13|13|1244|6796|5848|3|2|1648|1155|0|0|0|0|0|0|0|216")
 set(grouped_recovery_clean_rows)
 foreach(grouped_recovery_row_index RANGE 0 3)
     list(GET grouped_recovery_rows ${grouped_recovery_row_index}
@@ -1104,17 +1165,17 @@ foreach(grouped_recovery_row_index RANGE 0 3)
         "${grouped_recovery_row}")
     list(LENGTH grouped_recovery_fields grouped_recovery_field_count)
     list(GET grouped_recovery_fields 0 grouped_recovery_pair_id)
-    list(GET grouped_recovery_fields 25 grouped_recovery_base_matrix)
-    list(GET grouped_recovery_fields 26 grouped_recovery_base_peel)
-    list(GET grouped_recovery_fields 27 grouped_recovery_matrix)
-    list(GET grouped_recovery_fields 28 grouped_recovery_peel)
-    list(GET grouped_recovery_fields 41 grouped_recovery_trace_sha256)
+    list(GET grouped_recovery_fields 28 grouped_recovery_base_matrix)
+    list(GET grouped_recovery_fields 29 grouped_recovery_base_peel)
+    list(GET grouped_recovery_fields 30 grouped_recovery_matrix)
+    list(GET grouped_recovery_fields 31 grouped_recovery_peel)
+    list(GET grouped_recovery_fields 44 grouped_recovery_trace_sha256)
     string(LENGTH "${grouped_recovery_pair_id}"
         grouped_recovery_pair_id_length)
     string(LENGTH "${grouped_recovery_trace_sha256}"
         grouped_recovery_trace_sha256_length)
     if(NOT grouped_recovery_prefix_index EQUAL 0 OR
-       NOT grouped_recovery_field_count EQUAL 74 OR
+       NOT grouped_recovery_field_count EQUAL 77 OR
        NOT grouped_recovery_pair_id_length EQUAL 64 OR
        NOT grouped_recovery_pair_id MATCHES "^[0-9a-f]+$" OR
        NOT grouped_recovery_trace_sha256_length EQUAL 64 OR
@@ -1125,7 +1186,7 @@ foreach(grouped_recovery_row_index RANGE 0 3)
             "grouped recovery golden row mismatch at "
             "${grouped_recovery_row_index}\n${grouped_recovery_row}")
     endif()
-    foreach(grouped_recovery_timing_index RANGE 61 65)
+    foreach(grouped_recovery_timing_index RANGE 64 68)
         list(GET grouped_recovery_fields ${grouped_recovery_timing_index}
             grouped_recovery_timing)
         if(NOT grouped_recovery_timing MATCHES "^[0-9]+$")
@@ -1164,7 +1225,8 @@ endforeach()
 # only fields allowed to differ.
 set(grouped_recovery_shared_indices
     0 1 4 5 6 7 8 9 10 11 12 13 14 16 18 19 20 23
-    25 26 27 28 29 30 31 32 33 34 35 36 37 39 40 41 42 43)
+    24 25 26 28 29 30 31 32 33 34 35 36 37 38 39 40
+    42 43 44 45 46)
 foreach(grouped_recovery_pair_start IN ITEMS 0 2)
     math(EXPR grouped_recovery_pair_end
         "${grouped_recovery_pair_start} + 1")
@@ -1190,22 +1252,22 @@ foreach(grouped_recovery_pair_start IN ITEMS 0 2)
         endif()
     endforeach()
 endforeach()
-list(GET grouped_recovery_clean_rows 0 grouped_recovery_k3_h12_row)
+list(GET grouped_recovery_clean_rows 0 grouped_recovery_k4_h12_row)
 list(GET grouped_recovery_clean_rows 2 grouped_recovery_k64_h12_row)
-string(REPLACE "," ";" grouped_recovery_k3_h12_fields
-    "${grouped_recovery_k3_h12_row}")
+string(REPLACE "," ";" grouped_recovery_k4_h12_fields
+    "${grouped_recovery_k4_h12_row}")
 string(REPLACE "," ";" grouped_recovery_k64_h12_fields
     "${grouped_recovery_k64_h12_row}")
-list(GET grouped_recovery_k3_h12_fields 0 grouped_recovery_k3_pair_id)
+list(GET grouped_recovery_k4_h12_fields 0 grouped_recovery_k4_pair_id)
 list(GET grouped_recovery_k64_h12_fields 0 grouped_recovery_k64_pair_id)
-list(GET grouped_recovery_k3_h12_fields 24 grouped_recovery_k3_probe)
-list(GET grouped_recovery_k64_h12_fields 24 grouped_recovery_k64_probe)
-list(GET grouped_recovery_k64_h12_fields 25 grouped_recovery_k64_matrix)
-list(GET grouped_recovery_k64_h12_fields 26 grouped_recovery_k64_peel)
-list(GET grouped_recovery_k64_h12_fields 40 grouped_recovery_k64_trace_seed)
-list(GET grouped_recovery_k64_h12_fields 41 grouped_recovery_k64_trace_sha)
-if(grouped_recovery_k3_pair_id STREQUAL grouped_recovery_k64_pair_id OR
-   NOT grouped_recovery_k3_probe STREQUAL raw_need_more_probe_result OR
+list(GET grouped_recovery_k4_h12_fields 27 grouped_recovery_k4_probe)
+list(GET grouped_recovery_k64_h12_fields 27 grouped_recovery_k64_probe)
+list(GET grouped_recovery_k64_h12_fields 28 grouped_recovery_k64_matrix)
+list(GET grouped_recovery_k64_h12_fields 29 grouped_recovery_k64_peel)
+list(GET grouped_recovery_k64_h12_fields 43 grouped_recovery_k64_trace_seed)
+list(GET grouped_recovery_k64_h12_fields 44 grouped_recovery_k64_trace_sha)
+if(grouped_recovery_k4_pair_id STREQUAL grouped_recovery_k64_pair_id OR
+   NOT grouped_recovery_k4_probe STREQUAL raw_need_more_probe_result OR
    NOT grouped_recovery_k64_probe STREQUAL raw_h12_probe_result OR
    NOT grouped_recovery_k64_matrix STREQUAL raw_h12_matrix_seed OR
    NOT grouped_recovery_k64_peel STREQUAL raw_h12_peel_seed OR
@@ -1213,6 +1275,89 @@ if(grouped_recovery_k3_pair_id STREQUAL grouped_recovery_k64_pair_id OR
    NOT grouped_recovery_k64_trace_sha STREQUAL raw_h12_trace_sha256)
     message(FATAL_ERROR
         "grouped recovery diverged from raw attempt0 receipts")
+endif()
+
+# Loss and construction roots are orthogonal coordinates.  Changing only the
+# loss root must alter the trace receipt but preserve the graph seeds; changing
+# only the construction root must alter the graph seeds but preserve the trace.
+run_bench(grouped_loss_root_result grouped_loss_root grouped_loss_root_err
+    groupedrecovery --N 64 --overhead 0 --seed 0
+    --construction-seed 2611923443488327891 --schedule adversarial)
+string(REGEX MATCH "\n[0-9a-f]+,[^\n]*" grouped_loss_root_row
+    "\n${grouped_loss_root}")
+string(SUBSTRING "${grouped_loss_root_row}" 1 -1 grouped_loss_root_row)
+string(REPLACE "," ";" grouped_loss_root_fields
+    "${grouped_loss_root_row}")
+list(LENGTH grouped_loss_root_fields grouped_loss_root_field_count)
+if(grouped_loss_root_field_count EQUAL 77)
+    list(GET grouped_loss_root_fields 0 grouped_loss_root_pair_id)
+    list(GET grouped_loss_root_fields 28 grouped_loss_root_matrix)
+    list(GET grouped_loss_root_fields 29 grouped_loss_root_peel)
+    list(GET grouped_loss_root_fields 43 grouped_loss_root_trace_seed)
+    list(GET grouped_loss_root_fields 44 grouped_loss_root_trace_sha)
+endif()
+if(NOT grouped_loss_root_result EQUAL 0 OR grouped_loss_root_err OR
+   NOT grouped_loss_root_field_count EQUAL 77 OR
+   grouped_loss_root_pair_id STREQUAL grouped_recovery_k64_pair_id OR
+   NOT grouped_loss_root_matrix STREQUAL grouped_recovery_k64_matrix OR
+   NOT grouped_loss_root_peel STREQUAL grouped_recovery_k64_peel OR
+   grouped_loss_root_trace_seed STREQUAL grouped_recovery_k64_trace_seed OR
+   grouped_loss_root_trace_sha STREQUAL grouped_recovery_k64_trace_sha)
+    message(FATAL_ERROR
+        "loss root did not change only the grouped packet trace\n"
+        "${grouped_loss_root}\n${grouped_loss_root_err}")
+endif()
+
+run_bench(grouped_construction_root_result grouped_construction_root
+    grouped_construction_root_err groupedrecovery --N 64 --overhead 0
+    --seed 15111065706836454659
+    --construction-seed 1376283091369227076 --schedule adversarial)
+string(REGEX MATCH "\n[0-9a-f]+,[^\n]*" grouped_construction_root_row
+    "\n${grouped_construction_root}")
+string(SUBSTRING "${grouped_construction_root_row}" 1 -1
+    grouped_construction_root_row)
+string(REPLACE "," ";" grouped_construction_root_fields
+    "${grouped_construction_root_row}")
+list(LENGTH grouped_construction_root_fields
+    grouped_construction_root_field_count)
+if(grouped_construction_root_field_count EQUAL 77)
+    list(GET grouped_construction_root_fields 0
+        grouped_construction_root_pair_id)
+    list(GET grouped_construction_root_fields 24
+        grouped_construction_root_policy)
+    list(GET grouped_construction_root_fields 25
+        grouped_construction_root_seed)
+    list(GET grouped_construction_root_fields 26
+        grouped_construction_root_fixups)
+    list(GET grouped_construction_root_fields 28
+        grouped_construction_root_matrix)
+    list(GET grouped_construction_root_fields 29
+        grouped_construction_root_peel)
+    list(GET grouped_construction_root_fields 43
+        grouped_construction_root_trace_seed)
+    list(GET grouped_construction_root_fields 44
+        grouped_construction_root_trace_sha)
+endif()
+if(NOT grouped_construction_root_result EQUAL 0 OR
+   grouped_construction_root_err OR
+   NOT grouped_construction_root_field_count EQUAL 77 OR
+   grouped_construction_root_pair_id STREQUAL
+       grouped_recovery_k64_pair_id OR
+   NOT grouped_construction_root_policy STREQUAL
+       "matrix-c-peel-lo32-xor-hi32-v1" OR
+   NOT grouped_construction_root_seed STREQUAL "1376283091369227076" OR
+   NOT grouped_construction_root_fixups STREQUAL "0" OR
+   NOT grouped_construction_root_matrix STREQUAL "0x13198a2e03707344" OR
+   NOT grouped_construction_root_peel STREQUAL "0x1069f96a" OR
+   grouped_construction_root_matrix STREQUAL grouped_recovery_k64_matrix OR
+   grouped_construction_root_peel STREQUAL grouped_recovery_k64_peel OR
+   NOT grouped_construction_root_trace_seed STREQUAL
+       grouped_recovery_k64_trace_seed OR
+   NOT grouped_construction_root_trace_sha STREQUAL
+       grouped_recovery_k64_trace_sha)
+    message(FATAL_ERROR
+        "construction root did not change only the grouped graph seeds\n"
+        "${grouped_construction_root}\n${grouped_construction_root_err}")
 endif()
 
 # The pair-native command must reproduce the independent raw trace oracle for
@@ -1226,6 +1371,7 @@ foreach(raw_trace_case IN LISTS raw_trace_cases)
         grouped_recovery_trace_error groupedrecovery --N 64
         --overhead ${grouped_recovery_trace_overhead}
         --seed 15111065706836454659
+        --construction-seed 2611923443488327891
         --schedule ${grouped_recovery_trace_schedule})
     string(REPLACE "\r\n" "\n" grouped_recovery_trace_output
         "${grouped_recovery_trace_output}")
@@ -1252,15 +1398,15 @@ foreach(raw_trace_case IN LISTS raw_trace_cases)
             grouped_recovery_trace_field_count)
         list(GET grouped_recovery_trace_row_fields 0
             grouped_recovery_trace_row_pair_id)
-        list(GET grouped_recovery_trace_row_fields 39
+        list(GET grouped_recovery_trace_row_fields 42
             grouped_recovery_trace_packet_count)
-        list(GET grouped_recovery_trace_row_fields 40
+        list(GET grouped_recovery_trace_row_fields 43
             grouped_recovery_trace_seed)
-        list(GET grouped_recovery_trace_row_fields 41
+        list(GET grouped_recovery_trace_row_fields 44
             grouped_recovery_trace_sha256)
         math(EXPR grouped_recovery_trace_expected_packet_count
             "64 + ${grouped_recovery_trace_overhead}")
-        if(NOT grouped_recovery_trace_field_count EQUAL 74 OR
+        if(NOT grouped_recovery_trace_field_count EQUAL 77 OR
            NOT grouped_recovery_trace_packet_count EQUAL
                grouped_recovery_trace_expected_packet_count OR
            NOT grouped_recovery_trace_seed STREQUAL
@@ -1283,7 +1429,8 @@ endforeach()
 # successes; 251 entries are rejected before any solve output is emitted.
 run_bench(grouped_recovery_boundary_result grouped_recovery_boundary
     grouped_recovery_boundary_err groupedrecovery --N 2,64000
-    --overhead 1024 --seed 18446744073709551615 --schedule repair-only)
+    --overhead 1024 --seed 18446744073709551615
+    --construction-seed 18446744073709551615 --schedule repair-only)
 string(REPLACE "\r\n" "\n" grouped_recovery_boundary
     "${grouped_recovery_boundary}")
 string(REGEX MATCHALL "\n[0-9a-f]+,[^\n]*"
@@ -1309,7 +1456,7 @@ endforeach()
 run_bench(grouped_recovery_max_result grouped_recovery_max
     grouped_recovery_max_err groupedrecovery
     --N "${grouped_recovery_max_N_list}" --overhead 0 --seed 0
-    --schedule burst)
+    --construction-seed 0 --schedule burst)
 string(REPLACE "\r\n" "\n" grouped_recovery_max
     "${grouped_recovery_max}")
 string(REGEX MATCHALL "\n[0-9a-f]+,[^\n]*"
@@ -1327,34 +1474,48 @@ set(grouped_recovery_too_many_N_list
     "${grouped_recovery_max_N_list},252")
 expect_failure_without_output("at most 250 values" groupedrecovery
     --N "${grouped_recovery_too_many_N_list}" --overhead 0 --seed 0
-    --schedule burst)
+    --construction-seed 0 --schedule burst)
 
 expect_failure_without_output(
-    "requires --N, --overhead, --seed, and --schedule"
+    "requires --N, --overhead, --seed, --construction-seed, and --schedule"
     groupedrecovery)
-expect_failure("requires --N, --overhead, --seed, and --schedule"
+expect_failure(
+    "requires --N, --overhead, --seed, --construction-seed, and --schedule"
     groupedrecovery --N 2 --overhead 0 --seed 0)
+expect_failure(
+    "requires --N, --overhead, --seed, --construction-seed, and --schedule"
+    groupedrecovery --N 2 --overhead 0 --seed 0 --schedule burst)
 expect_failure("--N requires a value" groupedrecovery --N)
 expect_failure("--overhead requires a value" groupedrecovery
     --N 2 --overhead)
 expect_failure("--seed requires a value" groupedrecovery
     --N 2 --overhead 0 --seed)
 expect_failure("--schedule requires a value" groupedrecovery
-    --N 2 --overhead 0 --seed 0 --schedule)
+    --N 2 --overhead 0 --seed 0 --construction-seed 0 --schedule)
+expect_failure("--construction-seed requires a value" groupedrecovery
+    --N 2 --overhead 0 --seed 0 --construction-seed)
 foreach(grouped_recovery_duplicate IN ITEMS
-        --N --overhead --seed --schedule)
+        --N --overhead --seed --construction-seed --schedule)
     if(grouped_recovery_duplicate STREQUAL "--N")
         expect_failure("specified more than once" groupedrecovery
-            --N 2 --N 3 --overhead 0 --seed 0 --schedule burst)
+            --N 2 --N 3 --overhead 0 --seed 0 --construction-seed 0
+            --schedule burst)
     elseif(grouped_recovery_duplicate STREQUAL "--overhead")
         expect_failure("specified more than once" groupedrecovery
-            --N 2 --overhead 0 --overhead 1 --seed 0 --schedule burst)
+            --N 2 --overhead 0 --overhead 1 --seed 0
+            --construction-seed 0 --schedule burst)
     elseif(grouped_recovery_duplicate STREQUAL "--seed")
         expect_failure("specified more than once" groupedrecovery
-            --N 2 --overhead 0 --seed 0 --seed 1 --schedule burst)
+            --N 2 --overhead 0 --seed 0 --seed 1 --construction-seed 0
+            --schedule burst)
+    elseif(grouped_recovery_duplicate STREQUAL "--construction-seed")
+        expect_failure("specified more than once" groupedrecovery
+            --N 2 --overhead 0 --seed 0 --construction-seed 0
+            --construction-seed 1 --schedule burst)
     else()
         expect_failure("specified more than once" groupedrecovery
-            --N 2 --overhead 0 --seed 0 --schedule burst
+            --N 2 --overhead 0 --seed 0 --construction-seed 0
+            --schedule burst
             --schedule adversarial)
     endif()
 endforeach()
@@ -1362,36 +1523,48 @@ foreach(grouped_recovery_bad_N IN ITEMS
         02 2,03 3,2 2,2 2, 2,,3 malformed -2)
     expect_failure("--N must be a canonical strictly increasing"
         groupedrecovery --N "${grouped_recovery_bad_N}" --overhead 0
-        --seed 0 --schedule burst)
+        --seed 0 --construction-seed 0 --schedule burst)
 endforeach()
 foreach(grouped_recovery_bad_N IN ITEMS 1 64001)
     expect_failure("--N values must be in \\[2,64000\\]"
         groupedrecovery --N ${grouped_recovery_bad_N} --overhead 0
-        --seed 0 --schedule burst)
+        --seed 0 --construction-seed 0 --schedule burst)
 endforeach()
 foreach(grouped_recovery_bad_overhead IN ITEMS 00 01 1025 4294967296)
     expect_failure("overhead" groupedrecovery --N 2
         --overhead ${grouped_recovery_bad_overhead} --seed 0
-        --schedule burst)
+        --construction-seed 0 --schedule burst)
 endforeach()
 foreach(grouped_recovery_bad_seed IN ITEMS
         00 01 0x1 -1 18446744073709551616)
     expect_failure("bad --seed value" groupedrecovery --N 2 --overhead 0
-        --seed ${grouped_recovery_bad_seed} --schedule burst)
+        --seed ${grouped_recovery_bad_seed} --construction-seed 0
+        --schedule burst)
+endforeach()
+foreach(grouped_recovery_bad_construction_seed IN ITEMS
+        00 01 0x1 -1 18446744073709551616)
+    expect_failure("bad --construction-seed value" groupedrecovery
+        --N 2 --overhead 0 --seed 0
+        --construction-seed ${grouped_recovery_bad_construction_seed}
+        --schedule burst)
 endforeach()
 foreach(grouped_recovery_bad_schedule IN ITEMS
         iid permutation systematic-first malformed)
     expect_failure("--schedule must be burst, adversarial, or repair-only"
         groupedrecovery --N 2 --overhead 0 --seed 0
+        --construction-seed 0
         --schedule ${grouped_recovery_bad_schedule})
 endforeach()
 expect_failure_without_output("unknown option --loss" groupedrecovery
-    --N 2 --overhead 0 --seed 0 --schedule burst --loss 0.5)
+    --N 2 --overhead 0 --seed 0 --construction-seed 0
+    --schedule burst --loss 0.5)
 
 if(EXISTS "/dev/full")
     execute_process(
-        COMMAND "${BENCH}" groupedrecovery --N 3,64 --overhead 0
-            --seed 15111065706836454659 --schedule adversarial
+        COMMAND "${BENCH}" groupedrecovery --N 4,64 --overhead 0
+            --seed 15111065706836454659
+            --construction-seed 2611923443488327891
+            --schedule adversarial
         OUTPUT_FILE "/dev/full"
         ERROR_VARIABLE grouped_recovery_full_error
         RESULT_VARIABLE grouped_recovery_full_result)
@@ -1405,26 +1578,51 @@ if(EXISTS "/dev/full")
 endif()
 
 expect_failure("--raw-attempt0 requires the Stage-A" precodefail
-    --raw-attempt0 --paired-overhead-stream --N 64 --bb-list 64
+    --raw-attempt0 --construction-seed 2611923443488327891
+    --paired-overhead-stream --N 64 --bb-list 64
     --overhead 0 --trials 2 --threads 1 --loss 0.5 --completion mixed
     --mix-count 2 --seed 0xd1b54a32d192ed03 --schedule adversarial
     --mixed-period 48 --mixed-geometry shared-x --mixed-gf256-rows 10
-    --mixed-gf16-rows 2 --binary-dense-two-anchor --seed-block-bytes 64)
+    --mixed-gf16-rows 2 --binary-dense-two-anchor)
 expect_failure("--raw-attempt0 requires the Stage-A" precodefail
-    --raw-attempt0 --paired-overhead-stream --N 64 --bb-list 64
+    --raw-attempt0 --construction-seed 2611923443488327891
+    --paired-overhead-stream --N 64 --bb-list 64
     --overhead 0 --trials 1 --threads 1 --loss 0.5 --completion mixed
     --mix-count 2 --seed 0xd1b54a32d192ed03 --schedule adversarial
     --mixed-period 48 --mixed-geometry shared-x --mixed-gf256-rows 10
-    --mixed-gf16-rows 2 --binary-dense-two-anchor --seed-block-bytes 64
+    --mixed-gf16-rows 2 --binary-dense-two-anchor
     --packet-peel-seed-xor 1)
 expect_failure("--raw-attempt0 requires the Stage-A" precodefail
-    --raw-attempt0 --paired-overhead-stream --N 64 --bb-list 64
+    --raw-attempt0 --construction-seed 2611923443488327891
+    --paired-overhead-stream --N 64 --bb-list 64
     --overhead 0 --trials 1 --threads 1 --loss 0.5 --completion mixed
     --mix-count 2 --seed 0xd1b54a32d192ed03 --schedule adversarial
     --mixed-period 48 --mixed-geometry shared-x --mixed-gf256-rows 11
     --mixed-gf16-rows 2 --mixed-grouped-gf256-rows 3
-    --mixed-grouped-gf256-row-mask 0x380 --binary-dense-two-anchor
-    --seed-block-bytes 64)
+    --mixed-grouped-gf256-row-mask 0x380 --binary-dense-two-anchor)
+
+# The uniform construction seed is an exact, required raw-mode coordinate.
+expect_failure("--raw-attempt0 requires --construction-seed" precodefail
+    --raw-attempt0 --paired-overhead-stream --N 64 --bb-list 64
+    --overhead 0 --trials 1 --threads 1 --loss 0.5 --completion mixed
+    --mix-count 2 --seed 0xd1b54a32d192ed03 --schedule adversarial
+    --mixed-period 48 --mixed-geometry shared-x --mixed-gf256-rows 10
+    --mixed-gf16-rows 2 --binary-dense-two-anchor)
+expect_failure("--construction-seed requires a value" precodefail
+    --raw-attempt0 --construction-seed)
+expect_failure("--construction-seed specified more than once" precodefail
+    --raw-attempt0 --construction-seed 0 --construction-seed 1)
+foreach(raw_bad_construction_seed IN ITEMS
+        00 01 0x1 -1 18446744073709551616)
+    expect_failure("bad --construction-seed value" precodefail
+        --raw-attempt0 --construction-seed ${raw_bad_construction_seed})
+endforeach()
+expect_failure("--construction-seed requires --raw-attempt0" precodefail
+    --N 64 --bb-list 64 --overhead 0 --trials 1 --threads 1
+    --construction-seed 0)
+expect_failure("--construction-seed conflicts with --seed-block-bytes"
+    ${raw_stage_a_common} --N 64 --overhead 0
+    --schedule adversarial --mixed-gf256-rows 10 --seed-block-bytes 64)
 expect_success("mixed_gf256_rows=11" compare
     --nlo 64 --nhi 64 --trials 1 --bb-list 8 --max-message-mib 1
     --loss 0.1 --precode --precode-profile mixed
