@@ -1,4 +1,5 @@
 {
+"arms": {
 "cert-baseline": {
 "eohc": 0.03894736842105263,
 "nc": 950
@@ -334,5 +335,38 @@
 "wh2-dispatched-v1": {
 "eohc": 0.005263157894736842,
 "nc": 950
+}
+},
+"arms_sha256": "6c9666703e526b9006a68403ac5395eefdd9ad47c019875f67bbdc9f322d2eb2",
+"classification": {
+"architecture_evidence_eligible": false,
+"diagnostic_only": true,
+"historical": true,
+"seed_ids_present": false,
+"selection_eligible": false
+},
+"grid": {
+"cells_per_arm": 950,
+"cells_per_k": 10,
+"k_count": 95,
+"k_max": 100,
+"k_min": 6,
+"region": "r1_2_100"
+},
+"notice": "Historical diagnostic only; non-selectable and never architecture evidence. cells_detail has no seed IDs, so cross-arm cell identity cannot be verified.",
+"schema": "wirehair.untuned-pareto.r1-historical-diagnostic.v2",
+"sources": {
+"metadata_status": "exact-result-files-authenticated-directly; round2 index/provenance predate the dispatch append and are not authority",
+"round1": {
+"git_tree_oid": "d5dd90d18cb1d442414997f690e3ebec6a74ca52",
+"result_file_count": 63,
+"result_file_manifest_sha256": "8e12eae35125c0dfaf55e1c517f9ecb5a8987b4303d0da75760a95558897df34"
+},
+"round2": {
+"git_tree_oid": "cfd3d0b86ece0d3ffc005a4f4c4363999f7f3625",
+"result_file_count": 21,
+"result_file_manifest_sha256": "becc3ec542ec9645e3d22edec89d84008cffade86fdda1fbc319ed00c46eb404"
+},
+"schema": "wirehair.untuned-pareto.result-sources.v1"
 }
 }

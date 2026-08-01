@@ -1,4 +1,5 @@
-[
+{
+"rows": [
 {
 "cf": 0.0,
 "dead": 0.0,
@@ -9071,4 +9072,27 @@
 "sps": 2706268.081715442,
 "xors": 987887.9246855584
 }
-]
+],
+"rows_sha256": "ed1c2a1779eb87d3a63338567ff1d9c5e41c019f1a9ddf8cc61727465c82643f",
+"schema": "wirehair.untuned-pareto.rows.v1",
+"sources": {
+"result_sources": {
+"metadata_status": "exact-result-files-authenticated-directly; round2 index/provenance predate the dispatch append and are not authority",
+"round1": {
+"git_tree_oid": "d5dd90d18cb1d442414997f690e3ebec6a74ca52",
+"result_file_count": 63,
+"result_file_manifest_sha256": "8e12eae35125c0dfaf55e1c517f9ecb5a8987b4303d0da75760a95558897df34"
+},
+"round2": {
+"git_tree_oid": "cfd3d0b86ece0d3ffc005a4f4c4363999f7f3625",
+"result_file_count": 21,
+"result_file_manifest_sha256": "becc3ec542ec9645e3d22edec89d84008cffade86fdda1fbc319ed00c46eb404"
+},
+"schema": "wirehair.untuned-pareto.result-sources.v1"
+},
+"timing": {
+"git_blob_oid": "713c9374a58000144241265218d7028d57cbd249",
+"sha256": "10ee9918b4a732bb14abcbba828c40ae44197508a665d0b946bc02bde0878068"
+}
+}
+}
