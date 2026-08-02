@@ -40,6 +40,8 @@ bool TestParams()
             params.HeavyRows != 12u ||
             params.HeavyFamily !=
                 wirehair_v2::HeavyCoefficientFamily::PeriodicCauchy ||
+            params.DenseAnchors !=
+                wirehair_v2::DenseAnchorLayout::Disabled ||
             params.SourceHits != c.SourceHits)
         {
             std::fprintf(stderr,
@@ -65,6 +67,7 @@ bool TestParams()
     sentinel.Params.BlockCount = 7u;
     sentinel.StaircaseRows.push_back(std::vector<uint32_t>{1u, 2u});
     sentinel.DenseRowColumns.push_back(std::vector<uint32_t>{3u});
+    sentinel.DenseBasisRowColumns.push_back(std::vector<uint32_t>{4u});
 
     std::vector<wirehair_v2::PrecodeParams> invalid_params;
     wirehair_v2::PrecodeParams invalid =
@@ -94,6 +97,29 @@ bool TestParams()
     invalid.HeavyRows = 0u;
     invalid.DenseIdentityCorner = true;
     invalid_params.push_back(invalid);
+    invalid = wirehair_v2::MakeCertifiedParams(16u, 1u);
+    invalid.DenseAnchors =
+        static_cast<wirehair_v2::DenseAnchorLayout>(UINT32_MAX);
+    invalid_params.push_back(invalid);
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    invalid = wirehair_v2::MakeCertifiedParams(16u, 1u);
+    invalid.DenseAnchors = wirehair_v2::DenseAnchorLayout::Two07;
+    invalid.DenseRows = 11u;
+    invalid_params.push_back(invalid);
+    invalid = wirehair_v2::MakeCertifiedParams(16u, 1u);
+    invalid.DenseAnchors = wirehair_v2::DenseAnchorLayout::Four0369;
+    invalid.HeavyRows = 11u;
+    invalid_params.push_back(invalid);
+    invalid = wirehair_v2::MakeCertifiedParams(16u, 1u);
+    invalid.DenseAnchors = wirehair_v2::DenseAnchorLayout::Two07;
+    invalid.DenseIdentityCorner = true;
+    invalid_params.push_back(invalid);
+    invalid = wirehair_v2::MakeCertifiedParams(16u, 1u);
+    invalid.DenseAnchors = wirehair_v2::DenseAnchorLayout::Four0369;
+    invalid.HeavyFamily =
+        wirehair_v2::HeavyCoefficientFamily::HashedNonzero;
+    invalid_params.push_back(invalid);
+#endif
 
     for (size_t i = 0; i < invalid_params.size(); ++i)
     {
@@ -101,7 +127,8 @@ bool TestParams()
         if (wirehair_v2::BuildPrecodeSystem(invalid_params[i], out) ||
             out.Params.BlockCount != sentinel.Params.BlockCount ||
             out.StaircaseRows != sentinel.StaircaseRows ||
-            out.DenseRowColumns != sentinel.DenseRowColumns)
+            out.DenseRowColumns != sentinel.DenseRowColumns ||
+            out.DenseBasisRowColumns != sentinel.DenseBasisRowColumns)
         {
             std::fprintf(stderr,
                 "invalid parameter case %zu must fail before modifying output\n",
@@ -277,7 +304,8 @@ bool TestDeterminism(uint32_t K)
         return false;
     }
     if (a.StaircaseRows != b.StaircaseRows ||
-        a.DenseRowColumns != b.DenseRowColumns)
+        a.DenseRowColumns != b.DenseRowColumns ||
+        a.DenseBasisRowColumns != b.DenseBasisRowColumns)
     {
         std::fprintf(stderr, "K=%u: same seed produced different systems\n", K);
         return false;
@@ -290,6 +318,179 @@ bool TestDeterminism(uint32_t K)
     }
     return true;
 }
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+uint64_t DenseRowsFingerprint(const wirehair_v2::PrecodeSystem& system)
+{
+    uint64_t hash = UINT64_C(14695981039346656037);
+    const auto mix_u32 = [&](uint32_t value) {
+        for (uint32_t shift = 0u; shift < 32u; shift += 8u) {
+            hash ^= (uint8_t)(value >> shift);
+            hash *= UINT64_C(1099511628211);
+        }
+    };
+    mix_u32(system.Params.BlockCount);
+    mix_u32((uint32_t)system.DenseRowColumns.size());
+    for (size_t row = 0u; row < system.DenseRowColumns.size(); ++row)
+    {
+        mix_u32((uint32_t)row);
+        mix_u32((uint32_t)system.DenseRowColumns[row].size());
+        for (uint32_t column : system.DenseRowColumns[row]) {
+            mix_u32(column);
+        }
+    }
+    return hash;
+}
+
+bool IsAnchorRow(wirehair_v2::DenseAnchorLayout layout, uint32_t row)
+{
+    if (row == 0u) {
+        return true;
+    }
+    if (layout == wirehair_v2::DenseAnchorLayout::Two07) {
+        return row == 7u;
+    }
+    if (layout == wirehair_v2::DenseAnchorLayout::Four0369) {
+        return row == 3u || row == 6u || row == 9u;
+    }
+    return false;
+}
+
+bool TestDenseAnchorLayout(
+    uint32_t K,
+    uint64_t seed,
+    wirehair_v2::DenseAnchorLayout layout)
+{
+    wirehair_v2::PrecodeParams params =
+        wirehair_v2::MakeCertifiedParams(K, seed);
+    params.DenseAnchors = layout;
+    wirehair_v2::PrecodeSystem system, repeat;
+    if (!BuildPrecodeSystem(params, system) ||
+        !BuildPrecodeSystem(params, repeat) ||
+        !wirehair_v2::ValidatePrecodeSystem(system) ||
+        system.DenseRowColumns != repeat.DenseRowColumns ||
+        system.DenseBasisRowColumns != repeat.DenseBasisRowColumns ||
+        system.StaircaseRows != repeat.StaircaseRows)
+    {
+        std::fprintf(stderr,
+            "K=%u layout=%u: anchor build/validation/determinism failed\n",
+            K, (unsigned)layout);
+        return false;
+    }
+
+    const uint32_t span = K + params.Staircase + params.DenseRows;
+    const size_t anchor_size = (span + 1u) / 2u;
+    std::vector<std::vector<uint32_t>> basis;
+    if (!wirehair_v2::BuildDenseEquationBasis(system, basis) ||
+        basis.size() != params.DenseRows ||
+        basis != system.DenseBasisRowColumns)
+    {
+        std::fprintf(stderr,
+            "K=%u layout=%u: dense basis build failed\n",
+            K, (unsigned)layout);
+        return false;
+    }
+
+    size_t expected_references = 0u;
+    size_t actual_references = 0u;
+    std::vector<uint32_t> reconstructed;
+    for (uint32_t row = 0; row < params.DenseRows; ++row)
+    {
+        const bool anchor = IsAnchorRow(layout, row);
+        const size_t expected_size = anchor ? anchor_size : 2u;
+        if (basis[row].size() != expected_size)
+        {
+            std::fprintf(stderr,
+                "K=%u layout=%u row=%u: basis refs=%zu want=%zu\n",
+                K, (unsigned)layout, row,
+                basis[row].size(), expected_size);
+            return false;
+        }
+        expected_references += expected_size;
+        actual_references += basis[row].size();
+
+        if (anchor) {
+            reconstructed = basis[row];
+        }
+        else
+        {
+            std::vector<uint32_t> next;
+            std::set_symmetric_difference(
+                reconstructed.begin(), reconstructed.end(),
+                basis[row].begin(), basis[row].end(),
+                std::back_inserter(next));
+            reconstructed.swap(next);
+        }
+        if (reconstructed != system.DenseRowColumns[row])
+        {
+            std::fprintf(stderr,
+                "K=%u layout=%u row=%u: basis reconstruction mismatch\n",
+                K, (unsigned)layout, row);
+            return false;
+        }
+    }
+    if (actual_references != expected_references) {
+        return false;
+    }
+    if (K == 64u)
+    {
+        wirehair_v2::PrecodeSystem bad = system;
+        bad.DenseBasisRowColumns[1u].clear();
+        if (wirehair_v2::ValidatePrecodeSystem(bad)) {
+            std::fprintf(stderr,
+                "layout=%u: validator accepted missing cached delta\n",
+                (unsigned)layout);
+            return false;
+        }
+        bad = system;
+        bad.DenseBasisRowColumns[0u].pop_back();
+        if (wirehair_v2::ValidatePrecodeSystem(bad)) {
+            std::fprintf(stderr,
+                "layout=%u: validator accepted damaged cached anchor\n",
+                (unsigned)layout);
+            return false;
+        }
+    }
+    return true;
+}
+
+bool TestDenseAnchorGoldens()
+{
+    struct GoldenCase
+    {
+        wirehair_v2::DenseAnchorLayout Layout;
+        uint64_t Fingerprint;
+    };
+    // These are the pure-binary dense-equation fingerprints first measured
+    // by historical commit 57d7990.  Pinning them proves this GF(256)-only
+    // port did not inherit or alter any retired completion-field behavior.
+    static const GoldenCase kCases[] = {
+        { wirehair_v2::DenseAnchorLayout::Disabled,
+          UINT64_C(0xcde1e21be25b9081) },
+        { wirehair_v2::DenseAnchorLayout::Two07,
+          UINT64_C(0x7da0674ba8931e64) },
+        { wirehair_v2::DenseAnchorLayout::Four0369,
+          UINT64_C(0x89f570b207ae565d) }
+    };
+    for (const GoldenCase& golden : kCases)
+    {
+        wirehair_v2::PrecodeParams params =
+            wirehair_v2::MakeCertifiedParams(
+                945u, UINT64_C(0x5eed7a12));
+        params.DenseAnchors = golden.Layout;
+        wirehair_v2::PrecodeSystem system;
+        if (!BuildPrecodeSystem(params, system) ||
+            DenseRowsFingerprint(system) != golden.Fingerprint)
+        {
+            std::fprintf(stderr,
+                "K=945 layout=%u: dense equation golden mismatch\n",
+                (unsigned)golden.Layout);
+            return false;
+        }
+    }
+    return true;
+}
+#endif
 
 // GF(256) GE rank of an h x h matrix (destructive)
 unsigned SquareRank(std::vector<uint8_t>& m, unsigned h)
@@ -481,6 +682,27 @@ int main()
             return 1;
         }
     }
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    static const wirehair_v2::DenseAnchorLayout kAnchorLayouts[] = {
+        wirehair_v2::DenseAnchorLayout::Disabled,
+        wirehair_v2::DenseAnchorLayout::Two07,
+        wirehair_v2::DenseAnchorLayout::Four0369
+    };
+    static const uint32_t kAnchorKs[] = {2u, 64u, 1001u, 64000u};
+    for (uint32_t K : kAnchorKs) {
+        for (wirehair_v2::DenseAnchorLayout layout : kAnchorLayouts) {
+            if (!TestDenseAnchorLayout(
+                    K, UINT64_C(0x616e63686f727331) ^ K, layout))
+            {
+                return 1;
+            }
+        }
+    }
+    if (!TestDenseAnchorGoldens()) {
+        return 1;
+    }
+#endif
 
     // Identity-corner dense variant: deck spans only K + S, and dense row
     // r references exactly its own dense column K + S + r

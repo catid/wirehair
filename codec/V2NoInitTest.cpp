@@ -79,7 +79,9 @@ bool CheckPatternInitializedAccessors()
         system.Params.DenseRows != 0u || system.Params.HeavyRows != 0u ||
         system.Params.SourceHits != 0u || system.Params.DenseIdentityCorner ||
         system.Params.Seed != 0u || !system.StaircaseRows.empty() ||
-        !system.DenseRowColumns.empty() || stats.StaircaseBlockOps != 0u ||
+        !system.DenseRowColumns.empty() ||
+        !system.DenseBasisRowColumns.empty() ||
+        stats.StaircaseBlockOps != 0u ||
         stats.DenseKnownBlockOps != 0u || stats.DenseSolveBlockOps != 0u ||
         stats.HeavyBucketXors != 0u || stats.HeavyMulAdds != 0u ||
         stats.HeavySolveBlockOps != 0u)
@@ -146,6 +148,7 @@ bool CheckPatternInitializedAccessors()
         decoder_system.Params.BlockCount != 0u ||
         !decoder_system.StaircaseRows.empty() ||
         !decoder_system.DenseRowColumns.empty() ||
+        !decoder_system.DenseBasisRowColumns.empty() ||
         solve_stats.PacketRows != 0u ||
         solve_stats.InactivatedColumns != 0u ||
         solve_stats.ResidualRank != 0u)

@@ -859,7 +859,9 @@ bool CheckTinyDenseOracle()
     const uint64_t empty_residue_muladds =
         (uint64_t)(coefficient_period - std::min(coefficient_period, L)) *
         system.Params.HeavyRows;
-    static const uint64_t kExpectedExecutedMulAdds = 528u;
+    // The equation-preserving dense basis peels the eleven two-column deltas
+    // directly, reducing the tiny residual completion work from 528.
+    static const uint64_t kExpectedExecutedMulAdds = 492u;
     static const uint32_t kBlockBytes[] = { 1u, block_bytes, 1280u };
     uint64_t expected_muladds = UINT64_MAX;
     for (uint32_t bytes : kBlockBytes)
@@ -956,6 +958,111 @@ bool CheckTinyDenseOracle()
     std::printf("tiny hashed-family dense oracle: PASS\n");
     return true;
 }
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+bool CheckDenseAnchorPayloadOracle()
+{
+    static const wirehair_v2::DenseAnchorLayout kLayouts[] = {
+        wirehair_v2::DenseAnchorLayout::Two07,
+        wirehair_v2::DenseAnchorLayout::Four0369
+    };
+    static const uint32_t kBlockCounts[] = { 2u, 17u, 64u };
+    static const uint32_t kBlockBytes[] = { 1u, 13u };
+
+    for (wirehair_v2::DenseAnchorLayout layout : kLayouts)
+    {
+        for (uint32_t K : kBlockCounts)
+        {
+            wirehair_v2::PrecodeParams params =
+                wirehair_v2::MakeCertifiedParams(
+                    K,
+                    UINT64_C(0x616e63686f72736f) ^
+                        ((uint64_t)(uint32_t)layout << 32) ^ K);
+            params.DenseAnchors = layout;
+            wirehair_v2::PacketRowConfig base_config;
+            base_config.PeelSeed =
+                UINT32_C(0x9e3779b9) ^ K ^ (uint32_t)layout;
+            base_config.MixCount = wirehair_v2::kCertifiedPacketMixCount;
+
+            wirehair_v2::PrecodeSystem system;
+            wirehair_v2::PacketRowConfig config;
+            uint32_t attempt = 0u;
+            if (wirehair_v2::SelectSystematicConfiguration(
+                    params, base_config, system, config, &attempt) !=
+                    Wirehair_Success ||
+                system.Params.DenseAnchors != layout)
+            {
+                std::fprintf(stderr,
+                    "solve: dense-anchor configuration failed "
+                    "layout=%u K=%u\n",
+                    (unsigned)layout, K);
+                return false;
+            }
+
+            for (uint32_t block_bytes : kBlockBytes)
+            {
+                std::vector<uint8_t> message((size_t)K * block_bytes);
+                for (size_t i = 0; i < message.size(); ++i) {
+                    message[i] = (uint8_t)(
+                        i * 43u + K * 11u + block_bytes * 7u +
+                        (uint32_t)layout);
+                }
+                std::vector<wirehair_v2::SolvePacket> packets(K);
+                for (uint32_t id = 0; id < K; ++id) {
+                    packets[id].BlockId = id;
+                    packets[id].Data =
+                        message.data() + (size_t)id * block_bytes;
+                }
+
+                std::vector<uint8_t> solved;
+                const WirehairResult solve_result =
+                    wirehair_v2::SolvePrecodeSystem(
+                        system, config, packets, block_bytes, solved);
+                std::vector<uint8_t> oracle;
+                const WirehairResult oracle_result =
+                    wirehair_v2::test::SolvePrecodeSystemTinyDenseOracle(
+                        system, config, packets, block_bytes, oracle);
+                if (solve_result != Wirehair_Success ||
+                    oracle_result != Wirehair_Success || solved != oracle)
+                {
+                    std::fprintf(stderr,
+                        "solve: dense-anchor payload oracle mismatch "
+                        "layout=%u K=%u attempt=%u bb=%u solve=%d "
+                        "oracle=%d\n",
+                        (unsigned)layout, K, attempt, block_bytes,
+                        (int)solve_result, (int)oracle_result);
+                    return false;
+                }
+
+                std::vector<uint8_t> recovered(block_bytes);
+                for (uint32_t id = 0; id < K; ++id)
+                {
+                    if (!wirehair_v2::EvaluatePacketBlockForValidatedSystem(
+                            system,
+                            config,
+                            solved.data(),
+                            block_bytes,
+                            id,
+                            recovered.data()) ||
+                        std::memcmp(
+                            recovered.data(),
+                            message.data() + (size_t)id * block_bytes,
+                            block_bytes) != 0)
+                    {
+                        std::fprintf(stderr,
+                            "solve: dense-anchor payload replay mismatch "
+                            "layout=%u K=%u attempt=%u bb=%u id=%u\n",
+                            (unsigned)layout, K, attempt, block_bytes, id);
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    std::printf("dense-anchor payload/oracle solve: PASS\n");
+    return true;
+}
+#endif
 
 bool CheckZeroRhsAcrossBlockWidths(
     const wirehair_v2::PrecodeSystem& system,
@@ -2529,6 +2636,9 @@ int main(int argc, char** argv)
     ok = CheckPacketRowSeedPermutation() && ok;
     ok = CheckPacketRuntimeBoundaries() && ok;
     ok = CheckTinyDenseOracle() && ok;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    ok = CheckDenseAnchorPayloadOracle() && ok;
+#endif
     ok = CheckExactSystematicFailureClassification() && ok;
     ok = CheckHeavyCoefficientBoundaryOracle() && ok;
     ok = CheckBinaryQuotientBoundary() && ok;

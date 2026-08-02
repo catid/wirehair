@@ -274,6 +274,61 @@ bool TestCorrectnessAsBuilt()
     return ok;
 }
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+bool TestDenseAnchorEncoding()
+{
+    static const wirehair_v2::DenseAnchorLayout kLayouts[] = {
+        wirehair_v2::DenseAnchorLayout::Two07,
+        wirehair_v2::DenseAnchorLayout::Four0369
+    };
+    static const uint32_t kBlockCounts[] = {64u, 1001u};
+    const uint32_t block_bytes = 13u;
+    for (wirehair_v2::DenseAnchorLayout layout : kLayouts)
+    {
+        for (uint32_t K : kBlockCounts)
+        {
+            for (uint32_t seed = 0u; seed < 64u; ++seed)
+            {
+                wirehair_v2::PrecodeParams params =
+                    wirehair_v2::MakeCertifiedParams(K, seed);
+                params.DenseAnchors = layout;
+                wirehair_v2::PrecodeSystem system;
+                if (!BuildPrecodeSystem(params, system)) {
+                    return false;
+                }
+                const uint32_t parity_count = params.Staircase +
+                    params.DenseRows + params.HeavyRows;
+                std::vector<uint8_t> source((size_t)K * block_bytes);
+                std::vector<uint8_t> parity(
+                    (size_t)parity_count * block_bytes);
+                FillRandomBlocks(
+                    source.data(), source.size(),
+                    UINT64_C(0x616e63686f72656e) ^
+                        ((uint64_t)K << 32) ^ seed ^ (uint32_t)layout);
+                const bool feasible =
+                    wirehair_v2::DenseCornerInvertible(system);
+                const bool computed = wirehair_v2::ComputePrecodeValues(
+                    system, source.data(), block_bytes, parity.data());
+                if (computed != feasible ||
+                    (computed && !VerifyValues(
+                        system, source.data(), parity.data(), block_bytes,
+                        "dense-anchor")))
+                {
+                    std::fprintf(stderr,
+                        "dense-anchor encode mismatch layout=%u K=%u "
+                        "seed=%u feasible=%d computed=%d\n",
+                        (unsigned)layout, K, seed,
+                        (int)feasible, (int)computed);
+                    return false;
+                }
+            }
+        }
+    }
+    std::printf("dense-anchor basis encoding: PASS\n");
+    return true;
+}
+#endif
+
 bool TestCorrectnessDoctored()
 {
     const uint32_t Ks[] = {16u, 1000u, 3200u};
@@ -893,6 +948,8 @@ bool TestRecoveryBlockEncoding()
         !wirehair_v2::ValidatePrecodeSystem(encoder_state.System()) ||
         encoder_state.System().StaircaseRows != system.StaircaseRows ||
         encoder_state.System().DenseRowColumns != system.DenseRowColumns ||
+        encoder_state.System().DenseBasisRowColumns !=
+            system.DenseBasisRowColumns ||
         encoder_state.SourceBlockCount() != K ||
         encoder_state.ParityBlockCount() != parity_count ||
         encoder_state.BlockBytes() != bb ||
@@ -1218,6 +1275,7 @@ bool TestMessagePrecodeEncoder()
     if (!blocks.IntermediateBlocks() || blocks.HasCompleteSystem() ||
         !encoder_system.StaircaseRows.empty() ||
         !encoder_system.DenseRowColumns.empty() ||
+        !encoder_system.DenseBasisRowColumns.empty() ||
         encoder_system.Params.BlockCount != K ||
         encoder_system.Params.Staircase != encoder.Profile().V2StaircaseCount ||
         encoder_system.Params.DenseRows != encoder.Profile().V2DenseRowCount ||
@@ -1322,6 +1380,7 @@ bool TestMessagePrecodeEncoder()
         encoder.BlockEncoder().HasCompleteSystem() ||
         !encoder.BlockEncoder().System().StaircaseRows.empty() ||
         !encoder.BlockEncoder().System().DenseRowColumns.empty() ||
+        !encoder.BlockEncoder().System().DenseBasisRowColumns.empty() ||
         encoder.SourceBlockCount() != K ||
         !encoder.BlockEncoder().IsInitialized())
     {
@@ -1860,6 +1919,9 @@ int main(int argc, char** argv)
 
     bool ok = true;
     ok = TestCorrectnessAsBuilt() && ok;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    ok = TestDenseAnchorEncoding() && ok;
+#endif
     ok = TestCorrectnessDoctored() && ok;
     ok = TestMalformedDenseCorner() && ok;
     ok = TestStrictSystemValidation() && ok;

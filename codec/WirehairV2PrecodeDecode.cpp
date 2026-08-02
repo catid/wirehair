@@ -350,6 +350,8 @@ void MessagePrecodeDecoder::Swap(MessagePrecodeDecoder& other) noexcept
     swap(SystemValue.Params, other.SystemValue.Params);
     SystemValue.StaircaseRows.swap(other.SystemValue.StaircaseRows);
     SystemValue.DenseRowColumns.swap(other.SystemValue.DenseRowColumns);
+    SystemValue.DenseBasisRowColumns.swap(
+        other.SystemValue.DenseBasisRowColumns);
     ReceivedBlockIds.swap(other.ReceivedBlockIds);
     ReceivedBlockStorage.swap(other.ReceivedBlockStorage);
     ReceivedSlots.Swap(other.ReceivedSlots);

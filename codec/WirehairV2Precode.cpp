@@ -4,6 +4,7 @@
 #include "../gf256.h"
 
 #include <algorithm>
+#include <iterator>
 #include <limits>
 
 namespace wirehair_v2 {
@@ -76,37 +77,58 @@ bool IsStrictlyIncreasingBelow(
     return true;
 }
 
-size_t SymmetricDifferenceCountBelow(
+bool SymmetricDifferenceEquals(
     const std::vector<uint32_t>& a,
     const std::vector<uint32_t>& b,
-    uint32_t limit)
+    const std::vector<uint32_t>& expected)
 {
-    size_t ai = 0, bi = 0, count = 0;
+    size_t ai = 0, bi = 0, ei = 0;
     while (ai < a.size() || bi < b.size())
     {
-        while (ai < a.size() && a[ai] >= limit) {
-            ++ai;
-        }
-        while (bi < b.size() && b[bi] >= limit) {
-            ++bi;
-        }
-        if (ai >= a.size() && bi >= b.size()) {
-            break;
-        }
+        uint32_t difference;
         if (bi >= b.size() || (ai < a.size() && a[ai] < b[bi])) {
+            difference = a[ai];
             ++ai;
-            ++count;
         }
         else if (ai >= a.size() || b[bi] < a[ai]) {
+            difference = b[bi];
             ++bi;
-            ++count;
         }
-        else {
+        else
+        {
             ++ai;
             ++bi;
+            continue;
         }
+        if (ei >= expected.size() || expected[ei] != difference) {
+            return false;
+        }
+        ++ei;
     }
-    return count;
+    return ei == expected.size();
+}
+
+bool IsKnownDenseAnchorLayout(DenseAnchorLayout layout)
+{
+    return layout == DenseAnchorLayout::Disabled ||
+        layout == DenseAnchorLayout::Two07 ||
+        layout == DenseAnchorLayout::Four0369;
+}
+
+bool IsAdditionalDenseAnchor(
+    DenseAnchorLayout layout,
+    uint32_t row_index)
+{
+    switch (layout)
+    {
+    case DenseAnchorLayout::Disabled:
+        return false;
+    case DenseAnchorLayout::Two07:
+        return row_index == 7u;
+    case DenseAnchorLayout::Four0369:
+        return row_index == 3u || row_index == 6u || row_index == 9u;
+    }
+    return false;
 }
 
 bool ValidatePrecodeParams(const PrecodeParams& params)
@@ -121,6 +143,7 @@ bool ValidatePrecodeParams(const PrecodeParams& params)
         params.DenseRows > 64u || params.HeavyRows > 128u ||
         (params.HeavyFamily != HeavyCoefficientFamily::PeriodicCauchy &&
          params.HeavyFamily != HeavyCoefficientFamily::HashedNonzero) ||
+        !IsKnownDenseAnchorLayout(params.DenseAnchors) ||
         binary_span > UINT16_MAX || total_span > UINT16_MAX)
     {
         return false;
@@ -129,6 +152,19 @@ bool ValidatePrecodeParams(const PrecodeParams& params)
     // Identity-corner flips address both halves of the K + S deck.
     const uint64_t known_span =
         (uint64_t)params.BlockCount + params.Staircase;
+    if (params.DenseAnchors != DenseAnchorLayout::Disabled)
+    {
+#if !defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        return false;
+#else
+        if (params.DenseRows != 12u || params.HeavyRows != 12u ||
+            params.DenseIdentityCorner ||
+            params.HeavyFamily != HeavyCoefficientFamily::PeriodicCauchy)
+        {
+            return false;
+        }
+#endif
+    }
     return !params.DenseIdentityCorner ||
         known_span >= 2u * (uint64_t)(params.DenseRows >> 1);
 }
@@ -146,6 +182,7 @@ PrecodeParams MakeCertifiedParams(uint32_t block_count, uint64_t seed)
     params.HeavyRows = 12u;
     params.SourceHits = CertifiedSourceHits(block_count);
     params.DenseIdentityCorner = false;
+    params.DenseAnchors = DenseAnchorLayout::Disabled;
     params.Seed = seed;
     return params;
 }
@@ -167,6 +204,7 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
     out.Params = params;
     out.StaircaseRows.assign(S, std::vector<uint32_t>());
     out.DenseRowColumns.assign(D2, std::vector<uint32_t>());
+    out.DenseBasisRowColumns.clear();
 
     wirehair::PCGRandom prng;
     prng.Seed(params.Seed, K);
@@ -260,25 +298,55 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
         };
         emit_row();
 
-        const uint32_t halves[2] = {
-            D2 >> 1,
-            (D2 >> 1) + (D2 & 1u) - 1u
-        };
-        for (uint32_t half = 0; half < 2u; ++half)
+        if (params.DenseAnchors != DenseAnchorLayout::Disabled)
         {
+            // Row zero uses the initial balanced deck.  Each segment gets a
+            // fresh deck: an additional anchor emits its balanced set-half,
+            // while other rows consume one distinct set/clear flip pair.
             UnbiasedShuffleDeck(prng, deck.data(), deck_span);
-            for (uint32_t ii = 0; ii < halves[half]; ++ii)
+            uint32_t flip_index = 0u;
+            while (row_i < D2)
             {
-                // Deck entries at distinct positions are distinct columns,
-                // so each flip pair changes exactly two columns
-                bitmap[deck[ii]] ^= 1u;
-                bitmap[deck[set_count + ii]] ^= 1u;
+                if (IsAdditionalDenseAnchor(params.DenseAnchors, row_i))
+                {
+                    UnbiasedShuffleDeck(prng, deck.data(), deck_span);
+                    std::fill(bitmap.begin(), bitmap.end(), uint8_t{0});
+                    for (uint32_t i = 0; i < set_count; ++i) {
+                        bitmap[deck[i]] = 1u;
+                    }
+                    flip_index = 0u;
+                    emit_row();
+                    continue;
+                }
+                bitmap[deck[flip_index]] ^= 1u;
+                bitmap[deck[set_count + flip_index]] ^= 1u;
+                ++flip_index;
                 emit_row();
+            }
+        }
+        else
+        {
+            const uint32_t halves[2] = {
+                D2 >> 1,
+                (D2 >> 1) + (D2 & 1u) - 1u
+            };
+            for (uint32_t half = 0; half < 2u; ++half)
+            {
+                UnbiasedShuffleDeck(prng, deck.data(), deck_span);
+                for (uint32_t ii = 0; ii < halves[half]; ++ii)
+                {
+                    // Deck entries at distinct positions are distinct
+                    // columns, so each flip pair changes exactly two columns.
+                    bitmap[deck[ii]] ^= 1u;
+                    bitmap[deck[set_count + ii]] ^= 1u;
+                    emit_row();
+                }
             }
         }
     }
 
-    return ValidatePrecodeSystem(out);
+    return BuildDenseEquationBasis(out, out.DenseBasisRowColumns) &&
+        ValidatePrecodeSystem(out);
 }
 
 bool ValidatePrecodeSystem(const PrecodeSystem& system)
@@ -291,7 +359,8 @@ bool ValidatePrecodeSystem(const PrecodeSystem& system)
 
     if (!ValidatePrecodeParams(params) ||
         system.StaircaseRows.size() != S ||
-        system.DenseRowColumns.size() != D2)
+        system.DenseRowColumns.size() != D2 ||
+        system.DenseBasisRowColumns.size() != D2)
     {
         return false;
     }
@@ -348,7 +417,11 @@ bool ValidatePrecodeSystem(const PrecodeSystem& system)
     for (uint32_t row_index = 0; row_index < D2; ++row_index)
     {
         const std::vector<uint32_t>& row = system.DenseRowColumns[row_index];
-        if (!IsStrictlyIncreasingBelow(row, binary_span)) {
+        const std::vector<uint32_t>& basis =
+            system.DenseBasisRowColumns[row_index];
+        if (!IsStrictlyIncreasingBelow(row, binary_span) ||
+            !IsStrictlyIncreasingBelow(basis, binary_span))
+        {
             return false;
         }
 
@@ -370,26 +443,66 @@ bool ValidatePrecodeSystem(const PrecodeSystem& system)
         {
             return false;
         }
-        if (row_index == 0u)
+        const bool is_anchor = row_index == 0u ||
+            IsAdditionalDenseAnchor(params.DenseAnchors, row_index);
+        if (is_anchor)
         {
             const size_t first_count = params.DenseIdentityCorner ?
                 known_count : row.size();
-            if (first_count != first_expected) {
+            if (first_count != first_expected || basis != row) {
                 return false;
             }
         }
         else
         {
-            const uint32_t difference_limit = params.DenseIdentityCorner ?
-                known_span : (uint32_t)binary_span;
-            if (SymmetricDifferenceCountBelow(
-                    system.DenseRowColumns[row_index - 1u], row,
-                    difference_limit) != 2u)
+            const size_t expected_basis_size =
+                params.DenseIdentityCorner ? 4u : 2u;
+            if (basis.size() != expected_basis_size ||
+                !SymmetricDifferenceEquals(
+                    system.DenseRowColumns[row_index - 1u], row, basis))
             {
                 return false;
             }
         }
     }
+    return true;
+}
+
+bool BuildDenseEquationBasis(
+    const PrecodeSystem& system,
+    std::vector<std::vector<uint32_t>>& basis_out)
+{
+    const uint32_t D2 = system.Params.DenseRows;
+    if (!IsKnownDenseAnchorLayout(system.Params.DenseAnchors) ||
+        system.DenseRowColumns.size() != D2)
+    {
+        return false;
+    }
+
+    std::vector<std::vector<uint32_t>> basis(D2);
+    for (uint32_t row = 0; row < D2; ++row)
+    {
+        if (row == 0u ||
+            IsAdditionalDenseAnchor(system.Params.DenseAnchors, row))
+        {
+            basis[row] = system.DenseRowColumns[row];
+            continue;
+        }
+        const std::vector<uint32_t>& previous =
+            system.DenseRowColumns[row - 1u];
+        const std::vector<uint32_t>& current =
+            system.DenseRowColumns[row];
+        // Valid Shuffle-2 non-anchor rows differ in two columns (four for
+        // the identity-corner variant's changing owned columns).  Reserving
+        // both half-dense inputs here would recreate the memory cost this
+        // sparse basis is intended to remove.
+        basis[row].reserve(4u);
+        std::set_symmetric_difference(
+            previous.begin(), previous.end(),
+            current.begin(), current.end(),
+            std::back_inserter(basis[row]));
+    }
+    basis_out.swap(basis);
     return true;
 }
 

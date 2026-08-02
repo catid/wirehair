@@ -274,43 +274,28 @@ bool ComputePrecodeValues(
     }
 
     // --- Shuffle-2 dense rows ---
-    // Transform to consecutive-row differences: diff row 0 = row 0, diff
-    // row r = row r XOR row r-1 (unit bidiagonal row transform: same rank,
-    // same solution).  Each difference is the flip pair, so the known part
-    // of diff row r > 0 costs at most 2 block ops; dense-column flips only
-    // toggle the row's corner mask.  Then Gauss-Jordan solves the D2 x D2
-    // GF(2) corner with the known sums as block-valued RHS.
+    // Transform each anchor segment to its equation-preserving sparse basis:
+    // the anchor remains original and every following row is the adjacent
+    // symmetric difference.  Non-anchor known parts therefore cost at most
+    // two block ops; dense-column flips only toggle the corner mask.  Then
+    // Gauss-Jordan solves the D2 x D2 GF(2) corner with block-valued RHS.
     if (D2 > 0u)
     {
         std::vector<uint8_t> rhs((size_t)D2 * block_bytes);
         std::vector<uint64_t> masks(D2);
-        std::vector<uint32_t> diff;
+        const std::vector<std::vector<uint32_t>>& dense_basis_rows =
+            system.DenseBasisRowColumns;
 
         for (uint32_t r = 0; r < D2; ++r)
         {
-            const std::vector<uint32_t>& cur = system.DenseRowColumns[r];
-            const uint32_t* cols = cur.data();
-            size_t count = cur.size();
+            const std::vector<uint32_t>& row = dense_basis_rows[r];
             uint64_t mask = 0; // dense bits of THIS transformed row only
-            if (r > 0u)
-            {
-                const std::vector<uint32_t>& prev =
-                    system.DenseRowColumns[r - 1u];
-                diff.clear();
-                std::set_symmetric_difference(
-                    prev.begin(), prev.end(),
-                    cur.begin(), cur.end(),
-                    std::back_inserter(diff));
-                cols = diff.data();
-                count = diff.size();
-            }
 
             BlockAccumulator acc(
                 rhs.data() + (size_t)r * block_bytes,
                 block_bytes, st.DenseKnownBlockOps);
-            for (size_t i = 0; i < count; ++i)
+            for (uint32_t col : row)
             {
-                const uint32_t col = cols[i];
                 if (col >= dense_base + D2) {
                     return false; // out-of-span dense column
                 }
@@ -730,6 +715,8 @@ void PrecodeEncoder::Swap(PrecodeEncoder& other) noexcept
     swap(SystemValue.Params, other.SystemValue.Params);
     SystemValue.StaircaseRows.swap(other.SystemValue.StaircaseRows);
     SystemValue.DenseRowColumns.swap(other.SystemValue.DenseRowColumns);
+    SystemValue.DenseBasisRowColumns.swap(
+        other.SystemValue.DenseBasisRowColumns);
     swap(CodecValue, other.CodecValue);
     swap(RowSeed, other.RowSeed);
     swap(MixCount, other.MixCount);

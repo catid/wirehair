@@ -45,6 +45,21 @@ enum class HeavyCoefficientFamily : uint32_t
     HashedNonzero = 1
 };
 
+/**
+    Experiment-only segmentation of the D=12 Shuffle-2 dense equations.
+
+    An anchor is a freshly shuffled balanced half-row.  Rows between anchors
+    retain the certified one-set/one-clear two-column delta cadence.  The
+    layouts are pure binary/GF(256) architecture arms; named/public profiles
+    always use Disabled.
+*/
+enum class DenseAnchorLayout : uint32_t
+{
+    Disabled = 0,
+    Two07 = 1,    ///< independent anchors at rows {0, 7}
+    Four0369 = 2 ///< independent anchors at rows {0, 3, 6, 9}
+};
+
 struct PrecodeParams
 {
     uint32_t BlockCount = 0;   ///< K: source blocks
@@ -74,6 +89,8 @@ struct PrecodeParams
 
     HeavyCoefficientFamily HeavyFamily =
         HeavyCoefficientFamily::PeriodicCauchy;
+
+    DenseAnchorLayout DenseAnchors = DenseAnchorLayout::Disabled;
 
     uint64_t Seed = 0;         ///< constraint-generation seed
 };
@@ -120,6 +137,13 @@ struct PrecodeSystem
         selected attempts.
     */
     std::vector<std::vector<uint32_t>> DenseRowColumns;
+
+    /**
+        Precomputed equation-preserving dense basis used by the hot solver
+        and direct parity encoder.  Anchor entries equal DenseRowColumns;
+        non-anchor entries are adjacent symmetric differences.
+    */
+    std::vector<std::vector<uint32_t>> DenseBasisRowColumns;
 };
 
 /**
@@ -137,6 +161,18 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out);
     uses widened arithmetic and performs no writes to block data.
 */
 bool ValidatePrecodeSystem(const PrecodeSystem& system);
+
+/**
+    Build an invertible row basis for the dense binary equations.
+
+    Each segment starts with its original anchor row.  Every later basis row
+    is the symmetric difference of the current and previous original rows.
+    This preserves the exact equation span while reducing non-anchor rows to
+    their two-column Shuffle-2 delta.  The returned rows are sorted.
+*/
+bool BuildDenseEquationBasis(
+    const PrecodeSystem& system,
+    std::vector<std::vector<uint32_t>>& basis_out);
 
 /**
     GF(256) coefficient of heavy row r at GE column c.

@@ -1993,6 +1993,8 @@ static WirehairResult SolvePrecodeSystemImpl(
             return Wirehair_OOM;
         }
         const size_t row_count = (size_t)row_count_wide;
+        const std::vector<std::vector<uint32_t>>& dense_basis_rows =
+            system.DenseBasisRowColumns;
         size_t reference_count = 0u;
         const auto add_references = [&reference_count](size_t count) {
             if (count > std::numeric_limits<size_t>::max() - reference_count) {
@@ -2006,7 +2008,7 @@ static WirehairResult SolvePrecodeSystemImpl(
                 return Wirehair_OOM;
             }
         }
-        for (const std::vector<uint32_t>& columns : system.DenseRowColumns) {
+        for (const std::vector<uint32_t>& columns : dense_basis_rows) {
             if (!add_references(columns.size())) {
                 return Wirehair_OOM;
             }
@@ -2035,7 +2037,7 @@ static WirehairResult SolvePrecodeSystemImpl(
             rows.AppendRow(columns, nullptr);
             st.BinaryRowReferences += columns.size();
         }
-        for (const std::vector<uint32_t>& columns : system.DenseRowColumns)
+        for (const std::vector<uint32_t>& columns : dense_basis_rows)
         {
             rows.AppendRow(columns, nullptr);
             st.BinaryRowReferences += columns.size();
