@@ -245,25 +245,25 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
             params.DenseIdentityCorner ? (K + S) : span;
         const uint32_t set_count = (deck_span + 1u) >> 1;
         std::vector<uint16_t> deck(deck_span);
-        std::vector<uint8_t> bitmap(deck_span, 0u);
+        // One bit per anchor lets every balanced row be populated by the same
+        // ascending column scan.  Four0369 is the largest accepted layout.
+        std::vector<uint8_t> anchor_flags(deck_span, 0u);
+        uint32_t anchor_rows[4] = {};
+        uint8_t anchor_bits[4] = {};
+        uint32_t anchor_count = 0u;
         uint32_t row_i = 0;
-        const auto emit_anchor = [&]() {
-            std::fill(bitmap.begin(), bitmap.end(), uint8_t{0});
+        const auto mark_anchor = [&]() {
+            CAT_DEBUG_ASSERT(anchor_count < 4u);
+            const uint8_t anchor_bit = (uint8_t)(1u << anchor_count);
             for (uint32_t i = 0; i < set_count; ++i) {
-                bitmap[deck[i]] = 1u;
+                // Anchors overlap heavily; assignment would erase membership
+                // recorded for an earlier anchor at the same column.
+                anchor_flags[deck[i]] |= anchor_bit;
             }
-            std::vector<uint32_t>& columns =
-                out.DenseBasisRowColumns[row_i];
-            columns.reserve(set_count + 8u);
-            for (uint32_t col = 0; col < deck_span; ++col) {
-                if (bitmap[col]) {
-                    columns.push_back(col);
-                }
-            }
-            if (params.DenseIdentityCorner) {
-                // Own dense column is above every deck column: stays sorted
-                columns.push_back(K + S + row_i);
-            }
+            anchor_rows[anchor_count] = row_i;
+            anchor_bits[anchor_count] = anchor_bit;
+            out.DenseBasisRowColumns[row_i].reserve(set_count + 1u);
+            ++anchor_count;
             ++row_i;
         };
         const auto emit_delta = [&](uint32_t first, uint32_t second) {
@@ -282,7 +282,7 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
         };
 
         UnbiasedShuffleDeck(prng, deck.data(), deck_span);
-        emit_anchor();
+        mark_anchor();
 
         if (params.DenseAnchors != DenseAnchorLayout::Disabled)
         {
@@ -297,7 +297,7 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
                 {
                     UnbiasedShuffleDeck(prng, deck.data(), deck_span);
                     flip_index = 0u;
-                    emit_anchor();
+                    mark_anchor();
                     continue;
                 }
                 emit_delta(
@@ -320,6 +320,29 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
                     // columns, so each flip pair changes exactly two columns.
                     emit_delta(deck[ii], deck[set_count + ii]);
                 }
+            }
+        }
+
+        // Populate every anchor in one ordered pass.  Delta rows were already
+        // emitted above and consume no membership scan.
+        for (uint32_t col = 0; col < deck_span; ++col)
+        {
+            const uint8_t flags = anchor_flags[col];
+            for (uint32_t anchor = 0; anchor < anchor_count; ++anchor) {
+                if ((flags & anchor_bits[anchor]) != 0u) {
+                    out.DenseBasisRowColumns[anchor_rows[anchor]].push_back(
+                        col);
+                }
+            }
+        }
+        if (params.DenseIdentityCorner)
+        {
+            // Owned dense columns follow the known-column deck and preserve
+            // sorted order.  Accepted identity-corner layouts have one
+            // anchor, but retaining the loop keeps the basis rule explicit.
+            for (uint32_t anchor = 0; anchor < anchor_count; ++anchor) {
+                const uint32_t row = anchor_rows[anchor];
+                out.DenseBasisRowColumns[row].push_back(K + S + row);
             }
         }
     }
