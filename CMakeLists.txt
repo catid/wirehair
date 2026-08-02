@@ -732,8 +732,20 @@ install(FILES
     V2_WIRE_PROFILE.md
     DESTINATION "${CMAKE_INSTALL_DATADIR}/doc/wirehair")
 
+if(BUILD_TESTS)
+    find_package(Python3 3.8 COMPONENTS Interpreter REQUIRED)
+    add_test(
+        NAME wh2_benchmark_contract_test
+        COMMAND ${Python3_EXECUTABLE} -m unittest -v
+            bench/test_wh2_benchmark_contract.py)
+    set_tests_properties(wh2_benchmark_contract_test PROPERTIES
+        WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+        ENVIRONMENT "PYTHONWARNINGS=error"
+        TIMEOUT 180
+        LABELS "wh2;benchmark;contract")
+endif()
+
 if(BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
-    find_package(Python3 COMPONENTS Interpreter QUIET)
     find_package(PkgConfig QUIET)
     get_property(WIREHAIR_MULTI_CONFIG GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
     foreach(_wirehair_package_variant IN ITEMS static shared both)

@@ -1,0 +1,273 @@
+{
+  "schema": "wirehair.wh2.benchmark-contract.v1",
+  "contract_id": "wh2-pure-gf256-1pct-v1",
+  "field": "GF(256)",
+  "goal": {
+    "primary_failure_threshold_ppm": 10000,
+    "primary_overhead": 0,
+    "final_bad_seed_count": 0,
+    "primary_speed_scope": "decoder_solve",
+    "cross_codec_speed_scope": "receive_to_success"
+  },
+  "k_bands": [
+    {"name": "2-100", "first": 2, "last": 100},
+    {"name": "101-1000", "first": 101, "last": 1000},
+    {"name": "1001-5000", "first": 1001, "last": 5000},
+    {"name": "5001-10000", "first": 5001, "last": 10000},
+    {"name": "10001-20000", "first": 10001, "last": 20000},
+    {"name": "20001-64000", "first": 20001, "last": 64000}
+  ],
+  "k_sets": {
+    "short": [
+      2, 3, 4, 5, 6, 8, 16, 32, 64, 100,
+      101, 128, 256, 512, 513, 1000,
+      1001, 2048, 4096, 5000,
+      5001, 8192, 10000,
+      10001, 16384, 20000,
+      20001, 32768, 49152, 64000
+    ],
+    "timing_short": [
+      8, 32, 100, 128, 512, 1000,
+      2048, 5000, 8192, 20000, 32768, 64000
+    ],
+    "all": {"first": 2, "last": 64000}
+  },
+  "seeds": {
+    "raw_base_seed_attempts": [0, 1, 2],
+    "production_base_seed_attempt": 0,
+    "training_loss_roots": [
+      "0xd1b54a32d192ed03",
+      "0x94d049bb133111eb",
+      "0x8538ecb5bd456ea3"
+    ],
+    "validation_loss_roots": [
+      "0xc0ac29b7c97c50dd",
+      "0x3f84d5b5b5470917",
+      "0x9216d5d98979fb1b"
+    ]
+  },
+  "strata_sets": {
+    "development": [
+      {"schedule": "iid", "loss_ppm": 100000},
+      {"schedule": "burst", "loss_ppm": 500000},
+      {"schedule": "adversarial", "loss_ppm": 500000},
+      {"schedule": "repair-only", "loss_ppm": 500000}
+    ],
+    "hard": [
+      {"schedule": "burst", "loss_ppm": 500000},
+      {"schedule": "adversarial", "loss_ppm": 500000},
+      {"schedule": "repair-only", "loss_ppm": 500000}
+    ]
+  },
+  "recovery": {
+    "overhead_thresholds": [0, 1, 2, 4],
+    "overhead_cap": 4,
+    "raw_construction_attempts": 1,
+    "production_seed_fixups_in_raw_phase": 0,
+    "max_construction_attempts": 256,
+    "phase_seed_policy": {
+      "development": "one_base_attempt_no_retry",
+      "final_raw": "one_base_attempt_no_retry",
+      "final_repaired": "frozen_lowest_training_success_attempt",
+      "final_validation": "replay_frozen_training_repair_map",
+      "cross_width_validation": "replay_frozen_training_repair_map"
+    },
+    "repair_rule": "for each K, choose the lowest production retry offset in [0,255] that decodes at overhead 0 on all three hard schedules crossed with all three training loss roots; freeze the complete map and SHA-256 before validation; no manual exceptions",
+    "attempt_derivation": "retry offset r selects public seed_attempt=(base_seed_attempt+r) modulo 256; that public attempt adds attempt*0x9e3779b97f4a7c15 modulo 2^64 to the certified GF(256) precode seed and attempt*0x9e3779b9 modulo 2^32 to the packet peel seed; raw phases use r=0 exactly",
+    "packet_trace": {
+      "loss_rate_conversion": "double(loss_ppm) / 1000000.0",
+      "trace_seed": "loss_seed xor (K * 0x9e3779b97f4a7c15) xor (block_bytes * 0xbf58476d1ce4e5b9) mod 2^64; overhead salt and local trial salt are zero",
+      "rng": "SplitMix64; Unit=(Next() >> 11) / 2^53; drop iff Unit < loss_rate",
+      "iid": "candidate packet IDs 0,1,...; use the unsalted trace-seed RNG",
+      "burst": "candidate packet IDs 0,1,...; use RNG seed trace_seed xor 0x10fade; eight-drop bursts start on an idle candidate with probability loss_rate/(8-7*loss_rate)",
+      "adversarial": "candidate packet IDs UINT32_MAX-2*i modulo 2^32; use RNG seed trace_seed xor 0x10fade and IID drops",
+      "repair-only": "candidate packet IDs K+i modulo 2^32; use RNG seed trace_seed xor 0x10fade and IID drops",
+      "nested_overhead": "generate one K+4 delivered-ID prefix; threshold h replays exactly its first K+h IDs",
+      "candidate_limit": "256*(K+4)+65536 attempted candidates",
+      "trace_sha256": "SHA-256 of the K+4 delivered IDs encoded consecutively as unsigned 32-bit little-endian words"
+    },
+    "cell_key": [
+      "phase", "band", "K", "block_bytes", "loss_ppm", "schedule",
+      "trial", "base_seed_attempt", "loss_seed", "overhead_cap"
+    ],
+    "outcomes": {
+      "success": "decoded_extra is an integer in [0,overhead_cap]",
+      "need_more_at_cap": "explicit failure charged overhead_cap",
+      "construct_failed": "explicit failure charged overhead_cap",
+      "unsupported": "explicit failure charged overhead_cap",
+      "fatal_or_internal": "abort the arm; never score"
+    },
+    "domains": {
+      "development": {
+        "k_set": "short",
+        "block_bytes": [2],
+        "seed_mode": "raw_paired_training",
+        "strata_set": "development",
+        "expected_cells_per_arm": 360,
+        "domain_sha256": "f97f28c211428cd77aed97160073b192d93014cb4a61a844bc7d76375ac61b77"
+      },
+      "final_raw": {
+        "k_set": "all",
+        "block_bytes": [2],
+        "seed_mode": "raw_paired_training",
+        "strata_set": "hard",
+        "expected_cells_per_arm": 575991,
+        "domain_sha256": "c33160c0379675dac9de3162463e3100041bc8eeb55c002dcf6c3473973e7749"
+      },
+      "final_repaired": {
+        "k_set": "all",
+        "block_bytes": [2],
+        "seed_mode": "production_training",
+        "strata_set": "hard",
+        "expected_cells_per_arm": 575991,
+        "domain_sha256": "e247b0ff51f47383f415b1747a783e0c4b4a91e97862e9e72aa660241ff0aeee"
+      },
+      "final_validation": {
+        "k_set": "all",
+        "block_bytes": [2],
+        "seed_mode": "production_validation",
+        "strata_set": "hard",
+        "expected_cells_per_arm": 575991,
+        "domain_sha256": "a63611ad300396a1b8977281fcd387fde4bd207a3ca82043c5e234e8fc39d4de"
+      },
+      "cross_width_validation": {
+        "k_set": "short",
+        "block_bytes": [64, 256, 1280, 4096],
+        "seed_mode": "production_validation",
+        "strata_set": "development",
+        "expected_cells_per_arm": 1440,
+        "domain_sha256": "80fb4c19b31f88101ef4b3c480e6d5ff4a3bba7d45c96f02dc3518cd7c1c0399"
+      }
+    }
+  },
+  "timing": {
+    "development_wall_time_seconds_per_candidate": 7200,
+    "loss_ppm": 100000,
+    "schedule": "iid",
+    "fixed_received_overhead": 4,
+    "cell_key": [
+      "phase", "band", "K", "block_bytes", "loss_ppm", "schedule",
+      "replicate", "base_seed_attempt", "loss_seed", "fixed_received_overhead"
+    ],
+    "seed_derivation": "construction seed is selected by seed_mode and unchanged; loss seed=SplitMix64(base_loss_seed xor (replicate * 0x9e3779b97f4a7c15 mod 2^64))",
+    "domains": {
+      "development": {
+        "k_set": "timing_short",
+        "block_bytes": [64, 1280],
+        "seed_mode": "raw_paired_training",
+        "paired_repetitions": 8,
+        "expected_cells": 192,
+        "domain_sha256": "1a15ee48e893280013b74f448d81607e45630fbf631d4e73960b3a2194e204c3"
+      },
+      "final": {
+        "k_set": "short",
+        "block_bytes": [2, 64, 256, 1280, 4096],
+        "seed_mode": "production_validation",
+        "paired_repetitions": 24,
+        "expected_cells": 3600,
+        "domain_sha256": "90bd3ea12b21b5a04290d7e55aac95287f9d0fe3150ff27047027dfe84ba63ec"
+      }
+    },
+    "confidence": "two-sided Student-t 95% interval over paired log seconds",
+    "practical_margin_ppm": 20000,
+    "effective_floor": "log1p(0.02) after both A/A intervals pass",
+    "aa_repeatability_rule": "each A/A 95% interval must lie strictly inside [-log1p(0.02),+log1p(0.02)]; otherwise the comparison is non-selectable",
+    "order": "counterbalanced ABBA/BAAB",
+    "cache_state": "warm",
+    "production_policy": "final timing replays the frozen production repair map; each Wirehair2 timing receipt binds its map SHA-256 and realized attempt",
+    "eligibility": "a timing cell is eligible only when every compared arm byte-recovers successfully on the predeclared prefix; any arm failure invalidates the timing panel and remains a recovery failure; observed common-success intersection is forbidden",
+    "scope_protocol": "decoder_solve uses a fresh decoder and the identical fixed K+4 received prefix; encoder_init_plus_first_K_symbols encodes exactly IDs 0..K-1; receive_to_success replays the nested trace and includes all feed and final recovery work through each arm's first success",
+    "required_panels": [
+      "each_arm_AA",
+      "candidate_vs_wirehair2_head_decoder_solve",
+      "candidate_vs_wirehair1_receive_to_success",
+      "candidate_vs_both_controls_encoder"
+    ],
+    "scopes": [
+      "decoder_solve",
+      "encoder_init_plus_first_K_symbols",
+      "receive_to_success"
+    ],
+    "panel_protocol": {
+      "control_aa": [
+        {"arm": "wirehair2_head", "scope": "decoder_solve"},
+        {"arm": "wirehair1", "scope": "receive_to_success"},
+        {"arm": "wirehair2_head", "scope": "encoder_init_plus_first_K_symbols"},
+        {"arm": "wirehair1", "scope": "encoder_init_plus_first_K_symbols"}
+      ],
+      "candidate_aa_scopes": [
+        "decoder_solve", "receive_to_success", "encoder_init_plus_first_K_symbols"
+      ],
+      "candidate_ab": [
+        {"control": "wirehair2_head", "scope": "decoder_solve"},
+        {"control": "wirehair1", "scope": "receive_to_success"},
+        {"control": "wirehair2_head", "scope": "encoder_init_plus_first_K_symbols"},
+        {"control": "wirehair1", "scope": "encoder_init_plus_first_K_symbols"}
+      ],
+      "slots_per_panel": 4,
+      "warmups_per_logical_side": 1,
+      "order_assignment": "phase_bit=low bit of SHA256(canonical panel key); ABBA iff replicate parity equals phase_bit, otherwise BAAB"
+    },
+    "statistics": {
+      "block_log_ratio": "ABBA=((ln e0-ln e1)+(ln e3-ln e2))/2; BAAB=((ln e1-ln e0)+(ln e2-ln e3))/2",
+      "independent_unit": "one replicate mean over every frozen K in the reported band and width",
+      "aggregate_weighting": "within each replicate, equal weight for every frozen K x width cell",
+      "variance": "unbiased sample variance over replicate means",
+      "t_critical_by_repetitions": {
+        "8": 2.364624251592784,
+        "24": 2.0686576104190477
+      },
+      "faster": "A/B upper 95% bound < -effective_floor",
+      "noninferior": "A/B upper 95% bound < effective_floor",
+      "resolved_slower": "A/B lower 95% bound > effective_floor",
+      "strict_inequalities": true
+    },
+    "invalid_timer_policy": "success requires four integer elapsed_ns values in [1,2^63-1]; any non-success requires four nulls and makes the complete comparison panel non-selectable; rows are never dropped"
+  },
+  "selection": {
+    "controls": ["wirehair2_head", "wirehair1"],
+    "noninferiority_margin_ppm": 1000,
+    "architecture_failure_equivalence_ppm": 1000,
+    "raw_weak_seed_definition": "a (K,base_seed_attempt,block_bytes) with any overhead-0 failure",
+    "raw_individual_weak_seeds_are_vetoes": false,
+    "raw_repairs_and_introductions_are_descriptive": true,
+    "architecture_order": [
+      "eligible aggregate/band/stratum overhead-tail noninferiority",
+      "form the recovery-equivalent set within 0.1 percentage point of the eligible minimum aggregate overhead-0 failure count",
+      "fastest decoder_solve within that recovery-equivalent set",
+      "lexicographic failures at overhead 1,2,4",
+      "stable arm identifier"
+    ],
+    "development_resolved_slowdown_rejects": true,
+    "final_decoder_solve_vs_wirehair2": "candidate/wirehair2_head paired-log 95% upper bound is strictly below negative effective floor in every band x payload width",
+    "final_receive_to_success_vs_wirehair1": "candidate/wirehair1 paired-log 95% upper bound is strictly below negative effective floor in every band x payload width",
+    "final_encoder_rule": "candidate/control paired-log 95% upper bound is strictly below effective floor for both controls in every band x payload width and strictly below negative effective floor for both controls under equal-cell aggregate weighting",
+    "final_raw_failure_rule": "100 * failures <= cells overall and in every band x loss/schedule stratum at overhead 0",
+    "final_repaired_rule": "zero overhead-0 weak (K,production_seed) units on the training census",
+    "final_validation_rule": "zero overhead-0 weak K units on disjoint loss roots with zero unsupported, construction, fatal, or internal errors; the 1% rule is therefore implied"
+  },
+  "evidence": {
+    "freeze_before_results": [
+      "source_git_commit", "benchmark_binary_sha256", "contract_sha256",
+      "arm_roster_sha256", "recovery_domain_sha256", "timing_domain_sha256",
+      "trace_manifest_sha256", "arm_descriptor_sha256", "repair_map_sha256",
+      "repair_training_trace_manifest_sha256", "commands", "CPU_affinity",
+      "host_identity"
+    ],
+    "freeze_manifest_schema": "wirehair.wh2.benchmark-freeze.v1 canonical JSON object; it is the sole arm-roster and artifact authority",
+    "trace_manifest_schema": "wirehair.wh2.trace-manifest.v1 ordered canonical JSONL rows of ordinal,cell_sha256,trace_sha256; duplicate trace hashes are valid",
+    "repair_map_schema": "wirehair.wh2.repair-map.v1 canonical JSON object with 63999 retry offsets indexed by K-2 and bound to training traces",
+    "canonical_hashing": "parse with duplicate-key rejection; accept LF or CRLF input; hash sorted compact logical JSON with LF and explicit schema domain separation",
+    "common_cell_policy": "every arm has exactly one result for every predeclared arm-free key",
+    "invalid_domain_mutations": [
+      "missing", "duplicate", "extra", "seed_swapped", "partial",
+      "wrong_band", "wrong_loss", "incomplete_roster", "domain_hash_drift",
+      "trace_drift", "repair_map_drift", "construction_attempt_drift",
+      "timing_panel_drift", "timing_order_drift"
+    ],
+    "selectable_excluded_cells": 0,
+    "unsupported_policy": "only an explicitly measured routed composite is selectable",
+    "thermal_policy": "run under the existing sole CPU/DIMM/EDAC sampler; abort on its configured thermal or EDAC violation",
+    "final_continuity_policy": "one joint continuity check must bind final_raw, final_repaired, final_validation, cross_width_validation, and final timing to the same source, host, roster, codec kinds, binaries, descriptors, training trace, and production repair maps, and to the exact development architecture-selection receipt"
+  }
+}

@@ -1,0 +1,2602 @@
+#!/usr/bin/env python3
+"""Validate and describe the minimal Wirehair2 benchmark contract.
+
+This is intentionally a contract/ledger checker, not a campaign supervisor.
+It keeps candidate experiments cheap while preventing an arm from improving
+its denominator by omitting an inconvenient K, seed, or loss stratum.
+"""
+
+from __future__ import annotations
+
+import argparse
+from collections import defaultdict
+import hashlib
+import json
+import math
+from pathlib import Path
+import re
+import sys
+from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
+
+
+SCHEMA = "wirehair.wh2.benchmark-contract.v1"
+FREEZE_SCHEMA = "wirehair.wh2.benchmark-freeze.v1"
+REPAIR_MAP_SCHEMA = "wirehair.wh2.repair-map.v1"
+DEFAULT_CONTRACT = Path(__file__).with_name("wh2_benchmark_contract_v1.json")
+MAX_JSON_LINE_BYTES = 64 * 1024
+HEX64 = re.compile(r"0x[0-9a-f]{16}\Z")
+SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+GIT_COMMIT = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?\Z")
+PROFILE_ID = 0x4b295bbb47f4f9c9
+PROFILE_ENCODING_VERSION = 1
+SCORED_OUTCOMES = ("success", "need_more_at_cap", "construct_failed", "unsupported")
+EXPECTED_OUTCOMES = {
+    "success": "decoded_extra is an integer in [0,overhead_cap]",
+    "need_more_at_cap": "explicit failure charged overhead_cap",
+    "construct_failed": "explicit failure charged overhead_cap",
+    "unsupported": "explicit failure charged overhead_cap",
+    "fatal_or_internal": "abort the arm; never score",
+}
+EXPECTED_BANDS = (
+    ("2-100", 2, 100), ("101-1000", 101, 1000),
+    ("1001-5000", 1001, 5000), ("5001-10000", 5001, 10000),
+    ("10001-20000", 10001, 20000), ("20001-64000", 20001, 64000),
+)
+EXPECTED_SHORT_K = (
+    2, 3, 4, 5, 6, 8, 16, 32, 64, 100,
+    101, 128, 256, 512, 513, 1000,
+    1001, 2048, 4096, 5000,
+    5001, 8192, 10000,
+    10001, 16384, 20000,
+    20001, 32768, 49152, 64000,
+)
+EXPECTED_TIMING_SHORT_K = (
+    8, 32, 100, 128, 512, 1000,
+    2048, 5000, 8192, 20000, 32768, 64000,
+)
+EXPECTED_RAW_BASE_ATTEMPTS = (0, 1, 2)
+EXPECTED_TRAINING_LOSS_ROOTS = (
+    "0xd1b54a32d192ed03", "0x94d049bb133111eb", "0x8538ecb5bd456ea3",
+)
+EXPECTED_VALIDATION_LOSS_ROOTS = (
+    "0xc0ac29b7c97c50dd", "0x3f84d5b5b5470917", "0x9216d5d98979fb1b",
+)
+EXPECTED_STRATA_SETS = {
+    "development": (
+        ("iid", 100000),
+        ("burst", 500000),
+        ("adversarial", 500000),
+        ("repair-only", 500000),
+    ),
+    "hard": (
+        ("burst", 500000),
+        ("adversarial", 500000),
+        ("repair-only", 500000),
+    ),
+}
+EXPECTED_RECOVERY_DOMAINS = {
+    "development": ("short", (2,), "raw_paired_training", "development", 360),
+    "final_raw": ("all", (2,), "raw_paired_training", "hard", 575991),
+    "final_repaired": ("all", (2,), "production_training", "hard", 575991),
+    "final_validation": ("all", (2,), "production_validation", "hard", 575991),
+    "cross_width_validation": (
+        "short", (64, 256, 1280, 4096), "production_validation",
+        "development", 1440,
+    ),
+}
+EXPECTED_PACKET_TRACE = {
+    "loss_rate_conversion": "double(loss_ppm) / 1000000.0",
+    "trace_seed": (
+        "loss_seed xor (K * 0x9e3779b97f4a7c15) xor "
+        "(block_bytes * 0xbf58476d1ce4e5b9) mod 2^64; overhead salt and "
+        "local trial salt are zero"
+    ),
+    "rng": "SplitMix64; Unit=(Next() >> 11) / 2^53; drop iff Unit < loss_rate",
+    "iid": "candidate packet IDs 0,1,...; use the unsalted trace-seed RNG",
+    "burst": (
+        "candidate packet IDs 0,1,...; use RNG seed trace_seed xor 0x10fade; "
+        "eight-drop bursts start on an idle candidate with probability "
+        "loss_rate/(8-7*loss_rate)"
+    ),
+    "adversarial": (
+        "candidate packet IDs UINT32_MAX-2*i modulo 2^32; use RNG seed "
+        "trace_seed xor 0x10fade and IID drops"
+    ),
+    "repair-only": (
+        "candidate packet IDs K+i modulo 2^32; use RNG seed trace_seed xor "
+        "0x10fade and IID drops"
+    ),
+    "nested_overhead": (
+        "generate one K+4 delivered-ID prefix; threshold h replays exactly "
+        "its first K+h IDs"
+    ),
+    "candidate_limit": "256*(K+4)+65536 attempted candidates",
+    "trace_sha256": (
+        "SHA-256 of the K+4 delivered IDs encoded consecutively as unsigned "
+        "32-bit little-endian words"
+    ),
+}
+EXPECTED_PHASE_SEED_POLICY = {
+    "development": "one_base_attempt_no_retry",
+    "final_raw": "one_base_attempt_no_retry",
+    "final_repaired": "frozen_lowest_training_success_attempt",
+    "final_validation": "replay_frozen_training_repair_map",
+    "cross_width_validation": "replay_frozen_training_repair_map",
+}
+EXPECTED_REPAIR_RULE = (
+    "for each K, choose the lowest production retry offset in [0,255] that "
+    "decodes at overhead 0 on all three hard schedules crossed with all three "
+    "training loss roots; freeze the complete map and SHA-256 before "
+    "validation; no manual exceptions"
+)
+EXPECTED_ATTEMPT_DERIVATION = (
+    "retry offset r selects public seed_attempt=(base_seed_attempt+r) modulo "
+    "256; that public "
+    "attempt adds attempt*0x9e3779b97f4a7c15 modulo 2^64 to the certified "
+    "GF(256) precode seed and attempt*0x9e3779b9 modulo 2^32 to the packet "
+    "peel seed; raw phases use r=0 exactly"
+)
+EXPECTED_TIMING_POLICY = {
+    "development_wall_time_seconds_per_candidate": 7200,
+    "loss_ppm": 100000,
+    "schedule": "iid",
+    "fixed_received_overhead": 4,
+    "seed_derivation": (
+        "construction seed is selected by seed_mode and unchanged; "
+        "loss seed=SplitMix64(base_loss_seed xor (replicate * "
+        "0x9e3779b97f4a7c15 mod 2^64))"
+    ),
+    "confidence": "two-sided Student-t 95% interval over paired log seconds",
+    "practical_margin_ppm": 20000,
+    "effective_floor": "log1p(0.02) after both A/A intervals pass",
+    "aa_repeatability_rule": (
+        "each A/A 95% interval must lie strictly inside "
+        "[-log1p(0.02),+log1p(0.02)]; otherwise the comparison is "
+        "non-selectable"
+    ),
+    "order": "counterbalanced ABBA/BAAB",
+    "cache_state": "warm",
+    "production_policy": (
+        "final timing replays the frozen production repair map; each "
+        "Wirehair2 timing receipt binds its map SHA-256 and realized attempt"
+    ),
+    "eligibility": (
+        "a timing cell is eligible only when every compared arm byte-recovers "
+        "successfully on the predeclared prefix; any arm failure invalidates "
+        "the timing panel and remains a recovery failure; observed "
+        "common-success intersection is forbidden"
+    ),
+    "scope_protocol": (
+        "decoder_solve uses a fresh decoder and the identical fixed K+4 "
+        "received prefix; encoder_init_plus_first_K_symbols encodes exactly "
+        "IDs 0..K-1; receive_to_success replays the nested trace and includes "
+        "all feed and final recovery work through each arm's first success"
+    ),
+}
+EXPECTED_PANEL_PROTOCOL = {
+    "control_aa": [
+        {"arm": "wirehair2_head", "scope": "decoder_solve"},
+        {"arm": "wirehair1", "scope": "receive_to_success"},
+        {"arm": "wirehair2_head",
+         "scope": "encoder_init_plus_first_K_symbols"},
+        {"arm": "wirehair1",
+         "scope": "encoder_init_plus_first_K_symbols"},
+    ],
+    "candidate_aa_scopes": [
+        "decoder_solve", "receive_to_success",
+        "encoder_init_plus_first_K_symbols",
+    ],
+    "candidate_ab": [
+        {"control": "wirehair2_head", "scope": "decoder_solve"},
+        {"control": "wirehair1", "scope": "receive_to_success"},
+        {"control": "wirehair2_head",
+         "scope": "encoder_init_plus_first_K_symbols"},
+        {"control": "wirehair1",
+         "scope": "encoder_init_plus_first_K_symbols"},
+    ],
+    "slots_per_panel": 4,
+    "warmups_per_logical_side": 1,
+    "order_assignment": (
+        "phase_bit=low bit of SHA256(canonical panel key); ABBA iff "
+        "replicate parity equals phase_bit, otherwise BAAB"
+    ),
+}
+EXPECTED_TIMING_STATISTICS = {
+    "block_log_ratio": (
+        "ABBA=((ln e0-ln e1)+(ln e3-ln e2))/2; "
+        "BAAB=((ln e1-ln e0)+(ln e2-ln e3))/2"
+    ),
+    "independent_unit": (
+        "one replicate mean over every frozen K in the reported band and width"
+    ),
+    "aggregate_weighting": (
+        "within each replicate, equal weight for every frozen K x width cell"
+    ),
+    "variance": "unbiased sample variance over replicate means",
+    "t_critical_by_repetitions": {
+        "8": 2.364624251592784,
+        "24": 2.0686576104190477,
+    },
+    "faster": "A/B upper 95% bound < -effective_floor",
+    "noninferior": "A/B upper 95% bound < effective_floor",
+    "resolved_slower": "A/B lower 95% bound > effective_floor",
+    "strict_inequalities": True,
+}
+EXPECTED_INVALID_TIMER_POLICY = (
+    "success requires four integer elapsed_ns values in [1,2^63-1]; any "
+    "non-success requires four nulls and makes the complete comparison panel "
+    "non-selectable; rows are never dropped"
+)
+EXPECTED_SELECTION_POLICY = {
+    "controls": ["wirehair2_head", "wirehair1"],
+    "noninferiority_margin_ppm": 1000,
+    "architecture_failure_equivalence_ppm": 1000,
+    "raw_weak_seed_definition": (
+        "a (K,base_seed_attempt,block_bytes) with any overhead-0 failure"
+    ),
+    "raw_individual_weak_seeds_are_vetoes": False,
+    "raw_repairs_and_introductions_are_descriptive": True,
+    "architecture_order": [
+        "eligible aggregate/band/stratum overhead-tail noninferiority",
+        "form the recovery-equivalent set within 0.1 percentage point of the "
+        "eligible minimum aggregate overhead-0 failure count",
+        "fastest decoder_solve within that recovery-equivalent set",
+        "lexicographic failures at overhead 1,2,4",
+        "stable arm identifier",
+    ],
+    "development_resolved_slowdown_rejects": True,
+    "final_decoder_solve_vs_wirehair2": (
+        "candidate/wirehair2_head paired-log 95% upper bound is strictly "
+        "below negative effective floor in every band x payload width"
+    ),
+    "final_receive_to_success_vs_wirehair1": (
+        "candidate/wirehair1 paired-log 95% upper bound is strictly below "
+        "negative effective floor in every band x payload width"
+    ),
+    "final_encoder_rule": (
+        "candidate/control paired-log 95% upper bound is strictly below "
+        "effective floor for both controls in every band x payload width and "
+        "strictly below negative effective floor for both controls under "
+        "equal-cell aggregate weighting"
+    ),
+    "final_raw_failure_rule": (
+        "100 * failures <= cells overall and in every band x loss/schedule "
+        "stratum at overhead 0"
+    ),
+    "final_repaired_rule": (
+        "zero overhead-0 weak (K,production_seed) units on the training census"
+    ),
+    "final_validation_rule": (
+        "zero overhead-0 weak K units on disjoint loss roots with zero "
+        "unsupported, construction, fatal, or internal errors; the 1% rule "
+        "is therefore implied"
+    ),
+}
+EXPECTED_EVIDENCE_POLICY = {
+    "freeze_before_results": [
+        "source_git_commit", "benchmark_binary_sha256", "contract_sha256",
+        "arm_roster_sha256", "recovery_domain_sha256", "timing_domain_sha256",
+        "trace_manifest_sha256", "arm_descriptor_sha256", "repair_map_sha256",
+        "repair_training_trace_manifest_sha256", "commands", "CPU_affinity",
+        "host_identity",
+    ],
+    "freeze_manifest_schema": (
+        "wirehair.wh2.benchmark-freeze.v1 canonical JSON object; it is the "
+        "sole arm-roster and artifact authority"
+    ),
+    "trace_manifest_schema": (
+        "wirehair.wh2.trace-manifest.v1 ordered canonical JSONL rows of "
+        "ordinal,cell_sha256,trace_sha256; duplicate trace hashes are valid"
+    ),
+    "repair_map_schema": (
+        "wirehair.wh2.repair-map.v1 canonical JSON object with 63999 retry "
+        "offsets indexed by K-2 and bound to training traces"
+    ),
+    "canonical_hashing": (
+        "parse with duplicate-key rejection; accept LF or CRLF input; hash "
+        "sorted compact logical JSON with LF and explicit schema domain separation"
+    ),
+    "common_cell_policy": (
+        "every arm has exactly one result for every predeclared arm-free key"
+    ),
+    "invalid_domain_mutations": [
+        "missing", "duplicate", "extra", "seed_swapped", "partial",
+        "wrong_band", "wrong_loss", "incomplete_roster", "domain_hash_drift",
+        "trace_drift", "repair_map_drift", "construction_attempt_drift",
+        "timing_panel_drift", "timing_order_drift",
+    ],
+    "selectable_excluded_cells": 0,
+    "unsupported_policy": (
+        "only an explicitly measured routed composite is selectable"
+    ),
+    "thermal_policy": (
+        "run under the existing sole CPU/DIMM/EDAC sampler; abort on its "
+        "configured thermal or EDAC violation"
+    ),
+    "final_continuity_policy": (
+        "one joint continuity check must bind final_raw, final_repaired, "
+        "final_validation, cross_width_validation, and final timing to the "
+        "same source, host, roster, codec kinds, binaries, descriptors, "
+        "training trace, and production repair maps, and to the exact "
+        "development architecture-selection receipt"
+    ),
+}
+LEDGER_FIELDS = frozenset((
+    "arm", "phase", "band", "K", "block_bytes", "loss_ppm", "schedule",
+    "trial", "base_seed_attempt", "loss_seed", "overhead_cap", "outcome",
+    "decoded_extra", "cell_sha256", "trace_sha256", "binary_sha256",
+    "arm_descriptor_sha256", "construction_attempt",
+    "realized_construction_sha256", "repair_map_sha256",
+))
+TIMING_RECEIPT_FIELDS = frozenset((
+    "phase", "band", "K", "block_bytes", "loss_ppm", "schedule",
+    "replicate", "base_seed_attempt", "loss_seed", "fixed_received_overhead",
+    "panel_kind", "scope", "left_arm", "right_arm", "order",
+    "left_outcome", "right_outcome", "left_decoded_extra",
+    "right_decoded_extra", "elapsed_ns", "cell_sha256", "trace_sha256",
+    "left_binary_sha256", "right_binary_sha256",
+    "left_arm_descriptor_sha256", "right_arm_descriptor_sha256",
+    "left_construction_attempt", "right_construction_attempt",
+    "left_realized_construction_sha256",
+    "right_realized_construction_sha256", "left_repair_map_sha256",
+    "right_repair_map_sha256",
+))
+TRACE_FIELDS = frozenset((
+    "ordinal", "cell_sha256", "trace_sha256",
+))
+FREEZE_FIELDS = frozenset((
+    "schema", "contract_sha256", "evidence_kind", "phase",
+    "domain_sha256", "source_git_commit", "arm_roster",
+    "arm_roster_sha256", "trace_manifest_sha256",
+    "repair_training_trace_manifest_sha256", "commands",
+    "cpu_affinity", "host_identity", "arms",
+))
+FREEZE_ARM_FIELDS = frozenset((
+    "arm", "codec", "binary_sha256", "arm_descriptor_sha256",
+    "construction_policy", "repair_map_sha256",
+))
+REPAIR_MAP_FIELDS = frozenset((
+    "schema", "contract_sha256", "training_domain_sha256", "arm",
+    "source_git_commit", "binary_sha256", "arm_descriptor_sha256",
+    "production_base_seed_attempt", "entry_kind", "attempt_derivation",
+    "repair_rule", "training_trace_manifest_sha256", "retry_offsets",
+))
+FINAL_FREEZE_KEYS = frozenset((
+    ("recovery", "final_raw"),
+    ("recovery", "final_repaired"),
+    ("recovery", "final_validation"),
+    ("recovery", "cross_width_validation"),
+    ("timing", "final"),
+))
+SELECTION_FIELDS = frozenset((
+    "schema", "contract_sha256", "recovery_domain_sha256",
+    "timing_domain_sha256", "recovery_freeze_manifest_sha256",
+    "timing_freeze_manifest_sha256", "architecture_artifact_sha256",
+    "recovery_cells_per_arm", "timing_rows", "candidate_roster",
+    "eligible_candidates", "eligible_overhead0_failures",
+    "minimum_overhead0_failures", "recovery_equivalence_allowance",
+    "recovery_equivalent_candidates", "ranking", "selected_arm",
+    "selected_codec", "selected_arm_descriptor_sha256",
+    "selected_architecture_sha256", "selection_sha256",
+))
+
+
+class ContractError(RuntimeError):
+    """The frozen benchmark contract or a result ledger is invalid."""
+
+
+def fail(message: str) -> None:
+    raise ContractError(message)
+
+
+def _object_no_duplicates(pairs: Sequence[Tuple[str, Any]]) -> Dict[str, Any]:
+    result: Dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            fail("duplicate JSON key: " + key)
+        result[key] = value
+    return result
+
+
+def canonical_json(value: Any) -> str:
+    return json.dumps(
+        value, sort_keys=True, separators=(",", ":"), allow_nan=False,
+    )
+
+
+def sha256_json(value: Any) -> str:
+    return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def repair_map_sha256(value: Mapping[str, Any]) -> str:
+    digest = hashlib.sha256()
+    digest.update(b"wirehair.wh2.repair-map.v1\0")
+    digest.update(canonical_json(value).encode("utf-8"))
+    return digest.hexdigest()
+
+
+def arm_roster_sha256(arms: Sequence[str]) -> str:
+    digest = hashlib.sha256()
+    digest.update(b"wirehair.wh2.arm-roster.v1\0")
+    digest.update(canonical_json(list(arms)).encode("utf-8"))
+    return digest.hexdigest()
+
+
+def freeze_manifest_sha256(value: Mapping[str, Any]) -> str:
+    manifest = {
+        key: item for key, item in value.items() if key != "arms_by_name"
+    }
+    digest = hashlib.sha256()
+    digest.update(b"wirehair.wh2.benchmark-freeze.v1\0")
+    digest.update(canonical_json(manifest).encode("utf-8"))
+    return digest.hexdigest()
+
+
+def architecture_artifact_sha256(value: Mapping[str, Any]) -> str:
+    identity = {
+        "source_git_commit": value["source_git_commit"],
+        "arm_roster": value["arm_roster"],
+        "arms": [
+            {
+                "arm": arm["arm"],
+                "codec": arm["codec"],
+                "binary_sha256": arm["binary_sha256"],
+                "arm_descriptor_sha256": arm["arm_descriptor_sha256"],
+            }
+            for arm in value["arms"]
+        ],
+    }
+    digest = hashlib.sha256()
+    digest.update(b"wirehair.wh2.architecture-artifacts.v1\0")
+    digest.update(canonical_json(identity).encode("utf-8"))
+    return digest.hexdigest()
+
+
+def frozen_arm_artifacts(value: Mapping[str, Any]) -> Mapping[str, Any]:
+    return {
+        arm["arm"]: {
+            "codec": arm["codec"],
+            "binary_sha256": arm["binary_sha256"],
+            "arm_descriptor_sha256": arm["arm_descriptor_sha256"],
+        }
+        for arm in value["arms"]
+    }
+
+
+def selected_architecture_sha256(
+        arm: str, artifact: Mapping[str, Any]) -> str:
+    identity = {
+        "arm": arm,
+        "codec": artifact["codec"],
+        "arm_descriptor_sha256": artifact["arm_descriptor_sha256"],
+    }
+    digest = hashlib.sha256()
+    digest.update(b"wirehair.wh2.selected-architecture.v1\0")
+    digest.update(canonical_json(identity).encode("utf-8"))
+    return digest.hexdigest()
+
+
+def contract_sha256(contract: Mapping[str, Any]) -> str:
+    """Portable identity over parsed canonical JSON, independent of checkout EOL."""
+    return sha256_json(contract)
+
+
+def serialized_wh2_profile(K: int, block_bytes: int,
+                           seed_attempt: int) -> bytes:
+    if (type(K) is not int or not 2 <= K <= 64000 or
+            type(block_bytes) is not int or block_bytes <= 0 or
+            type(seed_attempt) is not int or not 0 <= seed_attempt < 256):
+        fail("cannot serialize an invalid WH2 benchmark profile")
+    message_bytes = K * block_bytes
+    if message_bytes >= 1 << 64 or block_bytes >= 1 << 32:
+        fail("WH2 benchmark profile dimensions overflow the public descriptor")
+    return b"".join((
+        b"WHV2",
+        PROFILE_ENCODING_VERSION.to_bytes(2, "little"),
+        (32).to_bytes(2, "little"),
+        PROFILE_ID.to_bytes(8, "little"),
+        message_bytes.to_bytes(8, "little"),
+        block_bytes.to_bytes(4, "little"),
+        seed_attempt.to_bytes(1, "little"),
+        b"\0\0\0",
+    ))
+
+
+def realized_construction_sha256(
+        arm_descriptor_sha256: str, K: int, block_bytes: int,
+        seed_attempt: int) -> str:
+    if (not isinstance(arm_descriptor_sha256, str) or
+            SHA256.fullmatch(arm_descriptor_sha256) is None):
+        fail("cannot receipt an invalid arm descriptor hash")
+    digest = hashlib.sha256()
+    digest.update(b"wirehair.wh2.realized-construction.v1\0")
+    digest.update(bytes.fromhex(arm_descriptor_sha256))
+    digest.update(serialized_wh2_profile(K, block_bytes, seed_attempt))
+    return digest.hexdigest()
+
+
+def _load_json_bytes(data: bytes, context: str) -> Any:
+    def parse_int(token: str) -> int:
+        value = int(token)
+        if not -(1 << 63) <= value < (1 << 63):
+            fail("{}: JSON integer is outside signed int64".format(context))
+        return value
+
+    def parse_float(token: str) -> float:
+        value = float(token)
+        if not math.isfinite(value):
+            fail("{}: non-finite JSON number {}".format(context, token))
+        return value
+
+    try:
+        text = data.decode("utf-8")
+        return json.loads(
+            text, object_pairs_hook=_object_no_duplicates,
+            parse_int=parse_int, parse_float=parse_float,
+            parse_constant=lambda token: fail(
+                "{}: nonstandard JSON constant {}".format(context, token)),
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError,
+            OverflowError, RecursionError) as exc:
+        fail("{}: invalid JSON: {}".format(context, exc))
+    return None
+
+
+def _exact_keys(value: Any, keys: Iterable[str], context: str) -> Mapping[str, Any]:
+    expected = set(keys)
+    if not isinstance(value, dict) or set(value) != expected:
+        fail("{}: expected keys {}, got {}".format(
+            context, sorted(expected),
+            sorted(value) if isinstance(value, dict) else type(value).__name__,
+        ))
+    return value
+
+
+def _integer(value: Any, context: str, minimum: int = 0) -> int:
+    if type(value) is not int or value < minimum:
+        fail("{}: expected integer >= {}".format(context, minimum))
+    return value
+
+
+def _exact_integer(value: Any, expected: int, context: str) -> int:
+    if type(value) is not int or value != expected:
+        fail("{}: expected exact integer {}".format(context, expected))
+    return value
+
+
+def _hex_seed(value: Any, context: str) -> str:
+    if not isinstance(value, str) or HEX64.fullmatch(value) is None:
+        fail("{}: expected canonical 64-bit lowercase hex seed".format(context))
+    return value
+
+
+def _seed_pairs(contract: Mapping[str, Any], mode: str) -> Sequence[Dict[str, Any]]:
+    seeds = contract["seeds"]
+    if mode == "raw_paired_training":
+        base_attempts = seeds["raw_base_seed_attempts"]
+        loss_roots = seeds["training_loss_roots"]
+    elif mode == "production_training":
+        base_attempts = [seeds["production_base_seed_attempt"]] * 3
+        loss_roots = seeds["training_loss_roots"]
+    elif mode == "production_validation":
+        base_attempts = [seeds["production_base_seed_attempt"]] * 3
+        loss_roots = seeds["validation_loss_roots"]
+    else:
+        fail("unknown seed mode: " + str(mode))
+    if len(base_attempts) != 3 or len(loss_roots) != 3:
+        fail("seed mode does not resolve to exactly three trials")
+    return [
+        {"base_seed_attempt": base_attempt, "loss_seed": loss_seed}
+        for base_attempt, loss_seed in zip(base_attempts, loss_roots)
+    ]
+
+
+def _k_values(contract: Mapping[str, Any], name: str) -> Sequence[int]:
+    k_set = contract["k_sets"].get(name)
+    if isinstance(k_set, list):
+        return k_set
+    if isinstance(k_set, dict) and set(k_set) == {"first", "last"}:
+        return range(k_set["first"], k_set["last"] + 1)
+    fail("unknown or malformed K set: " + name)
+    return ()
+
+
+def _band_for(contract: Mapping[str, Any], K: int) -> str:
+    matches = [
+        band["name"] for band in contract["k_bands"]
+        if band["first"] <= K <= band["last"]
+    ]
+    if len(matches) != 1:
+        fail("K={} is not covered by exactly one band".format(K))
+    return matches[0]
+
+
+def _validate_structure(contract: Any, check_domain_hashes: bool) -> Mapping[str, Any]:
+    top = _exact_keys(contract, (
+        "schema", "contract_id", "field", "goal", "k_bands", "k_sets",
+        "seeds", "strata_sets", "recovery", "timing", "selection",
+        "evidence",
+    ), "contract")
+    if top["schema"] != SCHEMA:
+        fail("unexpected contract schema")
+    if top["contract_id"] != "wh2-pure-gf256-1pct-v1" or top["field"] != "GF(256)":
+        fail("v1 is pure GF(256) only")
+
+    goal = _exact_keys(top["goal"], (
+        "primary_failure_threshold_ppm", "primary_overhead",
+        "final_bad_seed_count", "primary_speed_scope",
+        "cross_codec_speed_scope",
+    ), "goal")
+    if (_exact_integer(goal["primary_failure_threshold_ppm"], 10000,
+                       "primary failure threshold") != 10000 or
+            _exact_integer(goal["primary_overhead"], 0,
+                           "primary overhead") != 0 or
+            _exact_integer(goal["final_bad_seed_count"], 0,
+                           "final bad-seed count") != 0 or
+            goal["primary_speed_scope"] != "decoder_solve" or
+            goal["cross_codec_speed_scope"] != "receive_to_success"):
+        fail("v1 goal constants changed without a schema bump")
+
+    bands = top["k_bands"]
+    if not isinstance(bands, list) or len(bands) != 6:
+        fail("the contract needs exactly six K bands")
+    next_k = 2
+    names = set()
+    for index, band_value in enumerate(bands):
+        band = _exact_keys(band_value, ("name", "first", "last"),
+                           "k_bands[{}]".format(index))
+        first = _integer(band["first"], "band first", 2)
+        last = _integer(band["last"], "band last", first)
+        if not isinstance(band["name"], str) or not band["name"] or first != next_k:
+            fail("K bands must be named, ordered, and contiguous")
+        if band["name"] in names:
+            fail("duplicate K band name")
+        names.add(band["name"])
+        next_k = last + 1
+    if next_k != 64001:
+        fail("K bands must cover exactly K=2..64000")
+    actual_bands = tuple(
+        (band["name"], band["first"], band["last"]) for band in bands)
+    if actual_bands != EXPECTED_BANDS:
+        fail("v1 K bands changed without a schema bump")
+
+    k_sets = _exact_keys(top["k_sets"], ("short", "timing_short", "all"), "k_sets")
+    all_set = _exact_keys(k_sets["all"], ("first", "last"), "k_sets.all")
+    if (_exact_integer(all_set["first"], 2, "k_sets.all.first") != 2 or
+            _exact_integer(all_set["last"], 64000,
+                           "k_sets.all.last") != 64000):
+        fail("all-K set must be exactly K=2..64000")
+    for name in ("short", "timing_short"):
+        values = k_sets[name]
+        if (not isinstance(values, list) or not values or
+                any(type(K) is not int for K in values) or
+                values != sorted(set(values)) or values[0] < 2 or values[-1] > 64000):
+            fail("{} K set must be a sorted unique in-range list".format(name))
+        if {_band_for(top, K) for K in values} != names:
+            fail("{} K set must cover all six bands".format(name))
+    if tuple(k_sets["short"]) != EXPECTED_SHORT_K or \
+            tuple(k_sets["timing_short"]) != EXPECTED_TIMING_SHORT_K:
+        fail("v1 bounded K cohorts changed without a schema bump")
+
+    seeds = _exact_keys(top["seeds"], (
+        "raw_base_seed_attempts", "production_base_seed_attempt",
+        "training_loss_roots", "validation_loss_roots",
+    ), "seeds")
+    raw_base_attempts = seeds["raw_base_seed_attempts"]
+    if (not isinstance(raw_base_attempts, list) or
+            len(raw_base_attempts) != 3 or
+            any(type(attempt) is not int or not 0 <= attempt < 256
+                for attempt in raw_base_attempts) or
+            len(set(raw_base_attempts)) != 3):
+        fail("raw_base_seed_attempts must contain three unique uint8 values")
+    if tuple(raw_base_attempts) != EXPECTED_RAW_BASE_ATTEMPTS:
+        fail("v1 raw base seed attempts changed without a schema bump")
+    _exact_integer(seeds["production_base_seed_attempt"], 0,
+                   "production base seed attempt")
+    if seeds["production_base_seed_attempt"] not in raw_base_attempts:
+        fail("production base seed attempt must be one raw seed attempt")
+    for field in ("training_loss_roots", "validation_loss_roots"):
+        roots = seeds[field]
+        if not isinstance(roots, list) or len(roots) != 3:
+            fail("{} must contain exactly three unique roots".format(field))
+        for index, root in enumerate(roots):
+            _hex_seed(root, "{}[{}]".format(field, index))
+        if len(set(roots)) != 3:
+            fail("{} must contain exactly three unique roots".format(field))
+    if (tuple(seeds["training_loss_roots"]) != EXPECTED_TRAINING_LOSS_ROOTS or
+            tuple(seeds["validation_loss_roots"]) !=
+            EXPECTED_VALIDATION_LOSS_ROOTS):
+        fail("v1 loss roots changed without a schema bump")
+    if not set(seeds["training_loss_roots"]).isdisjoint(
+            seeds["validation_loss_roots"]):
+        fail("training and validation loss roots must be disjoint")
+
+    strata_sets = _exact_keys(top["strata_sets"], ("development", "hard"), "strata_sets")
+    for set_name, expected_count in (("development", 4), ("hard", 3)):
+        strata = strata_sets[set_name]
+        if not isinstance(strata, list) or len(strata) != expected_count:
+            fail("{} needs exactly {} strata".format(set_name, expected_count))
+        seen = set()
+        for index, stratum_value in enumerate(strata):
+            stratum = _exact_keys(stratum_value, ("schedule", "loss_ppm"),
+                                  "stratum {}:{}".format(set_name, index))
+            key = (stratum["schedule"], _integer(stratum["loss_ppm"], "loss_ppm", 1))
+            if (not isinstance(key[0], str) or key[1] >= 1000000 or key in seen):
+                fail("loss strata must be unique and have loss in (0,1)")
+            seen.add(key)
+    actual_strata = {
+        set_name: tuple(
+            (value["schedule"], value["loss_ppm"])
+            for value in strata_sets[set_name])
+        for set_name in strata_sets
+    }
+    if actual_strata != EXPECTED_STRATA_SETS:
+        fail("v1 loss/schedule strata changed without a schema bump")
+
+    recovery = _exact_keys(top["recovery"], (
+        "overhead_thresholds", "overhead_cap", "raw_construction_attempts",
+        "production_seed_fixups_in_raw_phase", "max_construction_attempts",
+        "phase_seed_policy", "repair_rule", "attempt_derivation",
+        "packet_trace", "cell_key",
+        "outcomes", "domains",
+    ), "recovery")
+    if (recovery["overhead_thresholds"] != [0, 1, 2, 4] or
+            any(type(value) is not int
+                for value in recovery["overhead_thresholds"]) or
+            _exact_integer(recovery["overhead_cap"], 4,
+                           "recovery overhead cap") != 4 or
+            _exact_integer(recovery["raw_construction_attempts"], 1,
+                           "raw construction attempts") != 1 or
+            _exact_integer(recovery["production_seed_fixups_in_raw_phase"], 0,
+                           "raw production seed fixups") != 0 or
+            _exact_integer(recovery["max_construction_attempts"], 256,
+                           "maximum construction attempts") != 256):
+        fail("v1 raw/overhead constants changed without a schema bump")
+    if (recovery["phase_seed_policy"] != EXPECTED_PHASE_SEED_POLICY or
+            recovery["repair_rule"] != EXPECTED_REPAIR_RULE or
+            recovery["attempt_derivation"] != EXPECTED_ATTEMPT_DERIVATION):
+        fail("v1 raw/repaired seed policy changed without a schema bump")
+    if recovery["packet_trace"] != EXPECTED_PACKET_TRACE:
+        fail("v1 packet-trace algorithm changed without a schema bump")
+    expected_key = [
+        "phase", "band", "K", "block_bytes", "loss_ppm", "schedule",
+        "trial", "base_seed_attempt", "loss_seed", "overhead_cap",
+    ]
+    if recovery["cell_key"] != expected_key:
+        fail("recovery cell key changed without a schema bump")
+    outcomes = _exact_keys(recovery["outcomes"], (
+        "success", "need_more_at_cap", "construct_failed", "unsupported",
+        "fatal_or_internal",
+    ), "recovery outcomes")
+    if outcomes != EXPECTED_OUTCOMES:
+        fail("v1 recovery outcomes changed without a schema bump")
+
+    domains = recovery["domains"]
+    expected_phases = {
+        "development", "final_raw", "final_repaired", "final_validation",
+        "cross_width_validation",
+    }
+    if not isinstance(domains, dict) or set(domains) != expected_phases:
+        fail("recovery phase roster changed without a schema bump")
+    for phase in sorted(domains):
+        domain = _exact_keys(domains[phase], (
+            "k_set", "block_bytes", "seed_mode", "strata_set",
+            "expected_cells_per_arm", "domain_sha256",
+        ), "recovery domain " + phase)
+        expected_k_set, expected_widths, expected_seed_mode, \
+            expected_strata_set, expected_count = EXPECTED_RECOVERY_DOMAINS[phase]
+        actual_widths = tuple(domain["block_bytes"]) \
+            if isinstance(domain["block_bytes"], list) else ()
+        if (domain["k_set"] != expected_k_set or
+                actual_widths != expected_widths):
+            fail("v1 {} K set or widths changed without a schema bump".format(
+                phase))
+        if (domain["seed_mode"] != expected_seed_mode or
+                domain["strata_set"] != expected_strata_set or
+                type(domain["expected_cells_per_arm"]) is not int or
+                domain["expected_cells_per_arm"] != expected_count):
+            fail("v1 {} recovery domain changed without a schema bump".format(
+                phase))
+        widths = domain["block_bytes"]
+        if (not isinstance(widths, list) or not widths or
+                any(type(width) is not int or width <= 0 for width in widths) or
+                widths != sorted(set(widths))):
+            fail("{} block widths must be sorted unique positive integers".format(phase))
+        count = (len(_k_values(top, domain["k_set"])) * len(widths) *
+                 len(_seed_pairs(top, domain["seed_mode"])) *
+                 len(strata_sets[domain["strata_set"]]))
+        if domain["expected_cells_per_arm"] != count:
+            fail("{} expected cell count is {}, want {}".format(
+                phase, domain["expected_cells_per_arm"], count))
+        if check_domain_hashes:
+            digest = recovery_domain_sha256(top, phase)
+            if domain["domain_sha256"] != digest:
+                fail("{} domain hash mismatch: want {}".format(phase, digest))
+
+    timing = top["timing"]
+    required_timing = {
+        "development_wall_time_seconds_per_candidate",
+        "loss_ppm", "schedule", "fixed_received_overhead", "cell_key",
+        "seed_derivation", "domains", "confidence", "practical_margin_ppm",
+        "effective_floor", "aa_repeatability_rule", "order", "cache_state",
+        "production_policy", "eligibility", "scope_protocol",
+        "required_panels", "scopes", "panel_protocol", "statistics",
+        "invalid_timer_policy",
+    }
+    _exact_keys(timing, required_timing, "timing")
+    exact_timing_integer_fields = (
+        "development_wall_time_seconds_per_candidate", "loss_ppm",
+        "fixed_received_overhead", "practical_margin_ppm",
+    )
+    for field in exact_timing_integer_fields:
+        _exact_integer(timing[field], EXPECTED_TIMING_POLICY[field],
+                       "timing." + field)
+    for field in (
+            "schedule", "seed_derivation", "confidence", "effective_floor",
+            "aa_repeatability_rule", "order", "cache_state",
+            "production_policy", "eligibility", "scope_protocol"):
+        if timing[field] != EXPECTED_TIMING_POLICY[field]:
+            fail("v1 timing.{} changed without a schema bump".format(field))
+    if (timing["panel_protocol"] != EXPECTED_PANEL_PROTOCOL or
+            timing["statistics"] != EXPECTED_TIMING_STATISTICS or
+            timing["invalid_timer_policy"] != EXPECTED_INVALID_TIMER_POLICY or
+            type(timing["panel_protocol"].get("slots_per_panel")) is not int or
+            type(timing["panel_protocol"].get(
+                "warmups_per_logical_side")) is not int or
+            timing["statistics"].get("strict_inequalities") is not True or
+            any(type(value) is not float for value in
+                timing["statistics"].get(
+                    "t_critical_by_repetitions", {}).values())):
+        fail("v1 timing panel/statistics protocol changed without a schema bump")
+    if (timing["required_panels"] != [
+                "each_arm_AA",
+                "candidate_vs_wirehair2_head_decoder_solve",
+                "candidate_vs_wirehair1_receive_to_success",
+                "candidate_vs_both_controls_encoder"] or
+            timing["scopes"] != [
+                "decoder_solve", "encoder_init_plus_first_K_symbols",
+                "receive_to_success"]):
+        fail("v1 timing constants changed without a schema bump")
+    expected_timing_key = [
+        "phase", "band", "K", "block_bytes", "loss_ppm", "schedule",
+        "replicate", "base_seed_attempt", "loss_seed",
+        "fixed_received_overhead",
+    ]
+    if timing["cell_key"] != expected_timing_key:
+        fail("v1 timing cell or seed derivation changed without a schema bump")
+    timing_domains = timing["domains"]
+    if not isinstance(timing_domains, dict) or set(timing_domains) != {
+            "development", "final"}:
+        fail("timing domain roster changed without a schema bump")
+    expected_timing_domains = {
+        "development": (
+            "timing_short", [64, 1280], "raw_paired_training", 8, 192),
+        "final": (
+            "short", [2, 64, 256, 1280, 4096],
+            "production_validation", 24, 3600),
+    }
+    for phase, expected in expected_timing_domains.items():
+        domain = _exact_keys(timing_domains[phase], (
+            "k_set", "block_bytes", "seed_mode", "paired_repetitions",
+            "expected_cells", "domain_sha256",
+        ), "timing domain " + phase)
+        k_name, expected_widths, seed_mode, repetitions, expected_count = expected
+        if (domain["k_set"] != k_name or domain["block_bytes"] != expected_widths or
+                domain["seed_mode"] != seed_mode or
+                type(domain["paired_repetitions"]) is not int or
+                domain["paired_repetitions"] != repetitions or
+                type(domain["expected_cells"]) is not int or
+                domain["expected_cells"] != expected_count):
+            fail("v1 {} timing domain changed without a schema bump".format(phase))
+        widths = domain["block_bytes"]
+        if (not isinstance(widths, list) or widths != sorted(set(widths)) or
+                any(type(width) is not int or width <= 0 for width in widths)):
+            fail("{} timing widths must be sorted unique positive".format(phase))
+        count = len(_k_values(top, k_name)) * len(widths) * repetitions
+        if count != expected_count:
+            fail("{} timing cell count is inconsistent".format(phase))
+        if check_domain_hashes:
+            digest = timing_domain_sha256(top, phase)
+            if domain["domain_sha256"] != digest:
+                fail("{} timing domain hash mismatch: want {}".format(phase, digest))
+
+    selection = _exact_keys(top["selection"], (
+        "controls", "noninferiority_margin_ppm",
+        "architecture_failure_equivalence_ppm", "raw_weak_seed_definition",
+        "raw_individual_weak_seeds_are_vetoes",
+        "raw_repairs_and_introductions_are_descriptive", "architecture_order",
+        "development_resolved_slowdown_rejects",
+        "final_decoder_solve_vs_wirehair2",
+        "final_receive_to_success_vs_wirehair1", "final_encoder_rule",
+        "final_raw_failure_rule", "final_repaired_rule",
+        "final_validation_rule",
+    ), "selection")
+    if (selection != EXPECTED_SELECTION_POLICY or
+            type(selection["noninferiority_margin_ppm"]) is not int or
+            type(selection["architecture_failure_equivalence_ppm"]) is not int or
+            selection["raw_individual_weak_seeds_are_vetoes"] is not False or
+            selection["raw_repairs_and_introductions_are_descriptive"] is not True or
+            selection["development_resolved_slowdown_rejects"] is not True):
+        fail("v1 comparison/weak-seed policy changed without a schema bump")
+    evidence = _exact_keys(top["evidence"], (
+        "freeze_before_results", "freeze_manifest_schema",
+        "trace_manifest_schema", "repair_map_schema", "canonical_hashing",
+        "common_cell_policy",
+        "invalid_domain_mutations", "selectable_excluded_cells",
+        "unsupported_policy", "thermal_policy", "final_continuity_policy",
+    ), "evidence")
+    if (evidence != EXPECTED_EVIDENCE_POLICY or
+            type(evidence["selectable_excluded_cells"]) is not int):
+        fail("evidence must freeze the roster and permit no excluded cells")
+    return top
+
+
+def load_contract(path: Path = DEFAULT_CONTRACT,
+                  check_domain_hashes: bool = True) -> Mapping[str, Any]:
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        fail("cannot read contract {}: {}".format(path, exc))
+    return _validate_structure(_load_json_bytes(data, str(path)), check_domain_hashes)
+
+
+def _load_canonical_json_file(path: Path, context: str) -> Mapping[str, Any]:
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        fail("cannot read {} {}: {}".format(context, path, exc))
+    value = _load_json_bytes(data, context)
+    if not isinstance(value, dict):
+        fail("{} must be a JSON object".format(context))
+    logical = canonical_json(value).encode("utf-8")
+    if data not in (logical + b"\n", logical + b"\r\n"):
+        fail("{} must be canonical JSON followed by one line ending".format(
+            context))
+    return value
+
+
+def load_freeze_manifest(
+        contract: Mapping[str, Any], phase: str, path: Path,
+        evidence_kind: str = "recovery") -> Mapping[str, Any]:
+    manifest = _load_canonical_json_file(path, "freeze manifest")
+    _exact_keys(manifest, FREEZE_FIELDS, "freeze manifest")
+    if (manifest["schema"] != FREEZE_SCHEMA or
+            manifest["contract_sha256"] != contract_sha256(contract) or
+            manifest["evidence_kind"] != evidence_kind or
+            manifest["phase"] != phase):
+        fail("freeze manifest does not bind this contract, kind, and phase")
+    domains = contract[evidence_kind]["domains"]
+    domain = domains.get(phase)
+    if domain is None or manifest["domain_sha256"] != domain["domain_sha256"]:
+        fail("freeze manifest does not bind the frozen domain")
+    if (not isinstance(manifest["source_git_commit"], str) or
+            GIT_COMMIT.fullmatch(manifest["source_git_commit"]) is None):
+        fail("freeze manifest source_git_commit is not a full Git object ID")
+    for field in (
+            "arm_roster_sha256", "trace_manifest_sha256",
+            "repair_training_trace_manifest_sha256"):
+        if (not isinstance(manifest[field], str) or
+                SHA256.fullmatch(manifest[field]) is None):
+            fail("freeze manifest {} is not a SHA-256".format(field))
+    roster = manifest["arm_roster"]
+    if (not isinstance(roster, list) or
+            any(not isinstance(arm, str) or not arm for arm in roster) or
+            len(set(roster)) != len(roster) or
+            manifest["arm_roster_sha256"] != arm_roster_sha256(roster)):
+        fail("freeze manifest has an invalid or unbound arm roster")
+    controls = tuple(contract["selection"]["controls"])
+    if any(control not in roster for control in controls):
+        fail("freeze manifest must contain both declared controls")
+    if not any(arm not in controls for arm in roster):
+        fail("freeze manifest must contain at least one candidate")
+    commands = manifest["commands"]
+    if (not isinstance(commands, list) or not commands or
+            any(not isinstance(command, list) or not command or
+                any(not isinstance(argument, str) or not argument
+                    for argument in command)
+                for command in commands)):
+        fail("freeze manifest commands must be nonempty argv arrays")
+    affinity = manifest["cpu_affinity"]
+    if (not isinstance(affinity, list) or not affinity or
+            any(type(cpu) is not int or cpu < 0 for cpu in affinity) or
+            affinity != sorted(set(affinity))):
+        fail("freeze manifest CPU affinity must be sorted unique CPU IDs")
+    if (not isinstance(manifest["host_identity"], dict) or
+            not manifest["host_identity"]):
+        fail("freeze manifest host identity must be a nonempty object")
+    arm_values = manifest["arms"]
+    if not isinstance(arm_values, list) or len(arm_values) != len(roster):
+        fail("freeze manifest arm records do not match the roster")
+    arms: Dict[str, Mapping[str, Any]] = {}
+    raw_phase = contract["recovery"]["phase_seed_policy"].get(phase) == \
+        "one_base_attempt_no_retry"
+    training_trace_sha = manifest["repair_training_trace_manifest_sha256"]
+    if raw_phase and training_trace_sha != "0" * 64:
+        fail("raw freezes must use the no-training-trace marker")
+    if not raw_phase and training_trace_sha == "0" * 64:
+        fail("repaired freezes must bind the training trace manifest")
+    if phase == "final_repaired" and \
+            training_trace_sha != manifest["trace_manifest_sha256"]:
+        fail("the repaired training phase must bind its own frozen traces")
+    for index, arm_value in enumerate(arm_values):
+        arm = _exact_keys(arm_value, FREEZE_ARM_FIELDS,
+                          "freeze arm {}".format(index))
+        name = arm["arm"]
+        if name != roster[index] or name in arms:
+            fail("freeze arm records must follow the unique frozen roster")
+        if arm["codec"] not in (
+                "wirehair2_certified", "wirehair2_experiment", "wirehair1",
+                "routed_composite"):
+            fail("freeze arm has an unknown codec kind")
+        if (name == "wirehair1") != (arm["codec"] == "wirehair1"):
+            fail("codec=wirehair1 is reserved for the Wirehair1 control")
+        if (name == "wirehair2_head") != \
+                (arm["codec"] == "wirehair2_certified"):
+            fail("codec=wirehair2_certified is reserved for the WH2 control")
+        if name not in controls and arm["codec"] not in (
+                "wirehair2_experiment", "routed_composite"):
+            fail("candidate codec must be experimental WH2 or routed composite")
+        expected_policy = "raw_base" if raw_phase else "repair_map"
+        if arm["codec"] == "wirehair1":
+            expected_policy = "not_applicable"
+        if arm["construction_policy"] != expected_policy:
+            fail("freeze arm construction policy disagrees with phase and codec")
+        for field in ("binary_sha256", "arm_descriptor_sha256",
+                      "repair_map_sha256"):
+            if (not isinstance(arm[field], str) or
+                    SHA256.fullmatch(arm[field]) is None):
+                fail("freeze arm {} is not a SHA-256".format(field))
+        if raw_phase and arm["repair_map_sha256"] != "0" * 64:
+            fail("raw freeze arms must use the no-map marker")
+        if (not raw_phase and arm["codec"] != "wirehair1" and
+                arm["repair_map_sha256"] == "0" * 64):
+            fail("repaired Wirehair2/composite arms must freeze a repair map")
+        if arm["codec"] == "wirehair1" and \
+                arm["repair_map_sha256"] != "0" * 64:
+            fail("Wirehair1 must use the no-map marker")
+        arms[name] = arm
+    result = dict(manifest)
+    result["arms_by_name"] = arms
+    return result
+
+
+def validate_selection_receipt(
+        contract: Mapping[str, Any], value: Mapping[str, Any]) -> Mapping[str, Any]:
+    _exact_keys(value, SELECTION_FIELDS, "architecture selection receipt")
+    unsigned = {key: item for key, item in value.items()
+                if key != "selection_sha256"}
+    for field in (
+            "selection_sha256", "recovery_freeze_manifest_sha256",
+            "timing_freeze_manifest_sha256", "architecture_artifact_sha256",
+            "selected_arm_descriptor_sha256",
+            "selected_architecture_sha256"):
+        if (not isinstance(value[field], str) or
+                SHA256.fullmatch(value[field]) is None):
+            fail("architecture selection {} is not a SHA-256".format(field))
+    if (value["schema"] != SCHEMA + ".architecture-selection.v1" or
+            value["contract_sha256"] != contract_sha256(contract) or
+            value["recovery_domain_sha256"] != contract["recovery"][
+                "domains"]["development"]["domain_sha256"] or
+            value["timing_domain_sha256"] != contract["timing"][
+                "domains"]["development"]["domain_sha256"] or
+            value["selection_sha256"] != sha256_json(unsigned)):
+        fail("architecture selection receipt identity is invalid")
+    _exact_integer(
+        value["recovery_cells_per_arm"], contract["recovery"]["domains"]
+        ["development"]["expected_cells_per_arm"],
+        "architecture selection recovery cells")
+    candidate_roster = value["candidate_roster"]
+    controls = set(contract["selection"]["controls"])
+    if (not isinstance(candidate_roster, list) or not candidate_roster or
+            any(not isinstance(arm, str) or not arm
+                for arm in candidate_roster) or
+            candidate_roster != sorted(set(candidate_roster)) or
+            set(candidate_roster) & controls):
+        fail("architecture selection candidate roster is malformed")
+    protocol = contract["timing"]["panel_protocol"]
+    panel_count = len(protocol["control_aa"]) + len(candidate_roster) * (
+        len(protocol["candidate_aa_scopes"]) + len(protocol["candidate_ab"]))
+    expected_timing_rows = contract["timing"]["domains"]["development"][
+        "expected_cells"] * panel_count
+    _exact_integer(value["timing_rows"], expected_timing_rows,
+                   "architecture selection timing rows")
+    eligible = value["eligible_candidates"]
+    eligible_failures = value["eligible_overhead0_failures"]
+    equivalent = value["recovery_equivalent_candidates"]
+    if (not isinstance(eligible, list) or
+            any(not isinstance(arm, str) or not arm for arm in eligible) or
+            eligible != sorted(set(eligible)) or
+            not isinstance(equivalent, list) or
+            any(not isinstance(arm, str) or not arm for arm in equivalent) or
+            equivalent != sorted(set(equivalent)) or
+            not isinstance(eligible_failures, dict) or
+            set(eligible_failures) != set(eligible) or
+            any(type(count) is not int for count in eligible_failures.values()) or
+            not set(eligible).issubset(candidate_roster) or
+            not set(equivalent).issubset(eligible)):
+        fail("architecture selection candidate sets are malformed")
+    selected = value["selected_arm"]
+    selected_codec = value["selected_codec"]
+    minimum = value["minimum_overhead0_failures"]
+    allowance = value["recovery_equivalence_allowance"]
+    ranking = value["ranking"]
+    cells = contract["recovery"]["domains"]["development"][
+        "expected_cells_per_arm"]
+    margin_ppm = contract["selection"][
+        "architecture_failure_equivalence_ppm"]
+    expected_allowance = max(
+        1, (margin_ppm * cells + 1000000 - 1) // 1000000)
+    if (not isinstance(selected, str) or not selected or
+            selected not in equivalent or type(minimum) is not int or
+            not 0 <= minimum <= cells or type(allowance) is not int or
+            allowance != expected_allowance or
+            selected_codec not in ("wirehair2_experiment", "routed_composite") or
+            not isinstance(ranking, list) or not ranking):
+        fail("architecture selection has no promotable winner")
+    if (any(not 0 <= count <= cells for count in eligible_failures.values()) or
+            minimum != min(eligible_failures.values()) or
+            set(equivalent) != {
+                arm for arm, count in eligible_failures.items()
+                if count <= minimum + allowance}):
+        fail("architecture recovery-equivalent set is invalid")
+    selected_artifact = {
+        "codec": selected_codec,
+        "arm_descriptor_sha256": value["selected_arm_descriptor_sha256"],
+    }
+    if value["selected_architecture_sha256"] != \
+            selected_architecture_sha256(selected, selected_artifact):
+        fail("selected architecture identity is invalid")
+    ranking_values = []
+    for index, item_value in enumerate(ranking):
+        item = _exact_keys(item_value, (
+            "arm", "decoder_solve_mean_log_ratio", "failures_overhead0",
+            "failures_overhead1", "failures_overhead2", "failures_overhead4",
+        ), "architecture ranking item {}".format(index))
+        mean = item["decoder_solve_mean_log_ratio"]
+        counts = tuple(item[field] for field in (
+            "failures_overhead0", "failures_overhead1",
+            "failures_overhead2", "failures_overhead4"))
+        if (not isinstance(item["arm"], str) or type(mean) is not float or
+                not math.isfinite(mean) or
+                any(type(count) is not int or not 0 <= count <= cells
+                    for count in counts) or
+                any(left < right for left, right in zip(counts, counts[1:]))):
+            fail("architecture ranking item is malformed")
+        if eligible_failures.get(item["arm"]) != counts[0]:
+            fail("architecture ranking overhead-zero count is inconsistent")
+        ranking_values.append((
+            mean, counts[1], counts[2], counts[3], item["arm"]))
+    ranked_arms = [item[-1] for item in ranking_values]
+    if (ranking_values != sorted(ranking_values) or
+            len(set(ranked_arms)) != len(ranked_arms) or
+            set(ranked_arms) != set(equivalent) or
+            ranking_values[0][-1] != selected):
+        fail("architecture ranking disagrees with the selected winner")
+    return value
+
+
+def validate_final_freeze_continuity(
+        contract: Mapping[str, Any],
+        freeze_paths: Mapping[Tuple[str, str], Path],
+        selection_receipt: Mapping[str, Any]) -> Mapping[str, Any]:
+    selection = validate_selection_receipt(contract, selection_receipt)
+    if set(freeze_paths) != FINAL_FREEZE_KEYS:
+        fail("final continuity requires exactly the five frozen final phases")
+    freezes = {
+        key: load_freeze_manifest(contract, key[1], path, key[0])
+        for key, path in freeze_paths.items()
+    }
+    anchor = freezes[("recovery", "final_raw")]
+    controls = tuple(contract["selection"]["controls"])
+    candidates = tuple(
+        arm for arm in anchor["arm_roster"] if arm not in controls)
+    if len(candidates) != 1 or len(anchor["arm_roster"]) != len(controls) + 1:
+        fail("final phases must contain both controls and one selected candidate")
+    if candidates[0] != selection["selected_arm"]:
+        fail("final phases substitute the selected development architecture")
+    final_selected_artifact = frozen_arm_artifacts(anchor)[candidates[0]]
+    if selected_architecture_sha256(
+            candidates[0], final_selected_artifact) != \
+            selection["selected_architecture_sha256"]:
+        fail("final phases substitute the selected architecture descriptor")
+    artifact_sha256 = architecture_artifact_sha256(anchor)
+    host_identity = canonical_json(anchor["host_identity"])
+    for key, freeze in freezes.items():
+        if architecture_artifact_sha256(freeze) != artifact_sha256:
+            fail("{}:{} substitutes final architecture artifacts".format(*key))
+        if canonical_json(freeze["host_identity"]) != host_identity:
+            fail("{}:{} substitutes the final benchmark host".format(*key))
+
+    repaired = freezes[("recovery", "final_repaired")]
+    training_trace_sha256 = repaired["trace_manifest_sha256"]
+    production_keys = FINAL_FREEZE_KEYS - {("recovery", "final_raw")}
+    production_maps = {
+        arm: repaired["arms_by_name"][arm]["repair_map_sha256"]
+        for arm in repaired["arm_roster"]
+    }
+    for key in production_keys:
+        freeze = freezes[key]
+        if freeze["repair_training_trace_manifest_sha256"] != \
+                training_trace_sha256:
+            fail("{}:{} substitutes the repair-training trace".format(*key))
+        actual_maps = {
+            arm: freeze["arms_by_name"][arm]["repair_map_sha256"]
+            for arm in freeze["arm_roster"]
+        }
+        if actual_maps != production_maps:
+            fail("{}:{} substitutes production repair maps".format(*key))
+
+    identity = {
+        "contract_sha256": contract_sha256(contract),
+        "architecture_artifact_sha256": artifact_sha256,
+        "host_identity": anchor["host_identity"],
+        "repair_training_trace_manifest_sha256": training_trace_sha256,
+        "production_repair_maps": production_maps,
+        "selection_sha256": selection["selection_sha256"],
+    }
+    return {
+        "schema": SCHEMA + ".final-continuity-summary.v1",
+        "selected_candidate": candidates[0],
+        "selection_sha256": selection["selection_sha256"],
+        "promotion_identity_sha256": sha256_json(identity),
+        "freeze_manifest_sha256": {
+            "{}:{}".format(*key): freeze_manifest_sha256(freezes[key])
+            for key in sorted(FINAL_FREEZE_KEYS)
+        },
+    }
+
+
+def load_repair_map(
+        contract: Mapping[str, Any], path: Path,
+        freeze_arm: Mapping[str, Any], source_git_commit: str,
+        training_trace_manifest_sha256: str) -> Mapping[int, int]:
+    value = _load_canonical_json_file(path, "repair map")
+    _exact_keys(value, REPAIR_MAP_FIELDS, "repair map")
+    if (value["schema"] != REPAIR_MAP_SCHEMA or
+            value["contract_sha256"] != contract_sha256(contract) or
+            value["training_domain_sha256"] !=
+            contract["recovery"]["domains"]["final_repaired"]["domain_sha256"] or
+            value["arm"] != freeze_arm["arm"] or
+            value["source_git_commit"] != source_git_commit or
+            value["binary_sha256"] != freeze_arm["binary_sha256"] or
+            value["arm_descriptor_sha256"] !=
+            freeze_arm["arm_descriptor_sha256"] or
+            value["training_trace_manifest_sha256"] !=
+            training_trace_manifest_sha256 or
+            value["entry_kind"] != "retry_offset_indexed_by_K_minus_2" or
+            value["attempt_derivation"] != EXPECTED_ATTEMPT_DERIVATION or
+            value["repair_rule"] != EXPECTED_REPAIR_RULE):
+        fail("repair map does not bind the frozen training artifact")
+    _exact_integer(
+        value["production_base_seed_attempt"],
+        contract["seeds"]["production_base_seed_attempt"],
+        "repair map production base seed attempt")
+    if repair_map_sha256(value) != freeze_arm["repair_map_sha256"]:
+        fail("repair map SHA-256 differs from the pre-result freeze")
+    retry_offsets = value["retry_offsets"]
+    K_values = _k_values(contract, "all")
+    if (not isinstance(retry_offsets, list) or
+            len(retry_offsets) != len(K_values)):
+        fail("repair map must contain one retry offset for every K")
+    attempts: Dict[int, int] = {}
+    for expected_K, retry_offset in zip(K_values, retry_offsets):
+        retry_offset = _integer(
+            retry_offset, "repair map retry offset for K={}".format(expected_K))
+        if retry_offset >= contract["recovery"]["max_construction_attempts"]:
+            fail("repair map retry offset exceeds uint8 range")
+        attempts[expected_K] = (
+            value["production_base_seed_attempt"] + retry_offset) & 0xff
+    return attempts
+
+
+def generic_realized_construction_sha256(
+        codec: str, arm_descriptor_sha256: str, K: int, block_bytes: int,
+        construction_attempt: int) -> str:
+    if codec == "wirehair2_certified":
+        return realized_construction_sha256(
+            arm_descriptor_sha256, K, block_bytes, construction_attempt)
+    return sha256_json({
+        "schema": "wirehair.wh2.realized-construction.v1",
+        "codec": codec,
+        "arm_descriptor_sha256": arm_descriptor_sha256,
+        "K": K,
+        "block_bytes": block_bytes,
+        "construction_attempt": construction_attempt,
+    })
+
+
+def expected_construction_attempt(
+        frozen_arm: Mapping[str, Any], K: int, base_seed_attempt: int,
+        repair_attempts: Mapping[str, Mapping[int, int]]) -> int:
+    arm = frozen_arm["arm"]
+    if arm in repair_attempts:
+        return repair_attempts[arm][K]
+    if frozen_arm["construction_policy"] == "not_applicable":
+        return 0
+    if frozen_arm["construction_policy"] == "raw_base":
+        return base_seed_attempt
+    fail("mapped construction policy has no authenticated repair map")
+    return 0
+
+
+def iter_recovery_cells(contract: Mapping[str, Any], phase: str) -> Iterator[Dict[str, Any]]:
+    domains = contract["recovery"]["domains"]
+    if phase not in domains:
+        fail("unknown recovery phase: " + phase)
+    domain = domains[phase]
+    K_values = _k_values(contract, domain["k_set"])
+    for block_bytes in domain["block_bytes"]:
+        for trial, seed_pair in enumerate(
+                _seed_pairs(contract, domain["seed_mode"])):
+            for stratum in contract["strata_sets"][domain["strata_set"]]:
+                for K in K_values:
+                    yield {
+                        "phase": phase,
+                        "band": _band_for(contract, K),
+                        "K": K,
+                        "block_bytes": block_bytes,
+                        "loss_ppm": stratum["loss_ppm"],
+                        "schedule": stratum["schedule"],
+                        "trial": trial,
+                        "base_seed_attempt": seed_pair["base_seed_attempt"],
+                        "loss_seed": seed_pair["loss_seed"],
+                        "overhead_cap": contract["recovery"]["overhead_cap"],
+                    }
+
+
+def recovery_domain_sha256(contract: Mapping[str, Any], phase: str) -> str:
+    digest = hashlib.sha256()
+    for cell in iter_recovery_cells(contract, phase):
+        digest.update(canonical_json(cell).encode("utf-8"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def _splitmix64(value: int) -> int:
+    mask = (1 << 64) - 1
+    value = (value + 0x9e3779b97f4a7c15) & mask
+    value = ((value ^ (value >> 30)) * 0xbf58476d1ce4e5b9) & mask
+    value = ((value ^ (value >> 27)) * 0x94d049bb133111eb) & mask
+    return (value ^ (value >> 31)) & mask
+
+
+def iter_timing_cells(contract: Mapping[str, Any], phase: str) -> Iterator[Dict[str, Any]]:
+    domains = contract["timing"]["domains"]
+    if phase not in domains:
+        fail("unknown timing phase: " + phase)
+    domain = domains[phase]
+    seed_pairs = _seed_pairs(contract, domain["seed_mode"])
+    mask = (1 << 64) - 1
+    for block_bytes in domain["block_bytes"]:
+        for replicate in range(domain["paired_repetitions"]):
+            pair = seed_pairs[replicate % len(seed_pairs)]
+            salt = (replicate * 0x9e3779b97f4a7c15) & mask
+            loss_seed = _splitmix64(int(pair["loss_seed"], 16) ^ salt)
+            for K in _k_values(contract, domain["k_set"]):
+                yield {
+                    "phase": phase,
+                    "band": _band_for(contract, K),
+                    "K": K,
+                    "block_bytes": block_bytes,
+                    "loss_ppm": contract["timing"]["loss_ppm"],
+                    "schedule": contract["timing"]["schedule"],
+                    "replicate": replicate,
+                    "base_seed_attempt": pair["base_seed_attempt"],
+                    "loss_seed": "0x{:016x}".format(loss_seed),
+                    "fixed_received_overhead":
+                        contract["timing"]["fixed_received_overhead"],
+                }
+
+
+def timing_domain_sha256(contract: Mapping[str, Any], phase: str) -> str:
+    digest = hashlib.sha256()
+    for cell in iter_timing_cells(contract, phase):
+        digest.update(canonical_json(cell).encode("utf-8"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def timing_panels(
+        contract: Mapping[str, Any], arms: Sequence[str],
+        ) -> Sequence[Dict[str, str]]:
+    controls = tuple(contract["selection"]["controls"])
+    candidates = tuple(arm for arm in arms if arm not in controls)
+    panels: List[Dict[str, str]] = []
+    protocol = contract["timing"]["panel_protocol"]
+    for value in protocol["control_aa"]:
+        panels.append({
+            "panel_kind": "AA", "scope": value["scope"],
+            "left_arm": value["arm"], "right_arm": value["arm"],
+        })
+    for candidate in candidates:
+        for scope in protocol["candidate_aa_scopes"]:
+            panels.append({
+                "panel_kind": "AA", "scope": scope,
+                "left_arm": candidate, "right_arm": candidate,
+            })
+        for value in protocol["candidate_ab"]:
+            panels.append({
+                "panel_kind": "AB", "scope": value["scope"],
+                "left_arm": candidate, "right_arm": value["control"],
+            })
+    if len({canonical_json(panel) for panel in panels}) != len(panels):
+        fail("internal duplicate timing panel")
+    return panels
+
+
+def timing_order(panel: Mapping[str, str], replicate: int) -> str:
+    phase_bit = bytes.fromhex(sha256_json(panel))[-1] & 1
+    return "ABBA" if (replicate & 1) == phase_bit else "BAAB"
+
+
+def _timing_cell_indexes(
+        contract: Mapping[str, Any], phase: str,
+        ) -> Mapping[str, Tuple[int, Mapping[str, Any]]]:
+    result: Dict[str, Tuple[int, Mapping[str, Any]]] = {}
+    for ordinal, cell in enumerate(iter_timing_cells(contract, phase)):
+        key = canonical_json(cell)
+        if key in result:
+            fail("internal duplicate timing cell")
+        result[key] = (ordinal, cell)
+    return result
+
+
+def _timing_cell_ordinal(
+        contract: Mapping[str, Any], phase: str, row: Mapping[str, Any],
+        indexes: Mapping[str, Tuple[int, Mapping[str, Any]]],
+        ) -> Tuple[int, Mapping[str, Any]]:
+    integer_fields = (
+        "K", "block_bytes", "loss_ppm", "replicate", "base_seed_attempt",
+        "fixed_received_overhead",
+    )
+    string_fields = ("phase", "band", "schedule", "loss_seed")
+    if (any(type(row[field]) is not int for field in integer_fields) or
+            any(not isinstance(row[field], str) for field in string_fields)):
+        fail("timing cell key uses a noncanonical scalar type")
+    key_value = {
+        key: row[key] for key in contract["timing"]["cell_key"]
+    }
+    try:
+        return indexes[canonical_json(key_value)]
+    except KeyError:
+        fail("timing row is outside the frozen {} domain".format(phase))
+    return 0, {}
+
+
+def _domain_indexes(contract: Mapping[str, Any], phase: str) -> Tuple[
+        Mapping[int, int], Mapping[Tuple[str, str], int],
+        Mapping[Tuple[str, int], int], Mapping[int, int]]:
+    domain = contract["recovery"]["domains"][phase]
+    return (
+        {K: index for index, K in enumerate(_k_values(contract, domain["k_set"]))},
+        {(pair["base_seed_attempt"], pair["loss_seed"]): index
+         for index, pair in enumerate(_seed_pairs(contract, domain["seed_mode"]))},
+        {(value["schedule"], value["loss_ppm"]): index
+         for index, value in enumerate(contract["strata_sets"][domain["strata_set"]])},
+        {width: index for index, width in enumerate(domain["block_bytes"])},
+    )
+
+
+def _cell_ordinal(
+        contract: Mapping[str, Any], phase: str, row: Mapping[str, Any],
+        indexes: Tuple[Mapping[int, int], Mapping[Tuple[str, str], int],
+                       Mapping[Tuple[str, int], int], Mapping[int, int]],
+) -> Tuple[int, Dict[str, Any]]:
+    domain = contract["recovery"]["domains"][phase]
+    k_index, seed_index, stratum_index, width_index = indexes
+    integer_fields = (
+        "K", "block_bytes", "loss_ppm", "trial", "base_seed_attempt",
+        "overhead_cap",
+    )
+    string_fields = ("phase", "band", "schedule", "loss_seed")
+    if (any(type(row[field]) is not int for field in integer_fields) or
+            any(not isinstance(row[field], str) for field in string_fields)):
+        fail("ledger cell key uses a noncanonical scalar type")
+    try:
+        K_slot = k_index[row["K"]]
+        seed_slot = seed_index[(row["base_seed_attempt"], row["loss_seed"])]
+        stratum_slot = stratum_index[(row["schedule"], row["loss_ppm"])]
+        width_slot = width_index[row["block_bytes"]]
+    except (KeyError, TypeError):
+        fail("ledger row is outside the frozen {} domain".format(phase))
+    if row["trial"] != seed_slot:
+        fail("ledger row swaps a trial index and seed pair")
+    expected = {
+        key: row[key] for key in contract["recovery"]["cell_key"]
+    }
+    expected["band"] = _band_for(contract, row["K"])
+    if row["phase"] != phase or row["band"] != expected["band"] or \
+            row["overhead_cap"] != contract["recovery"]["overhead_cap"]:
+        fail("ledger row phase, band, or cap differs from the frozen cell")
+    K_count = len(k_index)
+    seed_count = len(seed_index)
+    stratum_count = len(stratum_index)
+    ordinal = (((width_slot * seed_count + seed_slot) * stratum_count +
+                stratum_slot) * K_count + K_slot)
+    if ordinal >= domain["expected_cells_per_arm"]:
+        fail("internal domain ordinal overflow")
+    return ordinal, expected
+
+
+def _parse_canonical_jsonl(
+        path: Path, context: str) -> Iterator[Mapping[str, Any]]:
+    try:
+        source = path.open("rb")
+    except OSError as exc:
+        fail("cannot open {} {}: {}".format(context, path, exc))
+    with source:
+        for line_number, line in enumerate(source, 1):
+            if len(line) > MAX_JSON_LINE_BYTES:
+                fail("{} line {} exceeds {} bytes".format(
+                    context, line_number, MAX_JSON_LINE_BYTES))
+            if not line.endswith(b"\n") or line in (b"\n", b"\r\n"):
+                fail("{} line {} is empty or incomplete".format(
+                    context, line_number))
+            value = _load_json_bytes(
+                line, "{} line {}".format(context, line_number))
+            if not isinstance(value, dict):
+                fail("{} line {} is not an object".format(context, line_number))
+            logical = canonical_json(value).encode("utf-8")
+            if line not in (logical + b"\n", logical + b"\r\n"):
+                fail("{} line {} is not canonical JSONL".format(
+                    context, line_number))
+            yield value
+
+
+def _parse_ledger(path: Path) -> Iterator[Mapping[str, Any]]:
+    return _parse_canonical_jsonl(path, "ledger")
+
+
+def _trace_manifest_hasher(
+        contract: Mapping[str, Any], evidence_kind: str,
+        phase: str) -> Any:
+    domain = contract[evidence_kind]["domains"][phase]
+    digest = hashlib.sha256()
+    digest.update(b"wirehair.wh2.trace-manifest.v1\0")
+    digest.update(bytes.fromhex(contract_sha256(contract)))
+    digest.update(bytes.fromhex(domain["domain_sha256"]))
+    digest.update(phase.encode("utf-8"))
+    digest.update(b"\0")
+    return digest
+
+
+def _hash_trace_manifest_row(digest: Any, value: Mapping[str, Any]) -> None:
+    digest.update(canonical_json(value).encode("utf-8"))
+    digest.update(b"\n")
+
+
+def trace_manifest_sha256(
+        contract: Mapping[str, Any], evidence_kind: str, phase: str,
+        path: Path) -> str:
+    digest = _trace_manifest_hasher(contract, evidence_kind, phase)
+    for value in _parse_canonical_jsonl(path, "trace manifest"):
+        _hash_trace_manifest_row(digest, value)
+    return digest.hexdigest()
+
+
+def _load_frozen_trace_manifest(
+        contract: Mapping[str, Any], evidence_kind: str, phase: str,
+        path: Path, expected_sha256: str,
+        cells: Iterable[Mapping[str, Any]], count: int,
+        context: str) -> Sequence[str]:
+    digest = _trace_manifest_hasher(contract, evidence_kind, phase)
+    traces: List[str] = []
+    rows = iter(_parse_canonical_jsonl(path, context))
+    for ordinal, cell in enumerate(cells):
+        try:
+            row = next(rows)
+        except StopIteration:
+            fail("{} has {} cells, expected {}".format(context, ordinal, count))
+        _hash_trace_manifest_row(digest, row)
+        if set(row) != TRACE_FIELDS:
+            fail("{} row has an unexpected schema".format(context))
+        _exact_integer(row["ordinal"], ordinal, context + " ordinal")
+        for field in ("cell_sha256", "trace_sha256"):
+            if (not isinstance(row[field], str) or
+                    SHA256.fullmatch(row[field]) is None):
+                fail("{} {} is not a lowercase SHA-256".format(
+                    context, field))
+        if row["cell_sha256"] != sha256_json(cell):
+            fail("{} cell hash does not bind its key".format(context))
+        traces.append(row["trace_sha256"])
+    if len(traces) != count:
+        fail("{} domain yielded {} cells, expected {}".format(
+            context, len(traces), count))
+    try:
+        next(rows)
+        fail("{} contains cells beyond the frozen domain".format(context))
+    except StopIteration:
+        pass
+    if digest.hexdigest() != expected_sha256:
+        fail("{} differs from the pre-result freeze".format(context))
+    return traces
+
+
+def load_trace_manifest(
+        contract: Mapping[str, Any], phase: str, path: Path,
+        expected_sha256: str) -> Sequence[str]:
+    count = contract["recovery"]["domains"][phase]["expected_cells_per_arm"]
+    return _load_frozen_trace_manifest(
+        contract, "recovery", phase, path, expected_sha256,
+        iter_recovery_cells(contract, phase), count, "trace manifest")
+
+
+def load_timing_trace_manifest(
+        contract: Mapping[str, Any], phase: str, path: Path,
+        expected_sha256: str) -> Sequence[str]:
+    count = contract["timing"]["domains"][phase]["expected_cells"]
+    return _load_frozen_trace_manifest(
+        contract, "timing", phase, path, expected_sha256,
+        iter_timing_cells(contract, phase), count, "timing trace manifest")
+
+
+def validate_ledger(contract: Mapping[str, Any], phase: str, path: Path,
+                    freeze_manifest_path: Path, trace_manifest_path: Path,
+                    repair_map_paths: Optional[Mapping[str, Path]] = None,
+                    ) -> Dict[str, Any]:
+    if repair_map_paths is None:
+        repair_map_paths = {}
+    freeze = load_freeze_manifest(
+        contract, phase, freeze_manifest_path, "recovery")
+    arms = tuple(freeze["arm_roster"])
+    controls = tuple(contract["selection"]["controls"])
+    candidate_arms = tuple(arm for arm in arms if arm not in controls)
+    domain = contract["recovery"]["domains"].get(phase)
+    if domain is None:
+        fail("unknown recovery phase: " + phase)
+    count = domain["expected_cells_per_arm"]
+    indexes = _domain_indexes(contract, phase)
+    frozen_traces = load_trace_manifest(
+        contract, phase, trace_manifest_path, freeze["trace_manifest_sha256"])
+    required_map_arms = {
+        arm for arm in arms
+        if freeze["arms_by_name"][arm]["repair_map_sha256"] != "0" * 64
+    }
+    if set(repair_map_paths) != required_map_arms:
+        fail("repair-map arguments must match the frozen nonzero map roster")
+    repair_attempts = {
+        arm: load_repair_map(
+            contract, repair_map_paths[arm], freeze["arms_by_name"][arm],
+            freeze["source_git_commit"],
+            freeze["repair_training_trace_manifest_sha256"])
+        for arm in required_map_arms
+    }
+    seen = {arm: bytearray(count) for arm in arms}
+    scores = {arm: bytearray(count) for arm in arms}
+    status_counts = {arm: defaultdict(int) for arm in arms}
+    threshold_counts = {
+        arm: {threshold: 0 for threshold in contract["recovery"]["overhead_thresholds"]}
+        for arm in arms
+    }
+    scoped_counts = {arm: defaultdict(lambda: defaultdict(int)) for arm in arms}
+    scoped_cells = {arm: defaultdict(int) for arm in arms}
+    weak_multiplicity = {arm: defaultdict(int) for arm in arms}
+    capped_overhead_sum = {arm: 0 for arm in arms}
+
+    for row in _parse_ledger(path):
+        if set(row) != LEDGER_FIELDS:
+            fail("ledger row has an unexpected schema")
+        arm = row["arm"]
+        if not isinstance(arm, str):
+            fail("ledger arm name must be a string")
+        if arm not in seen:
+            fail("ledger contains an arm outside the frozen roster")
+        for field in ("cell_sha256", "trace_sha256", "binary_sha256",
+                      "arm_descriptor_sha256", "realized_construction_sha256",
+                      "repair_map_sha256"):
+            if not isinstance(row[field], str) or SHA256.fullmatch(row[field]) is None:
+                fail("ledger {} is not a lowercase SHA-256".format(field))
+        ordinal, cell = _cell_ordinal(contract, phase, row, indexes)
+        if row["cell_sha256"] != sha256_json(cell):
+            fail("ledger cell hash does not bind its arm-free key")
+        if seen[arm][ordinal]:
+            fail("duplicate ledger cell for arm {} at ordinal {}".format(arm, ordinal))
+        seen[arm][ordinal] = 1
+        if row["trace_sha256"] != frozen_traces[ordinal]:
+            fail("ledger trace differs from the pre-result trace manifest")
+        frozen_arm = freeze["arms_by_name"][arm]
+        for field in ("binary_sha256", "arm_descriptor_sha256",
+                      "repair_map_sha256"):
+            if row[field] != frozen_arm[field]:
+                fail("ledger {} differs from frozen arm {}".format(field, arm))
+
+        attempt = row["construction_attempt"]
+        if (type(attempt) is not int or
+                not 0 <= attempt < contract["recovery"]["max_construction_attempts"]):
+            fail("ledger construction attempt is outside [0,255]")
+        expected_attempt = expected_construction_attempt(
+            frozen_arm, row["K"], row["base_seed_attempt"], repair_attempts)
+        if attempt != expected_attempt:
+            fail("ledger construction attempt differs from the frozen seed policy")
+        expected_realized = generic_realized_construction_sha256(
+            frozen_arm["codec"], frozen_arm["arm_descriptor_sha256"],
+            row["K"], row["block_bytes"], attempt)
+        if row["realized_construction_sha256"] != expected_realized:
+            fail("ledger realized construction does not match its frozen descriptor")
+
+        outcome = row["outcome"]
+        extra = row["decoded_extra"]
+        cap = contract["recovery"]["overhead_cap"]
+        if outcome not in SCORED_OUTCOMES:
+            fail("fatal, internal, or unknown outcomes abort rather than score")
+        if outcome == "success":
+            if type(extra) is not int or not 0 <= extra <= cap:
+                fail("successful ledger row has invalid decoded_extra")
+            score = extra
+        else:
+            if extra is not None:
+                fail("failed ledger row must use decoded_extra=null")
+            score = cap + 1
+        scores[arm][ordinal] = score
+        status_counts[arm][outcome] += 1
+        capped_overhead_sum[arm] += min(score, cap)
+        scope = (
+            row["band"], row["block_bytes"], row["schedule"], row["loss_ppm"])
+        scoped_cells[arm][scope] += 1
+        for threshold in threshold_counts[arm]:
+            failed = score > threshold
+            threshold_counts[arm][threshold] += failed
+            scoped_counts[arm][scope][threshold] += failed
+        if score > 0:
+            weak_multiplicity[arm][(
+                row["K"], row["base_seed_attempt"], row["block_bytes"])] += 1
+
+    for arm in arms:
+        present = sum(seen[arm])
+        if present != count:
+            fail("arm {} has {} cells, expected {} (no exclusions allowed)".format(
+                arm, present, count))
+    summaries = {}
+    target_ppm = contract["goal"]["primary_failure_threshold_ppm"]
+    for arm in arms:
+        primary_failures = threshold_counts[arm][0]
+        scope_summaries = {}
+        for scope, failures in sorted(scoped_counts[arm].items()):
+            scope_cells = scoped_cells[arm][scope]
+            primary = failures[0]
+            scope_summaries["{}|{}|{}|{}".format(*scope)] = {
+                "cells": scope_cells,
+                "failure_by_overhead": {
+                    str(key): value for key, value in failures.items()
+                },
+                "one_percent_overhead0_pass":
+                    primary * 1000000 <= target_ppm * scope_cells,
+            }
+        summaries[arm] = {
+            "cells": count,
+            "failure_by_overhead": {
+                str(key): value for key, value in threshold_counts[arm].items()
+            },
+            "failure_ppm_overhead0": (primary_failures * 1000000) // count,
+            "one_percent_overall_pass": primary_failures * 1000000 <= target_ppm * count,
+            "status_counts": dict(sorted(status_counts[arm].items())),
+            "capped_overhead_sum": capped_overhead_sum[arm],
+            "weak_seed_units": len(weak_multiplicity[arm]),
+            "weak_seed_multiplicity_histogram": _histogram(weak_multiplicity[arm].values()),
+            "weak_seed_unit_details": [
+                {
+                    "K": key[0], "base_seed_attempt": key[1],
+                    "block_bytes": key[2],
+                    "overhead0_failure_multiplicity": multiplicity,
+                }
+                for key, multiplicity in sorted(weak_multiplicity[arm].items())
+            ],
+            "all_band_strata_one_percent_pass": all(
+                value["one_percent_overhead0_pass"]
+                for value in scope_summaries.values()
+            ),
+            "band_stratum": scope_summaries,
+        }
+        construct_failed = status_counts[arm].get("construct_failed", 0)
+        unsupported = status_counts[arm].get("unsupported", 0)
+        summaries[arm]["construct_failed"] = construct_failed
+        summaries[arm]["unsupported"] = unsupported
+        if phase in ("final_repaired", "final_validation"):
+            summaries[arm]["phase_recovery_gate_pass"] = (
+                len(weak_multiplicity[arm]) == 0 and
+                construct_failed == 0 and unsupported == 0)
+        elif phase == "final_raw":
+            summaries[arm]["phase_recovery_gate_pass"] = (
+                summaries[arm]["one_percent_overall_pass"] and
+                summaries[arm]["all_band_strata_one_percent_pass"] and
+                unsupported == 0)
+        elif phase == "cross_width_validation":
+            summaries[arm]["phase_recovery_gate_pass"] = (
+                summaries[arm]["one_percent_overall_pass"] and
+                summaries[arm]["all_band_strata_one_percent_pass"] and
+                construct_failed == 0 and unsupported == 0)
+        else:
+            summaries[arm]["phase_recovery_gate_pass"] = unsupported == 0
+
+    comparisons = {}
+    margin_ppm = contract["selection"]["noninferiority_margin_ppm"]
+    mandatory_controls_supported = all(
+        summaries[control]["unsupported"] == 0 for control in controls)
+    for arm in candidate_arms:
+        control_comparisons = {}
+        for control in controls:
+            repairs = introductions = shared_failures = 0
+            for left, right in zip(scores[control], scores[arm]):
+                left_failed = left > 0
+                right_failed = right > 0
+                repairs += left_failed and not right_failed
+                introductions += not left_failed and right_failed
+                shared_failures += left_failed and right_failed
+            allowed = max(
+                1, (margin_ppm * count + 1000000 - 1) // 1000000)
+            overall_tail = {
+                str(threshold): {
+                    "control_failures": threshold_counts[control][threshold],
+                    "candidate_failures": threshold_counts[arm][threshold],
+                    "allowed_excess_failures": allowed,
+                    "noninferior": threshold_counts[arm][threshold] <=
+                        threshold_counts[control][threshold] + allowed,
+                }
+                for threshold in contract["recovery"]["overhead_thresholds"]
+            }
+            scope_tail = {}
+            for scope in sorted(scoped_cells[arm]):
+                scope_count = scoped_cells[arm][scope]
+                scope_allowed = max(
+                    1, (margin_ppm * scope_count + 1000000 - 1) // 1000000)
+                scope_tail["{}|{}|{}|{}".format(*scope)] = {
+                    str(threshold): {
+                        "control_failures": scoped_counts[control][scope][threshold],
+                        "candidate_failures": scoped_counts[arm][scope][threshold],
+                        "allowed_excess_failures": scope_allowed,
+                        "noninferior": scoped_counts[arm][scope][threshold] <=
+                            scoped_counts[control][scope][threshold] + scope_allowed,
+                    }
+                    for threshold in contract["recovery"]["overhead_thresholds"]
+                }
+            control_comparisons[control] = {
+                "overhead0_repairs": repairs,
+                "overhead0_introductions": introductions,
+                "overhead0_shared_failures": shared_failures,
+                "overall_tail": overall_tail,
+                "band_stratum_tail": scope_tail,
+                "all_noninferiority_gates_pass": (
+                    all(value["noninferior"] for value in overall_tail.values()) and
+                    all(value["noninferior"] for tail in scope_tail.values()
+                        for value in tail.values())
+                ),
+            }
+        all_controls_noninferior = all(
+            value["all_noninferiority_gates_pass"]
+            for value in control_comparisons.values()) and \
+            summaries[arm]["unsupported"] == 0 and \
+            mandatory_controls_supported
+        comparisons[arm] = {
+            "controls": control_comparisons,
+            "all_controls_noninferior": all_controls_noninferior,
+            "architecture_eligible": (
+                all_controls_noninferior and
+                summaries[arm]["phase_recovery_gate_pass"]),
+        }
+    return {
+        "schema": SCHEMA + ".ledger-summary.v1",
+        "phase": phase,
+        "contract_sha256": contract_sha256(contract),
+        "freeze_manifest_sha256": freeze_manifest_sha256(freeze),
+        "architecture_artifact_sha256":
+            architecture_artifact_sha256(freeze),
+        "arm_artifacts": frozen_arm_artifacts(freeze),
+        "domain_sha256": domain["domain_sha256"],
+        "excluded_cells": 0,
+        "mandatory_controls_supported": mandatory_controls_supported,
+        "arms": summaries,
+        "comparisons": comparisons,
+    }
+
+
+def _timing_outcome(
+        row: Mapping[str, Any], side: str, scope: str) -> Tuple[str, Any]:
+    outcome = row[side + "_outcome"]
+    extra = row[side + "_decoded_extra"]
+    if outcome not in SCORED_OUTCOMES:
+        fail("fatal, internal, or unknown timing outcomes abort")
+    if outcome == "success":
+        if scope == "encoder_init_plus_first_K_symbols":
+            if extra is not None:
+                fail("successful encoder timing must use decoded_extra=null")
+        elif scope == "decoder_solve":
+            if type(extra) is not int or extra != 4:
+                fail("isolated solve timing must receipt the fixed K+4 prefix")
+        elif type(extra) is not int or not 0 <= extra <= 4:
+            fail("successful decoder timing has invalid decoded_extra")
+    elif extra is not None:
+        fail("failed timing side must use decoded_extra=null")
+    return outcome, extra
+
+
+def _timing_identity(
+        row: Mapping[str, Any], side: str, arm: str,
+        frozen_arm: Mapping[str, Any], repair_attempts: Mapping[str, Mapping[int, int]],
+        ) -> Tuple[Any, ...]:
+    hash_fields = (
+        "binary_sha256", "arm_descriptor_sha256",
+        "realized_construction_sha256", "repair_map_sha256",
+    )
+    for field in hash_fields:
+        value = row[side + "_" + field]
+        if not isinstance(value, str) or SHA256.fullmatch(value) is None:
+            fail("timing {}_{} is not a lowercase SHA-256".format(side, field))
+    for field in ("binary_sha256", "arm_descriptor_sha256",
+                  "repair_map_sha256"):
+        if row[side + "_" + field] != frozen_arm[field]:
+            fail("timing {} {} differs from the frozen arm".format(side, field))
+    attempt = row[side + "_construction_attempt"]
+    if type(attempt) is not int:
+        fail("timing construction attempt is not an integer")
+    expected_attempt = expected_construction_attempt(
+        frozen_arm, row["K"], row["base_seed_attempt"], repair_attempts)
+    if attempt != expected_attempt:
+        fail("timing construction attempt differs from the frozen seed policy")
+    expected_realized = generic_realized_construction_sha256(
+        frozen_arm["codec"], frozen_arm["arm_descriptor_sha256"],
+        row["K"], row["block_bytes"], attempt)
+    if row[side + "_realized_construction_sha256"] != expected_realized:
+        fail("timing realized construction differs from its frozen descriptor")
+    return (
+        arm, frozen_arm["binary_sha256"], frozen_arm["arm_descriptor_sha256"],
+        attempt, expected_realized, frozen_arm["repair_map_sha256"],
+    )
+
+
+def _timing_confidence_interval(
+        contract: Mapping[str, Any], values: Sequence[float],
+        expected_count: int) -> Mapping[str, float]:
+    if len(values) != expected_count or expected_count < 2:
+        fail("timing statistics lack the complete replicate domain")
+    mean = math.fsum(values) / expected_count
+    variance = math.fsum(
+        (value - mean) * (value - mean) for value in values) / \
+        (expected_count - 1)
+    critical = contract["timing"]["statistics"][
+        "t_critical_by_repetitions"].get(str(expected_count))
+    if type(critical) is not float:
+        fail("timing contract lacks the exact Student-t critical value")
+    half_width = critical * math.sqrt(variance / expected_count)
+    return {
+        "mean_log_ratio": mean,
+        "lower_95": mean - half_width,
+        "upper_95": mean + half_width,
+    }
+
+
+def _timing_group_decision(
+        contract: Mapping[str, Any], ab: Mapping[str, Any],
+        left_aa: Mapping[str, Any],
+        right_aa: Mapping[str, Any]) -> Mapping[str, Any]:
+    if not (ab.get("selectable") and left_aa.get("selectable") and
+            right_aa.get("selectable")):
+        return {
+            "selectable": False, "status": "non_selectable",
+            "reason": "failed_or_incomplete_panel",
+        }
+    floor = math.log1p(
+        contract["timing"]["practical_margin_ppm"] / 1000000.0)
+    if any(not (-floor < aa["lower_95"] and aa["upper_95"] < floor)
+           for aa in (left_aa, right_aa)):
+        return {
+            "selectable": False, "status": "non_selectable",
+            "reason": "aa_repeatability_threshold",
+            "effective_floor": floor,
+        }
+    if ab["upper_95"] < -floor:
+        status = "faster"
+    elif ab["lower_95"] > floor:
+        status = "resolved_slower"
+    elif ab["upper_95"] < floor:
+        status = "noninferior"
+    else:
+        status = "unresolved"
+    return {
+        "selectable": True,
+        "status": status,
+        "effective_floor": floor,
+        **ab,
+    }
+
+
+def _timing_speed_gate(
+        phase: str, candidate_decisions: Mapping[str, Any]) -> bool:
+    if phase == "development":
+        all_groups = [
+            decision for panel in candidate_decisions.values()
+            for decision in panel["by_band_width"].values()
+        ] + [
+            panel["aggregate"] for panel in candidate_decisions.values()
+        ]
+        return all(
+            value["status"] not in ("resolved_slower", "non_selectable")
+            for value in all_groups)
+    if phase != "final":
+        fail("unknown timing speed-gate phase: " + phase)
+    solve = candidate_decisions["decoder_solve|wirehair2_head"]
+    receive = candidate_decisions["receive_to_success|wirehair1"]
+    encoder_head = candidate_decisions[
+        "encoder_init_plus_first_K_symbols|wirehair2_head"]
+    encoder_wh1 = candidate_decisions[
+        "encoder_init_plus_first_K_symbols|wirehair1"]
+    return (
+        all(value["status"] == "faster"
+            for value in solve["by_band_width"].values()) and
+        all(value["status"] == "faster"
+            for value in receive["by_band_width"].values()) and
+        all(value["status"] in ("faster", "noninferior")
+            for panel in (encoder_head, encoder_wh1)
+            for value in panel["by_band_width"].values()) and
+        encoder_head["aggregate"]["status"] == "faster" and
+        encoder_wh1["aggregate"]["status"] == "faster")
+
+
+def validate_timing_receipt(
+        contract: Mapping[str, Any], phase: str, path: Path,
+        freeze_manifest_path: Path, trace_manifest_path: Path,
+        repair_map_paths: Optional[Mapping[str, Path]] = None,
+        ) -> Dict[str, Any]:
+    if repair_map_paths is None:
+        repair_map_paths = {}
+    freeze = load_freeze_manifest(contract, phase, freeze_manifest_path, "timing")
+    arms = tuple(freeze["arm_roster"])
+    controls = tuple(contract["selection"]["controls"])
+    candidates = tuple(arm for arm in arms if arm not in controls)
+    domain = contract["timing"]["domains"].get(phase)
+    if domain is None:
+        fail("unknown timing phase: " + phase)
+    cell_count = domain["expected_cells"]
+    cells = _timing_cell_indexes(contract, phase)
+    traces = load_timing_trace_manifest(
+        contract, phase, trace_manifest_path, freeze["trace_manifest_sha256"])
+    required_map_arms = {
+        arm for arm in arms
+        if freeze["arms_by_name"][arm]["repair_map_sha256"] != "0" * 64
+    }
+    if set(repair_map_paths) != required_map_arms:
+        fail("timing repair-map arguments must match the frozen map roster")
+    repair_attempts = {
+        arm: load_repair_map(
+            contract, repair_map_paths[arm], freeze["arms_by_name"][arm],
+            freeze["source_git_commit"],
+            freeze["repair_training_trace_manifest_sha256"])
+        for arm in required_map_arms
+    }
+    panels = timing_panels(contract, arms)
+    panel_indexes = {
+        canonical_json(panel): index for index, panel in enumerate(panels)
+    }
+    seen = bytearray(cell_count * len(panels))
+    measurements: Dict[str, Any] = {
+        canonical_json(panel): defaultdict(list) for panel in panels
+    }
+    failed_groups: Dict[str, Any] = {
+        canonical_json(panel): set() for panel in panels
+    }
+    failed_aggregate = {canonical_json(panel): False for panel in panels}
+    construction_by_arm_cell: Dict[Tuple[str, int], Tuple[Any, ...]] = {}
+    outcome_by_arm_cell_scope: Dict[
+        Tuple[str, int, str], Tuple[str, Any]] = {}
+
+    for row in _parse_canonical_jsonl(path, "timing receipt"):
+        if set(row) != TIMING_RECEIPT_FIELDS:
+            fail("timing receipt row has an unexpected schema")
+        for field in ("cell_sha256", "trace_sha256"):
+            if not isinstance(row[field], str) or SHA256.fullmatch(row[field]) is None:
+                fail("timing receipt {} is not a lowercase SHA-256".format(field))
+        cell_ordinal, cell = _timing_cell_ordinal(contract, phase, row, cells)
+        if row["cell_sha256"] != sha256_json(cell):
+            fail("timing receipt cell hash does not bind its key")
+        if row["trace_sha256"] != traces[cell_ordinal]:
+            fail("timing receipt trace differs from the pre-result manifest")
+        panel = {
+            "panel_kind": row["panel_kind"], "scope": row["scope"],
+            "left_arm": row["left_arm"], "right_arm": row["right_arm"],
+        }
+        panel_key = canonical_json(panel)
+        if panel_key not in panel_indexes:
+            fail("timing receipt has an undeclared or side-swapped panel")
+        receipt_ordinal = cell_ordinal * len(panels) + panel_indexes[panel_key]
+        if seen[receipt_ordinal]:
+            fail("duplicate timing receipt cell/panel")
+        seen[receipt_ordinal] = 1
+        expected_order = timing_order(panel, row["replicate"])
+        if row["order"] != expected_order:
+            fail("timing receipt order differs from frozen counterbalancing")
+
+        side_outcomes = []
+        side_identities = []
+        for side in ("left", "right"):
+            arm = row[side + "_arm"]
+            if arm not in freeze["arms_by_name"]:
+                fail("timing receipt side is outside the frozen roster")
+            frozen_arm = freeze["arms_by_name"][arm]
+            identity = _timing_identity(
+                row, side, arm, frozen_arm, repair_attempts)
+            outcome = _timing_outcome(row, side, row["scope"])
+            identity_key = (arm, cell_ordinal)
+            prior_identity = construction_by_arm_cell.setdefault(
+                identity_key, identity)
+            if prior_identity != identity:
+                fail("timing arm construction changes between panels")
+            outcome_key = (arm, cell_ordinal, row["scope"])
+            prior_outcome = outcome_by_arm_cell_scope.setdefault(
+                outcome_key, outcome)
+            if prior_outcome != outcome:
+                fail("timing arm outcome changes between equivalent panels")
+            side_identities.append(identity)
+            side_outcomes.append(outcome)
+        if row["panel_kind"] == "AA" and (
+                side_identities[0] != side_identities[1] or
+                side_outcomes[0] != side_outcomes[1]):
+            fail("A/A timing sides must have identical identity and outcome")
+
+        elapsed = row["elapsed_ns"]
+        both_success = all(outcome[0] == "success" for outcome in side_outcomes)
+        if not isinstance(elapsed, list) or len(elapsed) != 4:
+            fail("timing elapsed_ns must contain exactly four slots")
+        if both_success:
+            if any(type(value) is not int or not 1 <= value < (1 << 63)
+                   for value in elapsed):
+                fail("successful timing slots must be positive int63 nanoseconds")
+            logs = [math.log(value) for value in elapsed]
+            if expected_order == "ABBA":
+                log_ratio = ((logs[0] - logs[1]) +
+                             (logs[3] - logs[2])) / 2.0
+            else:
+                log_ratio = ((logs[1] - logs[0]) +
+                             (logs[2] - logs[3])) / 2.0
+            group = (row["band"], row["block_bytes"], row["replicate"])
+            measurements[panel_key][group].append(log_ratio)
+        else:
+            if any(value is not None for value in elapsed):
+                fail("failed timing panels must use four null elapsed slots")
+            group_scope = (row["band"], row["block_bytes"])
+            failed_groups[panel_key].add(group_scope)
+            failed_aggregate[panel_key] = True
+
+    expected_rows = cell_count * len(panels)
+    if sum(seen) != expected_rows:
+        fail("timing receipt has {} rows, expected {}".format(
+            sum(seen), expected_rows))
+
+    repetitions = domain["paired_repetitions"]
+    K_values = list(_k_values(contract, domain["k_set"]))
+    K_count_by_band: Dict[str, int] = defaultdict(int)
+    for K in K_values:
+        K_count_by_band[_band_for(contract, K)] += 1
+    panel_statistics: Dict[str, Any] = {}
+    for panel in panels:
+        panel_key = canonical_json(panel)
+        by_band_width = {}
+        for band in (value[0] for value in EXPECTED_BANDS):
+            expected_K_count = K_count_by_band[band]
+            for width in domain["block_bytes"]:
+                label = "{}|{}".format(band, width)
+                if (band, width) in failed_groups[panel_key]:
+                    by_band_width[label] = {"selectable": False}
+                    continue
+                replicate_means = []
+                for replicate in range(repetitions):
+                    values = measurements[panel_key][(band, width, replicate)]
+                    if len(values) != expected_K_count:
+                        fail("timing band/width replicate has an incomplete K cohort")
+                    replicate_means.append(math.fsum(values) / len(values))
+                by_band_width[label] = {
+                    "selectable": True,
+                    **_timing_confidence_interval(
+                        contract, replicate_means, repetitions),
+                }
+        if failed_aggregate[panel_key]:
+            aggregate = {"selectable": False}
+        else:
+            aggregate_means = []
+            expected_per_replicate = len(K_values) * len(domain["block_bytes"])
+            for replicate in range(repetitions):
+                values = []
+                for band in (value[0] for value in EXPECTED_BANDS):
+                    for width in domain["block_bytes"]:
+                        values.extend(measurements[panel_key][(
+                            band, width, replicate)])
+                if len(values) != expected_per_replicate:
+                    fail("aggregate timing replicate has an incomplete cell cohort")
+                aggregate_means.append(math.fsum(values) / len(values))
+            aggregate = {
+                "selectable": True,
+                **_timing_confidence_interval(
+                    contract, aggregate_means, repetitions),
+            }
+        panel_statistics[panel_key] = {
+            "panel": panel,
+            "by_band_width": by_band_width,
+            "aggregate": aggregate,
+        }
+
+    decisions: Dict[str, Any] = {}
+    for candidate in candidates:
+        candidate_decisions = {}
+        for value in contract["timing"]["panel_protocol"]["candidate_ab"]:
+            panel = {
+                "panel_kind": "AB", "scope": value["scope"],
+                "left_arm": candidate, "right_arm": value["control"],
+            }
+            left_aa = {
+                "panel_kind": "AA", "scope": value["scope"],
+                "left_arm": candidate, "right_arm": candidate,
+            }
+            right_aa = {
+                "panel_kind": "AA", "scope": value["scope"],
+                "left_arm": value["control"], "right_arm": value["control"],
+            }
+            ab_stats = panel_statistics[canonical_json(panel)]
+            left_stats = panel_statistics[canonical_json(left_aa)]
+            right_stats = panel_statistics[canonical_json(right_aa)]
+            group_decisions = {
+                label: _timing_group_decision(
+                    contract, stats, left_stats["by_band_width"][label],
+                    right_stats["by_band_width"][label])
+                for label, stats in ab_stats["by_band_width"].items()
+            }
+            aggregate_decision = _timing_group_decision(
+                contract, ab_stats["aggregate"], left_stats["aggregate"],
+                right_stats["aggregate"])
+            key = "{}|{}".format(value["scope"], value["control"])
+            candidate_decisions[key] = {
+                "by_band_width": group_decisions,
+                "aggregate": aggregate_decision,
+            }
+        decisions[candidate] = {
+            "panels": candidate_decisions,
+            "phase_speed_gate_pass": _timing_speed_gate(
+                phase, candidate_decisions),
+        }
+
+    return {
+        "schema": SCHEMA + ".timing-summary.v1",
+        "phase": phase,
+        "contract_sha256": contract_sha256(contract),
+        "domain_sha256": domain["domain_sha256"],
+        "freeze_manifest_sha256": freeze_manifest_sha256(freeze),
+        "architecture_artifact_sha256":
+            architecture_artifact_sha256(freeze),
+        "arm_artifacts": frozen_arm_artifacts(freeze),
+        "rows": expected_rows,
+        "excluded_cells": 0,
+        "panel_statistics": panel_statistics,
+        "candidates": decisions,
+    }
+
+
+def select_development_architecture(
+        contract: Mapping[str, Any], recovery: Mapping[str, Any],
+        timing: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Apply the frozen architecture ordering to validated development summaries."""
+    contract_digest = contract_sha256(contract)
+    recovery_domain = contract["recovery"]["domains"]["development"]
+    timing_domain = contract["timing"]["domains"]["development"]
+    if (recovery.get("schema") != SCHEMA + ".ledger-summary.v1" or
+            timing.get("schema") != SCHEMA + ".timing-summary.v1" or
+            recovery.get("phase") != "development" or
+            timing.get("phase") != "development" or
+            recovery.get("contract_sha256") != contract_digest or
+            timing.get("contract_sha256") != contract_digest or
+            recovery.get("domain_sha256") != recovery_domain["domain_sha256"] or
+            timing.get("domain_sha256") != timing_domain["domain_sha256"] or
+            type(recovery.get("excluded_cells")) is not int or
+            recovery.get("excluded_cells") != 0 or
+            type(timing.get("excluded_cells")) is not int or
+            timing.get("excluded_cells") != 0):
+        fail("architecture selection requires development validator summaries")
+    recovery_freeze = recovery.get("freeze_manifest_sha256")
+    timing_freeze = timing.get("freeze_manifest_sha256")
+    if (not isinstance(recovery_freeze, str) or
+            SHA256.fullmatch(recovery_freeze) is None or
+            not isinstance(timing_freeze, str) or
+            SHA256.fullmatch(timing_freeze) is None):
+        fail("development summaries lack frozen manifest identities")
+    recovery_artifacts = recovery.get("architecture_artifact_sha256")
+    if (not isinstance(recovery_artifacts, str) or
+            SHA256.fullmatch(recovery_artifacts) is None or
+            recovery_artifacts != timing.get("architecture_artifact_sha256")):
+        fail("development recovery and timing substitute architecture artifacts")
+    arm_artifacts = recovery.get("arm_artifacts")
+    if (not isinstance(arm_artifacts, dict) or
+            arm_artifacts != timing.get("arm_artifacts")):
+        fail("development summaries substitute per-arm artifacts")
+    recovery_comparisons = recovery.get("comparisons")
+    timing_candidates = timing.get("candidates")
+    recovery_arms = recovery.get("arms")
+    if (not isinstance(recovery_comparisons, dict) or
+            not isinstance(timing_candidates, dict) or
+            not isinstance(recovery_arms, dict) or
+            set(recovery_comparisons) != set(timing_candidates)):
+        fail("development summaries disagree on the candidate roster")
+    candidates = sorted(recovery_comparisons)
+    if not candidates:
+        fail("development summaries contain no candidate")
+    controls = tuple(contract["selection"]["controls"])
+    if set(candidates) & set(controls):
+        fail("reserved controls cannot enter the candidate roster")
+    if set(recovery_arms) != set(controls) | set(candidates):
+        fail("development recovery summary has the wrong arm roster")
+    if set(arm_artifacts) != set(recovery_arms):
+        fail("development per-arm artifacts have the wrong roster")
+    for arm, artifact_value in arm_artifacts.items():
+        artifact = _exact_keys(artifact_value, (
+            "codec", "binary_sha256", "arm_descriptor_sha256",
+        ), "development arm artifact " + arm)
+        if (not isinstance(artifact["codec"], str) or
+                any(not isinstance(artifact[field], str) or
+                    SHA256.fullmatch(artifact[field]) is None
+                    for field in ("binary_sha256", "arm_descriptor_sha256"))):
+            fail("development per-arm artifact is malformed")
+    panel_count = len(contract["timing"]["panel_protocol"]["control_aa"]) + \
+        len(candidates) * (
+            len(contract["timing"]["panel_protocol"]["candidate_aa_scopes"]) +
+            len(contract["timing"]["panel_protocol"]["candidate_ab"]))
+    expected_timing_rows = timing_domain["expected_cells"] * panel_count
+    if (type(timing.get("rows")) is not int or
+            timing.get("rows") != expected_timing_rows or
+            type(recovery.get("mandatory_controls_supported")) is not bool):
+        fail("development summaries have the wrong frozen cardinality")
+
+    eligible = []
+    failures: Dict[str, Mapping[str, int]] = {}
+    thresholds = contract["recovery"]["overhead_thresholds"]
+    for arm in sorted(recovery_arms):
+        arm_summary = recovery_arms.get(arm)
+        if not isinstance(arm_summary, dict):
+            fail("development arm summary is malformed")
+        arm_cells = arm_summary.get("cells")
+        tail = arm_summary.get("failure_by_overhead")
+        if (type(arm_cells) is not int or
+                arm_cells != recovery_domain["expected_cells_per_arm"] or
+                not isinstance(tail, dict) or set(tail) != {
+                    str(threshold) for threshold in thresholds} or
+                any(type(tail.get(str(threshold))) is not int or
+                    not 0 <= tail[str(threshold)] <= arm_cells
+                    for threshold in thresholds)):
+            fail("development recovery totals are malformed")
+        ordered_tail = [tail[str(threshold)] for threshold in thresholds]
+        if any(left < right for left, right in zip(
+                ordered_tail, ordered_tail[1:])):
+            fail("development recovery tails are not nested")
+        failures[arm] = tail
+
+    for arm in candidates:
+        comparison = recovery_comparisons[arm]
+        timing_summary = timing_candidates[arm]
+        if (not isinstance(comparison, dict) or
+                not isinstance(timing_summary, dict) or
+                type(comparison.get("architecture_eligible")) is not bool or
+                type(timing_summary.get("phase_speed_gate_pass")) is not bool or
+                not isinstance(comparison.get("controls"), dict) or
+                set(comparison["controls"]) != set(controls)):
+            fail("development candidate summary is malformed")
+        if (comparison.get("architecture_eligible") is True and
+                timing_summary.get("phase_speed_gate_pass") is True and
+                recovery["mandatory_controls_supported"] is True):
+            eligible.append(arm)
+
+    bindings = {
+        "contract_sha256": contract_digest,
+        "recovery_domain_sha256": recovery_domain["domain_sha256"],
+        "timing_domain_sha256": timing_domain["domain_sha256"],
+        "recovery_freeze_manifest_sha256": recovery_freeze,
+        "timing_freeze_manifest_sha256": timing_freeze,
+        "architecture_artifact_sha256": recovery_artifacts,
+        "recovery_cells_per_arm": recovery_domain["expected_cells_per_arm"],
+        "timing_rows": expected_timing_rows,
+        "candidate_roster": candidates,
+    }
+    if not eligible:
+        result = {
+            "schema": SCHEMA + ".architecture-selection.v1",
+            **bindings,
+            "eligible_candidates": [],
+            "eligible_overhead0_failures": {},
+            "minimum_overhead0_failures": None,
+            "recovery_equivalence_allowance": None,
+            "recovery_equivalent_candidates": [],
+            "selected_arm": None,
+            "selected_codec": None,
+            "selected_arm_descriptor_sha256": None,
+            "selected_architecture_sha256": None,
+            "ranking": [],
+        }
+        result["selection_sha256"] = sha256_json(result)
+        return result
+    minimum = min(failures[arm]["0"] for arm in eligible)
+    margin_ppm = contract["selection"][
+        "architecture_failure_equivalence_ppm"]
+    cells = recovery_domain["expected_cells_per_arm"]
+    allowance = max(1, (margin_ppm * cells + 1000000 - 1) // 1000000)
+    equivalent = [
+        arm for arm in eligible
+        if failures[arm]["0"] <= minimum + allowance
+    ]
+    ranking_values = []
+    for arm in equivalent:
+        try:
+            solve = timing_candidates[arm]["panels"][
+                "decoder_solve|wirehair2_head"]["aggregate"]
+        except (KeyError, TypeError):
+            fail("development timing summary lacks aggregate solve evidence")
+        if not isinstance(solve, dict):
+            fail("development aggregate solve evidence is malformed")
+        mean = solve.get("mean_log_ratio")
+        if (solve.get("selectable") is not True or type(mean) is not float or
+                not math.isfinite(mean)):
+            fail("development aggregate solve evidence is not selectable")
+        ranking_values.append((
+            mean, failures[arm]["1"], failures[arm]["2"],
+            failures[arm]["4"], arm,
+        ))
+    ranking_values.sort()
+    selected = ranking_values[0][4]
+    selected_artifact = arm_artifacts[selected]
+    result = {
+        "schema": SCHEMA + ".architecture-selection.v1",
+        **bindings,
+        "eligible_candidates": sorted(eligible),
+        "eligible_overhead0_failures": {
+            arm: failures[arm]["0"] for arm in sorted(eligible)
+        },
+        "minimum_overhead0_failures": minimum,
+        "recovery_equivalence_allowance": allowance,
+        "recovery_equivalent_candidates": sorted(equivalent),
+        "ranking": [
+            {
+                "arm": value[4], "decoder_solve_mean_log_ratio": value[0],
+                "failures_overhead0": failures[value[4]]["0"],
+                "failures_overhead1": value[1],
+                "failures_overhead2": value[2],
+                "failures_overhead4": value[3],
+            }
+            for value in ranking_values
+        ],
+        "selected_arm": selected,
+        "selected_codec": selected_artifact["codec"],
+        "selected_arm_descriptor_sha256":
+            selected_artifact["arm_descriptor_sha256"],
+        "selected_architecture_sha256": selected_architecture_sha256(
+            selected, selected_artifact),
+    }
+    result["selection_sha256"] = sha256_json(result)
+    return result
+
+
+def _histogram(values: Iterable[int]) -> Dict[str, int]:
+    result: Dict[str, int] = defaultdict(int)
+    for value in values:
+        result[str(value)] += 1
+    return dict(sorted(result.items(), key=lambda item: int(item[0])))
+
+
+def _command_hashes(contract_path: Path) -> int:
+    contract = load_contract(contract_path, check_domain_hashes=False)
+    for phase in sorted(contract["recovery"]["domains"]):
+        print("recovery:{} {}".format(
+            phase, recovery_domain_sha256(contract, phase)))
+    for phase in sorted(contract["timing"]["domains"]):
+        print("timing:{} {}".format(
+            phase, timing_domain_sha256(contract, phase)))
+    return 0
+
+
+def _command_describe(contract_path: Path) -> int:
+    contract = load_contract(contract_path)
+    result = {
+        "schema": contract["schema"],
+        "contract_id": contract["contract_id"],
+        "contract_sha256": contract_sha256(contract),
+        "recovery_domains": {
+            phase: {
+                "cells_per_arm": domain["expected_cells_per_arm"],
+                "domain_sha256": domain["domain_sha256"],
+            }
+            for phase, domain in sorted(contract["recovery"]["domains"].items())
+        },
+        "timing_domains": {
+            phase: {
+                "cells": domain["expected_cells"],
+                "domain_sha256": domain["domain_sha256"],
+            }
+            for phase, domain in sorted(contract["timing"]["domains"].items())
+        },
+        "development_wall_time_seconds_per_candidate":
+            contract["timing"]["development_wall_time_seconds_per_candidate"],
+    }
+    print(json.dumps(result, sort_keys=True, indent=2))
+    return 0
+
+
+def _repair_map_arguments(values: Sequence[str]) -> Mapping[str, Path]:
+    result: Dict[str, Path] = {}
+    for value in values:
+        arm, separator, path_text = value.partition("=")
+        if not separator or not arm or not path_text or arm in result:
+            fail("--repair-map must be a unique ARM=PATH pair")
+        result[arm] = Path(path_text)
+    return result
+
+
+def _final_freeze_arguments(
+        values: Sequence[str]) -> Mapping[Tuple[str, str], Path]:
+    result: Dict[Tuple[str, str], Path] = {}
+    for value in values:
+        key_text, separator, path_text = value.partition("=")
+        evidence_kind, kind_separator, phase = key_text.partition(":")
+        key = (evidence_kind, phase)
+        if (not separator or not kind_separator or not path_text or
+                key in result):
+            fail("--freeze must be a unique KIND:PHASE=PATH value")
+        result[key] = Path(path_text)
+    return result
+
+
+def main(argv: Sequence[str] = ()) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--contract", type=Path, default=DEFAULT_CONTRACT)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers.add_parser("hashes", help="derive domain hashes while authoring a contract")
+    subparsers.add_parser("describe", help="validate and summarize the frozen contract")
+    ledger = subparsers.add_parser("validate-ledger", help="validate and summarize JSONL results")
+    ledger.add_argument("--phase", required=True)
+    ledger.add_argument("--freeze-manifest", required=True, type=Path)
+    ledger.add_argument("--trace-manifest", required=True, type=Path)
+    ledger.add_argument(
+        "--repair-map", action="append", default=[], metavar="ARM=PATH",
+        help="canonical frozen repair map; repeat once per mapped arm")
+    ledger.add_argument("ledger", type=Path)
+    timing = subparsers.add_parser(
+        "validate-timing", help="validate and summarize paired timing JSONL")
+    timing.add_argument("--phase", required=True)
+    timing.add_argument("--freeze-manifest", required=True, type=Path)
+    timing.add_argument("--trace-manifest", required=True, type=Path)
+    timing.add_argument(
+        "--repair-map", action="append", default=[], metavar="ARM=PATH",
+        help="canonical frozen repair map; repeat once per mapped arm")
+    timing.add_argument("receipt", type=Path)
+    continuity = subparsers.add_parser(
+        "validate-final-continuity",
+        help="prove that every final phase uses one architecture and map set")
+    continuity.add_argument(
+        "--freeze", action="append", default=[],
+        metavar="KIND:PHASE=PATH",
+        help="repeat for all four final recovery freezes and final timing")
+    continuity.add_argument(
+        "--selection-receipt", required=True, type=Path,
+        help="canonical development architecture-selection receipt")
+    args = parser.parse_args(list(argv) if argv else None)
+    try:
+        if args.command == "hashes":
+            return _command_hashes(args.contract)
+        if args.command == "describe":
+            return _command_describe(args.contract)
+        contract = load_contract(args.contract)
+        if args.command == "validate-final-continuity":
+            summary = validate_final_freeze_continuity(
+                contract, _final_freeze_arguments(args.freeze),
+                _load_canonical_json_file(
+                    args.selection_receipt, "architecture selection receipt"))
+            print(json.dumps(summary, sort_keys=True, indent=2))
+            return 0
+        repair_maps = _repair_map_arguments(args.repair_map)
+        if args.command == "validate-ledger":
+            summary = validate_ledger(
+                contract, args.phase, args.ledger, args.freeze_manifest,
+                args.trace_manifest, repair_maps)
+        else:
+            summary = validate_timing_receipt(
+                contract, args.phase, args.receipt, args.freeze_manifest,
+                args.trace_manifest, repair_maps)
+        print(json.dumps(summary, sort_keys=True, indent=2))
+        return 0
+    except ContractError as exc:
+        print("contract error: {}".format(exc), file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
