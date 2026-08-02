@@ -122,6 +122,33 @@ void SetBinaryPeelOracleForTesting(bool enabled);
 void ResetBinaryPeelOracleComparisonsForTesting();
 uint64_t BinaryPeelOracleComparisonsForTesting();
 
+/**
+    Force the bounded tiny-K direct GF(256) solver on or off in this thread.
+
+    The production/default state is off.  Enabling this control only attempts
+    the direct solver for its certified tiny geometry; ineligible systems and
+    recoverable local allocation failures use the unchanged general solver.
+*/
+void SetTinyDirectSolveForTesting(bool enabled);
+
+/**
+    Inject an exception at a tiny-direct allocation checkpoint in this thread.
+
+    A negative countdown disables injection.  Zero fails the next checkpoint;
+    a positive value is decremented at each checkpoint.  `length_error` selects
+    the exception type, otherwise std::bad_alloc is thrown.  The direct solver
+    must catch either exception and fall through to the general solver.
+*/
+void SetTinyDirectSolveAllocationFailureForTesting(
+    int64_t countdown,
+    bool length_error);
+
+/** Reset/read thread-local diagnostics for the forced tiny-direct path. */
+void ResetTinyDirectSolveCountersForTesting();
+uint64_t TinyDirectSolveAttemptsForTesting();
+uint64_t TinyDirectSolveCompletionsForTesting();
+uint64_t TinyDirectSolveFallbacksForTesting();
+
 #endif
 
 /**

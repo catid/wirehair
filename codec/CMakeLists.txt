@@ -91,6 +91,17 @@ if (BUILD_TESTS)
     add_test(NAME wirehair_v2_precode_solve_test
         COMMAND wirehair_v2_precode_solve_test)
 
+    add_executable(wirehair_v2_tiny_direct_test
+        V2TinyDirectTest.cpp
+        V2TinyDenseOracle.cpp
+        V2TinyDenseOracle.h)
+    wirehair_apply_project_options(wirehair_v2_tiny_direct_test)
+    target_link_libraries(wirehair_v2_tiny_direct_test wirehair_v2_policy)
+    add_test(NAME wirehair_v2_tiny_direct_test
+        COMMAND wirehair_v2_tiny_direct_test)
+    set_tests_properties(wirehair_v2_tiny_direct_test
+        PROPERTIES LABELS "v2;solve;tiny;experiment" TIMEOUT 120)
+
     add_executable(wirehair_v2_precode_roundtrip_test PrecodeRoundTripTest.cpp)
     wirehair_apply_project_options(wirehair_v2_precode_roundtrip_test)
     target_link_libraries(wirehair_v2_precode_roundtrip_test wirehair_v2_policy)

@@ -27,6 +27,9 @@ namespace {
 thread_local uint32_t OddPacketPeelSeedXor = 0u;
 thread_local uint32_t PacketRowSeedMultiplier = 1u;
 thread_local bool PacketRowSeedAvalanche = false;
+thread_local bool TinyDirectSolveEnabled = false;
+thread_local int64_t TinyDirectAllocationFailureCountdown = -1;
+thread_local bool TinyDirectAllocationThrowsLengthError = false;
 #endif
 
 constexpr uint32_t PackedWordCount(uint32_t bit_count)
@@ -262,6 +265,9 @@ static_assert(
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 std::atomic<uint32_t> BinaryPeelOracleUsers(0u);
 std::atomic<uint64_t> BinaryPeelOracleComparisons(0u);
+thread_local uint64_t TinyDirectSolveAttempts = 0u;
+thread_local uint64_t TinyDirectSolveCompletions = 0u;
+thread_local uint64_t TinyDirectSolveFallbacks = 0u;
 #endif
 
 bool CheckedBlockStorage(
@@ -1303,6 +1309,41 @@ uint64_t BinaryPeelOracleComparisonsForTesting()
 {
     return BinaryPeelOracleComparisons.load(std::memory_order_relaxed);
 }
+
+void SetTinyDirectSolveForTesting(bool enabled)
+{
+    TinyDirectSolveEnabled = enabled;
+}
+
+void SetTinyDirectSolveAllocationFailureForTesting(
+    int64_t countdown,
+    bool length_error)
+{
+    TinyDirectAllocationFailureCountdown = countdown;
+    TinyDirectAllocationThrowsLengthError = length_error;
+}
+
+void ResetTinyDirectSolveCountersForTesting()
+{
+    TinyDirectSolveAttempts = 0u;
+    TinyDirectSolveCompletions = 0u;
+    TinyDirectSolveFallbacks = 0u;
+}
+
+uint64_t TinyDirectSolveAttemptsForTesting()
+{
+    return TinyDirectSolveAttempts;
+}
+
+uint64_t TinyDirectSolveCompletionsForTesting()
+{
+    return TinyDirectSolveCompletions;
+}
+
+uint64_t TinyDirectSolveFallbacksForTesting()
+{
+    return TinyDirectSolveFallbacks;
+}
 #endif
 
 void PrecodeSolveResumeState::Clear()
@@ -1935,6 +1976,417 @@ WirehairResult SolvePrecodeSystem(
         intermediate_blocks_out, stats, resume_state);
 }
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+namespace {
+
+constexpr uint32_t kTinyDirectMaxSourceBlocks = 100u;
+constexpr uint32_t kTinyDirectMaxColumns = 160u;
+constexpr uint32_t kTinyDirectMaxRows = 160u;
+constexpr uint32_t kTinyDirectMaxBlockBytes = 4096u;
+
+enum class TinyDirectDisposition
+{
+    Ineligible,
+    Fallback,
+    Complete
+};
+
+struct TinyDirectOutcome
+{
+    TinyDirectOutcome(
+        TinyDirectDisposition disposition = TinyDirectDisposition::Ineligible,
+        WirehairResult result = Wirehair_Error)
+        : Disposition(disposition)
+        , Result(result)
+    {
+    }
+
+    TinyDirectDisposition Disposition;
+    WirehairResult Result;
+};
+
+void TinyDirectAllocationCheckpoint()
+{
+    if (TinyDirectAllocationFailureCountdown < 0) {
+        return;
+    }
+    if (TinyDirectAllocationFailureCountdown > 0)
+    {
+        --TinyDirectAllocationFailureCountdown;
+        return;
+    }
+    TinyDirectAllocationFailureCountdown = -1;
+    const bool throw_length_error = TinyDirectAllocationThrowsLengthError;
+    TinyDirectAllocationThrowsLengthError = false;
+    if (throw_length_error) {
+        throw std::length_error("injected tiny-direct allocation failure");
+    }
+    throw std::bad_alloc();
+}
+
+bool IsTinyDirectDenseAnchor(
+    DenseAnchorLayout layout,
+    uint32_t dense_row)
+{
+    return dense_row == 0u ||
+        (layout == DenseAnchorLayout::Two07 && dense_row == 7u);
+}
+
+#if defined(_MSC_VER)
+#define WH2_TINY_DIRECT_NOINLINE __declspec(noinline)
+#elif defined(__GNUC__) || defined(__clang__)
+#define WH2_TINY_DIRECT_NOINLINE __attribute__((noinline))
+#else
+#define WH2_TINY_DIRECT_NOINLINE
+#endif
+
+WH2_TINY_DIRECT_NOINLINE TinyDirectOutcome TryTinyDirectSolve(
+    const PrecodeSystem& system,
+    const PacketRowConfig& config,
+    const PacketRowRuntime& runtime,
+    const std::vector<SolvePacket>& packets,
+    uint32_t block_bytes,
+    size_t value_bytes,
+    std::vector<uint8_t>& output,
+    PrecodeSolveStats& st)
+{
+    const PrecodeParams& params = system.Params;
+    const uint32_t K = params.BlockCount;
+    const uint32_t S = params.Staircase;
+    const uint32_t D2 = params.DenseRows;
+    const uint32_t H = params.HeavyRows;
+    const bool supported_layout =
+        params.DenseAnchors == DenseAnchorLayout::Disabled ||
+        params.DenseAnchors == DenseAnchorLayout::Two07;
+    if (!TinyDirectSolveEnabled || K < 2u ||
+        K > kTinyDirectMaxSourceBlocks ||
+        S != wirehair::GetDenseCount(K) || D2 != 12u || H != 12u ||
+        params.SourceHits != 2u || params.DenseIdentityCorner ||
+        params.HeavyFamily != HeavyCoefficientFamily::PeriodicCauchy ||
+        !supported_layout || config.MixCount != kCertifiedPacketMixCount ||
+        block_bytes > kTinyDirectMaxBlockBytes)
+    {
+        return TinyDirectOutcome();
+    }
+
+    const uint64_t P_wide = (uint64_t)S + D2 + H;
+    const uint64_t L_wide = (uint64_t)K + P_wide;
+    if (packets.size() > (size_t)K + 4u) {
+        return TinyDirectOutcome();
+    }
+    const uint64_t row_count_wide = P_wide + packets.size();
+    if (L_wide == 0u || L_wide > kTinyDirectMaxColumns ||
+        row_count_wide == 0u || row_count_wide > kTinyDirectMaxRows ||
+        row_count_wide > UINT16_MAX ||
+        !runtime.IsValidFor(K, (uint32_t)P_wide, config.MixCount))
+    {
+        return TinyDirectOutcome();
+    }
+    const uint32_t P = (uint32_t)P_wide;
+    const uint32_t L = (uint32_t)L_wide;
+    const uint32_t row_count = (uint32_t)row_count_wide;
+    const uint64_t stride_wide = L_wide + block_bytes;
+    if (stride_wide > (uint64_t)std::numeric_limits<size_t>::max() ||
+        row_count_wide >
+            (uint64_t)std::numeric_limits<size_t>::max() / stride_wide)
+    {
+        return TinyDirectOutcome();
+    }
+    const size_t stride = (size_t)stride_wide;
+    const size_t matrix_bytes = (size_t)(row_count_wide * stride_wide);
+
+    ++TinyDirectSolveAttempts;
+    try
+    {
+        typedef std::chrono::steady_clock SolveClock;
+        const SolveClock::time_point build_start = SolveClock::now();
+
+        // Keep coefficients and RHS bytes for each equation in one allocation.
+        // The fixed row permutation changes pivot order without either another
+        // allocation or copying a payload-sized augmented row.
+        TinyDirectAllocationCheckpoint();
+        std::vector<uint8_t> matrix(matrix_bytes, 0u);
+        std::array<uint16_t, kTinyDirectMaxRows> logical_rows{};
+
+        size_t physical_row = 0u;
+        const auto add_binary_row = [&](
+            const std::vector<uint32_t>& columns,
+            const uint8_t* rhs) -> bool {
+            if (physical_row >= row_count) {
+                return false;
+            }
+            if (columns.size() > L) {
+                return false;
+            }
+            uint8_t* const row = matrix.data() + physical_row * stride;
+            uint32_t previous = 0u;
+            bool have_previous = false;
+            for (uint32_t column : columns)
+            {
+                // Recheck even on the trusted-system entry point: this test
+                // optimization must not turn a malformed cached system into an
+                // out-of-bounds write.
+                if (column >= L) {
+                    return false;
+                }
+                if (have_previous && column <= previous) {
+                    return false;
+                }
+                row[column] = 1u;
+                previous = column;
+                have_previous = true;
+            }
+            if (rhs) {
+                std::memcpy(row + L, rhs, block_bytes);
+            }
+            st.BinaryRowReferences += columns.size();
+            ++physical_row;
+            return true;
+        };
+
+        if (system.StaircaseRows.size() != S ||
+            system.DenseBasisRowColumns.size() != D2)
+        {
+            return {TinyDirectDisposition::Complete, Wirehair_InvalidInput};
+        }
+        for (const std::vector<uint32_t>& columns : system.StaircaseRows) {
+            if (!add_binary_row(columns, nullptr)) {
+                return {TinyDirectDisposition::Complete, Wirehair_InvalidInput};
+            }
+        }
+        for (const std::vector<uint32_t>& columns :
+                system.DenseBasisRowColumns) {
+            if (!add_binary_row(columns, nullptr)) {
+                return {TinyDirectDisposition::Complete, Wirehair_InvalidInput};
+            }
+        }
+        for (const SolvePacket& packet : packets)
+        {
+            if (physical_row >= row_count) {
+                return {TinyDirectDisposition::Complete, Wirehair_Error};
+            }
+            uint8_t* const row = matrix.data() + physical_row * stride;
+            size_t references = 0u;
+            bool valid_column = true;
+            const bool generated = ForEachPacketMatrixColumn(
+                K,
+                P,
+                packet.BlockId,
+                config,
+                runtime,
+                [&references](size_t count) { references = count; },
+                [&](uint32_t column) {
+                    if (column >= L) {
+                        valid_column = false;
+                    }
+                    else {
+                        row[column] ^= 1u;
+                    }
+                });
+            if (!generated || !valid_column || references == 0u) {
+                return {TinyDirectDisposition::Complete, Wirehair_InvalidInput};
+            }
+            std::memcpy(row + L, packet.Data, block_bytes);
+            if (references >
+                std::numeric_limits<uint64_t>::max() -
+                    st.BinaryRowReferences)
+            {
+                return {TinyDirectDisposition::Complete, Wirehair_Error};
+            }
+            st.BinaryRowReferences += references;
+            ++physical_row;
+        }
+        for (uint32_t heavy = 0u; heavy < H; ++heavy)
+        {
+            if (physical_row >= row_count) {
+                return {TinyDirectDisposition::Complete, Wirehair_Error};
+            }
+            uint8_t* const row = matrix.data() + physical_row * stride;
+            for (uint32_t column = 0u; column < L; ++column) {
+                row[column] = HeavyCoefficientForParams(
+                    params, heavy, column);
+            }
+            ++physical_row;
+        }
+        if (physical_row != row_count) {
+            return {TinyDirectDisposition::Complete, Wirehair_Error};
+        }
+
+        const uint32_t staircase_base = 0u;
+        const uint32_t dense_base = S;
+        const uint32_t packet_base = S + D2;
+        const uint32_t heavy_base = packet_base + (uint32_t)packets.size();
+        uint32_t logical = 0u;
+        const auto append_logical = [&](uint32_t row) {
+            logical_rows[logical++] = (uint16_t)row;
+        };
+        for (uint32_t row = 0u; row < S; ++row) {
+            append_logical(staircase_base + row);
+        }
+        // Consume the sparse equation-preserving deltas before packet rows,
+        // and leave each half-dense anchor until after the sparse rows.
+        for (uint32_t row = 0u; row < D2; ++row) {
+            if (!IsTinyDirectDenseAnchor(params.DenseAnchors, row)) {
+                append_logical(dense_base + row);
+            }
+        }
+        for (uint32_t row = 0u; row < packets.size(); ++row) {
+            append_logical(packet_base + row);
+        }
+        for (uint32_t row = 0u; row < D2; ++row) {
+            if (IsTinyDirectDenseAnchor(params.DenseAnchors, row)) {
+                append_logical(dense_base + row);
+            }
+        }
+        for (uint32_t row = 0u; row < H; ++row) {
+            append_logical(heavy_base + row);
+        }
+        if (logical != row_count) {
+            return {TinyDirectDisposition::Complete, Wirehair_Error};
+        }
+
+        st.PacketRows = (uint32_t)packets.size();
+        st.InactivatedColumns = L;
+        st.BinaryRowStorageBytes = matrix.capacity() * sizeof(uint8_t);
+        st.BinaryRowStorageAllocations = 1u;
+        st.ResidualRows = row_count;
+        const SolveClock::time_point build_end = SolveClock::now();
+        st.BuildNanoseconds = (uint64_t)
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                build_end - build_start).count();
+
+        std::array<uint16_t, kTinyDirectMaxColumns> pivot_columns{};
+        uint32_t rank = 0u;
+        for (uint32_t column = 0u; column < L && rank < row_count; ++column)
+        {
+            uint32_t pivot_logical = rank;
+            while (pivot_logical < row_count)
+            {
+                const uint8_t* const candidate = matrix.data() +
+                    (size_t)logical_rows[pivot_logical] * stride;
+                if (candidate[column] != 0u) {
+                    break;
+                }
+                ++pivot_logical;
+            }
+            if (pivot_logical == row_count) {
+                continue;
+            }
+            std::swap(logical_rows[rank], logical_rows[pivot_logical]);
+            uint8_t* const pivot = matrix.data() +
+                (size_t)logical_rows[rank] * stride;
+            const uint8_t pivot_value = pivot[column];
+            if (pivot_value != 1u)
+            {
+                gf256_div_mem(
+                    pivot + column,
+                    pivot + column,
+                    pivot_value,
+                    (int)(stride - column));
+                ++st.BlockMulAdds;
+            }
+            for (uint32_t target_logical = rank + 1u;
+                 target_logical < row_count;
+                 ++target_logical)
+            {
+                uint8_t* const target = matrix.data() +
+                    (size_t)logical_rows[target_logical] * stride;
+                const uint8_t scale = target[column];
+                if (scale == 0u) {
+                    continue;
+                }
+                if (scale == 1u) {
+                    gf256_add_mem(
+                        target + column,
+                        pivot + column,
+                        (int)(stride - column));
+                    ++st.BlockXors;
+                }
+                else
+                {
+                    gf256_muladd_mem(
+                        target + column,
+                        scale,
+                        pivot + column,
+                        (int)(stride - column));
+                    ++st.BlockMulAdds;
+                }
+            }
+            pivot_columns[rank] = (uint16_t)column;
+            ++rank;
+        }
+        st.ResidualRank = rank;
+
+        // Every non-pivot equation is reduced by every chosen pivot.  Inspect
+        // all of them, including surplus rows after full rank, before deciding
+        // between Success and NeedMore.
+        bool inconsistent = false;
+        for (uint32_t logical_row = rank;
+             logical_row < row_count;
+             ++logical_row)
+        {
+            const uint8_t* const row = matrix.data() +
+                (size_t)logical_rows[logical_row] * stride;
+            if (!RowIsZero(row, L) ||
+                !RowIsZero(row + L, block_bytes))
+            {
+                inconsistent = true;
+                break;
+            }
+        }
+        const SolveClock::time_point residual_end = SolveClock::now();
+        st.ResidualNanoseconds = (uint64_t)
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                residual_end - build_end).count();
+        if (inconsistent) {
+            return {TinyDirectDisposition::Complete, Wirehair_Error};
+        }
+        if (rank < L) {
+            return {TinyDirectDisposition::Complete, Wirehair_NeedMore};
+        }
+
+        TinyDirectAllocationCheckpoint();
+        std::vector<uint8_t> solved(value_bytes, 0u);
+        for (uint32_t reverse = rank; reverse-- > 0u;)
+        {
+            const uint8_t* const row = matrix.data() +
+                (size_t)logical_rows[reverse] * stride;
+            const uint32_t pivot_column = pivot_columns[reverse];
+            uint8_t* const value = solved.data() +
+                (size_t)pivot_column * block_bytes;
+            std::memcpy(value, row + L, block_bytes);
+            for (uint32_t column = pivot_column + 1u;
+                 column < L;
+                 ++column)
+            {
+                AddScaledBlock(
+                    value,
+                    row[column],
+                    solved.data() + (size_t)column * block_bytes,
+                    block_bytes,
+                    st);
+            }
+        }
+        const SolveClock::time_point backsub_end = SolveClock::now();
+        st.BackSubNanoseconds = (uint64_t)
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                backsub_end - residual_end).count();
+        output.swap(solved);
+        return {TinyDirectDisposition::Complete, Wirehair_Success};
+    }
+    catch (const std::bad_alloc&) {
+        return {TinyDirectDisposition::Fallback, Wirehair_OOM};
+    }
+    catch (const std::length_error&) {
+        return {TinyDirectDisposition::Fallback, Wirehair_OOM};
+    }
+}
+
+#undef WH2_TINY_DIRECT_NOINLINE
+
+} // namespace
+#endif
+
 static WirehairResult SolvePrecodeSystemImpl(
     const PrecodeSystem& system,
     const PacketRowConfig& config,
@@ -1976,6 +2428,39 @@ static WirehairResult SolvePrecodeSystemImpl(
     if (gf256_init() != 0) {
         return Wirehair_UnsupportedPlatform;
     }
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    if (TinyDirectSolveEnabled)
+    {
+        std::vector<uint8_t> direct_output;
+        PrecodeSolveStats direct_stats = {};
+        const TinyDirectOutcome direct = TryTinyDirectSolve(
+            system,
+            config,
+            runtime,
+            packets,
+            block_bytes,
+            value_bytes,
+            direct_output,
+            direct_stats);
+        if (direct.Disposition == TinyDirectDisposition::Fallback ||
+            (direct.Disposition == TinyDirectDisposition::Complete &&
+             direct.Result == Wirehair_NeedMore && resume_state))
+        {
+            ++TinyDirectSolveFallbacks;
+        }
+        else if (direct.Disposition == TinyDirectDisposition::Complete)
+        {
+            ++TinyDirectSolveCompletions;
+            if (direct.Result == Wirehair_Success) {
+                intermediate_blocks_out.swap(direct_output);
+            }
+            if (stats && direct.Result != Wirehair_InvalidInput) {
+                *stats = direct_stats;
+            }
+            return direct.Result;
+        }
+    }
+#endif
     const auto terminal_error = [&]() -> WirehairResult {
         if (stats) {
             *stats = st;
