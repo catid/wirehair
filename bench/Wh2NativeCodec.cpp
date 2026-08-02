@@ -368,6 +368,72 @@ NativeArmSpec MakeExperimentalWh2Arm(
     return spec;
 }
 
+bool ResolveNativeWh2Configuration(
+    const NativeArmSpec& spec,
+    uint32_t block_count,
+    uint32_t block_bytes,
+    ResolvedNativeWh2Configuration& result_out)
+{
+    if (!ValidArmSpec(spec) ||
+        spec.Kind == NativeArmKind::Wirehair1 ||
+        block_count < 2u || block_count > 64000u ||
+        block_bytes == 0u || block_bytes > UINT32_C(0x7fffffff))
+    {
+        return false;
+    }
+
+    wirehair_v2::PrecodeParams base_params;
+    wirehair_v2::PacketRowConfig base_packet_config;
+    if (spec.BaseKind == NativeWh2BaseKind::ProductionProfile)
+    {
+        const wirehair_v2::SeedProfile profile =
+            wirehair_v2::SelectSeedProfile(block_count, block_bytes);
+        wirehair_v2::MessagePrecodeEncoderOptions options;
+        if (!wirehair_v2::ResolveMessagePrecodeOptions(
+                profile, &spec.Wh2Options, options) ||
+            !wirehair_v2::ResolveMessagePrecodeConfiguration(
+                profile, options, base_params, base_packet_config))
+        {
+            return false;
+        }
+    }
+    else if (spec.BaseKind ==
+                 NativeWh2BaseKind::CanonicalCertifiedStructure)
+    {
+        base_params = wirehair_v2::MakeCertifiedParams(block_count, 0u);
+        base_packet_config.PeelSeed = 0u;
+        base_packet_config.MixCount =
+            wirehair_v2::kCertifiedPacketMixCount;
+    }
+    else {
+        return false;
+    }
+
+    if (spec.Transform &&
+        !spec.Transform(
+            block_count,
+            block_bytes,
+            base_params,
+            base_packet_config,
+            spec.TransformContext))
+    {
+        return false;
+    }
+
+    ResolvedNativeWh2Configuration resolved;
+    resolved.Params = wirehair_v2::PrecodeParamsForAttempt(
+        base_params, spec.ConstructionAttempt);
+    resolved.PacketConfig = wirehair_v2::PacketConfigForAttempt(
+        base_packet_config, spec.ConstructionAttempt);
+    resolved.PrecodeAttempt = spec.ConstructionAttempt;
+    resolved.PacketAttempt = spec.ConstructionAttempt;
+    if (!ValidPrecodeParamsShape(resolved.Params, block_count)) {
+        return false;
+    }
+    result_out = resolved;
+    return true;
+}
+
 bool MakeDeterministicSource(
     uint32_t block_count,
     uint32_t block_bytes,
@@ -488,52 +554,15 @@ WirehairResult NativeArm::InitializeOwnedSourceAfterGlobalInit(
             return Wirehair_Success;
         }
 
-        wirehair_v2::PrecodeParams base_params;
-        wirehair_v2::PacketRowConfig base_packet_config;
-        if (spec.BaseKind == NativeWh2BaseKind::ProductionProfile)
-        {
-            const wirehair_v2::SeedProfile profile =
-                wirehair_v2::SelectSeedProfile(block_count, block_bytes);
-            wirehair_v2::MessagePrecodeEncoderOptions options;
-            if (!wirehair_v2::ResolveMessagePrecodeOptions(
-                    profile, &spec.Wh2Options, options) ||
-                !wirehair_v2::ResolveMessagePrecodeConfiguration(
-                    profile, options, base_params, base_packet_config))
-            {
-                return Wirehair_InvalidInput;
-            }
-        }
-        else if (spec.BaseKind ==
-                     NativeWh2BaseKind::CanonicalCertifiedStructure)
-        {
-            base_params = wirehair_v2::MakeCertifiedParams(block_count, 0u);
-            base_packet_config.PeelSeed = 0u;
-            base_packet_config.MixCount =
-                wirehair_v2::kCertifiedPacketMixCount;
-        }
-        else {
-            return Wirehair_InvalidInput;
-        }
-        if (spec.Transform &&
-            !spec.Transform(
-                block_count,
-                block_bytes,
-                base_params,
-                base_packet_config,
-                spec.TransformContext))
+        ResolvedNativeWh2Configuration resolved;
+        if (!ResolveNativeWh2Configuration(
+                spec, block_count, block_bytes, resolved))
         {
             return Wirehair_InvalidInput;
         }
-
-        const wirehair_v2::PrecodeParams params =
-            wirehair_v2::PrecodeParamsForAttempt(
-                base_params, spec.ConstructionAttempt);
-        const wirehair_v2::PacketRowConfig packet_config =
-            wirehair_v2::PacketConfigForAttempt(
-                base_packet_config, spec.ConstructionAttempt);
-        if (!ValidPrecodeParamsShape(params, block_count)) {
-            return Wirehair_InvalidInput;
-        }
+        const wirehair_v2::PrecodeParams& params = resolved.Params;
+        const wirehair_v2::PacketRowConfig& packet_config =
+            resolved.PacketConfig;
 
         wirehair_v2::PrecodeSystem system;
         if (!wirehair_v2::BuildPrecodeSystem(params, system)) {

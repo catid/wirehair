@@ -31,6 +31,14 @@
 #include <sys/resource.h>
 #endif
 
+#ifndef WIREHAIR_V2_BENCH_SOURCE_GIT_COMMIT
+#define WIREHAIR_V2_BENCH_SOURCE_GIT_COMMIT \
+    0000000000000000000000000000000000000000
+#endif
+
+#define WIREHAIR_V2_STRINGIFY_INNER(value) #value
+#define WIREHAIR_V2_STRINGIFY(value) WIREHAIR_V2_STRINGIFY_INNER(value)
+
 namespace {
 
 using Clock = std::chrono::steady_clock;
@@ -3887,7 +3895,7 @@ int CmdPrecodeFail(int argc, char** argv)
         "overhead_stream=%s full_payload_solve=%u schedule=%s "
         "exact_attempt_mode=%u exact_precode_attempt=%u "
         "exact_packet_attempt=%u construction_seed_basis=%s "
-        "seed_schedule_sha256=%s\n",
+        "seed_schedule_sha256=%s source_git_commit=%s\n",
         trials, threads, loss, (unsigned long long)seed,
         source_hits_override,
         packet_peel_seed_xor,
@@ -3908,9 +3916,12 @@ int CmdPrecodeFail(int argc, char** argv)
             "production-profile",
         raw_architecture_seeds ?
             wirehair_v2::test::kRawArchitectureSeedScheduleSha256 :
-            "0000000000000000000000000000000000000000000000000000000000000000");
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        WIREHAIR_V2_STRINGIFY(WIREHAIR_V2_BENCH_SOURCE_GIT_COMMIT));
     std::printf(
-        "N,bb,heavy_family,mix_count,overhead,trials,success,rank_fail,error,"
+        "N,bb,heavy_family,mix_count,staircase,binary_dense_rows,"
+        "gf256_heavy_rows,source_hits,dense_identity_corner,"
+        "overhead,trials,success,rank_fail,error,"
         "fail_rate,"
         "inact_mu,inact_max,binary_def_mu,binary_def_max,heavy_gain_mu,"
         "heavy_gain_min,heavy_shortfall,solve_ms_mu,build_ms_mu,peel_ms_mu,"
@@ -4291,11 +4302,18 @@ int CmdPrecodeFail(int argc, char** argv)
             const std::string seed_attempt_text = exact_attempt_mode ?
                 std::string() : std::to_string(seed_attempt);
             std::printf(
-                "%u,%u,%s,%u,%u,%u,%u,%u,%u,%.8f,%.3f,%u,%.3f,%u,%.3f,"
+                "%u,%u,%s,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,"
+                "%.8f,%.3f,%u,%.3f,%u,%.3f,"
                 "%u,%u,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%s,%.3f,%.3f,%d,"
                 "%s,%s,%s,0x%x,%u,%u,%s,%s,%s,0x%016llx,0x%08x\n",
-                K, bb, HeavyFamilyName(heavy_family),
-                (uint32_t)mix_count_value, overhead, trials,
+                K, bb, HeavyFamilyName(system.Params.HeavyFamily),
+                config.MixCount,
+                system.Params.Staircase,
+                system.Params.DenseRows,
+                system.Params.HeavyRows,
+                system.Params.SourceHits,
+                system.Params.DenseIdentityCorner ? 1u : 0u,
+                overhead, trials,
                 successes, rank_failures, errors,
                 (double)(rank_failures + errors) / trials,
                 (double)inact_sum / trials,

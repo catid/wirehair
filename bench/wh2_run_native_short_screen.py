@@ -1026,13 +1026,20 @@ def _strict_response_validator(
         contract: Mapping[str, Any], freeze: Mapping[str, Any], kind: str,
         description: Mapping[str, Any], window_start_ns: int,
         ) -> ResponseValidator:
-    expected_schema = native_api.RECOVERY_RECORD_SCHEMA if kind == "recovery" \
-        else native_api.TIMING_RECORD_SCHEMA
-    payload_fields = contract_api.LEDGER_FIELDS if kind == "recovery" \
-        else contract_api.TIMING_RECEIPT_FIELDS
-
     def validate(value: Mapping[str, Any], _line: bytes,
                  worker: PersistentWorker, job: Job) -> int:
+        payload = value.get("payload")
+        if kind == "recovery":
+            if not isinstance(payload, dict):
+                fail("native response payload has an unexpected schema")
+            try:
+                expected_schema, payload_fields = \
+                    native_api.recovery_record_schema_fields(freeze, payload)
+            except native_api.NativeEvidenceError as exc:
+                fail(str(exc))
+        else:
+            expected_schema = native_api.TIMING_RECORD_SCHEMA
+            payload_fields = contract_api.TIMING_RECEIPT_FIELDS
         integer_fields = (
             "ordinal", "cpu", "worker_pid", "worker_process_start_ticks",
             "started_monotonic_ns", "finished_monotonic_ns",
@@ -1057,7 +1064,6 @@ def _strict_response_validator(
         for field in native_api.SHA256_FIELDS:
             if not _is_sha256(value.get(field)):
                 fail("native response {} is not a SHA-256".format(field))
-        payload = value.get("payload")
         if not isinstance(payload, dict) or set(payload) != payload_fields:
             fail("native response payload has an unexpected schema")
         try:

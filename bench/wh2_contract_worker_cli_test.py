@@ -12,8 +12,12 @@ import unittest
 
 
 DESCRIPTION_SCHEMA = "wirehair.wh2.native-worker-description.v1"
+RAW_DESCRIPTION_SCHEMA = "wirehair.wh2.native-worker-description.v2"
 DESCRIPTOR_SCHEMA = "wirehair.wh2.native-arm-descriptor.v1"
 RECOVERY_SCHEMA = "wirehair.wh2.native-recovery-record.v1"
+RAW_RECOVERY_SCHEMA = "wirehair.wh2.native-recovery-record.v2"
+RAW_REALIZED_SCHEMA = "wirehair.wh2.raw-realized-construction.v1"
+ZERO_SHA256 = "0" * 64
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 GIT_COMMIT = re.compile(r"^[0-9a-f]{40}$")
 RAW_SEED_BASIS = "uniform-raw-v1"
@@ -50,7 +54,7 @@ CANDIDATES = {
     "d12-h11-periodic": {
         "arm": "wirehair2_raw_d12_h11_periodic",
         "arm_descriptor_sha256":
-            "80f57b83eac9b8e3a19d8235cc067e39990980510e46588ddefa16f9561e1c38",
+            "91d7c1a558e1cf93b002fcf2062b7657d301faca03972215495bdf2429499e90",
         "codec": "wirehair2_experiment",
         "dense_rows": 12,
         "heavy_rows": 11,
@@ -59,7 +63,7 @@ CANDIDATES = {
     "d12-h13-periodic": {
         "arm": "wirehair2_raw_d12_h13_periodic",
         "arm_descriptor_sha256":
-            "0eb3aef0602b5e7de15c822de84a5dbfc5dfdd99b76fbfd41538f7a13248c3a5",
+            "7c7889747a97ac160726b807fb03349344d49d4bec84c9e8220aa4689b00d2ca",
         "codec": "wirehair2_experiment",
         "dense_rows": 12,
         "heavy_rows": 13,
@@ -68,7 +72,7 @@ CANDIDATES = {
     "d13-h12-periodic": {
         "arm": "wirehair2_raw_d13_h12_periodic",
         "arm_descriptor_sha256":
-            "2dc244661b3b073569319377ee3e55333a82ddad7bd328e1b0fef67395174614",
+            "c70e0f57bb8d7783fa29b0decbed5da5058a8eb532d57d540f72108e114f091a",
         "codec": "wirehair2_experiment",
         "dense_rows": 13,
         "heavy_rows": 12,
@@ -79,17 +83,17 @@ CANDIDATES = {
 RAW_CONTROL = {
     "arm": "wirehair2_raw_d12_h12_periodic",
     "arm_descriptor_sha256":
-        "0550e0ed0c62d5491ff6915652fd96ed25f3c7782462da8c551636ec2e0294dd",
+        "739092a7824449e6168f08b46661dfbe8ad5495ea4166b36073c79cd3bacdd11",
     "codec": "wirehair2_experiment",
 }
 
 CANDIDATE_REALIZED_CELL_ZERO = {
     "d12-h11-periodic":
-        "a09f111fcb61a34f0ac08900c72abb9882714b923af9e52f9bfd9c7476ceed5d",
+        "d9b77ab20e2d06aa4a9664c85f8f020dbec35249ad1f911a916c7ccae8937a49",
     "d12-h13-periodic":
-        "101544d96e066a770759657b04bc803a0fa45c06afe855b4103c3f4eb39b9bd6",
+        "a89c6b491b5f36bfe18b6ff21d6f327cb45b9e0c48b0f5b63571a002571ce8bf",
     "d13-h12-periodic":
-        "cad48f9e10712584a65d265c0cbfbc5324dcddef378ee4b7434130de7820de4e",
+        "943fffd7354809c211d93da6303616216287eaa554400d726199bffaeccf323a",
 }
 
 CANDIDATE_DISCRIMINATORS = {
@@ -125,7 +129,7 @@ CONTROL_REALIZED_CELL_ZERO = {
 }
 
 RAW_CONTROL_REALIZED_CELL_ZERO = (
-    "b50aface6540046ccc22dfe7f8f01041e601517df4dba1b6dfaf1de477f3fbc9"
+    "7562bed772f60e6cc3cfc7f1d9448e1c6fa88f976af003dfdfd4cc8425da43d6"
 )
 
 IDENTITY = {
@@ -147,12 +151,57 @@ def canonical_descriptor(arm, codec, transform):
 
 
 def candidate_arm_record(candidate):
-    """Description v1 binds these semantics through its canonical-ID hash."""
+    """Description v2 binds raw structure and seed policy independently."""
     return {
         "arm": candidate["arm"],
         "arm_descriptor_sha256": candidate["arm_descriptor_sha256"],
         "codec": candidate["codec"],
+        "construction_seed_basis": RAW_SEED_BASIS,
+        "seed_schedule_sha256": RAW_SEED_SCHEDULE_SHA256,
     }
+
+
+def candidate_control_record(control):
+    result = dict(control)
+    if control["codec"] == "wirehair1":
+        result["construction_seed_basis"] = "not-applicable"
+    else:
+        result["construction_seed_basis"] = "production-profile-v1"
+    result["seed_schedule_sha256"] = ZERO_SHA256
+    return result
+
+
+def raw_realized_object(payload, codec):
+    return {
+        "K": payload["K"],
+        "arm": payload["arm"],
+        "arm_descriptor_sha256": payload["arm_descriptor_sha256"],
+        "binary_dense_rows": payload["binary_dense_rows"],
+        "block_bytes": payload["block_bytes"],
+        "codec": codec,
+        "construction_seed_basis": payload["construction_seed_basis"],
+        "dense_identity_corner": payload["dense_identity_corner"],
+        "effective_packet_seed": payload["effective_packet_seed"],
+        "effective_precode_seed": payload["effective_precode_seed"],
+        "gf256_heavy_rows": payload["gf256_heavy_rows"],
+        "heavy_family": payload["heavy_family"],
+        "mix_count": payload["mix_count"],
+        "packet_attempt": payload["packet_attempt"],
+        "precode_attempt": payload["precode_attempt"],
+        "schema": RAW_REALIZED_SCHEMA,
+        "seed_schedule_sha256": payload["seed_schedule_sha256"],
+        "source_hits": payload["source_hits"],
+        "staircase": payload["staircase"],
+    }
+
+
+def raw_realized_sha256(payload, codec):
+    canonical = json.dumps(
+        raw_realized_object(payload, codec),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("ascii")).hexdigest()
 
 
 class ContractWorkerCliTest(unittest.TestCase):
@@ -179,11 +228,12 @@ class ContractWorkerCliTest(unittest.TestCase):
         return json.loads(result.stdout), result.stdout[:-1]
 
     def assert_exact_description(self, value, raw, arms, binary_sha256,
-                                 source_git_commit):
+                                 source_git_commit,
+                                 schema=DESCRIPTION_SCHEMA):
         expected = {
             "arms": arms,
             "binary_sha256": binary_sha256,
-            "schema": DESCRIPTION_SCHEMA,
+            "schema": schema,
             "source_git_commit": source_git_commit,
         }
         self.assertEqual(value, expected)
@@ -212,8 +262,7 @@ class ContractWorkerCliTest(unittest.TestCase):
                 RAW_SEED_SCHEDULE_CANONICAL.encode("ascii")).hexdigest(),
             RAW_SEED_SCHEDULE_SHA256,
         )
-        raw_transform = "d12-h12-periodic|seed_schedule={}".format(
-            RAW_SEED_SCHEDULE_SHA256)
+        raw_transform = "d12-h12-periodic"
         raw_descriptor = canonical_descriptor(
             RAW_CONTROL["arm"], RAW_CONTROL["codec"], raw_transform)
         raw_descriptor_hash = hashlib.sha256(
@@ -237,12 +286,14 @@ class ContractWorkerCliTest(unittest.TestCase):
                 self.assert_exact_description(
                     description,
                     raw,
-                    CONTROLS + [RAW_CONTROL, candidate_arm_record(candidate)],
+                    [candidate_control_record(control) for control in CONTROLS]
+                    + [candidate_arm_record(RAW_CONTROL),
+                       candidate_arm_record(candidate)],
                     executable_hash,
                     baseline["source_git_commit"],
+                    RAW_DESCRIPTION_SCHEMA,
                 )
-                transform = "{}|seed_schedule={}".format(
-                    candidate_id, RAW_SEED_SCHEDULE_SHA256)
+                transform = candidate_id
                 descriptor = canonical_descriptor(
                     candidate["arm"], candidate["codec"], transform)
                 descriptor_hash = hashlib.sha256(
@@ -350,6 +401,15 @@ class ContractWorkerCliTest(unittest.TestCase):
                 lines = result.stdout.splitlines()
                 self.assertEqual(len(lines), 6)
                 records = [json.loads(line) for line in lines]
+                self.assertEqual(
+                    lines,
+                    [json.dumps(record, sort_keys=True, separators=(",", ":"))
+                     for record in records],
+                )
+                for control_record in records[:2]:
+                    self.assertEqual(control_record["schema"], RECOVERY_SCHEMA)
+                    self.assertNotIn(
+                        "construction_seed_basis", control_record["payload"])
                 control_realized = {
                     record["payload"]["arm"]:
                         record["payload"]["realized_construction_sha256"]
@@ -359,7 +419,7 @@ class ContractWorkerCliTest(unittest.TestCase):
 
                 raw_control_record = records[2]
                 self.assertEqual(
-                    raw_control_record["schema"], RECOVERY_SCHEMA)
+                    raw_control_record["schema"], RAW_RECOVERY_SCHEMA)
                 self.assertEqual(raw_control_record["ordinal"], 2)
                 raw_control_payload = raw_control_record["payload"]
                 self.assertEqual(
@@ -373,12 +433,57 @@ class ContractWorkerCliTest(unittest.TestCase):
                     raw_control_payload["base_seed_attempt"],
                 )
                 self.assertEqual(
+                    raw_control_payload["precode_attempt"],
+                    raw_control_payload["construction_attempt"],
+                )
+                self.assertEqual(
+                    raw_control_payload["packet_attempt"],
+                    raw_control_payload["construction_attempt"],
+                )
+                self.assertEqual(
+                    raw_control_payload["construction_seed_basis"],
+                    RAW_SEED_BASIS,
+                )
+                self.assertEqual(
+                    raw_control_payload["seed_schedule_sha256"],
+                    RAW_SEED_SCHEDULE_SHA256,
+                )
+                self.assertEqual(raw_control_payload["binary_dense_rows"], 12)
+                self.assertEqual(raw_control_payload["gf256_heavy_rows"], 12)
+                self.assertEqual(
+                    raw_control_payload["heavy_family"], "periodic-cauchy")
+                self.assertRegex(
+                    raw_control_payload["effective_precode_seed"],
+                    r"^0x[0-9a-f]{16}$",
+                )
+                self.assertRegex(
+                    raw_control_payload["effective_packet_seed"],
+                    r"^0x[0-9a-f]{8}$",
+                )
+                self.assertEqual(
                     raw_control_payload["realized_construction_sha256"],
                     RAW_CONTROL_REALIZED_CELL_ZERO,
                 )
+                self.assertEqual(
+                    raw_realized_sha256(
+                        raw_control_payload, RAW_CONTROL["codec"]),
+                    RAW_CONTROL_REALIZED_CELL_ZERO,
+                )
+                added_fields = {
+                    "construction_seed_basis", "seed_schedule_sha256",
+                    "precode_attempt", "packet_attempt",
+                    "effective_precode_seed", "effective_packet_seed",
+                    "staircase", "binary_dense_rows", "gf256_heavy_rows",
+                    "source_hits", "dense_identity_corner", "heavy_family",
+                    "mix_count",
+                }
+                self.assertEqual(
+                    set(raw_control_payload),
+                    set(records[0]["payload"]) | added_fields,
+                )
 
                 record = records[3]
-                self.assertEqual(record["schema"], RECOVERY_SCHEMA)
+                self.assertEqual(record["schema"], RAW_RECOVERY_SCHEMA)
                 self.assertEqual(record["ordinal"], 3)
                 payload = record["payload"]
                 self.assertEqual(payload["arm"], candidate["arm"])
@@ -390,16 +495,84 @@ class ContractWorkerCliTest(unittest.TestCase):
                     payload["construction_attempt"],
                     payload["base_seed_attempt"],
                 )
+                self.assertEqual(payload["precode_attempt"], 0)
+                self.assertEqual(payload["packet_attempt"], 0)
+                self.assertEqual(
+                    payload["effective_precode_seed"],
+                    "0x487468302aad7105",
+                )
+                self.assertEqual(
+                    payload["effective_packet_seed"], "0x4ec72102")
+                self.assertEqual(
+                    payload["binary_dense_rows"], candidate["dense_rows"])
+                self.assertEqual(
+                    payload["gf256_heavy_rows"], candidate["heavy_rows"])
+                self.assertEqual(payload["source_hits"], 2)
+                self.assertEqual(payload["staircase"], 2)
+                self.assertFalse(payload["dense_identity_corner"])
+                self.assertEqual(payload["mix_count"], 3)
+                self.assertEqual(
+                    payload["heavy_family"], candidate["heavy_family"])
                 realized = payload["realized_construction_sha256"]
                 self.assertEqual(
                     realized, CANDIDATE_REALIZED_CELL_ZERO[candidate_id])
+                self.assertEqual(
+                    raw_realized_sha256(payload, candidate["codec"]), realized)
                 self.assertNotIn(realized, candidate_realized)
                 self.assertNotIn(realized, baseline_realized.values())
                 self.assertNotEqual(realized, RAW_CONTROL_REALIZED_CELL_ZERO)
                 candidate_realized.add(realized)
 
+                realized_object = raw_realized_object(
+                    payload, candidate["codec"])
+                for field, original in realized_object.items():
+                    with self.subTest(candidate=candidate_id, field=field):
+                        changed = dict(realized_object)
+                        if isinstance(original, bool):
+                            changed[field] = not original
+                        elif isinstance(original, int):
+                            changed[field] = original + 1
+                        else:
+                            changed[field] = original + "-tampered"
+                        changed_hash = hashlib.sha256(json.dumps(
+                            changed,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode("ascii")).hexdigest()
+                        self.assertNotEqual(changed_hash, realized)
+
                 raw_control_discriminator = records[4]["payload"]
                 candidate_discriminator = records[5]["payload"]
+                self.assertEqual(records[4]["schema"], RAW_RECOVERY_SCHEMA)
+                self.assertEqual(records[5]["schema"], RAW_RECOVERY_SCHEMA)
+                for discriminator_record, arm_codec in (
+                        (records[4], RAW_CONTROL["codec"]),
+                        (records[5], candidate["codec"])):
+                    discriminator_payload = discriminator_record["payload"]
+                    attempt = discriminator_payload["base_seed_attempt"]
+                    self.assertEqual(
+                        discriminator_payload["precode_attempt"], attempt)
+                    self.assertEqual(
+                        discriminator_payload["packet_attempt"], attempt)
+                    self.assertEqual(
+                        discriminator_payload["effective_precode_seed"],
+                        "0x{:016x}".format(
+                            (0x487468302AAD7105
+                             + attempt * 0x9E3779B97F4A7C15)
+                            & ((1 << 64) - 1)),
+                    )
+                    self.assertEqual(
+                        discriminator_payload["effective_packet_seed"],
+                        "0x{:08x}".format(
+                            (0x4EC72102 + attempt * 0x9E3779B9)
+                            & ((1 << 32) - 1)),
+                    )
+                    self.assertEqual(
+                        raw_realized_sha256(
+                            discriminator_payload, arm_codec),
+                        discriminator_payload[
+                            "realized_construction_sha256"],
+                    )
                 self.assertEqual(
                     raw_control_discriminator["arm"], RAW_CONTROL["arm"])
                 self.assertEqual(

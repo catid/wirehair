@@ -67,6 +67,40 @@ arm name, codec kind, and architecture descriptor.  This descriptor remains
 fixed across later equation-preserving implementation optimization even when
 the source commit or binary hash changes.
 
+### Raw seed-policy evidence boundary
+
+Closed uniform-raw architecture recovery uses
+`wirehair.wh2.benchmark-freeze.v2`. Every frozen arm separately binds its
+`construction_seed_basis` and `seed_schedule_sha256`: the certified head uses
+`production-profile-v1`, Wirehair1 uses `not-applicable`, and raw experimental
+arms use `uniform-raw-v1` plus schedule SHA-256
+`90a98a3db207852dabdf5fb27573ef48bce52e0228cee4e291d96fa44ed509a7`.
+The seed policy is deliberately alongside, not inside, the structure-only arm
+descriptor, so structure and seed-schedule changes cannot masquerade as one
+another.
+
+Raw native records, logical ledgers, and execution receipts use their v2
+schemas. Each raw row binds the paired precode/packet attempts, effective
+seeds, and realized staircase, binary-dense, and GF(256)-heavy geometry; the
+realized-construction hash covers all of those fields. The work/rank sidecar
+independently emits the same identity, and combination requires an exact
+native-to-sidecar trace and construction join for every raw cell. Missing or
+forged policy fields and legacy v1 freezes that claim a closed raw arm name or
+descriptor are rejected.
+
+The four current raw descriptors form a closed descriptor-to-arm/geometry
+map: D12/H11, D12/H12, D12/H13, and D13/H12, all periodic-Cauchy with mix
+count three. Validation also reproduces the certified `GetDenseCount(K)`
+staircase exactly for every K in 2..64,000, requires the certified source-hit
+boundary (two below K=10,000 and three thereafter), and requires the dense
+identity corner to remain disabled. Recomputing a realized-construction hash
+therefore cannot relabel one descriptor with another arm or geometry.
+
+Production and timing evidence remains on `benchmark-freeze.v1` and the
+existing v1 native receipt schemas. Selecting a raw-named architecture does
+not rewrite later repaired/validation production receipts; the schema boundary
+distinguishes raw construction evidence from the arm's human-readable name.
+
 ## Final recovery phases
 
 Only the selected architecture expands beyond the short screen.

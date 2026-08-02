@@ -18,8 +18,9 @@ namespace test {
 // first 64 and 32 bits of SHA-256("wirehair.wh2.raw-architecture.precode.v1")
 // and SHA-256("wirehair.wh2.raw-architecture.packet.v1"), respectively.
 // This is benchmark/test plumbing, not a production profile or wire-format
-// choice.  Keep the canonical name and values bound into every experimental
-// arm descriptor and result provenance that uses it.
+// choice.  Keep the canonical name and values bound separately alongside
+// every structure-only experimental descriptor and in each realized result
+// provenance receipt that uses it.
 static const uint64_t kRawArchitecturePrecodeSeed =
     UINT64_C(0x487468302aad7105);
 static const uint32_t kRawArchitecturePacketSeed = UINT32_C(0x4ec72102);

@@ -21,14 +21,63 @@ from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Seque
 
 SCHEMA = "wirehair.wh2.benchmark-contract.v3"
 FREEZE_SCHEMA = "wirehair.wh2.benchmark-freeze.v1"
+RAW_FREEZE_SCHEMA = "wirehair.wh2.benchmark-freeze.v2"
 REPAIR_MAP_SCHEMA = "wirehair.wh2.repair-map.v1"
 DEFAULT_CONTRACT = Path(__file__).with_name("wh2_benchmark_contract_v3.json")
 MAX_JSON_LINE_BYTES = 64 * 1024
 HEX64 = re.compile(r"0x[0-9a-f]{16}\Z")
+HEX32 = re.compile(r"0x[0-9a-f]{8}\Z")
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 GIT_COMMIT = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?\Z")
 PROFILE_ID = 0x4b295bbb47f4f9c9
 PROFILE_ENCODING_VERSION = 1
+RAW_CONSTRUCTION_SEED_BASIS = "uniform-raw-v1"
+PRODUCTION_CONSTRUCTION_SEED_BASIS = "production-profile-v1"
+NOT_APPLICABLE_CONSTRUCTION_SEED_BASIS = "not-applicable"
+RAW_SEED_SCHEDULE_SHA256 = (
+    "90a98a3db207852dabdf5fb27573ef48bce52e0228cee4e291d96fa44ed509a7"
+)
+RAW_PRECODE_BASE_SEED = 0x487468302aad7105
+RAW_PRECODE_ATTEMPT_STRIDE = 0x9e3779b97f4a7c15
+RAW_PACKET_BASE_SEED = 0x4ec72102
+RAW_PACKET_ATTEMPT_STRIDE = 0x9e3779b9
+LEGACY_RAW_ARM_DESCRIPTOR_SHA256S = frozenset((
+    # Legacy v3 raw descriptors included the seed schedule inside the
+    # descriptor. They remain denylisted so removing the raw arm-name prefix
+    # cannot downgrade an old receipt into generic v1 evidence.
+    "0550e0ed0c62d5491ff6915652fd96ed25f3c7782462da8c551636ec2e0294dd",
+    "80f57b83eac9b8e3a19d8235cc067e39990980510e46588ddefa16f9561e1c38",
+    "0eb3aef0602b5e7de15c822de84a5dbfc5dfdd99b76fbfd41538f7a13248c3a5",
+    "2dc244661b3b073569319377ee3e55333a82ddad7bd328e1b0fef67395174614",
+))
+RAW_STRUCTURE_BY_DESCRIPTOR = {
+    # Raw v2 keeps structure identity separate from its seed schedule.  Each
+    # closed descriptor hashes its canonical arm name and equation transform,
+    # so the validator must bind both that name and the realized fixed
+    # geometry before accepting a recomputed construction receipt.
+    "91d7c1a558e1cf93b002fcf2062b7657d301faca03972215495bdf2429499e90": {
+        "arm": "wirehair2_raw_d12_h11_periodic",
+        "binary_dense_rows": 12, "gf256_heavy_rows": 11,
+        "heavy_family": "periodic-cauchy", "mix_count": 3,
+    },
+    "739092a7824449e6168f08b46661dfbe8ad5495ea4166b36073c79cd3bacdd11": {
+        "arm": "wirehair2_raw_d12_h12_periodic",
+        "binary_dense_rows": 12, "gf256_heavy_rows": 12,
+        "heavy_family": "periodic-cauchy", "mix_count": 3,
+    },
+    "7c7889747a97ac160726b807fb03349344d49d4bec84c9e8220aa4689b00d2ca": {
+        "arm": "wirehair2_raw_d12_h13_periodic",
+        "binary_dense_rows": 12, "gf256_heavy_rows": 13,
+        "heavy_family": "periodic-cauchy", "mix_count": 3,
+    },
+    "c70e0f57bb8d7783fa29b0decbed5da5058a8eb532d57d540f72108e114f091a": {
+        "arm": "wirehair2_raw_d13_h12_periodic",
+        "binary_dense_rows": 13, "gf256_heavy_rows": 12,
+        "heavy_family": "periodic-cauchy", "mix_count": 3,
+    },
+}
+RAW_ARM_DESCRIPTOR_SHA256S = LEGACY_RAW_ARM_DESCRIPTOR_SHA256S | frozenset(
+    RAW_STRUCTURE_BY_DESCRIPTOR)
 MEASURED_BATCH_BLOCK_TARGET = 65536
 INVOCATIONS_PER_SLOT_FORMULA = (
     "max(1,ceil(measured_batch_block_target/K))"
@@ -54,6 +103,77 @@ EXPECTED_SHORT_K = (
     10001, 16384, 20000,
     20001, 32768, 49152, 64000,
 )
+_RAW_TINY_STAIRCASE = (
+    0, 0, 2, 3, 3, 5, 6, 6, 6, 7, 9, 10, 10, 10, 12, 14,
+    13, 14, 12, 12, 15, 16, 21, 14, 14, 13, 18, 21, 22, 21, 13, 22,
+    13, 24, 14, 17, 16, 24, 30, 26, 24, 18, 15, 15, 24, 18, 21, 17,
+    14, 16, 21, 18, 17, 22, 25, 20, 17, 18, 21, 18, 23, 20, 19, 23,
+    19,
+)
+_RAW_STAIRCASE_POINTS = (
+    (2048, 52), (2618, 54), (2826, 60), (3725, 62),
+    (3962, 67), (4277, 65), (4547, 60), (5065, 64),
+    (5224, 76), (5642, 66), (5909, 71), (6285, 76),
+    (6583, 66), (6895, 72), (7448, 69), (7682, 76),
+    (8046, 78), (8558, 76), (8963, 73), (9389, 81),
+    (10143, 86), (11129, 94), (12593, 99), (12988, 105),
+    (14032, 108), (14473, 114), (15397, 110), (16636, 113),
+    (17698, 118), (18828, 123), (19420, 127), (20343, 136),
+    (21979, 139), (23024, 150), (24119, 156), (25659, 162),
+    (27298, 173), (29042, 176), (30898, 183), (31870, 190),
+    (33906, 200), (35519, 211), (37208, 220), (38978, 234),
+    (40205, 253), (42776, 297), (44122, 320), (45511, 336),
+    (46944, 357), (48421, 373), (49177, 376), (50725, 380),
+    (52321, 391), (53968, 388), (54811, 382), (54811, 382),
+    (55667, 372), (57419, 362), (58316, 356), (60152, 347),
+    (61091, 337), (62045, 334), (63014, 340), (64000, 345),
+)
+
+
+def _raw_staircase_for_K(K: int) -> int:
+    """Exact Python port of GetDenseCount(), used by raw WH2 structure."""
+    if type(K) is not int or not 2 <= K <= 64000:
+        fail("raw staircase K is outside [2,64000]")
+    if K < len(_RAW_TINY_STAIRCASE):
+        return _RAW_TINY_STAIRCASE[K]
+    if K < 2048:
+        if K <= 500:
+            low_K, high_K, low_count, high_count = 64, 500, 26, 35
+        elif K <= 1000:
+            low_K, high_K, low_count, high_count = 500, 1000, 35, 48
+        else:
+            low_K, high_K, low_count, high_count = 1000, 2048, 48, 62
+    else:
+        low = 0
+        high = len(_RAW_STAIRCASE_POINTS) - 1
+        while True:
+            middle = (high + low) // 2
+            if middle == low:
+                break
+            if K > _RAW_STAIRCASE_POINTS[middle][0]:
+                low = middle
+            else:
+                high = middle
+        low_K, low_count = _RAW_STAIRCASE_POINTS[low]
+        high_K, high_count = _RAW_STAIRCASE_POINTS[low + 1]
+    numerator = (K - low_K) * (high_count - low_count)
+    denominator = high_K - low_K
+    quotient = numerator // denominator if numerator >= 0 else \
+        -((-numerator) // denominator)
+    count = low_count + quotient
+    remainder = count % 4
+    if remainder == 0:
+        count += 2
+    elif remainder == 1:
+        count += 1
+    elif remainder == 3:
+        count += 3
+    return count
+
+
+RAW_STAIRCASE_BY_K = {
+    K: _raw_staircase_for_K(K) for K in EXPECTED_SHORT_K
+}
 EXPECTED_TIMING_SHORT_K = (
     8, 32, 100, 128, 512, 1000,
     2048, 5000, 8192, 20000, 32768, 64000,
@@ -358,6 +478,15 @@ LEDGER_FIELDS = frozenset((
     "arm_descriptor_sha256", "construction_attempt",
     "realized_construction_sha256", "repair_map_sha256",
 ))
+RAW_CONSTRUCTION_FIELDS = (
+    "construction_seed_basis", "seed_schedule_sha256",
+    "precode_attempt", "packet_attempt", "effective_precode_seed",
+    "effective_packet_seed", "staircase", "binary_dense_rows",
+    "gf256_heavy_rows", "source_hits", "dense_identity_corner",
+    "heavy_family", "mix_count",
+)
+RAW_RECOVERY_RECORD_FIELDS = LEDGER_FIELDS | frozenset(
+    RAW_CONSTRUCTION_FIELDS)
 TIMING_RECEIPT_FIELDS = frozenset((
     "phase", "band", "K", "block_bytes", "loss_ppm", "schedule",
     "replicate", "base_seed_attempt", "loss_seed", "fixed_received_overhead",
@@ -385,6 +514,9 @@ FREEZE_FIELDS = frozenset((
 FREEZE_ARM_FIELDS = frozenset((
     "arm", "codec", "binary_sha256", "arm_descriptor_sha256",
     "construction_policy", "repair_map_sha256",
+))
+RAW_FREEZE_ARM_FIELDS = FREEZE_ARM_FIELDS | frozenset((
+    "construction_seed_basis", "seed_schedule_sha256",
 ))
 REPAIR_MAP_FIELDS = frozenset((
     "schema", "contract_sha256", "training_domain_sha256", "arm",
@@ -457,8 +589,11 @@ def freeze_manifest_sha256(value: Mapping[str, Any]) -> str:
     manifest = {
         key: item for key, item in value.items() if key != "arms_by_name"
     }
+    schema = manifest.get("schema")
+    if schema not in (FREEZE_SCHEMA, RAW_FREEZE_SCHEMA):
+        fail("cannot hash an unknown freeze-manifest schema")
     digest = hashlib.sha256()
-    digest.update(b"wirehair.wh2.benchmark-freeze.v1\0")
+    digest.update(schema.encode("ascii") + b"\0")
     digest.update(canonical_json(manifest).encode("utf-8"))
     return digest.hexdigest()
 
@@ -544,6 +679,114 @@ def realized_construction_sha256(
     digest.update(bytes.fromhex(arm_descriptor_sha256))
     digest.update(serialized_wh2_profile(K, block_bytes, seed_attempt))
     return digest.hexdigest()
+
+
+def _effective_raw_precode_seed(attempt: int) -> str:
+    if type(attempt) is not int or not 0 <= attempt < 256:
+        fail("raw precode attempt is outside [0,255]")
+    seed = (RAW_PRECODE_BASE_SEED +
+            attempt * RAW_PRECODE_ATTEMPT_STRIDE) & ((1 << 64) - 1)
+    return "0x{:016x}".format(seed)
+
+
+def _effective_raw_packet_seed(attempt: int) -> str:
+    if type(attempt) is not int or not 0 <= attempt < 256:
+        fail("raw packet attempt is outside [0,255]")
+    seed = (RAW_PACKET_BASE_SEED +
+            attempt * RAW_PACKET_ATTEMPT_STRIDE) & ((1 << 32) - 1)
+    return "0x{:08x}".format(seed)
+
+
+def _validate_raw_construction_fields(
+        value: Mapping[str, Any], context: str) -> Mapping[str, Any]:
+    _exact_keys(value, RAW_CONSTRUCTION_FIELDS, context)
+    if value["construction_seed_basis"] != RAW_CONSTRUCTION_SEED_BASIS:
+        fail("{} uses an unknown construction seed basis".format(context))
+    if value["seed_schedule_sha256"] != RAW_SEED_SCHEDULE_SHA256:
+        fail("{} does not bind the uniform raw seed schedule".format(context))
+    precode_attempt = value["precode_attempt"]
+    packet_attempt = value["packet_attempt"]
+    if (type(precode_attempt) is not int or
+            not 0 <= precode_attempt < 256 or
+            type(packet_attempt) is not int or
+            not 0 <= packet_attempt < 256):
+        fail("{} raw attempts must be uint8 integers".format(context))
+    precode_seed = value["effective_precode_seed"]
+    packet_seed = value["effective_packet_seed"]
+    if (not isinstance(precode_seed, str) or
+            HEX64.fullmatch(precode_seed) is None or
+            precode_seed != _effective_raw_precode_seed(precode_attempt)):
+        fail("{} effective precode seed is invalid".format(context))
+    if (not isinstance(packet_seed, str) or
+            HEX32.fullmatch(packet_seed) is None or
+            packet_seed != _effective_raw_packet_seed(packet_attempt)):
+        fail("{} effective packet seed is invalid".format(context))
+    for field in (
+            "staircase", "binary_dense_rows", "gf256_heavy_rows",
+            "mix_count"):
+        item = value[field]
+        if type(item) is not int or not 1 <= item < (1 << 32):
+            fail("{} {} must be a positive uint32".format(context, field))
+    source_hits = value["source_hits"]
+    if type(source_hits) is not int or not 1 <= source_hits <= 8:
+        fail("{} source_hits must be an integer in [1,8]".format(context))
+    if type(value["dense_identity_corner"]) is not bool:
+        fail("{} dense_identity_corner must be boolean".format(context))
+    if value["heavy_family"] != "periodic-cauchy":
+        fail("{} heavy_family must be periodic-cauchy".format(context))
+    return value
+
+
+def _validate_raw_descriptor_structure(
+        arm: str, descriptor_sha256: str, K: int,
+        value: Mapping[str, Any], context: str) -> None:
+    expected = RAW_STRUCTURE_BY_DESCRIPTOR.get(descriptor_sha256)
+    if expected is None:
+        fail("{} uses an unknown or retired raw descriptor".format(context))
+    if arm != expected["arm"]:
+        fail("{} raw arm name disagrees with its descriptor".format(context))
+    for field in (
+            "binary_dense_rows", "gf256_heavy_rows", "heavy_family",
+            "mix_count"):
+        if value[field] != expected[field]:
+            fail("{} {} disagrees with its raw descriptor".format(
+                context, field))
+    expected_staircase = _raw_staircase_for_K(K)
+    if value["staircase"] != expected_staircase:
+        fail("{} staircase disagrees with the frozen K geometry".format(
+            context))
+    if value["source_hits"] != (3 if K >= 10000 else 2):
+        fail("{} source_hits disagrees with the frozen K geometry".format(
+            context))
+    if value["dense_identity_corner"] is not False:
+        fail("{} dense identity corner disagrees with the raw descriptor".format(
+            context))
+
+
+def raw_realized_construction_sha256(
+        codec: str, arm: str, arm_descriptor_sha256: str, K: int,
+        block_bytes: int, raw_fields: Mapping[str, Any]) -> str:
+    if codec != "wirehair2_experiment":
+        fail("raw realized construction requires an experimental WH2 codec")
+    if (not isinstance(arm, str) or not arm.startswith("wirehair2_raw_") or
+            not isinstance(arm_descriptor_sha256, str) or
+            SHA256.fullmatch(arm_descriptor_sha256) is None):
+        fail("raw realized construction has an invalid arm identity")
+    if (type(K) is not int or not 2 <= K <= 64000 or
+            type(block_bytes) is not int or block_bytes <= 0 or
+            block_bytes >= 1 << 32 or K * block_bytes >= 1 << 64):
+        fail("raw realized construction has invalid dimensions")
+    fields = _validate_raw_construction_fields(
+        raw_fields, "raw realized construction")
+    return sha256_json({
+        "schema": "wirehair.wh2.raw-realized-construction.v1",
+        "codec": codec,
+        "arm": arm,
+        "arm_descriptor_sha256": arm_descriptor_sha256,
+        "K": K,
+        "block_bytes": block_bytes,
+        **{field: fields[field] for field in RAW_CONSTRUCTION_FIELDS},
+    })
 
 
 def _load_json_bytes(data: bytes, context: str) -> Any:
@@ -1003,7 +1246,8 @@ def load_freeze_manifest(
         evidence_kind: str = "recovery") -> Mapping[str, Any]:
     manifest = _load_canonical_json_file(path, "freeze manifest")
     _exact_keys(manifest, FREEZE_FIELDS, "freeze manifest")
-    if (manifest["schema"] != FREEZE_SCHEMA or
+    schema = manifest["schema"]
+    if (schema not in (FREEZE_SCHEMA, RAW_FREEZE_SCHEMA) or
             manifest["contract_sha256"] != contract_sha256(contract) or
             manifest["evidence_kind"] != evidence_kind or
             manifest["phase"] != phase):
@@ -1051,22 +1295,37 @@ def load_freeze_manifest(
     if not isinstance(arm_values, list) or len(arm_values) != len(roster):
         fail("freeze manifest arm records do not match the roster")
     arms: Dict[str, Mapping[str, Any]] = {}
-    raw_phase = contract["recovery"]["phase_seed_policy"].get(phase) == \
+    raw_phase = evidence_kind == "recovery" and \
+        contract["recovery"]["phase_seed_policy"].get(phase) == \
         "one_base_attempt_no_retry"
+    if schema == RAW_FREEZE_SCHEMA and not raw_phase:
+        fail("raw v2 freezes are restricted to raw recovery phases")
+    # Development timing uses an unrepaired production-profile attempt, but it
+    # is not raw architecture evidence and must never accept the raw v2 schema.
+    unrepaired_phase = raw_phase or \
+        (evidence_kind == "timing" and phase == "development")
     training_trace_sha = manifest["repair_training_trace_manifest_sha256"]
-    if raw_phase and training_trace_sha != "0" * 64:
-        fail("raw freezes must use the no-training-trace marker")
-    if not raw_phase and training_trace_sha == "0" * 64:
+    if unrepaired_phase and training_trace_sha != "0" * 64:
+        fail("unrepaired freezes must use the no-training-trace marker")
+    if not unrepaired_phase and training_trace_sha == "0" * 64:
         fail("repaired freezes must bind the training trace manifest")
     if phase == "final_repaired" and \
             training_trace_sha != manifest["trace_manifest_sha256"]:
         fail("the repaired training phase must bind its own frozen traces")
+    raw_candidate_count = 0
+    arm_fields = RAW_FREEZE_ARM_FIELDS if schema == RAW_FREEZE_SCHEMA else \
+        FREEZE_ARM_FIELDS
     for index, arm_value in enumerate(arm_values):
-        arm = _exact_keys(arm_value, FREEZE_ARM_FIELDS,
+        arm = _exact_keys(arm_value, arm_fields,
                           "freeze arm {}".format(index))
         name = arm["arm"]
         if name != roster[index] or name in arms:
             fail("freeze arm records must follow the unique frozen roster")
+        for field in ("binary_sha256", "arm_descriptor_sha256",
+                      "repair_map_sha256"):
+            if (not isinstance(arm[field], str) or
+                    SHA256.fullmatch(arm[field]) is None):
+                fail("freeze arm {} is not a SHA-256".format(field))
         if arm["codec"] not in (
                 "wirehair2_certified", "wirehair2_experiment", "wirehair1",
                 "routed_composite"):
@@ -1079,25 +1338,59 @@ def load_freeze_manifest(
         if name not in controls and arm["codec"] not in (
                 "wirehair2_experiment", "routed_composite"):
             fail("candidate codec must be experimental WH2 or routed composite")
-        expected_policy = "raw_base" if raw_phase else "repair_map"
+        raw_named = name.startswith("wirehair2_raw_")
+        raw_descriptor = arm["arm_descriptor_sha256"] in \
+            RAW_ARM_DESCRIPTOR_SHA256S
+        if schema == FREEZE_SCHEMA and raw_phase and \
+                (raw_named or raw_descriptor):
+            fail("legacy v1 freezes cannot authenticate raw WH2 arms")
+        if schema == RAW_FREEZE_SCHEMA:
+            if name not in controls:
+                if arm["codec"] != "wirehair2_experiment" or not raw_named:
+                    fail("raw v2 candidates must be raw-named experimental WH2")
+                expected_structure = RAW_STRUCTURE_BY_DESCRIPTOR.get(
+                    arm["arm_descriptor_sha256"])
+                if expected_structure is None:
+                    fail("raw v2 candidates must use a current closed descriptor")
+                if name != expected_structure["arm"]:
+                    fail("raw v2 candidate name disagrees with its descriptor")
+                raw_candidate_count += 1
+            if arm["codec"] == "routed_composite":
+                fail("raw v2 freezes cannot contain routed composites")
+        expected_policy = "raw_base" if unrepaired_phase else "repair_map"
         if arm["codec"] == "wirehair1":
             expected_policy = "not_applicable"
         if arm["construction_policy"] != expected_policy:
             fail("freeze arm construction policy disagrees with phase and codec")
-        for field in ("binary_sha256", "arm_descriptor_sha256",
-                      "repair_map_sha256"):
-            if (not isinstance(arm[field], str) or
-                    SHA256.fullmatch(arm[field]) is None):
-                fail("freeze arm {} is not a SHA-256".format(field))
-        if raw_phase and arm["repair_map_sha256"] != "0" * 64:
-            fail("raw freeze arms must use the no-map marker")
-        if (not raw_phase and arm["codec"] != "wirehair1" and
+        if unrepaired_phase and arm["repair_map_sha256"] != "0" * 64:
+            fail("unrepaired freeze arms must use the no-map marker")
+        if (not unrepaired_phase and arm["codec"] != "wirehair1" and
                 arm["repair_map_sha256"] == "0" * 64):
             fail("repaired Wirehair2/composite arms must freeze a repair map")
         if arm["codec"] == "wirehair1" and \
                 arm["repair_map_sha256"] != "0" * 64:
             fail("Wirehair1 must use the no-map marker")
+        if schema == RAW_FREEZE_SCHEMA:
+            seed_basis = arm["construction_seed_basis"]
+            seed_schedule_sha256 = arm["seed_schedule_sha256"]
+            if arm["codec"] == "wirehair2_certified":
+                expected_basis = PRODUCTION_CONSTRUCTION_SEED_BASIS
+                expected_schedule_sha256 = "0" * 64
+            elif arm["codec"] == "wirehair1":
+                expected_basis = NOT_APPLICABLE_CONSTRUCTION_SEED_BASIS
+                expected_schedule_sha256 = "0" * 64
+            else:
+                expected_basis = RAW_CONSTRUCTION_SEED_BASIS
+                expected_schedule_sha256 = RAW_SEED_SCHEDULE_SHA256
+            if seed_basis != expected_basis:
+                fail("raw v2 freeze arm uses the wrong construction seed basis")
+            if (not isinstance(seed_schedule_sha256, str) or
+                    SHA256.fullmatch(seed_schedule_sha256) is None or
+                    seed_schedule_sha256 != expected_schedule_sha256):
+                fail("raw v2 freeze arm uses the wrong seed schedule")
         arms[name] = arm
+    if schema == RAW_FREEZE_SCHEMA and raw_candidate_count == 0:
+        fail("raw v2 freeze must contain at least one raw candidate")
     result = dict(manifest)
     result["arms_by_name"] = arms
     return result
@@ -1796,13 +2089,21 @@ def validate_ledger(contract: Mapping[str, Any], phase: str, path: Path,
     capped_overhead_sum = {arm: 0 for arm in arms}
 
     for row in _parse_ledger(path):
-        if set(row) != LEDGER_FIELDS:
+        if not isinstance(row, dict):
             fail("ledger row has an unexpected schema")
-        arm = row["arm"]
+        arm = row.get("arm")
         if not isinstance(arm, str):
             fail("ledger arm name must be a string")
         if arm not in seen:
             fail("ledger contains an arm outside the frozen roster")
+        frozen_arm = freeze["arms_by_name"][arm]
+        raw_arm = freeze["schema"] == RAW_FREEZE_SCHEMA and \
+            frozen_arm["construction_seed_basis"] == \
+            RAW_CONSTRUCTION_SEED_BASIS
+        expected_fields = RAW_RECOVERY_RECORD_FIELDS if raw_arm else \
+            LEDGER_FIELDS
+        if set(row) != expected_fields:
+            fail("ledger row has an unexpected schema")
         for field in ("cell_sha256", "trace_sha256", "binary_sha256",
                       "arm_descriptor_sha256", "realized_construction_sha256",
                       "repair_map_sha256"):
@@ -1816,7 +2117,6 @@ def validate_ledger(contract: Mapping[str, Any], phase: str, path: Path,
         seen[arm][ordinal] = 1
         if row["trace_sha256"] != frozen_traces[ordinal]:
             fail("ledger trace differs from the pre-result trace manifest")
-        frozen_arm = freeze["arms_by_name"][arm]
         for field in ("binary_sha256", "arm_descriptor_sha256",
                       "repair_map_sha256"):
             if row[field] != frozen_arm[field]:
@@ -1830,9 +2130,30 @@ def validate_ledger(contract: Mapping[str, Any], phase: str, path: Path,
             frozen_arm, row["K"], row["base_seed_attempt"], repair_attempts)
         if attempt != expected_attempt:
             fail("ledger construction attempt differs from the frozen seed policy")
-        expected_realized = generic_realized_construction_sha256(
-            frozen_arm["codec"], frozen_arm["arm_descriptor_sha256"],
-            row["K"], row["block_bytes"], attempt)
+        if raw_arm:
+            raw_fields = {
+                field: row[field] for field in RAW_CONSTRUCTION_FIELDS
+            }
+            _validate_raw_construction_fields(raw_fields, "raw ledger row")
+            _validate_raw_descriptor_structure(
+                arm, frozen_arm["arm_descriptor_sha256"], row["K"], raw_fields,
+                "raw ledger row")
+            if (row["construction_seed_basis"] !=
+                    frozen_arm["construction_seed_basis"] or
+                    row["seed_schedule_sha256"] !=
+                    frozen_arm["seed_schedule_sha256"]):
+                fail("raw ledger seed policy differs from the frozen arm")
+            if (row["precode_attempt"] != attempt or
+                    row["packet_attempt"] != attempt):
+                fail("raw ledger attempts differ from the frozen paired attempt")
+            expected_realized = raw_realized_construction_sha256(
+                frozen_arm["codec"], arm,
+                frozen_arm["arm_descriptor_sha256"], row["K"],
+                row["block_bytes"], raw_fields)
+        else:
+            expected_realized = generic_realized_construction_sha256(
+                frozen_arm["codec"], frozen_arm["arm_descriptor_sha256"],
+                row["K"], row["block_bytes"], attempt)
         if row["realized_construction_sha256"] != expected_realized:
             fail("ledger realized construction does not match its frozen descriptor")
 
@@ -1995,7 +2316,7 @@ def validate_ledger(contract: Mapping[str, Any], phase: str, path: Path,
                 all_controls_noninferior and
                 summaries[arm]["phase_recovery_gate_pass"]),
         }
-    return {
+    result = {
         "schema": SCHEMA + ".ledger-summary.v1",
         "phase": phase,
         "contract_sha256": contract_sha256(contract),
@@ -2009,6 +2330,10 @@ def validate_ledger(contract: Mapping[str, Any], phase: str, path: Path,
         "arms": summaries,
         "comparisons": comparisons,
     }
+    if freeze["schema"] == RAW_FREEZE_SCHEMA:
+        result["schema"] = SCHEMA + ".ledger-summary.v2"
+        result["freeze_schema"] = RAW_FREEZE_SCHEMA
+    return result
 
 
 def _timing_outcome(
@@ -2396,9 +2721,10 @@ def select_development_architecture(
     contract_digest = contract_sha256(contract)
     recovery_domain = contract["recovery"]["domains"]["development"]
     timing_domain = contract["timing"]["domains"]["development"]
-    if (recovery.get("schema") != SCHEMA + ".ledger-summary.v1" or
+    if (recovery.get("schema") != SCHEMA + ".ledger-summary.v2" or
             timing.get("schema") != SCHEMA + ".timing-summary.v1" or
             recovery.get("phase") != "development" or
+            recovery.get("freeze_schema") != RAW_FREEZE_SCHEMA or
             timing.get("phase") != "development" or
             recovery.get("contract_sha256") != contract_digest or
             timing.get("contract_sha256") != contract_digest or

@@ -28,16 +28,17 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import wh2_benchmark_contract as contract_api
 import wh2_native_short_screen as native_api
+import wh2_precodefail_work_screen as work_api
 import wh2_run_native_short_screen as runner_api
 
 
 CANDIDATE_SPECS = (
     ("d12-h11-periodic", "wirehair2_raw_d12_h11_periodic",
-     "80f57b83eac9b8e3a19d8235cc067e39990980510e46588ddefa16f9561e1c38"),
+     "91d7c1a558e1cf93b002fcf2062b7657d301faca03972215495bdf2429499e90"),
     ("d12-h13-periodic", "wirehair2_raw_d12_h13_periodic",
-     "0eb3aef0602b5e7de15c822de84a5dbfc5dfdd99b76fbfd41538f7a13248c3a5"),
+     "7c7889747a97ac160726b807fb03349344d49d4bec84c9e8220aa4689b00d2ca"),
     ("d13-h12-periodic", "wirehair2_raw_d13_h12_periodic",
-     "2dc244661b3b073569319377ee3e55333a82ddad7bd328e1b0fef67395174614"),
+     "c70e0f57bb8d7783fa29b0decbed5da5058a8eb532d57d540f72108e114f091a"),
 )
 CANDIDATE_BY_ID = {
     candidate_id: (arm, descriptor)
@@ -50,18 +51,23 @@ CONTROL_ARMS = (
 RAW_CONTROL_ARM = (
     "wirehair2_raw_d12_h12_periodic", "wirehair2_experiment")
 RAW_CONTROL_DESCRIPTOR_SHA256 = \
-    "0550e0ed0c62d5491ff6915652fd96ed25f3c7782462da8c551636ec2e0294dd"
+    "739092a7824449e6168f08b46661dfbe8ad5495ea4166b36073c79cd3bacdd11"
 RAW_SEED_BASIS = "uniform-raw-v1"
 RAW_SEED_SCHEDULE_SHA256 = \
     "90a98a3db207852dabdf5fb27573ef48bce52e0228cee4e291d96fa44ed509a7"
+CANDIDATE_DESCRIPTION_SCHEMA = "wirehair.wh2.native-worker-description.v2"
+CANDIDATE_DESCRIPTION_ARM_FIELDS = frozenset((
+    "arm", "codec", "arm_descriptor_sha256",
+    "construction_seed_basis", "seed_schedule_sha256",
+))
 CONTROL_DESCRIPTOR_SHA256S = (
     "4cafe27a8fb388ca9a4249b2c279b1406e7a0a86bcf14e98246988c7c503fa7a",
     "d5a24d404e69efeb439907cd8271eba98d6af86b58efe159a820fb7aea08883d",
 )
 
-CAMPAIGN_SUMMARY_SCHEMA = "wirehair.wh2.native-recovery-screen-run.v1"
+CAMPAIGN_SUMMARY_SCHEMA = "wirehair.wh2.native-recovery-screen-run.v2"
 COMBINATION_SUMMARY_SCHEMA = \
-    "wirehair.wh2.logical-recovery-combination.v1"
+    "wirehair.wh2.logical-recovery-combination.v2"
 CAMPAIGN_SUMMARY_FIELDS = frozenset((
     "schema", "status", "output_dir", "candidate_id", "candidate_arm",
     "source_git_commit", "contract_sha256", "domain_sha256",
@@ -69,7 +75,7 @@ CAMPAIGN_SUMMARY_FIELDS = frozenset((
     "worker_cpus", "recovery_records", "recovery_freeze_sha256",
     "recovery_result_sha256", "recovery_execution_receipt_sha256",
     "thermal_samples", "cpu_tctl_max_millic", "dimm_max_millic",
-    "seed_basis", "seed_schedule_sha256", "summary_sha256",
+    "construction_seed_basis", "seed_schedule_sha256", "summary_sha256",
 ))
 COMBINATION_SUMMARY_FIELDS = frozenset((
     "schema", "status", "artifact_kind", "is_execution_receipt", "phase",
@@ -77,8 +83,11 @@ COMBINATION_SUMMARY_FIELDS = frozenset((
     "trace_file_sha256", "source_git_commit", "worker_binary_sha256",
     "candidate_roster", "arm_roster", "campaigns",
     "logical_freeze_manifest_sha256", "logical_result_stream_sha256",
-    "seed_basis", "seed_schedule_sha256", "validator_summary",
+    "construction_seed_basis", "seed_schedule_sha256", "validator_summary",
     "validator_summary_sha256", "combination_sha256",
+    "work_rank_summary_sha256", "work_rank_result_stream_sha256",
+    "work_rank_domain_sha256", "raw_identity_join_count",
+    "raw_identity_join_sha256",
 ))
 CAMPAIGN_BINDING_FIELDS = frozenset((
     "candidate_id", "candidate_arm", "run_summary_sha256",
@@ -90,6 +99,7 @@ RECOVERY_RECORDS = 1440
 LOGICAL_RECORDS = 2160
 RECOVERY_WORKER_COUNT = 8
 MAX_COMPLETED_ARTIFACT_BYTES = 64 * 1024 * 1024
+RAW_IDENTITY_JOIN_COUNT = 1440
 
 
 class RecoveryRunnerError(RuntimeError):
@@ -155,7 +165,7 @@ def describe_candidate_worker(
             deadline, "recovery candidate worker description"),
         "recovery candidate worker description")
     if (set(description) != runner_api.DESCRIPTION_FIELDS or
-            description.get("schema") != runner_api.DESCRIPTION_SCHEMA or
+            description.get("schema") != CANDIDATE_DESCRIPTION_SCHEMA or
             not isinstance(description.get("source_git_commit"), str) or
             re.fullmatch(r"[0-9a-f]{40}",
                          description["source_git_commit"]) is None or
@@ -168,12 +178,22 @@ def describe_candidate_worker(
     for index, expected_arm in enumerate(expected):
         arm = arms[index]
         if (not isinstance(arm, dict) or
-                set(arm) != runner_api.DESCRIPTION_ARM_FIELDS or
+                set(arm) != CANDIDATE_DESCRIPTION_ARM_FIELDS or
                 arm.get("arm") != expected_arm[0] or
                 arm.get("codec") != expected_arm[1] or
                 not _is_sha256(arm.get("arm_descriptor_sha256"))):
             fail("recovery candidate description has an invalid arm at index {}"
                  .format(index))
+    expected_policies = (
+        (contract_api.PRODUCTION_CONSTRUCTION_SEED_BASIS, ZERO_SHA256),
+        (contract_api.NOT_APPLICABLE_CONSTRUCTION_SEED_BASIS, ZERO_SHA256),
+        (RAW_SEED_BASIS, RAW_SEED_SCHEDULE_SHA256),
+        (RAW_SEED_BASIS, RAW_SEED_SCHEDULE_SHA256),
+    )
+    if tuple((arm["construction_seed_basis"],
+              arm["seed_schedule_sha256"]) for arm in arms) != \
+            expected_policies:
+        fail("recovery candidate description has an invalid seed-policy roster")
     if tuple(arms[index]["arm_descriptor_sha256"] for index in (0, 1)) != \
             CONTROL_DESCRIPTOR_SHA256S:
         fail("recovery candidate description substitutes a control descriptor")
@@ -229,9 +249,11 @@ def _candidate_freeze(
             "construction_policy": "not_applicable"
                 if value["codec"] == "wirehair1" else "raw_base",
             "repair_map_sha256": ZERO_SHA256,
+            "construction_seed_basis": value["construction_seed_basis"],
+            "seed_schedule_sha256": value["seed_schedule_sha256"],
         })
     return {
-        "schema": contract_api.FREEZE_SCHEMA,
+        "schema": contract_api.RAW_FREEZE_SCHEMA,
         "contract_sha256": contract_api.contract_sha256(contract),
         "evidence_kind": "recovery",
         "phase": "development",
@@ -288,6 +310,26 @@ def _validate_candidate_freeze(
     description_stub = {"resolved_path": worker_path}
     if commands != _candidate_commands(description_stub, candidate_id, cpus):
         fail("candidate freeze commands differ from the exact candidate argv")
+
+
+def _raw_policy_from_freeze(
+        freeze: Mapping[str, Any]) -> Tuple[str, str]:
+    """Return the one worker-attested raw policy bound by a v2 freeze."""
+    if freeze.get("schema") != contract_api.RAW_FREEZE_SCHEMA:
+        fail("candidate evidence does not use the raw v2 freeze schema")
+    arms = freeze.get("arms")
+    if not isinstance(arms, list):
+        fail("candidate freeze arm records are malformed")
+    policies = {
+        (arm.get("construction_seed_basis"),
+         arm.get("seed_schedule_sha256"))
+        for arm in arms
+        if isinstance(arm, dict) and
+        arm.get("construction_seed_basis") == RAW_SEED_BASIS
+    }
+    if policies != {(RAW_SEED_BASIS, RAW_SEED_SCHEDULE_SHA256)}:
+        fail("candidate freeze does not bind one uniform raw seed policy")
+    return next(iter(policies))
 
 
 def write_recovery_freeze(
@@ -489,6 +531,7 @@ def run_recovery_screen(args: argparse.Namespace) -> Mapping[str, Any]:
         if receipt.get("record_count") != RECOVERY_RECORDS:
             fail("recovery execution receipt does not contain 1440 records")
         thermal = receipt["thermal"]
+        raw_basis, raw_schedule_sha256 = _raw_policy_from_freeze(freeze)
         summary: Dict[str, Any] = {
             "schema": CAMPAIGN_SUMMARY_SCHEMA,
             "status": "complete",
@@ -510,8 +553,8 @@ def run_recovery_screen(args: argparse.Namespace) -> Mapping[str, Any]:
             "thermal_samples": thermal["sample_count"],
             "cpu_tctl_max_millic": thermal["cpu_tctl_max_millic"],
             "dimm_max_millic": thermal["dimm_max_millic"],
-            "seed_basis": RAW_SEED_BASIS,
-            "seed_schedule_sha256": RAW_SEED_SCHEDULE_SHA256,
+            "construction_seed_basis": raw_basis,
+            "seed_schedule_sha256": raw_schedule_sha256,
         }
         summary["summary_sha256"] = contract_api.sha256_json(summary)
         completed_summary = summary
@@ -544,7 +587,8 @@ def _parse_canonical_object(data: bytes, context: str) -> Mapping[str, Any]:
     return value
 
 
-def _read_regular_bytes(path: Path, context: str) -> bytes:
+def _read_regular_bytes(
+        path: Path, context: str, directory_fd: Optional[int] = None) -> bytes:
     """Read one bounded, already-opened regular artifact without symlink races."""
     descriptor = -1
     try:
@@ -554,11 +598,11 @@ def _read_regular_bytes(path: Path, context: str) -> bytes:
                 context))
         flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | nofollow | \
             getattr(os, "O_NONBLOCK", 0)
-        descriptor = os.open(str(path), flags)
-        info = os.fstat(descriptor)
-        if not stat.S_ISREG(info.st_mode):
+        descriptor = os.open(str(path), flags, dir_fd=directory_fd)
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
             fail("{} must be a regular non-symlink file".format(context))
-        if info.st_size > MAX_COMPLETED_ARTIFACT_BYTES:
+        if before.st_size > MAX_COMPLETED_ARTIFACT_BYTES:
             fail("{} exceeds the bounded artifact size".format(context))
         chunks = []
         size = 0
@@ -570,7 +614,19 @@ def _read_regular_bytes(path: Path, context: str) -> bytes:
             if size > MAX_COMPLETED_ARTIFACT_BYTES:
                 fail("{} exceeds the bounded artifact size".format(context))
             chunks.append(block)
-        return b"".join(chunks)
+        after = os.fstat(descriptor)
+        stable_before = (
+            before.st_dev, before.st_ino, before.st_size,
+            getattr(before, "st_mtime_ns", None),
+            getattr(before, "st_ctime_ns", None))
+        stable_after = (
+            after.st_dev, after.st_ino, after.st_size,
+            getattr(after, "st_mtime_ns", None),
+            getattr(after, "st_ctime_ns", None))
+        data = b"".join(chunks)
+        if stable_before != stable_after or len(data) != before.st_size:
+            fail("{} changed while it was being read".format(context))
+        return data
     except OSError as exc:
         fail("cannot read {} {}: {}".format(context, path, exc))
     finally:
@@ -633,20 +689,40 @@ def load_completed_campaign(
         contract: Mapping[str, Any], campaign_dir: Path,
         ) -> Mapping[str, Any]:
     """Revalidate one terminal four-arm campaign without claiming liveness."""
+    directory_fd = -1
     try:
-        info = os.lstat(str(campaign_dir))
-        if not stat.S_ISDIR(info.st_mode):
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        directory_flag = getattr(os, "O_DIRECTORY", 0)
+        if nofollow == 0 or directory_flag == 0:
+            fail("campaign directory cannot be opened fail-closed")
+        directory_fd = os.open(
+            str(campaign_dir), os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) |
+            nofollow | directory_flag)
+        opened_info = os.fstat(directory_fd)
+        if not stat.S_ISDIR(opened_info.st_mode):
             fail("campaign path must be a real directory, not a symlink")
         resolved = campaign_dir.resolve(strict=True)
+        resolved_info = resolved.stat()
+        if (opened_info.st_dev, opened_info.st_ino) != \
+                (resolved_info.st_dev, resolved_info.st_ino):
+            fail("campaign directory identity changed while opening")
     except OSError as exc:
+        if directory_fd >= 0:
+            os.close(directory_fd)
+            directory_fd = -1
         fail("cannot open campaign directory {}: {}".format(campaign_dir, exc))
-    source_paths = {
-        "summary": resolved / "run-summary.json",
-        "freeze": resolved / "recovery-freeze.json",
-        "trace": resolved / "recovery-traces.jsonl",
-        "native": resolved / "recovery-native-results.jsonl",
-        "result": resolved / "recovery-results.jsonl",
-        "receipt": resolved / "recovery-execution.json",
+    except BaseException:
+        if directory_fd >= 0:
+            os.close(directory_fd)
+            directory_fd = -1
+        raise
+    source_names = {
+        "summary": "run-summary.json",
+        "freeze": "recovery-freeze.json",
+        "trace": "recovery-traces.jsonl",
+        "native": "recovery-native-results.jsonl",
+        "result": "recovery-results.jsonl",
+        "receipt": "recovery-execution.json",
     }
     contexts = {
         "summary": "campaign run summary",
@@ -656,15 +732,20 @@ def load_completed_campaign(
         "result": "campaign recovery ledger",
         "receipt": "campaign recovery execution receipt",
     }
-    snapshots = {
-        key: _read_regular_bytes(path, contexts[key])
-        for key, path in source_paths.items()
-    }
+    try:
+        snapshots = {
+            key: _read_regular_bytes(
+                Path(name), contexts[key], directory_fd)
+            for key, name in source_names.items()
+        }
+    finally:
+        if directory_fd >= 0:
+            os.close(directory_fd)
     with tempfile.TemporaryDirectory(prefix="wh2-recovery-snapshot-") as raw:
         snapshot_root = Path(raw)
         paths = {
-            key: snapshot_root / path.name
-            for key, path in source_paths.items()
+            key: snapshot_root / name
+            for key, name in source_names.items()
         }
         for key, path in paths.items():
             _write_snapshot(path, snapshots[key])
@@ -697,6 +778,7 @@ def load_completed_campaign(
         if contract_api.freeze_manifest_sha256(freeze) != \
                 receipt.get("freeze_manifest_sha256"):
             fail("reopened candidate freeze differs from its execution receipt")
+        raw_basis, raw_schedule_sha256 = _raw_policy_from_freeze(freeze)
         expected_summary = {
             "source_git_commit": freeze["source_git_commit"],
             "contract_sha256": contract_api.contract_sha256(contract),
@@ -713,8 +795,8 @@ def load_completed_campaign(
             "thermal_samples": receipt["thermal"]["sample_count"],
             "cpu_tctl_max_millic": receipt["thermal"]["cpu_tctl_max_millic"],
             "dimm_max_millic": receipt["thermal"]["dimm_max_millic"],
-            "seed_basis": RAW_SEED_BASIS,
-            "seed_schedule_sha256": RAW_SEED_SCHEDULE_SHA256,
+            "construction_seed_basis": raw_basis,
+            "seed_schedule_sha256": raw_schedule_sha256,
         }
         if (type(expected_summary["controller_cpu"]) is not int or
                 expected_summary["controller_cpu"] < 0 or
@@ -732,7 +814,7 @@ def load_completed_campaign(
             contract, freeze, snapshots["trace"])
         return {
             "directory": str(resolved),
-            "directory_identity": (info.st_dev, info.st_ino),
+        "directory_identity": (opened_info.st_dev, opened_info.st_ino),
             "candidate_id": candidate_id,
             "candidate_arm": candidate_arm,
             "summary": summary,
@@ -848,7 +930,7 @@ def _combine_loaded_campaigns(
         fail("logical recovery ledger is not exactly six arms by 360 cells")
 
     logical_freeze = {
-        "schema": contract_api.FREEZE_SCHEMA,
+        "schema": contract_api.RAW_FREEZE_SCHEMA,
         "contract_sha256": expected_contract,
         "evidence_kind": "recovery",
         "phase": "development",
@@ -885,12 +967,119 @@ def _combine_loaded_campaigns(
     return logical_freeze, logical_rows, bindings, first["trace_bytes"]
 
 
+def _bind_work_rank_identities(
+        logical_rows: Sequence[Mapping[str, Any]],
+        work_screen: Mapping[str, Any], source_git_commit: str,
+        ) -> Mapping[str, Any]:
+    """Prove every native raw construction equals all four sidecar prefixes."""
+    summary = work_screen.get("summary")
+    work_rows = work_screen.get("rows")
+    if (not isinstance(summary, Mapping) or
+            not isinstance(work_rows, (list, tuple))):
+        fail("work/rank artifact loader returned a malformed result")
+    provenance = summary.get("source_provenance")
+    if not isinstance(provenance, Mapping) or \
+            provenance.get("source_git_commit") != source_git_commit:
+        fail("native and work/rank evidence use different source commits")
+    if (summary.get("construction_seed_basis") != RAW_SEED_BASIS or
+            summary.get("seed_schedule_sha256") !=
+            RAW_SEED_SCHEDULE_SHA256):
+        fail("work/rank summary does not bind the frozen raw seed policy")
+
+    grouped: Dict[Tuple[Any, ...], List[Mapping[str, Any]]] = {}
+    for row in work_rows:
+        if not isinstance(row, Mapping):
+            fail("work/rank result contains a malformed row")
+        key = (
+            row.get("arm"), row.get("K"), row.get("block_bytes"),
+            row.get("trial"), row.get("schedule"), row.get("loss_ppm"),
+            row.get("loss_seed"),
+        )
+        grouped.setdefault(key, []).append(row)
+    if len(work_rows) != work_api.EXPECTED_RECORDS or \
+            len(grouped) != RAW_IDENTITY_JOIN_COUNT:
+        fail("work/rank evidence has the wrong raw identity cardinality")
+
+    common_fields = (
+        "arm_descriptor_sha256", "construction_seed_basis",
+        "seed_schedule_sha256", "precode_attempt", "packet_attempt",
+        "effective_precode_seed", "effective_packet_seed", "staircase",
+        "binary_dense_rows", "gf256_heavy_rows", "source_hits",
+        "dense_identity_corner", "heavy_family", "mix_count",
+        "realized_construction_sha256",
+    )
+    joined = []
+    seen = set()
+    for native in logical_rows:
+        if native.get("construction_seed_basis") != RAW_SEED_BASIS:
+            continue
+        if native.get("base_seed_attempt") != native.get("trial") or \
+                native.get("construction_attempt") != \
+                native.get("precode_attempt") or \
+                native.get("precode_attempt") != native.get("packet_attempt"):
+            fail("native raw row has inconsistent construction attempts")
+        key = (
+            native.get("arm"), native.get("K"), native.get("block_bytes"),
+            native.get("trial"), native.get("schedule"),
+            native.get("loss_ppm"), native.get("loss_seed"),
+        )
+        if key in seen:
+            fail("native logical ledger repeats a raw construction identity")
+        seen.add(key)
+        matches = grouped.get(key)
+        if matches is None or \
+                {row.get("overhead") for row in matches} != {0, 1, 2, 4} or \
+                len(matches) != 4:
+            fail("native raw row lacks its exact four sidecar prefixes")
+        for sidecar in matches:
+            if any(native.get(field) != sidecar.get(field)
+                   for field in common_fields):
+                fail("native and work/rank effective constructions differ")
+            if (native.get("cell_sha256") != sidecar.get("cell_sha256") or
+                    native.get("trace_sha256") !=
+                    sidecar.get("frozen_trace_sha256")):
+                fail("native and work/rank frozen trace identities differ")
+        joined.append({
+            "K": native["K"],
+            "arm": native["arm"],
+            "block_bytes": native["block_bytes"],
+            "cell_sha256": native["cell_sha256"],
+            "loss_ppm": native["loss_ppm"],
+            "loss_seed": native["loss_seed"],
+            "realized_construction_sha256":
+                native["realized_construction_sha256"],
+            "schedule": native["schedule"],
+            "trace_sha256": native["trace_sha256"],
+            "trial": native["trial"],
+        })
+    if len(joined) != RAW_IDENTITY_JOIN_COUNT or seen != set(grouped):
+        fail("native and work/rank raw identity domains differ")
+    for field in ("summary_sha256", "result_stream_sha256",
+                  "work_domain_sha256"):
+        if not _is_sha256(summary.get(field)):
+            fail("work/rank summary {} is not a SHA-256".format(field))
+    return {
+        "work_rank_summary_sha256": summary["summary_sha256"],
+        "work_rank_result_stream_sha256": summary["result_stream_sha256"],
+        "work_rank_domain_sha256": summary["work_domain_sha256"],
+        "raw_identity_join_count": len(joined),
+        "raw_identity_join_sha256": contract_api.sha256_json(joined),
+    }
+
+
 def combine_recovery_screens(args: argparse.Namespace) -> Mapping[str, Any]:
     contract = contract_api.load_contract(args.contract)
     campaigns = [load_completed_campaign(contract, path)
                  for path in args.campaign_dir]
+    try:
+        work_screen = work_api.load_completed_work_screen(
+            contract, args.work_rank_dir)
+    except work_api.WorkScreenError as exc:
+        fail(str(exc))
     logical_freeze, logical_rows, bindings, trace_bytes = \
         _combine_loaded_campaigns(contract, campaigns)
+    work_binding = _bind_work_rank_identities(
+        logical_rows, work_screen, logical_freeze["source_git_commit"])
     output_dir = runner_api._create_output_dir(args.output_dir)
     trace_path = output_dir / "logical-recovery-traces.jsonl"
     freeze_path = output_dir / "logical-recovery-freeze.json"
@@ -921,6 +1110,7 @@ def combine_recovery_screens(args: argparse.Namespace) -> Mapping[str, Any]:
             fail("published logical ledger differs from its canonical hash")
     except runner_api.RunnerError as exc:
         fail(str(exc))
+    raw_basis, raw_schedule_sha256 = _raw_policy_from_freeze(loaded_freeze)
     summary: Dict[str, Any] = {
         "schema": COMBINATION_SUMMARY_SCHEMA,
         "status": "complete",
@@ -936,14 +1126,15 @@ def combine_recovery_screens(args: argparse.Namespace) -> Mapping[str, Any]:
         "candidate_roster": [value[0] for value in CANDIDATE_SPECS],
         "arm_roster": logical_freeze["arm_roster"],
         "campaigns": bindings,
-        "seed_basis": RAW_SEED_BASIS,
-        "seed_schedule_sha256": RAW_SEED_SCHEDULE_SHA256,
+        "construction_seed_basis": raw_basis,
+        "seed_schedule_sha256": raw_schedule_sha256,
         "logical_freeze_manifest_sha256":
             contract_api.freeze_manifest_sha256(loaded_freeze),
         "logical_result_stream_sha256": result_hash,
         "validator_summary": validator_summary,
         "validator_summary_sha256":
             contract_api.sha256_json(validator_summary),
+        **work_binding,
     }
     summary["combination_sha256"] = contract_api.sha256_json(summary)
     if set(summary) != COMBINATION_SUMMARY_FIELDS or \
@@ -991,6 +1182,9 @@ def main(argv: Sequence[str] = ()) -> int:
     combine.add_argument(
         "--campaign-dir", type=Path, action="append", required=True,
         help="repeat exactly three times, once per closed candidate")
+    combine.add_argument(
+        "--work-rank-dir", type=Path, required=True,
+        help="completed raw-v2 precodefail work/rank artifact directory")
     combine.add_argument("--output-dir", type=Path, required=True)
     combine.add_argument(
         "--deadline-seconds", type=float,

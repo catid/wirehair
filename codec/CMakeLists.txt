@@ -223,6 +223,8 @@ else()
 endif()
 add_executable(wirehair_v2_bench ${WIREHAIR_BENCH_EXCLUDE}
     WirehairV2Bench.cpp)
+target_compile_definitions(wirehair_v2_bench PRIVATE
+    "WIREHAIR_V2_BENCH_SOURCE_GIT_COMMIT=${WIREHAIR_WH2_SOURCE_GIT_COMMIT}")
 target_link_libraries(wirehair_v2_bench wirehair_v2_policy Threads::Threads)
 wirehair_apply_project_options(wirehair_v2_bench)
 

@@ -72,9 +72,9 @@ function(expect_precodefail_attempt_csv expected_seed expected_precode
     string(REPLACE "," ";" row_fields "${row}")
     list(LENGTH header_fields header_count)
     list(LENGTH row_fields row_count)
-    if(NOT header_count EQUAL 38 OR NOT row_count EQUAL header_count)
+    if(NOT header_count EQUAL 43 OR NOT row_count EQUAL header_count)
         message(FATAL_ERROR
-            "precodefail attempt CSV is not 38 aligned fields: ${ARGN}\n"
+            "precodefail attempt CSV is not 43 aligned fields: ${ARGN}\n"
             "header=${header}\nrow=${row}")
     endif()
     foreach(name IN ITEMS seed_attempt precode_attempt packet_attempt
@@ -221,7 +221,8 @@ expect_success("# peelcost:" peelcost --N 2 --bb-list 8 --trials 1
     --structures lt_m1_c16 --precode dense --overhead 0)
 expect_success("# precodefail:" precodefail --N 64 --bb-list 8
     --overhead 0,1 --trials 4 --threads 2 --loss 0.1)
-expect_success("64,8,periodic,2,0,2," precodefail --N 64 --bb-list 8
+expect_success("64,8,periodic,2,[^,]*,[^,]*,[^,]*,[^,]*,[^,]*,0,2,"
+    precodefail --N 64 --bb-list 8
     --overhead 0 --trials 2 --threads 2 --loss 0.1 --mix-count 2)
 expect_failure("precodefail mix count must be in" precodefail --N 64
     --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
@@ -277,34 +278,34 @@ expect_failure("--source-hits must be in" precodefail --N 64 --bb-list 8
 # selector's attempt 2; forcing (0,0) must expose that weak construction
 # instead of silently retrying.  Unequal pairs prove that the two seeds are
 # controlled independently, and 255 exercises the inclusive uint8 boundary.
-expect_success("2,1,periodic,3,0,1,1,0,0,.*0x0,2,2,selected" precodefail
+expect_success("2,1,periodic,3,[^,]*,[^,]*,[^,]*,[^,]*,[^,]*,0,1,1,0,0,.*0x0,2,2,selected" precodefail
     --N 2 --bb-list 1 --overhead 0 --trials 1 --threads 1 --loss 0)
 expect_precodefail_attempt_csv("2" "2" "2" "selected" "production-profile"
     precodefail
     --N 2 --bb-list 1 --overhead 0 --trials 1 --threads 1 --loss 0)
-expect_success("2,1,periodic,3,0,1,0,1,0,.*0x0,0,0,exact" precodefail
+expect_success("2,1,periodic,3,[^,]*,[^,]*,[^,]*,[^,]*,[^,]*,0,1,0,1,0,.*0x0,0,0,exact" precodefail
     --N 2 --bb-list 1 --overhead 0 --trials 1 --threads 1 --loss 0
     --exact-precode-attempt 0 --exact-packet-attempt 0
     --construction-seed-basis production-profile)
-expect_success("2,1,periodic,3,0,1,0,1,0,.*0x0,0,2,exact" precodefail
+expect_success("2,1,periodic,3,[^,]*,[^,]*,[^,]*,[^,]*,[^,]*,0,1,0,1,0,.*0x0,0,2,exact" precodefail
     --N 2 --bb-list 1 --overhead 0 --trials 1 --threads 1 --loss 0
     --exact-precode-attempt 0 --exact-packet-attempt 2
     --construction-seed-basis production-profile)
-expect_success("2,1,periodic,3,0,1,0,1,0,.*0x0,2,0,exact" precodefail
+expect_success("2,1,periodic,3,[^,]*,[^,]*,[^,]*,[^,]*,[^,]*,0,1,0,1,0,.*0x0,2,0,exact" precodefail
     --N 2 --bb-list 1 --overhead 0 --trials 1 --threads 1 --loss 0
     --exact-precode-attempt 2 --exact-packet-attempt 0
     --construction-seed-basis production-profile)
 # These asymmetric pairs have different outcomes, so swapping the p/q
 # implementation while leaving the CSV labels unchanged cannot pass.
-expect_success("2,1,periodic,3,0,1,1,0,0,.*0x0,2,1,exact" precodefail
+expect_success("2,1,periodic,3,[^,]*,[^,]*,[^,]*,[^,]*,[^,]*,0,1,1,0,0,.*0x0,2,1,exact" precodefail
     --N 2 --bb-list 1 --overhead 0 --trials 1 --threads 1 --loss 0
     --exact-precode-attempt 2 --exact-packet-attempt 1
     --construction-seed-basis production-profile)
-expect_success("2,1,periodic,3,0,1,0,1,0,.*0x0,1,2,exact" precodefail
+expect_success("2,1,periodic,3,[^,]*,[^,]*,[^,]*,[^,]*,[^,]*,0,1,0,1,0,.*0x0,1,2,exact" precodefail
     --N 2 --bb-list 1 --overhead 0 --trials 1 --threads 1 --loss 0
     --exact-precode-attempt 1 --exact-packet-attempt 2
     --construction-seed-basis production-profile)
-expect_success("2,1,periodic,3,0,1,1,0,0,.*0x0,2,2,exact" precodefail
+expect_success("2,1,periodic,3,[^,]*,[^,]*,[^,]*,[^,]*,[^,]*,0,1,1,0,0,.*0x0,2,2,exact" precodefail
     --N 2 --bb-list 1 --overhead 0 --trials 1 --threads 1 --loss 0
     --exact-precode-attempt 2 --exact-packet-attempt 2
     --construction-seed-basis production-profile)

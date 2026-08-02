@@ -67,15 +67,21 @@ static const char kTraceSchema[] =
     "wirehair.wh2.native-trace-record.v1";
 static const char kRecoverySchema[] =
     "wirehair.wh2.native-recovery-record.v1";
+static const char kRawRecoverySchema[] =
+    "wirehair.wh2.native-recovery-record.v2";
 static const char kTimingSchema[] =
     "wirehair.wh2.native-timing-record.v2";
 static const char kDescriptionSchema[] =
     "wirehair.wh2.native-worker-description.v1";
+static const char kRawDescriptionSchema[] =
+    "wirehair.wh2.native-worker-description.v2";
 static const char kDescriptorSchema[] =
     "wirehair.wh2.native-arm-descriptor.v1";
 static const char kWorkSchema[] = "wirehair.wh2.native-work.v1";
 static const char kRealizedSchema[] =
     "wirehair.wh2.realized-construction.v1";
+static const char kRawRealizedSchema[] =
+    "wirehair.wh2.raw-realized-construction.v1";
 static const char kRealizedDomain[] =
     "wirehair.wh2.realized-construction.v1\0";
 static const char kSourceDomain[] = "wirehair.wh2.source.v1\0";
@@ -87,7 +93,9 @@ static const uint32_t kRecoveryOverheadCap = 4u;
 static const char kRawControlArm[] =
     "wirehair2_raw_d12_h12_periodic";
 static const char kRawControlDescriptorSha256[] =
-    "0550e0ed0c62d5491ff6915652fd96ed25f3c7782462da8c551636ec2e0294dd";
+    "739092a7824449e6168f08b46661dfbe8ad5495ea4166b36073c79cd3bacdd11";
+static const char kProductionSeedBasis[] = "production-profile-v1";
+static const char kNotApplicableSeedBasis[] = "not-applicable";
 
 struct ArmDescriptor
 {
@@ -95,6 +103,8 @@ struct ArmDescriptor
     const char* Codec;
     std::string CanonicalDescriptor;
     std::string DescriptorSha256;
+    const char* ConstructionSeedBasis;
+    const char* SeedScheduleSha256;
 };
 
 struct CandidateDefinition
@@ -111,7 +121,7 @@ static const CandidateDefinition kRecoveryCandidates[] = {
     {
         "d12-h11-periodic",
         "wirehair2_raw_d12_h11_periodic",
-        "80f57b83eac9b8e3a19d8235cc067e39990980510e46588ddefa16f9561e1c38",
+        "91d7c1a558e1cf93b002fcf2062b7657d301faca03972215495bdf2429499e90",
         12u,
         11u,
         wirehair_v2::HeavyCoefficientFamily::PeriodicCauchy
@@ -119,7 +129,7 @@ static const CandidateDefinition kRecoveryCandidates[] = {
     {
         "d12-h13-periodic",
         "wirehair2_raw_d12_h13_periodic",
-        "0eb3aef0602b5e7de15c822de84a5dbfc5dfdd99b76fbfd41538f7a13248c3a5",
+        "7c7889747a97ac160726b807fb03349344d49d4bec84c9e8220aa4689b00d2ca",
         12u,
         13u,
         wirehair_v2::HeavyCoefficientFamily::PeriodicCauchy
@@ -127,7 +137,7 @@ static const CandidateDefinition kRecoveryCandidates[] = {
     {
         "d13-h12-periodic",
         "wirehair2_raw_d13_h12_periodic",
-        "2dc244661b3b073569319377ee3e55333a82ddad7bd328e1b0fef67395174614",
+        "c70e0f57bb8d7783fa29b0decbed5da5058a8eb532d57d540f72108e114f091a",
         13u,
         12u,
         wirehair_v2::HeavyCoefficientFamily::PeriodicCauchy
@@ -181,6 +191,18 @@ std::string HexSeed(uint64_t value)
     for (unsigned i = 0u; i < 16u; ++i)
     {
         text[17u - i] = hex[value & 15u];
+        value >>= 4;
+    }
+    return text;
+}
+
+std::string HexPacketSeed(uint32_t value)
+{
+    static const char hex[] = "0123456789abcdef";
+    std::string text("0x00000000");
+    for (unsigned i = 0u; i < 8u; ++i)
+    {
+        text[9u - i] = hex[value & 15u];
         value >>= 4;
     }
     return text;
@@ -333,6 +355,9 @@ bool BuildArmDescriptors(std::vector<ArmDescriptor>& arms)
             names[i], codecs[i], transforms[i]);
         descriptor.DescriptorSha256 = wirehair::wh2_benchmark::Sha256Hex(
             descriptor.CanonicalDescriptor);
+        descriptor.ConstructionSeedBasis = i == 1u ?
+            kNotApplicableSeedBasis : kProductionSeedBasis;
+        descriptor.SeedScheduleSha256 = kZeroSha256;
         if (!IsLowerSha256(descriptor.DescriptorSha256)) {
             return false;
         }
@@ -432,8 +457,7 @@ std::string RawTransformName(const char* structure)
     if (!structure || !*structure || !ValidRawSeedSchedule()) {
         return std::string();
     }
-    return std::string(structure) + "|seed_schedule=" +
-        wirehair_v2::test::kRawArchitectureSeedScheduleSha256;
+    return std::string(structure);
 }
 
 bool BuildCandidateArmDescriptors(
@@ -465,6 +489,10 @@ bool BuildCandidateArmDescriptors(
         raw_control.Arm, raw_control.Codec, raw_control_transform.c_str());
     raw_control.DescriptorSha256 = wirehair::wh2_benchmark::Sha256Hex(
         raw_control.CanonicalDescriptor);
+    raw_control.ConstructionSeedBasis =
+        wirehair_v2::test::kRawArchitectureSeedBasis;
+    raw_control.SeedScheduleSha256 =
+        wirehair_v2::test::kRawArchitectureSeedScheduleSha256;
 
     ArmDescriptor descriptor;
     descriptor.Arm = candidate.Arm;
@@ -474,6 +502,10 @@ bool BuildCandidateArmDescriptors(
         candidate.Arm, descriptor.Codec, candidate_transform.c_str());
     descriptor.DescriptorSha256 = wirehair::wh2_benchmark::Sha256Hex(
         descriptor.CanonicalDescriptor);
+    descriptor.ConstructionSeedBasis =
+        wirehair_v2::test::kRawArchitectureSeedBasis;
+    descriptor.SeedScheduleSha256 =
+        wirehair_v2::test::kRawArchitectureSeedScheduleSha256;
     if (raw_control_transform.empty() || candidate_transform.empty() ||
         !IsLowerSha256(raw_control.DescriptorSha256) ||
         raw_control.DescriptorSha256 != kRawControlDescriptorSha256 ||
@@ -604,38 +636,40 @@ bool RecoveryCandidateTransform(
     return true;
 }
 
-bool SameUnaffectedCandidateFields(
-    const wirehair_v2::PrecodeParams& transformed,
-    const wirehair_v2::PrecodeParams& original,
-    const wirehair_v2::PacketRowConfig& transformed_packet,
-    const wirehair_v2::PacketRowConfig& original_packet)
-{
-    return transformed.BlockCount == original.BlockCount &&
-        transformed.Staircase == original.Staircase &&
-        transformed.SourceHits == original.SourceHits &&
-        transformed.DenseIdentityCorner == original.DenseIdentityCorner &&
-        transformed.Seed == wirehair_v2::test::kRawArchitecturePrecodeSeed &&
-        transformed_packet.PeelSeed ==
-            wirehair_v2::test::kRawArchitecturePacketSeed &&
-        transformed_packet.MixCount == original_packet.MixCount;
-}
-
 bool ValidateRecoveryCandidateDefinition(
     const CandidateDefinition& candidate)
 {
     if (!ClosedCandidateSemantics(candidate)) {
         return false;
     }
-    static const uint32_t block_counts[] = { 3u, 1001u, 3061u, 5550u };
-    static const uint32_t block_bytes[] = { 2u, 1280u, 64u, 4096u };
-    for (std::size_t i = 0u;
-         i < sizeof(block_counts) / sizeof(block_counts[0]); ++i)
+    static const uint32_t block_counts[] = {
+        3u, 4u, 1001u, 3061u, 5550u, 7533u
+    };
+    static const uint32_t block_byte_values[] = {
+        2u, 64u, 1280u, 4096u
+    };
+    static const uint32_t attempts[] = { 0u, 1u, 2u, 255u };
+    static const uint64_t expected_precode[] = {
+        UINT64_C(0x487468302aad7105),
+        UINT64_C(0xe6abe1e9a9f7ed1a),
+        UINT64_C(0x84e35ba32942692f),
+        UINT64_C(0xe1b6a7f5f5df09f0)
+    };
+    static const uint32_t expected_packet[] = {
+        UINT32_C(0x4ec72102),
+        UINT32_C(0xecfe9abb),
+        UINT32_C(0x8b361474),
+        UINT32_C(0xe8096049)
+    };
+    for (std::size_t k_index = 0u;
+         k_index < sizeof(block_counts) / sizeof(block_counts[0]); ++k_index)
     {
+        const uint32_t K = block_counts[k_index];
         wirehair_v2::PrecodeParams certified;
         wirehair_v2::PacketRowConfig certified_packet;
-        certified = wirehair_v2::MakeCertifiedParams(block_counts[i], 0u);
+        certified = wirehair_v2::MakeCertifiedParams(K, 0u);
         certified_packet = wirehair_v2::PacketRowConfig();
-        if (certified.BlockCount != block_counts[i] ||
+        if (certified.BlockCount != K ||
             certified.DenseRows != 12u || certified.HeavyRows != 12u ||
             certified.HeavyFamily !=
                 wirehair_v2::HeavyCoefficientFamily::PeriodicCauchy ||
@@ -646,31 +680,73 @@ bool ValidateRecoveryCandidateDefinition(
             return false;
         }
 
-        wirehair_v2::PrecodeParams transformed = certified;
-        wirehair_v2::PacketRowConfig transformed_packet = certified_packet;
-        wirehair_v2::PrecodeParams raw_control = certified;
-        wirehair_v2::PacketRowConfig raw_control_packet = certified_packet;
-        if (!RecoveryCandidateTransform(
-                block_counts[i], block_bytes[i], transformed,
-                transformed_packet,
-                const_cast<CandidateDefinition*>(&candidate)) ||
-            !RawBaselineTransform(
-                block_counts[i], block_bytes[i], raw_control,
-                raw_control_packet, nullptr) ||
-            transformed.DenseRows != candidate.DenseRows ||
-            transformed.HeavyRows != candidate.HeavyRows ||
-            transformed.HeavyFamily != candidate.HeavyFamily ||
-            !SameUnaffectedCandidateFields(
-                transformed, certified, transformed_packet,
-                certified_packet) ||
-            raw_control.DenseRows != 12u || raw_control.HeavyRows != 12u ||
-            raw_control.HeavyFamily !=
-                wirehair_v2::HeavyCoefficientFamily::PeriodicCauchy ||
-            !SameUnaffectedCandidateFields(
-                raw_control, certified, raw_control_packet,
-                certified_packet))
+        for (std::size_t byte_index = 0u;
+             byte_index < sizeof(block_byte_values) /
+                 sizeof(block_byte_values[0]); ++byte_index)
         {
-            return false;
+            const uint32_t block_bytes = block_byte_values[byte_index];
+            for (std::size_t attempt_index = 0u;
+                 attempt_index < sizeof(attempts) / sizeof(attempts[0]);
+                 ++attempt_index)
+            {
+                const uint32_t attempt = attempts[attempt_index];
+                const NativeArmSpec raw_control_spec =
+                    wirehair_wh2_bench::MakeExperimentalWh2Arm(
+                        attempt,
+                        &RawBaselineTransform,
+                        nullptr,
+                        nullptr,
+                        wirehair_wh2_bench::NativeWh2BaseKind::
+                            CanonicalCertifiedStructure);
+                const NativeArmSpec candidate_spec =
+                    wirehair_wh2_bench::MakeExperimentalWh2Arm(
+                        attempt,
+                        &RecoveryCandidateTransform,
+                        const_cast<CandidateDefinition*>(&candidate),
+                        nullptr,
+                        wirehair_wh2_bench::NativeWh2BaseKind::
+                            CanonicalCertifiedStructure);
+                wirehair_wh2_bench::ResolvedNativeWh2Configuration control;
+                wirehair_wh2_bench::ResolvedNativeWh2Configuration actual;
+                if (!wirehair_wh2_bench::ResolveNativeWh2Configuration(
+                        raw_control_spec, K, block_bytes, control) ||
+                    !wirehair_wh2_bench::ResolveNativeWh2Configuration(
+                        candidate_spec, K, block_bytes, actual) ||
+                    control.PrecodeAttempt != attempt ||
+                    control.PacketAttempt != attempt ||
+                    actual.PrecodeAttempt != attempt ||
+                    actual.PacketAttempt != attempt ||
+                    control.Params.Seed != expected_precode[attempt_index] ||
+                    actual.Params.Seed != expected_precode[attempt_index] ||
+                    control.PacketConfig.PeelSeed !=
+                        expected_packet[attempt_index] ||
+                    actual.PacketConfig.PeelSeed !=
+                        expected_packet[attempt_index] ||
+                    control.Params.BlockCount != K ||
+                    actual.Params.BlockCount != K ||
+                    control.Params.Staircase != certified.Staircase ||
+                    actual.Params.Staircase != certified.Staircase ||
+                    control.Params.SourceHits != certified.SourceHits ||
+                    actual.Params.SourceHits != certified.SourceHits ||
+                    control.Params.DenseIdentityCorner !=
+                        certified.DenseIdentityCorner ||
+                    actual.Params.DenseIdentityCorner !=
+                        certified.DenseIdentityCorner ||
+                    control.Params.DenseRows != 12u ||
+                    control.Params.HeavyRows != 12u ||
+                    control.Params.HeavyFamily !=
+                        wirehair_v2::HeavyCoefficientFamily::PeriodicCauchy ||
+                    actual.Params.DenseRows != candidate.DenseRows ||
+                    actual.Params.HeavyRows != candidate.HeavyRows ||
+                    actual.Params.HeavyFamily != candidate.HeavyFamily ||
+                    control.PacketConfig.MixCount !=
+                        wirehair_v2::kCertifiedPacketMixCount ||
+                    actual.PacketConfig.MixCount !=
+                        wirehair_v2::kCertifiedPacketMixCount)
+                {
+                    return false;
+                }
+            }
         }
 
         // Exercise each fail-closed base guard independently and require a
@@ -692,7 +768,7 @@ bool ValidateRecoveryCandidateDefinition(
             const wirehair_v2::PrecodeParams before = unexpected;
             const wirehair_v2::PacketRowConfig before_packet = packet;
             if (RecoveryCandidateTransform(
-                    block_counts[i], block_bytes[i], unexpected, packet,
+                    K, 64u, unexpected, packet,
                     const_cast<CandidateDefinition*>(&candidate)) ||
                 unexpected.BlockCount != before.BlockCount ||
                 unexpected.Staircase != before.Staircase ||
@@ -823,6 +899,74 @@ bool RealizedConstructionSha256(
         json += "\"}";
         digest = wirehair::wh2_benchmark::Sha256Hex(json);
     }
+    return IsLowerSha256(digest);
+}
+
+bool RawRealizedConstructionSha256(
+    const ArmDescriptor& arm,
+    uint32_t K,
+    uint32_t block_bytes,
+    const wirehair_wh2_bench::ResolvedNativeWh2Configuration& resolved,
+    std::string& digest)
+{
+    const wirehair_v2::PrecodeParams& params = resolved.Params;
+    const wirehair_v2::PacketRowConfig& packet = resolved.PacketConfig;
+    if (arm.Codec != std::string("wirehair2_experiment") ||
+        !arm.ConstructionSeedBasis || !arm.SeedScheduleSha256 ||
+        arm.ConstructionSeedBasis != std::string(
+            wirehair_v2::test::kRawArchitectureSeedBasis) ||
+        arm.SeedScheduleSha256 != std::string(
+            wirehair_v2::test::kRawArchitectureSeedScheduleSha256) ||
+        !IsLowerSha256(arm.DescriptorSha256) ||
+        !IsLowerSha256(arm.SeedScheduleSha256) ||
+        params.BlockCount != K ||
+        params.HeavyFamily !=
+            wirehair_v2::HeavyCoefficientFamily::PeriodicCauchy ||
+        resolved.PrecodeAttempt > 255u || resolved.PacketAttempt > 255u)
+    {
+        return false;
+    }
+
+    std::string json;
+    json.reserve(900u);
+    json += "{\"K\":";
+    json += std::to_string(K);
+    json += ",\"arm\":\"";
+    json += arm.Arm;
+    json += "\",\"arm_descriptor_sha256\":\"";
+    json += arm.DescriptorSha256;
+    json += "\",\"binary_dense_rows\":";
+    json += std::to_string(params.DenseRows);
+    json += ",\"block_bytes\":";
+    json += std::to_string(block_bytes);
+    json += ",\"codec\":\"";
+    json += arm.Codec;
+    json += "\",\"construction_seed_basis\":\"";
+    json += arm.ConstructionSeedBasis;
+    json += "\",\"dense_identity_corner\":";
+    json += params.DenseIdentityCorner ? "true" : "false";
+    json += ",\"effective_packet_seed\":\"";
+    json += HexPacketSeed(packet.PeelSeed);
+    json += "\",\"effective_precode_seed\":\"";
+    json += HexSeed(params.Seed);
+    json += "\",\"gf256_heavy_rows\":";
+    json += std::to_string(params.HeavyRows);
+    json += ",\"heavy_family\":\"periodic-cauchy\",\"mix_count\":";
+    json += std::to_string(packet.MixCount);
+    json += ",\"packet_attempt\":";
+    json += std::to_string(resolved.PacketAttempt);
+    json += ",\"precode_attempt\":";
+    json += std::to_string(resolved.PrecodeAttempt);
+    json += ",\"schema\":\"";
+    json += kRawRealizedSchema;
+    json += "\",\"seed_schedule_sha256\":\"";
+    json += arm.SeedScheduleSha256;
+    json += "\",\"source_hits\":";
+    json += std::to_string(params.SourceHits);
+    json += ",\"staircase\":";
+    json += std::to_string(params.Staircase);
+    json += '}';
+    digest = wirehair::wh2_benchmark::Sha256Hex(json);
     return IsLowerSha256(digest);
 }
 
@@ -1136,8 +1280,7 @@ std::string WorkerDescription(
     const std::string& source_git_commit,
     const std::vector<ArmDescriptor>& arms)
 {
-    if ((arms.size() != 3u && arms.size() != 4u) ||
-        !IsLowerGitCommit(source_git_commit))
+    if (arms.size() != 3u || !IsLowerGitCommit(source_git_commit))
     {
         return std::string();
     }
@@ -1159,6 +1302,51 @@ std::string WorkerDescription(
     json += binary_sha256;
     json += "\",\"schema\":\"";
     json += kDescriptionSchema;
+    json += "\",\"source_git_commit\":\"";
+    json += source_git_commit;
+    json += "\"}";
+    return json;
+}
+
+std::string RawWorkerDescription(
+    const std::string& binary_sha256,
+    const std::string& source_git_commit,
+    const std::vector<ArmDescriptor>& arms)
+{
+    if (arms.size() != 4u || !IsLowerSha256(binary_sha256) ||
+        !IsLowerGitCommit(source_git_commit))
+    {
+        return std::string();
+    }
+    std::string json;
+    json.reserve(1900u);
+    json += "{\"arms\":[";
+    for (std::size_t i = 0u; i < arms.size(); ++i)
+    {
+        const ArmDescriptor& arm = arms[i];
+        if (!arm.ConstructionSeedBasis || !arm.SeedScheduleSha256 ||
+            !IsLowerSha256(arm.DescriptorSha256) ||
+            !IsLowerSha256(arm.SeedScheduleSha256))
+        {
+            return std::string();
+        }
+        if (i != 0u) json += ',';
+        json += "{\"arm\":\"";
+        json += arm.Arm;
+        json += "\",\"arm_descriptor_sha256\":\"";
+        json += arm.DescriptorSha256;
+        json += "\",\"codec\":\"";
+        json += arm.Codec;
+        json += "\",\"construction_seed_basis\":\"";
+        json += arm.ConstructionSeedBasis;
+        json += "\",\"seed_schedule_sha256\":\"";
+        json += arm.SeedScheduleSha256;
+        json += "\"}";
+    }
+    json += "],\"binary_sha256\":\"";
+    json += binary_sha256;
+    json += "\",\"schema\":\"";
+    json += kRawDescriptionSchema;
     json += "\",\"source_git_commit\":\"";
     json += source_git_commit;
     json += "\"}";
@@ -1301,6 +1489,102 @@ std::string RecoveryPayload(
     return json;
 }
 
+std::string RawRecoveryPayload(
+    const FrozenRecoveryCell& cell,
+    const ArmDescriptor& arm,
+    const std::string& binary_sha256,
+    const std::string& cell_sha256,
+    const std::string& trace_sha256,
+    uint32_t construction_attempt,
+    const wirehair_wh2_bench::ResolvedNativeWh2Configuration& resolved,
+    const std::string& realized_sha256,
+    const char* outcome,
+    bool has_decoded_extra,
+    uint32_t decoded_extra)
+{
+    const wirehair_v2::PrecodeParams& params = resolved.Params;
+    const wirehair_v2::PacketRowConfig& packet = resolved.PacketConfig;
+    if (!arm.ConstructionSeedBasis || !arm.SeedScheduleSha256 ||
+        construction_attempt != resolved.PrecodeAttempt ||
+        construction_attempt != resolved.PacketAttempt ||
+        params.BlockCount != cell.K ||
+        params.HeavyFamily !=
+            wirehair_v2::HeavyCoefficientFamily::PeriodicCauchy)
+    {
+        return std::string();
+    }
+
+    std::string json;
+    json.reserve(1600u);
+    json += "{\"K\":";
+    json += std::to_string(cell.K);
+    json += ",\"arm\":\"";
+    json += arm.Arm;
+    json += "\",\"arm_descriptor_sha256\":\"";
+    json += arm.DescriptorSha256;
+    json += "\",\"band\":\"";
+    json += cell.band;
+    json += "\",\"base_seed_attempt\":";
+    json += std::to_string(cell.base_seed_attempt);
+    json += ",\"binary_dense_rows\":";
+    json += std::to_string(params.DenseRows);
+    json += ",\"binary_sha256\":\"";
+    json += binary_sha256;
+    json += "\",\"block_bytes\":";
+    json += std::to_string(cell.block_bytes);
+    json += ",\"cell_sha256\":\"";
+    json += cell_sha256;
+    json += "\",\"construction_attempt\":";
+    json += std::to_string(construction_attempt);
+    json += ",\"construction_seed_basis\":\"";
+    json += arm.ConstructionSeedBasis;
+    json += "\",\"decoded_extra\":";
+    if (has_decoded_extra) json += std::to_string(decoded_extra);
+    else json += "null";
+    json += ",\"dense_identity_corner\":";
+    json += params.DenseIdentityCorner ? "true" : "false";
+    json += ",\"effective_packet_seed\":\"";
+    json += HexPacketSeed(packet.PeelSeed);
+    json += "\",\"effective_precode_seed\":\"";
+    json += HexSeed(params.Seed);
+    json += "\",\"gf256_heavy_rows\":";
+    json += std::to_string(params.HeavyRows);
+    json += ",\"heavy_family\":\"periodic-cauchy\",\"loss_ppm\":";
+    json += std::to_string(cell.loss_ppm);
+    json += ",\"loss_seed\":\"";
+    json += HexSeed(cell.loss_seed);
+    json += "\",\"mix_count\":";
+    json += std::to_string(packet.MixCount);
+    json += ",\"outcome\":\"";
+    json += outcome;
+    json += "\",\"overhead_cap\":";
+    json += std::to_string(cell.overhead_cap);
+    json += ",\"packet_attempt\":";
+    json += std::to_string(resolved.PacketAttempt);
+    json += ",\"phase\":\"";
+    json += cell.phase;
+    json += "\",\"precode_attempt\":";
+    json += std::to_string(resolved.PrecodeAttempt);
+    json += ",\"realized_construction_sha256\":\"";
+    json += realized_sha256;
+    json += "\",\"repair_map_sha256\":\"";
+    json += kZeroSha256;
+    json += "\",\"schedule\":\"";
+    json += FrozenScheduleName(cell.schedule);
+    json += "\",\"seed_schedule_sha256\":\"";
+    json += arm.SeedScheduleSha256;
+    json += "\",\"source_hits\":";
+    json += std::to_string(params.SourceHits);
+    json += ",\"staircase\":";
+    json += std::to_string(params.Staircase);
+    json += ",\"trace_sha256\":\"";
+    json += trace_sha256;
+    json += "\",\"trial\":";
+    json += std::to_string(cell.trial);
+    json += '}';
+    return json;
+}
+
 std::string Envelope(
     const char* schema,
     std::size_t ordinal,
@@ -1410,6 +1694,14 @@ bool RunRecoveryJob(
         error = "cannot construct selected native recovery arm";
         return false;
     }
+    const bool raw_arm = context.Candidate && arm_index >= 2u;
+    wirehair_wh2_bench::ResolvedNativeWh2Configuration resolved;
+    if (raw_arm && !wirehair_wh2_bench::ResolveNativeWh2Configuration(
+            spec, cell.K, cell.block_bytes, resolved))
+    {
+        error = "cannot resolve selected raw recovery construction";
+        return false;
+    }
     const RecoveryCellResult result = wirehair_wh2_bench::RunRecoveryCell(
         spec, cell.K, cell.block_bytes, source, trace.delivered_ids);
     const char* outcome = nullptr;
@@ -1422,9 +1714,14 @@ bool RunRecoveryJob(
         return false;
     }
     std::string realized_sha256;
-    if (!RealizedConstructionSha256(
+    const bool realized_ok = raw_arm ?
+        RawRealizedConstructionSha256(
+            context.Arms[arm_index], cell.K, cell.block_bytes, resolved,
+            realized_sha256) :
+        RealizedConstructionSha256(
             context.Arms[arm_index], cell.K, cell.block_bytes, attempt,
-            realized_sha256))
+            realized_sha256);
+    if (!realized_ok)
     {
         error = "cannot hash realized recovery construction";
         return false;
@@ -1437,10 +1734,19 @@ bool RunRecoveryJob(
         error = "cannot read CLOCK_MONOTONIC after recovery job";
         return false;
     }
-    const std::string payload = RecoveryPayload(
-        cell, context.Arms[arm_index], context.BinarySha256, cell_sha256,
-        trace.trace_sha256, attempt, realized_sha256, outcome,
-        has_decoded_extra, decoded_extra);
+    const std::string payload = raw_arm ?
+        RawRecoveryPayload(
+            cell, context.Arms[arm_index], context.BinarySha256,
+            cell_sha256, trace.trace_sha256, attempt, resolved,
+            realized_sha256, outcome, has_decoded_extra, decoded_extra) :
+        RecoveryPayload(
+            cell, context.Arms[arm_index], context.BinarySha256,
+            cell_sha256, trace.trace_sha256, attempt, realized_sha256,
+            outcome, has_decoded_extra, decoded_extra);
+    if (payload.empty()) {
+        error = "cannot serialize recovery payload";
+        return false;
+    }
     const std::size_t ordinal = cell_ordinal * context.Arms.size() + arm_index;
     const std::string work_sha256 = RecoveryWorkSha256(
         cell_sha256, ordinal);
@@ -1449,7 +1755,8 @@ bool RunRecoveryJob(
         return false;
     }
     envelope = Envelope(
-        kRecoverySchema, ordinal, actual_cpu, context.Pid, started_ns,
+        raw_arm ? kRawRecoverySchema : kRecoverySchema,
+        ordinal, actual_cpu, context.Pid, started_ns,
         finished_ns, context.ProcessStartTicks, context.BinarySha256,
         message_sha256, work_sha256, payload);
     return true;
@@ -2173,7 +2480,7 @@ int main(int argc, char** argv)
         if (!BuildCandidateArmDescriptors(*candidate, candidate_arms)) {
             return 1;
         }
-        const std::string description = WorkerDescription(
+        const std::string description = RawWorkerDescription(
             binary_sha256, source_git_commit, candidate_arms);
         return !description.empty() && EmitLine(description) ? 0 : 1;
     }

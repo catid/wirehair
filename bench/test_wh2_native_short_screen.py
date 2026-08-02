@@ -448,6 +448,24 @@ class NativeShortScreenTests(unittest.TestCase):
                 subject._validate_native_records(
                     self.contract, freeze, "timing", "development", legacy)
 
+    def test_recovery_schema_dispatch_rejects_non_string_arm(self) -> None:
+        freeze = {
+            "schema": contract_api.RAW_FREEZE_SCHEMA,
+            "arms_by_name": {
+                "wirehair2_raw_fixture": {
+                    "construction_seed_basis":
+                        contract_api.RAW_CONSTRUCTION_SEED_BASIS,
+                },
+            },
+        }
+        with self.assertRaisesRegex(
+                subject.NativeEvidenceError, "arm must be a string"):
+            subject.recovery_record_schema_fields(freeze, {"arm": []})
+        schema, fields = subject.recovery_record_schema_fields(
+            freeze, {"arm": "wirehair2_raw_fixture"})
+        self.assertEqual(schema, subject.RAW_RECOVERY_RECORD_SCHEMA)
+        self.assertEqual(fields, contract_api.RAW_RECOVERY_RECORD_FIELDS)
+
     def test_terminal_timing_geometry_rejects_placement_and_barrier_drift(
             self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

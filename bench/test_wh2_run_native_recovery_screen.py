@@ -35,13 +35,13 @@ def canonical(value):
 candidate = {
     "d12-h11-periodic": (
         "wirehair2_raw_d12_h11_periodic",
-        "80f57b83eac9b8e3a19d8235cc067e39990980510e46588ddefa16f9561e1c38"),
+        "91d7c1a558e1cf93b002fcf2062b7657d301faca03972215495bdf2429499e90"),
     "d12-h13-periodic": (
         "wirehair2_raw_d12_h13_periodic",
-        "0eb3aef0602b5e7de15c822de84a5dbfc5dfdd99b76fbfd41538f7a13248c3a5"),
+        "7c7889747a97ac160726b807fb03349344d49d4bec84c9e8220aa4689b00d2ca"),
     "d13-h12-periodic": (
         "wirehair2_raw_d13_h12_periodic",
-        "2dc244661b3b073569319377ee3e55333a82ddad7bd328e1b0fef67395174614"),
+        "c70e0f57bb8d7783fa29b0decbed5da5058a8eb532d57d540f72108e114f091a"),
 }
 if len(sys.argv) == 3 and sys.argv[1] == "--describe-recovery-candidate":
     arm, descriptor = candidate.get(sys.argv[2], (None, None))
@@ -57,14 +57,26 @@ if len(sys.argv) == 3 and sys.argv[1] == "--describe-recovery-candidate":
         {"arm": "wirehair2_raw_d12_h12_periodic",
          "codec": "wirehair2_experiment",
          "arm_descriptor_sha256":
-             "0550e0ed0c62d5491ff6915652fd96ed25f3c7782462da8c551636ec2e0294dd"},
+             "739092a7824449e6168f08b46661dfbe8ad5495ea4166b36073c79cd3bacdd11"},
         {"arm": arm, "codec": "wirehair2_experiment",
          "arm_descriptor_sha256": descriptor},
     ]
+    for index, value in enumerate(arms):
+        if index == 0:
+            value["construction_seed_basis"] = "production-profile-v1"
+            value["seed_schedule_sha256"] = "0" * 64
+        elif index == 1:
+            value["construction_seed_basis"] = "not-applicable"
+            value["seed_schedule_sha256"] = "0" * 64
+        else:
+            value["construction_seed_basis"] = "uniform-raw-v1"
+            value["seed_schedule_sha256"] = (
+                "90a98a3db207852dabdf5fb27573ef48b"
+                "ce52e0228cee4e291d96fa44ed509a7")
     print(canonical({
         "arms": arms,
         "binary_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-        "schema": "wirehair.wh2.native-worker-description.v1",
+        "schema": "wirehair.wh2.native-worker-description.v2",
         "source_git_commit": "1" * 40,
     }))
     raise SystemExit(0)
@@ -108,6 +120,9 @@ class RecoveryOnlyRunnerTests(unittest.TestCase):
                     subject.CONTROL_DESCRIPTOR_SHA256S[0],
                 "construction_policy": "raw_base",
                 "repair_map_sha256": subject.ZERO_SHA256,
+                "construction_seed_basis":
+                    contract_api.PRODUCTION_CONSTRUCTION_SEED_BASIS,
+                "seed_schedule_sha256": subject.ZERO_SHA256,
             },
             {
                 "arm": "wirehair1", "codec": "wirehair1",
@@ -116,6 +131,9 @@ class RecoveryOnlyRunnerTests(unittest.TestCase):
                     subject.CONTROL_DESCRIPTOR_SHA256S[1],
                 "construction_policy": "not_applicable",
                 "repair_map_sha256": subject.ZERO_SHA256,
+                "construction_seed_basis":
+                    contract_api.NOT_APPLICABLE_CONSTRUCTION_SEED_BASIS,
+                "seed_schedule_sha256": subject.ZERO_SHA256,
             },
         ]
         raw_control = {
@@ -126,6 +144,8 @@ class RecoveryOnlyRunnerTests(unittest.TestCase):
                 subject.RAW_CONTROL_DESCRIPTOR_SHA256,
             "construction_policy": "raw_base",
             "repair_map_sha256": subject.ZERO_SHA256,
+            "construction_seed_basis": subject.RAW_SEED_BASIS,
+            "seed_schedule_sha256": subject.RAW_SEED_SCHEDULE_SHA256,
         }
         candidate = {
             "arm": candidate_arm, "codec": "wirehair2_experiment",
@@ -133,13 +153,15 @@ class RecoveryOnlyRunnerTests(unittest.TestCase):
             "arm_descriptor_sha256": candidate_descriptor,
             "construction_policy": "raw_base",
             "repair_map_sha256": subject.ZERO_SHA256,
+            "construction_seed_basis": subject.RAW_SEED_BASIS,
+            "seed_schedule_sha256": subject.RAW_SEED_SCHEDULE_SHA256,
         }
         arms = controls + [raw_control, candidate]
         roster = [value["arm"] for value in arms]
         worker = "/fixture/worker"
         description = {"resolved_path": worker}
         freeze = {
-            "schema": contract_api.FREEZE_SCHEMA,
+            "schema": contract_api.RAW_FREEZE_SCHEMA,
             "contract_sha256": contract_api.contract_sha256(self.contract),
             "evidence_kind": "recovery",
             "phase": "development",
@@ -348,6 +370,97 @@ class RecoveryOnlyRunnerTests(unittest.TestCase):
         self.assertTrue(all("work_sha256" not in row for row in rows))
         self.assertEqual(len(bindings), 3)
 
+    def test_work_rank_binding_joins_every_effective_raw_construction(self) \
+            -> None:
+        raw_arms = (
+            (subject.RAW_CONTROL_ARM[0],
+             subject.RAW_CONTROL_DESCRIPTOR_SHA256, 12, 12),
+            (subject.CANDIDATE_SPECS[0][1],
+             subject.CANDIDATE_SPECS[0][2], 12, 11),
+            (subject.CANDIDATE_SPECS[1][1],
+             subject.CANDIDATE_SPECS[1][2], 12, 13),
+            (subject.CANDIDATE_SPECS[2][1],
+             subject.CANDIDATE_SPECS[2][2], 13, 12),
+        )
+        native_rows = []
+        work_rows = []
+        for arm, descriptor, dense_rows, heavy_rows in raw_arms:
+            for cell in contract_api.iter_recovery_cells(
+                    self.contract, "development"):
+                attempt = cell["base_seed_attempt"]
+                raw = {
+                    "construction_seed_basis": subject.RAW_SEED_BASIS,
+                    "seed_schedule_sha256":
+                        subject.RAW_SEED_SCHEDULE_SHA256,
+                    "precode_attempt": attempt,
+                    "packet_attempt": attempt,
+                    "effective_precode_seed":
+                        contract_api._effective_raw_precode_seed(attempt),
+                    "effective_packet_seed":
+                        contract_api._effective_raw_packet_seed(attempt),
+                    "staircase": 1 + cell["K"] % 7,
+                    "binary_dense_rows": dense_rows,
+                    "gf256_heavy_rows": heavy_rows,
+                    "source_hits": 3,
+                    "dense_identity_corner": False,
+                    "heavy_family": "periodic-cauchy",
+                    "mix_count": 3,
+                }
+                realized = contract_api.raw_realized_construction_sha256(
+                    "wirehair2_experiment", arm, descriptor, cell["K"],
+                    cell["block_bytes"], raw)
+                cell_sha256 = contract_api.sha256_json(cell)
+                trace_sha256 = hashlib.sha256(
+                    ("{}:{}".format(arm, cell_sha256)).encode("ascii")
+                ).hexdigest()
+                native = {
+                    **cell,
+                    "arm": arm,
+                    "arm_descriptor_sha256": descriptor,
+                    "cell_sha256": cell_sha256,
+                    "construction_attempt": attempt,
+                    "realized_construction_sha256": realized,
+                    "trace_sha256": trace_sha256,
+                    **raw,
+                }
+                native_rows.append(native)
+                for overhead in (0, 1, 2, 4):
+                    work_rows.append({
+                        **native,
+                        "frozen_trace_sha256": trace_sha256,
+                        "overhead": overhead,
+                    })
+        summary = {
+            "source_provenance": {"source_git_commit": "1" * 40},
+            "construction_seed_basis": subject.RAW_SEED_BASIS,
+            "seed_schedule_sha256": subject.RAW_SEED_SCHEDULE_SHA256,
+            "summary_sha256": "a" * 64,
+            "result_stream_sha256": "b" * 64,
+            "work_domain_sha256": "c" * 64,
+        }
+        binding = subject._bind_work_rank_identities(
+            native_rows, {"summary": summary, "rows": work_rows},
+            "1" * 40)
+        self.assertEqual(
+            binding["raw_identity_join_count"],
+            subject.RAW_IDENTITY_JOIN_COUNT)
+        self.assertRegex(binding["raw_identity_join_sha256"],
+                         contract_api.SHA256)
+        work_rows[0]["effective_packet_seed"] = "0x00000000"
+        with self.assertRaisesRegex(
+                subject.RecoveryRunnerError, "effective constructions differ"):
+            subject._bind_work_rank_identities(
+                native_rows, {"summary": summary, "rows": work_rows},
+                "1" * 40)
+        work_rows[0]["effective_packet_seed"] = \
+            native_rows[0]["effective_packet_seed"]
+        work_rows[0]["frozen_trace_sha256"] = "0" * 64
+        with self.assertRaisesRegex(
+                subject.RecoveryRunnerError, "trace identities differ"):
+            subject._bind_work_rank_identities(
+                native_rows, {"summary": summary, "rows": work_rows},
+                "1" * 40)
+
     def test_combiner_rejects_identity_and_control_drift(self) -> None:
         mutations: Dict[str, Any] = {}
         controls = self._campaigns()
@@ -420,7 +533,7 @@ class RecoveryOnlyRunnerTests(unittest.TestCase):
             "cpu_tctl_max_millic": receipt["thermal"]
                 ["cpu_tctl_max_millic"],
             "dimm_max_millic": receipt["thermal"]["dimm_max_millic"],
-            "seed_basis": subject.RAW_SEED_BASIS,
+            "construction_seed_basis": subject.RAW_SEED_BASIS,
             "seed_schedule_sha256": subject.RAW_SEED_SCHEDULE_SHA256,
         }
         summary["summary_sha256"] = contract_api.sha256_json(summary)
@@ -456,7 +569,8 @@ class RecoveryOnlyRunnerTests(unittest.TestCase):
             loaded = subject.load_completed_campaign(self.contract, directory)
             self.assertEqual(loaded["candidate_id"], campaign["candidate_id"])
             self.assertEqual(
-                loaded["summary"]["seed_basis"], subject.RAW_SEED_BASIS)
+                loaded["summary"]["construction_seed_basis"],
+                subject.RAW_SEED_BASIS)
             self.assertEqual(
                 loaded["summary"]["seed_schedule_sha256"],
                 subject.RAW_SEED_SCHEDULE_SHA256)
@@ -473,7 +587,7 @@ class RecoveryOnlyRunnerTests(unittest.TestCase):
                 subject.load_completed_campaign(self.contract, directory)
             publish_rows(campaign["rows"])
             mutated = dict(summary)
-            mutated["seed_basis"] = "production-profile"
+            mutated["construction_seed_basis"] = "production-profile"
             mutated["summary_sha256"] = contract_api.sha256_json({
                 key: value for key, value in mutated.items()
                 if key != "summary_sha256"
@@ -626,7 +740,15 @@ class RecoveryOnlyRunnerTests(unittest.TestCase):
         args = SimpleNamespace(
             contract=contract_api.DEFAULT_CONTRACT,
             campaign_dir=[Path("one"), Path("two"), Path("three")],
+            work_rank_dir=Path("work-rank"),
             output_dir=output)
+        work_binding = {
+            "work_rank_summary_sha256": "1" * 64,
+            "work_rank_result_stream_sha256": "2" * 64,
+            "work_rank_domain_sha256": "3" * 64,
+            "raw_identity_join_count": subject.RAW_IDENTITY_JOIN_COUNT,
+            "raw_identity_join_sha256": "4" * 64,
+        }
 
         def validate_ledger(contract, phase, result_path, freeze_path,
                             trace_path):
@@ -643,6 +765,12 @@ class RecoveryOnlyRunnerTests(unittest.TestCase):
                 subject, "load_completed_campaign",
                 side_effect=campaigns), \
                 mock.patch.object(
+                    subject.work_api, "load_completed_work_screen",
+                    return_value={"summary": {}, "rows": []}), \
+                mock.patch.object(
+                    subject, "_bind_work_rank_identities",
+                    return_value=work_binding), \
+                mock.patch.object(
                     subject.contract_api, "validate_ledger",
                     side_effect=validate_ledger):
             summary = subject.combine_recovery_screens(args)
@@ -653,7 +781,8 @@ class RecoveryOnlyRunnerTests(unittest.TestCase):
         self.assertIs(summary["is_execution_receipt"], False)
         self.assertEqual(summary["artifact_kind"],
                          "logical_recovery_combination")
-        self.assertEqual(summary["seed_basis"], subject.RAW_SEED_BASIS)
+        self.assertEqual(
+            summary["construction_seed_basis"], subject.RAW_SEED_BASIS)
         self.assertEqual(summary["seed_schedule_sha256"],
                          subject.RAW_SEED_SCHEDULE_SHA256)
         self.assertEqual(
@@ -674,7 +803,8 @@ class RecoveryOnlyRunnerTests(unittest.TestCase):
         with redirect_stderr(stderr):
             result = subject.main([
                 "combine", "--campaign-dir", "one",
-                "--campaign-dir", "two", "--output-dir", "out"])
+                "--campaign-dir", "two", "--work-rank-dir", "work",
+                "--output-dir", "out"])
         self.assertEqual(result, 1)
         self.assertIn("exactly three", stderr.getvalue())
 
@@ -694,12 +824,29 @@ class RecoveryOnlyRunnerTests(unittest.TestCase):
                 subject.RecoveryRunnerError, "bounded artifact size"):
             subject._read_regular_bytes(oversized, "oversized fixture")
 
+        source = self.root / "pinned-source"
+        source.mkdir()
+        (source / "artifact").write_bytes(b"original")
+        directory_fd = os.open(
+            str(source), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            source.rename(self.root / "held-source")
+            source.mkdir()
+            (source / "artifact").write_bytes(b"substitute")
+            self.assertEqual(
+                subject._read_regular_bytes(
+                    Path("artifact"), "pinned fixture", directory_fd),
+                b"original")
+        finally:
+            os.close(directory_fd)
+
     def test_combine_hard_wall_interrupts_synchronous_validation(self) -> None:
         stderr = StringIO()
         started = time.monotonic()
         argv = [
             "combine", "--campaign-dir", "one", "--campaign-dir", "two",
-            "--campaign-dir", "three", "--output-dir", "out",
+            "--campaign-dir", "three", "--work-rank-dir", "work",
+            "--output-dir", "out",
             "--deadline-seconds", "0.05",
         ]
         with redirect_stderr(stderr), mock.patch.object(

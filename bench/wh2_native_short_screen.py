@@ -31,9 +31,11 @@ import wh2_benchmark_contract as contract_api
 
 TRACE_RECORD_SCHEMA = "wirehair.wh2.native-trace-record.v1"
 RECOVERY_RECORD_SCHEMA = "wirehair.wh2.native-recovery-record.v1"
+RAW_RECOVERY_RECORD_SCHEMA = "wirehair.wh2.native-recovery-record.v2"
 TIMING_RECORD_SCHEMA = "wirehair.wh2.native-timing-record.v2"
 SAMPLER_SCHEMA = "wirehair.wh2.sampler-attestation.v1"
 EXECUTION_SCHEMA = "wirehair.wh2.native-execution-receipt.v1"
+RAW_EXECUTION_SCHEMA = "wirehair.wh2.native-execution-receipt.v2"
 
 SHA256_FIELDS = frozenset((
     "worker_binary_sha256", "message_sha256", "work_sha256",
@@ -792,6 +794,30 @@ def _expected_work_sha256(
     })
 
 
+def recovery_record_schema_fields(
+        freeze: Mapping[str, Any], payload: Mapping[str, Any],
+        ) -> Tuple[str, frozenset]:
+    """Select the exact native schema from the frozen per-arm seed policy."""
+    if not isinstance(payload, Mapping):
+        fail("native result payload has an unexpected schema")
+    arm = payload.get("arm")
+    if not isinstance(arm, str):
+        fail("native recovery payload arm must be a string")
+    arms = freeze.get("arms_by_name")
+    frozen_arm = arms.get(arm) \
+        if isinstance(arms, Mapping) else None
+    if frozen_arm is None:
+        fail("native recovery payload arm is outside the frozen roster")
+    raw_arm = frozen_arm.get("construction_seed_basis") == \
+        contract_api.RAW_CONSTRUCTION_SEED_BASIS
+    if raw_arm:
+        if freeze.get("schema") != contract_api.RAW_FREEZE_SCHEMA:
+            fail("uniform raw payload is not bound by a raw v2 freeze")
+        return (RAW_RECOVERY_RECORD_SCHEMA,
+                contract_api.RAW_RECOVERY_RECORD_FIELDS)
+    return RECOVERY_RECORD_SCHEMA, contract_api.LEDGER_FIELDS
+
+
 def _reverify_native_workers(workers: Sequence[Mapping[str, Any]]) -> None:
     for worker in workers:
         _verify_live_worker_process(
@@ -953,8 +979,6 @@ def _validate_native_records(
         sysfs_root: Optional[Path] = None) \
         -> Tuple[List[Mapping[str, Any]], Mapping[str, Any]]:
     if evidence_kind == "recovery":
-        payload_fields = contract_api.LEDGER_FIELDS
-        record_schema = RECOVERY_RECORD_SCHEMA
         cell_count = contract["recovery"]["domains"][phase][
             "expected_cells_per_arm"]
         expected_count = cell_count * len(freeze["arm_roster"])
@@ -981,9 +1005,12 @@ def _validate_native_records(
     work_by_ordinal: List[Optional[str]] = [None] * expected_count
     for raw in records:
         row = _exact_keys(raw, NATIVE_RECORD_FIELDS, "native result record")
+        payload = row["payload"]
+        if evidence_kind == "recovery":
+            record_schema, payload_fields = recovery_record_schema_fields(
+                freeze, payload)
         if row["schema"] != record_schema:
             fail("native result record has an unknown schema")
-        payload = row["payload"]
         _exact_keys(payload, payload_fields, "native result payload")
         try:
             expected_ordinal, message_key = _expected_record_ordinal(
@@ -1154,8 +1181,11 @@ def assemble_results(
         if verify_live_sampler:
             _reverify_native_workers(runtime_workers)
         result_sha256 = _sha256_jsonl(payloads)
+        receipt_schema = RAW_EXECUTION_SCHEMA \
+            if freeze.get("schema") == contract_api.RAW_FREEZE_SCHEMA \
+            else EXECUTION_SCHEMA
         receipt: Dict[str, Any] = {
-            "schema": EXECUTION_SCHEMA,
+            "schema": receipt_schema,
             "contract_sha256": contract_api.contract_sha256(contract),
             "evidence_kind": evidence_kind,
             "phase": phase,
@@ -1201,18 +1231,21 @@ def validate_execution_receipt(
     receipt = _exact_keys(
         _load_canonical_object(execution_receipt_path, "execution receipt"),
         EXECUTION_FIELDS, "execution receipt")
-    if receipt["schema"] != EXECUTION_SCHEMA:
+    try:
+        freeze = contract_api.load_freeze_manifest(
+            contract, phase, freeze_path, evidence_kind)
+    except contract_api.ContractError as exc:
+        fail(str(exc))
+    expected_receipt_schema = RAW_EXECUTION_SCHEMA \
+        if freeze.get("schema") == contract_api.RAW_FREEZE_SCHEMA \
+        else EXECUTION_SCHEMA
+    if receipt["schema"] != expected_receipt_schema:
         fail("execution receipt has an unknown schema")
     unsigned = {key: value for key, value in receipt.items()
                 if key != "receipt_sha256"}
     if (not _is_sha256(receipt["receipt_sha256"]) or
             receipt["receipt_sha256"] != contract_api.sha256_json(unsigned)):
         fail("execution receipt self-hash is invalid")
-    try:
-        freeze = contract_api.load_freeze_manifest(
-            contract, phase, freeze_path, evidence_kind)
-    except contract_api.ContractError as exc:
-        fail(str(exc))
     if (receipt["contract_sha256"] != contract_api.contract_sha256(contract) or
             receipt["evidence_kind"] != evidence_kind or
             receipt["phase"] != phase or

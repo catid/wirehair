@@ -13,6 +13,29 @@ if(NOT DEFINED CMAKE_CXX_STANDARD_REQUIRED)
 endif()
 find_package(Threads REQUIRED)
 
+# Embed one configure-time source identity in benchmark evidence producers.
+# Controllers separately require a clean, stable worktree at execution time.
+set(WIREHAIR_WH2_SOURCE_GIT_COMMIT
+    "0000000000000000000000000000000000000000")
+find_package(Git QUIET)
+if(Git_FOUND)
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} rev-parse --verify HEAD^{commit}
+        WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+        RESULT_VARIABLE WIREHAIR_WH2_GIT_RESULT
+        OUTPUT_VARIABLE WIREHAIR_WH2_GIT_OUTPUT
+        ERROR_QUIET
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
+    string(LENGTH "${WIREHAIR_WH2_GIT_OUTPUT}"
+        WIREHAIR_WH2_GIT_OUTPUT_LENGTH)
+    if(WIREHAIR_WH2_GIT_RESULT EQUAL 0 AND
+       WIREHAIR_WH2_GIT_OUTPUT_LENGTH EQUAL 40 AND
+       WIREHAIR_WH2_GIT_OUTPUT MATCHES "^[0-9a-f]+$")
+        set(WIREHAIR_WH2_SOURCE_GIT_COMMIT
+            "${WIREHAIR_WH2_GIT_OUTPUT}")
+    endif()
+endif()
+
 option(BUILD_SHARED_LIBS "Build Wirehair as a shared library" OFF)
 option(BUILD_TESTS "Build and register the correctness tests" ON)
 option(BUILD_CODEC_V2
@@ -792,26 +815,6 @@ if(BUILD_TESTS)
         bench/Wh2NativeCodec.h
         bench/Wh2NativePanel.cpp
         bench/Wh2NativePanel.h)
-    set(WIREHAIR_WH2_SOURCE_GIT_COMMIT
-        "0000000000000000000000000000000000000000")
-    find_package(Git QUIET)
-    if(Git_FOUND)
-        execute_process(
-            COMMAND ${GIT_EXECUTABLE} rev-parse --verify HEAD^{commit}
-            WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
-            RESULT_VARIABLE WIREHAIR_WH2_GIT_RESULT
-            OUTPUT_VARIABLE WIREHAIR_WH2_GIT_OUTPUT
-            ERROR_QUIET
-            OUTPUT_STRIP_TRAILING_WHITESPACE)
-        string(LENGTH "${WIREHAIR_WH2_GIT_OUTPUT}"
-            WIREHAIR_WH2_GIT_OUTPUT_LENGTH)
-        if(WIREHAIR_WH2_GIT_RESULT EQUAL 0 AND
-           WIREHAIR_WH2_GIT_OUTPUT_LENGTH EQUAL 40 AND
-           WIREHAIR_WH2_GIT_OUTPUT MATCHES "^[0-9a-f]+$")
-            set(WIREHAIR_WH2_SOURCE_GIT_COMMIT
-                "${WIREHAIR_WH2_GIT_OUTPUT}")
-        endif()
-    endif()
     target_compile_definitions(wirehair_wh2_contract_worker PRIVATE
         "WIREHAIR_WH2_SOURCE_GIT_COMMIT=\"${WIREHAIR_WH2_SOURCE_GIT_COMMIT}\"")
     target_link_libraries(wirehair_wh2_contract_worker PRIVATE

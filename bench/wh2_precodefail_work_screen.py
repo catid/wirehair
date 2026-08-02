@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import ctypes
 import csv
 from decimal import Decimal, InvalidOperation
 import hashlib
@@ -34,11 +35,11 @@ import os
 from pathlib import Path
 import re
 import selectors
+import secrets
 import signal
 import stat
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -48,9 +49,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import wh2_benchmark_contract as contract_api
 
 
-RECORD_SCHEMA = "wirehair.wh2.precodefail-work-record.v1"
-SUMMARY_SCHEMA = "wirehair.wh2.precodefail-work-summary.v1"
+RECORD_SCHEMA = "wirehair.wh2.precodefail-work-record.v2"
+SUMMARY_SCHEMA = "wirehair.wh2.precodefail-work-summary.v2"
 TRACE_IDENTITY_SCHEMA = "wirehair.wh2.precodefail-trace-identity.v1"
+NATIVE_DESCRIPTOR_SCHEMA = "wirehair.wh2.native-arm-descriptor.v1"
 RESULT_NAME = "work-rank-results.jsonl"
 SUMMARY_NAME = "work-rank-summary.json"
 MAX_WALL_SECONDS = 7200.0
@@ -74,6 +76,14 @@ MASK32 = (1 << 32) - 1
 MASK64 = (1 << 64) - 1
 UINT_TOKEN = re.compile(r"(?:0|[1-9][0-9]*)\Z")
 HEX_TOKEN = re.compile(r"0x(?:0|[1-9a-f][0-9a-f]*)\Z")
+_LIBC = ctypes.CDLL(None, use_errno=True)
+_RENAMEAT2 = getattr(_LIBC, "renameat2", None)
+if _RENAMEAT2 is not None:
+    _RENAMEAT2.argtypes = (
+        ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p,
+        ctypes.c_uint)
+    _RENAMEAT2.restype = ctypes.c_int
+_RENAME_NOREPLACE = 1
 
 RAW_SEED_BASIS = "uniform-raw-v1"
 RAW_SEED_SCHEDULE_SHA256 = (
@@ -100,9 +110,31 @@ ARMS = (
     ("wirehair2_raw_d12_h13_periodic", 12, 13),
     ("wirehair2_raw_d13_h12_periodic", 13, 12),
 )
+ARM_TRANSFORMS = {
+    "wirehair2_raw_d12_h11_periodic": "d12-h11-periodic",
+    "wirehair2_raw_d12_h12_periodic": "d12-h12-periodic",
+    "wirehair2_raw_d12_h13_periodic": "d12-h13-periodic",
+    "wirehair2_raw_d13_h12_periodic": "d13-h12-periodic",
+}
+# These are SHA-256 hashes of the closed, structure-only native arm
+# descriptors.  The uniform raw seed schedule is bound separately by every
+# realized-construction receipt, so changing the schedule cannot masquerade
+# as changing the equation structure (or vice versa).
+ARM_DESCRIPTOR_SHA256 = {
+    "wirehair2_raw_d12_h11_periodic":
+        "91d7c1a558e1cf93b002fcf2062b7657d301faca03972215495bdf2429499e90",
+    "wirehair2_raw_d12_h12_periodic":
+        "739092a7824449e6168f08b46661dfbe8ad5495ea4166b36073c79cd3bacdd11",
+    "wirehair2_raw_d12_h13_periodic":
+        "7c7889747a97ac160726b807fb03349344d49d4bec84c9e8220aa4689b00d2ca",
+    "wirehair2_raw_d13_h12_periodic":
+        "c70e0f57bb8d7783fa29b0decbed5da5058a8eb532d57d540f72108e114f091a",
+}
 
 CSV_HEADER = (
-    "N", "bb", "heavy_family", "mix_count", "overhead", "trials",
+    "N", "bb", "heavy_family", "mix_count", "staircase",
+    "binary_dense_rows", "gf256_heavy_rows", "source_hits",
+    "dense_identity_corner", "overhead", "trials",
     "success", "rank_fail", "error", "fail_rate", "inact_mu",
     "inact_max", "binary_def_mu", "binary_def_max", "heavy_gain_mu",
     "heavy_gain_min", "heavy_shortfall", "solve_ms_mu", "build_ms_mu",
@@ -122,7 +154,45 @@ METADATA_KEYS = frozenset((
     "seed_block_bytes_override", "overhead_stream", "full_payload_solve",
     "schedule", "exact_attempt_mode", "exact_precode_attempt",
     "exact_packet_attempt", "construction_seed_basis",
-    "seed_schedule_sha256",
+    "seed_schedule_sha256", "source_git_commit",
+))
+SUMMARY_FIELDS = frozenset((
+    "schema", "contract_sha256", "recovery_domain_sha256",
+    "work_domain_sha256", "worker_binary_sha256", "source_provenance",
+    "source_provenance_sha256", "result_stream_sha256", "record_count",
+    "invocation_count", "invocations", "trace_identity", "arms",
+    "construction_seed_basis", "seed_schedule_sha256",
+    "selection_performed", "timing_metrics_included", "summary_sha256",
+))
+SOURCE_PROVENANCE_FIELDS = frozenset((
+    "source_git_commit", "tracked_worktree_clean", "tracked_status_sha256",
+    "untracked_source_clean", "untracked_source_sha256",
+    "worker_source_git_commit",
+    "worker_binary_sha256", "controller_source_sha256",
+    "wirehair_v2_bench_source_sha256",
+    "wirehair_v2_raw_seed_source_sha256",
+    "wh2_frozen_trace_source_sha256",
+))
+INVOCATION_RECEIPT_FIELDS = frozenset((
+    "ordinal", "arm", "trial", "schedule", "row_count", "command_sha256",
+    "worker_stdout_sha256",
+))
+RECORD_FIELDS = frozenset((
+    "schema", "arm", "arm_descriptor_sha256",
+    "realized_construction_sha256", "construction_seed_basis",
+    "seed_schedule_sha256", "precode_attempt", "packet_attempt",
+    "effective_precode_seed", "effective_packet_seed", "staircase",
+    "binary_dense_rows", "gf256_heavy_rows", "source_hits",
+    "dense_identity_corner", "heavy_family", "mix_count", "phase", "band",
+    "K", "block_bytes", "loss_ppm", "schedule", "trial",
+    "base_seed_attempt", "loss_seed", "overhead", "attempt_mode",
+    "cell_sha256", "frozen_trace_sha256", "frozen_packet_prefix_sha256",
+    "packet_count", "frozen_trace_attempted_candidates",
+    "frozen_prefix_attempted_candidates", "success", "rank_fail", "error",
+    "inactivated_columns", "binary_deficiency", "gf256_rank_gain",
+    "heavy_shortfall", "block_xors", "gf256_muladds", "command_sha256",
+    "worker_stdout_sha256", "worker_binary_sha256", "ordinal",
+    "source_provenance_sha256",
 ))
 
 
@@ -177,7 +247,7 @@ class Invocation:
             "packet_attempt": self.trial,
             "precode_attempt": self.trial,
             "schedule": self.schedule,
-            "seed_basis": RAW_SEED_BASIS,
+            "construction_seed_basis": RAW_SEED_BASIS,
             "seed_schedule_sha256": RAW_SEED_SCHEDULE_SHA256,
             "effective_precode_seed": _effective_precode_seed(self.trial),
             "effective_packet_seed": _effective_packet_seed(self.trial),
@@ -355,6 +425,62 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _sha256_fd(descriptor: int, context: str) -> str:
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            fail("{} must be a regular file".format(context))
+        digest = hashlib.sha256()
+        offset = 0
+        while offset < before.st_size:
+            block = os.pread(
+                descriptor, min(1024 * 1024, before.st_size - offset),
+                offset)
+            if not block:
+                fail("{} was truncated while hashing".format(context))
+            digest.update(block)
+            offset += len(block)
+        if os.pread(descriptor, 1, offset):
+            fail("{} grew while hashing".format(context))
+        after = os.fstat(descriptor)
+    except OSError as exc:
+        fail("cannot hash {}: {}".format(context, exc))
+    identity_before = (
+        before.st_dev, before.st_ino, before.st_size,
+        before.st_mtime_ns, before.st_ctime_ns)
+    identity_after = (
+        after.st_dev, after.st_ino, after.st_size,
+        after.st_mtime_ns, after.st_ctime_ns)
+    if identity_before != identity_after:
+        fail("{} changed while hashing".format(context))
+    return digest.hexdigest()
+
+
+def _open_pinned_worker(path: Path) -> Tuple[Path, int]:
+    try:
+        resolved = path.resolve(strict=True)
+        flags = (os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) |
+                 getattr(os, "O_CLOEXEC", 0) |
+                 getattr(os, "O_NONBLOCK", 0))
+        descriptor = os.open(str(resolved), flags)
+        opened = os.fstat(descriptor)
+        current = os.stat(str(resolved), follow_symlinks=False)
+        if (not stat.S_ISREG(opened.st_mode) or
+                not opened.st_mode & 0o111 or
+                (opened.st_dev, opened.st_ino) !=
+                (current.st_dev, current.st_ino)):
+            fail("worker must be one stable executable regular file")
+        _sha256_fd(descriptor, "precodefail worker")
+        return resolved, descriptor
+    except BaseException:
+        if "descriptor" in locals():
+            try:
+                os.close(descriptor)
+            except BaseException:
+                pass
+        raise
+
+
 def _effective_precode_seed(attempt: int) -> str:
     value = (RAW_PRECODE_BASE_SEED +
              attempt * RAW_PRECODE_ATTEMPT_STRIDE) & MASK64
@@ -367,7 +493,77 @@ def _effective_packet_seed(attempt: int) -> str:
     return "0x{:08x}".format(value)
 
 
-def _source_provenance(worker: Path) -> Mapping[str, Any]:
+def _arm_descriptor_sha256(arm: str) -> str:
+    transform = ARM_TRANSFORMS.get(arm)
+    expected = ARM_DESCRIPTOR_SHA256.get(arm)
+    if transform is None or expected is None or \
+            set(ARM_TRANSFORMS) != set(ARM_DESCRIPTOR_SHA256):
+        fail("raw arm is not in the closed structure descriptor roster")
+    descriptor = {
+        "arm": arm,
+        "codec": "wirehair2_experiment",
+        "equation_transform": transform,
+        "schema": NATIVE_DESCRIPTOR_SCHEMA,
+    }
+    actual = _sha256_json(descriptor)
+    if actual != expected:
+        fail("raw structure descriptor golden is inconsistent")
+    return expected
+
+
+def _raw_realized_construction_sha256(
+        arm: str, K: int, block_bytes: int,
+        raw_fields: Mapping[str, Any]) -> str:
+    return contract_api.raw_realized_construction_sha256(
+        "wirehair2_experiment", arm, _arm_descriptor_sha256(arm), K,
+        block_bytes, raw_fields)
+
+
+def _git_source_state(repo_root: Path = REPO_ROOT) -> Mapping[str, Any]:
+    """Bind one stable HEAD and reject relevant untracked build inputs."""
+    commands = (
+        ["git", "rev-parse", "--verify", "HEAD^{commit}"],
+        ["git", "status", "--porcelain=v1", "--untracked-files=no"],
+        ["git", "ls-files", "--others", "--exclude-standard", "--",
+         "CMakeLists.txt", "codec", "bench", "include", "cmake",
+         ":(top,glob)*.c", ":(top,glob)*.cc", ":(top,glob)*.cpp",
+         ":(top,glob)*.h", ":(top,glob)*.hpp", ":(top,glob)*.inc"],
+        ["git", "rev-parse", "--verify", "HEAD^{commit}"],
+    )
+    outputs = []
+    try:
+        for command in commands:
+            result = subprocess.run(
+                command, cwd=str(repo_root), stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10.0,
+                check=False)
+            if result.returncode != 0:
+                fail("cannot bind source git provenance")
+            outputs.append(result.stdout)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        fail("cannot bind source git provenance: {}".format(exc))
+    try:
+        first = outputs[0].decode("ascii").strip()
+        status = outputs[1].decode("utf-8")
+        untracked = outputs[2].decode("utf-8")
+        second = outputs[3].decode("ascii").strip()
+    except UnicodeDecodeError:
+        fail("source git provenance is not valid text")
+    if re.fullmatch(r"[0-9a-f]{40}", first) is None or first != second:
+        fail("source git commit is malformed or changed during inspection")
+    return {
+        "source_git_commit": first,
+        "tracked_worktree_clean": not bool(status),
+        "tracked_status_sha256":
+            hashlib.sha256(status.encode("utf-8")).hexdigest(),
+        "untracked_source_clean": not bool(untracked),
+        "untracked_source_sha256":
+            hashlib.sha256(untracked.encode("utf-8")).hexdigest(),
+    }
+
+
+def _source_provenance(
+        worker: Path, worker_fd: Optional[int] = None) -> Mapping[str, Any]:
     for path in (
             BENCH_SOURCE, RAW_SEED_SOURCE, FROZEN_TRACE_SOURCE,
             CONTROLLER_SOURCE):
@@ -377,32 +573,26 @@ def _source_provenance(worker: Path) -> Mapping[str, Any]:
             fail("cannot inspect audited source {}: {}".format(path, exc))
         if not stat.S_ISREG(info.st_mode):
             fail("audited source must be a regular file: {}".format(path))
-    try:
-        head = subprocess.run(
-            ["git", "rev-parse", "--verify", "HEAD"], cwd=str(REPO_ROOT),
-            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, timeout=10.0, check=False)
-        status = subprocess.run(
-            ["git", "status", "--porcelain=v1", "--untracked-files=no"],
-            cwd=str(REPO_ROOT), stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10.0,
-            check=False)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        fail("cannot bind source git provenance: {}".format(exc))
-    if head.returncode != 0 or status.returncode != 0:
-        fail("cannot bind source git provenance")
-    try:
-        commit = head.stdout.decode("ascii").strip()
-        status.stdout.decode("utf-8")
-    except UnicodeDecodeError:
-        fail("source git provenance is not valid text")
-    if contract_api.GIT_COMMIT.fullmatch(commit) is None:
-        fail("source git commit is malformed")
+    git_state = _git_source_state()
+    if worker_fd is None:
+        worker_sha256 = _sha256_file(worker)
+    else:
+        try:
+            opened = os.fstat(worker_fd)
+            current = os.stat(str(worker), follow_symlinks=False)
+        except OSError as exc:
+            fail("cannot revalidate pinned worker: {}".format(exc))
+        if ((opened.st_dev, opened.st_ino) !=
+                (current.st_dev, current.st_ino) or
+                not stat.S_ISREG(opened.st_mode)):
+            fail("precodefail worker path no longer names the pinned binary")
+        worker_sha256 = _sha256_fd(worker_fd, "precodefail worker")
     return {
-        "source_git_commit": commit,
-        "tracked_worktree_clean": not bool(status.stdout),
-        "tracked_status_sha256": hashlib.sha256(status.stdout).hexdigest(),
-        "worker_binary_sha256": _sha256_file(worker),
+        **git_state,
+        # Every invocation must independently emit this same embedded commit
+        # before the controller can publish the campaign.
+        "worker_source_git_commit": git_state["source_git_commit"],
+        "worker_binary_sha256": worker_sha256,
         "controller_source_sha256": _sha256_file(CONTROLLER_SOURCE),
         "wirehair_v2_bench_source_sha256": _sha256_file(BENCH_SOURCE),
         "wirehair_v2_raw_seed_source_sha256": _sha256_file(RAW_SEED_SOURCE),
@@ -568,7 +758,9 @@ def _parse_nonnegative_decimal(text: str, field: str) -> Decimal:
     return value
 
 
-def _parse_metadata(line: str, invocation: Invocation) -> Mapping[str, str]:
+def _parse_metadata(
+        line: str, invocation: Invocation,
+        expected_source_git_commit: str) -> Mapping[str, str]:
     prefix = "# precodefail: "
     if not line.startswith(prefix):
         fail("precodefail metadata line is missing")
@@ -597,6 +789,7 @@ def _parse_metadata(line: str, invocation: Invocation) -> Mapping[str, str]:
         "exact_packet_attempt": str(invocation.trial),
         "construction_seed_basis": RAW_SEED_BASIS,
         "seed_schedule_sha256": RAW_SEED_SCHEDULE_SHA256,
+        "source_git_commit": expected_source_git_commit,
     }
     for key, expected_value in expected.items():
         if metadata[key] != expected_value:
@@ -628,7 +821,8 @@ def parse_invocation_output(
         stderr: bytes,
         cell_map: Mapping[Tuple[int, str, int], Mapping[str, Any]],
         trace_map: Mapping[Tuple[int, str, int], FrozenTrace],
-        worker_binary_sha256: str) -> InvocationResult:
+        worker_binary_sha256: str,
+        expected_source_git_commit: str) -> InvocationResult:
     if len(stdout) > MAX_STDOUT_BYTES or len(stderr) > MAX_STDERR_BYTES:
         fail("precodefail output exceeded its fixed byte cap")
     if stderr:
@@ -643,7 +837,7 @@ def parse_invocation_output(
     expected_rows = len(K_VALUES) * len(OVERHEADS)
     if len(lines) != expected_rows + 2:
         fail("precodefail invocation did not emit exactly 120 rows")
-    _parse_metadata(lines[0], invocation)
+    _parse_metadata(lines[0], invocation, expected_source_git_commit)
     if tuple(_parse_csv_line(lines[1])) != CSV_HEADER:
         fail("precodefail CSV header changed")
 
@@ -669,6 +863,9 @@ def parse_invocation_output(
         seen.add(key)
         exact_text = {
             "bb": "2", "heavy_family": "periodic", "mix_count": "3",
+            "binary_dense_rows": str(invocation.dense_rows),
+            "gf256_heavy_rows": str(invocation.heavy_rows),
+            "dense_identity_corner": "0",
             "trials": "1", "seed_attempt": "",
             "active_packet_peel_seed_xor": "0x0",
             "precode_attempt": str(invocation.trial),
@@ -683,6 +880,21 @@ def parse_invocation_output(
             if row[field] != expected:
                 fail("precodefail row {} field {} disagrees with the fixed "
                      "command".format(line_number, field))
+
+        staircase = _parse_uint(row["staircase"], "staircase", 400)
+        binary_dense_rows = _parse_uint(
+            row["binary_dense_rows"], "binary_dense_rows", 64)
+        gf256_heavy_rows = _parse_uint(
+            row["gf256_heavy_rows"], "gf256_heavy_rows", 128)
+        source_hits = _parse_uint(row["source_hits"], "source_hits", 8)
+        dense_identity_corner = bool(_parse_uint(
+            row["dense_identity_corner"], "dense_identity_corner", 1))
+        expected_source_hits = 3 if K >= 10000 else 2
+        if (staircase == 0 or binary_dense_rows != invocation.dense_rows or
+                gf256_heavy_rows != invocation.heavy_rows or
+                source_hits != expected_source_hits or dense_identity_corner or
+                K + staircase + binary_dense_rows + gf256_heavy_rows > 65535):
+            fail("precodefail row has an invalid realized raw structure")
 
         success = _parse_uint(row["success"], "success", 1)
         rank_fail = _parse_uint(row["rank_fail"], "rank_fail", 1)
@@ -744,13 +956,30 @@ def parse_invocation_output(
                 cell["block_bytes"] != 2):
             fail("precodefail invocation disagrees with its frozen cell")
         prefix = trace.packet_ids[:K + overhead]
+        raw_fields = {
+            "construction_seed_basis": RAW_SEED_BASIS,
+            "seed_schedule_sha256": RAW_SEED_SCHEDULE_SHA256,
+            "precode_attempt": invocation.trial,
+            "packet_attempt": invocation.trial,
+            "effective_precode_seed": expected_precode_seed,
+            "effective_packet_seed": expected_packet_seed,
+            "staircase": staircase,
+            "binary_dense_rows": binary_dense_rows,
+            "gf256_heavy_rows": gf256_heavy_rows,
+            "source_hits": source_hits,
+            "dense_identity_corner": dense_identity_corner,
+            "heavy_family": "periodic-cauchy",
+            "mix_count": 3,
+        }
+        arm_descriptor_sha256 = _arm_descriptor_sha256(invocation.arm)
         parsed.append({
             "schema": RECORD_SCHEMA,
             "arm": invocation.arm,
-            "binary_dense_rows": invocation.dense_rows,
-            "gf256_heavy_rows": invocation.heavy_rows,
-            "heavy_family": "periodic",
-            "mix_count": 3,
+            "arm_descriptor_sha256": arm_descriptor_sha256,
+            "realized_construction_sha256":
+                _raw_realized_construction_sha256(
+                    invocation.arm, K, 2, raw_fields),
+            **raw_fields,
             "phase": "development",
             "band": cell["band"],
             "K": K,
@@ -761,13 +990,7 @@ def parse_invocation_output(
             "base_seed_attempt": invocation.trial,
             "loss_seed": invocation.root,
             "overhead": overhead,
-            "precode_attempt": invocation.trial,
-            "packet_attempt": invocation.trial,
             "attempt_mode": "exact",
-            "seed_basis": RAW_SEED_BASIS,
-            "seed_schedule_sha256": RAW_SEED_SCHEDULE_SHA256,
-            "effective_precode_seed": expected_precode_seed,
-            "effective_packet_seed": expected_packet_seed,
             "cell_sha256": _sha256_json(cell),
             "frozen_trace_sha256": trace.trace_sha256,
             "frozen_packet_prefix_sha256": _packet_hash(prefix),
@@ -799,14 +1022,22 @@ def _run_invocation(
         registry: _ProcessRegistry,
         cell_map: Mapping[Tuple[int, str, int], Mapping[str, Any]],
         trace_map: Mapping[Tuple[int, str, int], FrozenTrace],
-        worker_binary_sha256: str) -> InvocationResult:
+        worker_binary_sha256: str,
+        expected_source_git_commit: str,
+        worker_fd: Optional[int] = None) -> InvocationResult:
     if registry.cancelled.is_set():
         fail("work/rank campaign was cancelled")
     command = invocation.argv(worker)
+    execution_command = list(command)
+    pass_fds: Tuple[int, ...] = ()
+    if worker_fd is not None:
+        execution_command[0] = "/proc/self/fd/{}".format(worker_fd)
+        pass_fds = (worker_fd,)
     try:
         process = subprocess.Popen(
-            command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, start_new_session=True)
+            execution_command, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            start_new_session=True, pass_fds=pass_fds)
     except OSError as exc:
         registry.cancel()
         fail("cannot start precodefail worker: {}".format(exc))
@@ -820,7 +1051,7 @@ def _run_invocation(
                 process.returncode, ": " + detail if detail else ""))
         return parse_invocation_output(
             invocation, command, stdout, stderr, cell_map, trace_map,
-            worker_binary_sha256)
+            worker_binary_sha256, expected_source_git_commit)
     except BaseException:
         registry.cancel()
         _kill_and_reap(process)
@@ -829,36 +1060,29 @@ def _run_invocation(
         registry.remove(process)
 
 
-def _domain_sha256() -> str:
+def _domain_sha256(records: Sequence[Mapping[str, Any]]) -> str:
+    if len(records) != EXPECTED_RECORDS:
+        fail("work domain requires exactly {} records".format(
+            EXPECTED_RECORDS))
     digest = hashlib.sha256()
-    for arm, dense_rows, heavy_rows in ARMS:
-        for trial, root in enumerate(ROOTS):
-            for schedule, loss_ppm in STRATA:
-                for K in K_VALUES:
-                    for overhead in OVERHEADS:
-                        identity = {
-                            "K": K, "arm": arm,
-                            "binary_dense_rows": dense_rows,
-                            "block_bytes": 2,
-                            "gf256_heavy_rows": heavy_rows,
-                            "heavy_family": "periodic",
-                            "loss_ppm": loss_ppm, "loss_seed": root,
-                            "mix_count": 3, "overhead": overhead,
-                            "attempt_mode": "exact",
-                            "packet_attempt": trial,
-                            "precode_attempt": trial,
-                            "schedule": schedule,
-                            "seed_basis": RAW_SEED_BASIS,
-                            "seed_schedule_sha256":
-                                RAW_SEED_SCHEDULE_SHA256,
-                            "effective_precode_seed":
-                                _effective_precode_seed(trial),
-                            "effective_packet_seed":
-                                _effective_packet_seed(trial),
-                            "trial": trial,
-                        }
-                        digest.update(_canonical(identity).encode("utf-8"))
-                        digest.update(b"\n")
+    identity_fields = (
+        "K", "arm", "arm_descriptor_sha256", "binary_dense_rows",
+        "block_bytes", "construction_seed_basis", "dense_identity_corner",
+        "effective_packet_seed", "effective_precode_seed",
+        "gf256_heavy_rows", "heavy_family", "loss_ppm", "loss_seed",
+        "mix_count", "overhead", "packet_attempt", "precode_attempt",
+        "realized_construction_sha256", "schedule",
+        "seed_schedule_sha256", "source_hits", "staircase", "trial",
+    )
+    ordered = sorted(records, key=lambda row: (
+        row["arm"], row["trial"], row["schedule"], row["K"],
+        row["overhead"]))
+    for row in ordered:
+        if not all(field in row for field in identity_fields):
+            fail("work domain record is missing raw construction identity")
+        identity = {field: row[field] for field in identity_fields}
+        digest.update(_canonical(identity).encode("utf-8"))
+        digest.update(b"\n")
     return digest.hexdigest()
 
 
@@ -955,9 +1179,10 @@ def _aggregate(records: Sequence[Mapping[str, Any]]) -> List[Mapping[str, Any]]:
                 fail("rank transition classification is inconsistent")
         summaries.append({
             "arm": arm,
+            "arm_descriptor_sha256": _arm_descriptor_sha256(arm),
             "binary_dense_rows": dense_rows,
             "gf256_heavy_rows": heavy_rows,
-            "heavy_family": "periodic",
+            "heavy_family": "periodic-cauchy",
             "mix_count": 3,
             "rows": len(arm_rows),
             "by_overhead": by_overhead,
@@ -980,44 +1205,452 @@ def _aggregate(records: Sequence[Mapping[str, Any]]) -> List[Mapping[str, Any]]:
     return summaries
 
 
-def _atomic_write(path: Path, data: bytes) -> None:
-    descriptor, raw_path = tempfile.mkstemp(
-        prefix="." + path.name + ".", suffix=".tmp", dir=str(path.parent))
-    staged = Path(raw_path)
-    linked = False
-    staged_info: Optional[os.stat_result] = None
+def _close_preserving_exception(descriptor: int) -> None:
+    initiating_exception = sys.exc_info()[0] is not None
     try:
-        with os.fdopen(descriptor, "wb") as output:
-            output.write(data)
-            output.flush()
-            os.fsync(output.fileno())
-        staged_info = staged.stat()
-        try:
-            os.link(str(staged), str(path))
-            linked = True
-        except FileExistsError:
-            fail("refusing to replace existing artifact {}".format(path))
-        directory = os.open(
-            str(path.parent), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        os.close(descriptor)
     except BaseException:
-        if linked and staged_info is not None:
+        if not initiating_exception:
+            raise
+
+
+def _open_pinned_directory(path: Path) -> Tuple[int, Tuple[int, int]]:
+    flags = (os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
+             getattr(os, "O_NOFOLLOW", 0))
+    try:
+        directory_fd = os.open(str(path), flags)
+        opened = os.fstat(directory_fd)
+        current = os.stat(str(path), follow_symlinks=False)
+        identity = (opened.st_dev, opened.st_ino)
+        if not stat.S_ISDIR(opened.st_mode) or identity != (
+                current.st_dev, current.st_ino):
+            fail("artifact output directory identity changed while opening")
+        return directory_fd, identity
+    except BaseException:
+        if "directory_fd" in locals():
+            _close_preserving_exception(directory_fd)
+        raise
+
+
+def _verify_pinned_directory(
+        path: Path, identity: Tuple[int, int]) -> None:
+    try:
+        current = os.stat(str(path), follow_symlinks=False)
+    except OSError as exc:
+        fail("artifact output directory became unavailable: {}".format(exc))
+    if not stat.S_ISDIR(current.st_mode) or (
+            current.st_dev, current.st_ino) != identity:
+        fail("artifact output directory identity changed during publication")
+
+
+def _remove_if_identity_at(
+        directory_fd: int, name: str, identity: Tuple[int, int],
+        display_path: Path) -> None:
+    """Rollback only the artifact inode published by this process."""
+    try:
+        if _quarantine_unlink_if_identity_at(
+                directory_fd, name, identity, display_path):
+            os.fsync(directory_fd)
+    except OSError as exc:
+        fail("cannot roll back partial artifact publication {}: {}".format(
+            display_path, exc))
+
+
+def _rename_noreplace_at(
+        directory_fd: int, source: str, destination: str) -> None:
+    if _RENAMEAT2 is None:
+        fail("artifact publication requires Linux renameat2")
+    result = _RENAMEAT2(
+        directory_fd, source.encode("utf-8"),
+        directory_fd, destination.encode("utf-8"), _RENAME_NOREPLACE)
+    if result != 0:
+        error_number = ctypes.get_errno()
+        raise OSError(error_number, os.strerror(error_number))
+
+
+def _probe_rename_noreplace(directory_fd: int) -> None:
+    source = ".renameat2-probe.{}.src".format(secrets.token_hex(16))
+    destination = ".renameat2-probe.{}.dst".format(secrets.token_hex(16))
+    descriptor = -1
+    try:
+        flags = (os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                 getattr(os, "O_NOFOLLOW", 0) |
+                 getattr(os, "O_CLOEXEC", 0))
+        descriptor = os.open(source, flags, 0o600, dir_fd=directory_fd)
+        closing_descriptor = descriptor
+        descriptor = -1
+        os.close(closing_descriptor)
+        _rename_noreplace_at(directory_fd, source, destination)
+        moved = os.stat(
+            destination, dir_fd=directory_fd, follow_symlinks=False)
+        if not stat.S_ISREG(moved.st_mode):
+            fail("renameat2 capability probe produced a non-regular file")
+    except OSError as exc:
+        fail("output directory does not support renameat2 NOREPLACE: {}".format(
+            exc))
+    finally:
+        if descriptor >= 0:
             try:
-                destination_info = os.lstat(str(path))
-                if (destination_info.st_dev == staged_info.st_dev and
-                        destination_info.st_ino == staged_info.st_ino):
-                    os.unlink(str(path))
-            except OSError:
+                os.close(descriptor)
+            except BaseException:
+                pass
+        for name in (source, destination):
+            try:
+                os.unlink(name, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
+        os.fsync(directory_fd)
+
+
+def _quarantine_unlink_if_identity_at(
+        directory_fd: int, name: str, identity: Tuple[int, int],
+        display_path: Path) -> bool:
+    """Remove one matching name without ever unlinking a path replacement."""
+    quarantine = ".{}.rollback.{}.tmp".format(name, secrets.token_hex(16))
+    move_attempted = False
+    try:
+        move_attempted = True
+        _rename_noreplace_at(directory_fd, name, quarantine)
+    except FileNotFoundError:
+        return False
+    except BaseException:
+        if move_attempted:
+            try:
+                _rename_noreplace_at(directory_fd, quarantine, name)
+            except BaseException:
+                pass
+        raise
+    try:
+        moved = os.stat(
+            quarantine, dir_fd=directory_fd, follow_symlinks=False)
+        if (moved.st_dev, moved.st_ino) == identity:
+            os.unlink(quarantine, dir_fd=directory_fd)
+            return True
+
+        # A foreign replacement won the race.  Restore it without overwriting
+        # a second replacement.  If the original name is occupied, retain both
+        # foreign inodes (one under the unpredictable quarantine name).
+        try:
+            _rename_noreplace_at(directory_fd, quarantine, name)
+        except FileExistsError:
+            pass
+        return False
+    except BaseException:
+        # Put the atomically quarantined name back whenever possible so the
+        # outer transaction can retry identity-checked cleanup.  This also
+        # covers an asynchronous exception immediately after renameat2.
+        if move_attempted:
+            try:
+                _rename_noreplace_at(directory_fd, quarantine, name)
+            except (FileNotFoundError, FileExistsError):
+                pass
+            except BaseException:
+                pass
+        raise
+
+
+@dataclass(frozen=True)
+class _PublishedArtifact:
+    device: int
+    inode: int
+    descriptor: int
+    staged_name: str
+    byte_count: int
+    sha256: str
+
+    @property
+    def identity(self) -> Tuple[int, int]:
+        return self.device, self.inode
+
+
+def _verify_identity_at(
+        directory_fd: int, name: str, expected: _PublishedArtifact,
+        display_path: Path, require_staged: bool = True) -> None:
+    try:
+        retained = os.fstat(expected.descriptor)
+        current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if require_staged:
+            staged = os.stat(
+                expected.staged_name, dir_fd=directory_fd,
+                follow_symlinks=False)
+    except OSError as exc:
+        fail("published artifact became unavailable {}: {}".format(
+            display_path, exc))
+    if (not stat.S_ISREG(retained.st_mode) or
+            (retained.st_dev, retained.st_ino) != expected.identity or
+            (current.st_dev, current.st_ino) != expected.identity or
+            (require_staged and
+             (staged.st_dev, staged.st_ino) != expected.identity)):
+        fail("published artifact identity changed for {}".format(
+            display_path))
+    flags = (os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) |
+             getattr(os, "O_NONBLOCK", 0) |
+             getattr(os, "O_CLOEXEC", 0))
+    try:
+        descriptor = os.open(name, flags, dir_fd=directory_fd)
+    except OSError as exc:
+        fail("cannot open published artifact {}: {}".format(
+            display_path, exc))
+    try:
+        before = os.fstat(descriptor)
+        if (not stat.S_ISREG(before.st_mode) or
+                (before.st_dev, before.st_ino) != expected.identity):
+            fail("published artifact identity changed while opening {}".format(
+                display_path))
+        digest = hashlib.sha256()
+        byte_count = 0
+        while True:
+            remaining = expected.byte_count - byte_count
+            if remaining < 0:
+                fail("published artifact exceeded its fixed size {}".format(
+                    display_path))
+            chunk = os.read(descriptor, min(1024 * 1024, remaining + 1))
+            if not chunk:
+                break
+            digest.update(chunk)
+            byte_count += len(chunk)
+        after = os.fstat(descriptor)
+    except OSError as exc:
+        fail("cannot verify published artifact {}: {}".format(
+            display_path, exc))
+    finally:
+        _close_preserving_exception(descriptor)
+    stable_fields_before = (
+        before.st_dev, before.st_ino, before.st_size,
+        before.st_mtime_ns, before.st_ctime_ns)
+    stable_fields_after = (
+        after.st_dev, after.st_ino, after.st_size,
+        after.st_mtime_ns, after.st_ctime_ns)
+    if stable_fields_before != stable_fields_after:
+        fail("published artifact changed while verifying {}".format(
+            display_path))
+    if (byte_count != expected.byte_count or
+            digest.hexdigest() != expected.sha256):
+        fail("published artifact content changed for {}".format(display_path))
+
+
+def _discard_staged_at(
+        directory_fd: int, expected: _PublishedArtifact,
+        display_path: Path) -> None:
+    if not _quarantine_unlink_if_identity_at(
+            directory_fd, expected.staged_name, expected.identity,
+            display_path):
+        fail("staged artifact disappeared for {}".format(display_path))
+
+
+def _rollback_publications_at(
+        directory_fd: int, paths: Sequence[Path],
+        expected: Mapping[str, _PublishedArtifact]) -> None:
+    """Best-effort rollback that never masks the initiating exception."""
+    for path in paths:
+        publication = expected.get(path.name)
+        if publication is None:
+            continue
+        try:
+            _remove_if_identity_at(
+                directory_fd, path.name, publication.identity, path)
+        except BaseException:
+            pass
+    for path in paths:
+        publication = expected.get(path.name)
+        if publication is None:
+            continue
+        try:
+            _quarantine_unlink_if_identity_at(
+                directory_fd, publication.staged_name,
+                publication.identity, path)
+        except BaseException:
+            pass
+    try:
+        os.fsync(directory_fd)
+    except BaseException:
+        pass
+
+
+def _close_publication_descriptors(
+        expected: Mapping[str, _PublishedArtifact]) -> None:
+    for publication in expected.values():
+        try:
+            os.close(publication.descriptor)
+        except BaseException:
+            # Descriptor closure occurs only after either successful commit or
+            # completed best-effort rollback.  It cannot change that outcome.
+            pass
+
+
+def _atomic_write_at(
+        directory_fd: int, name: str, display_path: Path, data: bytes,
+        expected_identities: Dict[str, _PublishedArtifact]
+        ) -> Tuple[int, int]:
+    if not name or name in (".", "..") or "/" in name:
+        fail("artifact destination must be a plain filename")
+    staged_name = ".{}.{}.{}.{}.tmp".format(
+        name, os.getpid(), threading.get_ident(), secrets.token_hex(16))
+    flags = (os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+             getattr(os, "O_NOFOLLOW", 0) |
+             getattr(os, "O_CLOEXEC", 0))
+    descriptor = -1
+    retained_descriptor = -1
+    staged_identity: Optional[Tuple[int, int]] = None
+    caller_owns_staged = False
+    try:
+        descriptor = os.open(
+            staged_name, flags, 0o600, dir_fd=directory_fd)
+        opened_info = os.fstat(descriptor)
+        staged_identity = (opened_info.st_dev, opened_info.st_ino)
+        remaining = memoryview(data)
+        while remaining:
+            written = os.write(descriptor, remaining)
+            if written <= 0:
+                fail("short write while staging artifact {}".format(
+                    display_path))
+            remaining = remaining[written:]
+        os.fsync(descriptor)
+        staged_info = os.fstat(descriptor)
+        if (staged_info.st_dev, staged_info.st_ino) != staged_identity:
+            fail("staged artifact identity changed while writing {}".format(
+                display_path))
+
+        # Publish the expected inode before linking.  The pair-level rollback
+        # can therefore identify our destination even if an asynchronous
+        # BaseException lands after link(2) but before this function returns.
+        retained_descriptor = os.dup(descriptor)
+        expected_identities[name] = _PublishedArtifact(
+            device=staged_info.st_dev,
+            inode=staged_info.st_ino,
+            descriptor=retained_descriptor,
+            staged_name=staged_name,
+            byte_count=len(data),
+            sha256=hashlib.sha256(data).hexdigest())
+        caller_owns_staged = True
+        try:
+            os.link(
+                staged_name, name,
+                src_dir_fd=directory_fd, dst_dir_fd=directory_fd,
+                follow_symlinks=False)
+        except FileExistsError:
+            fail("refusing to replace existing artifact {}".format(
+                display_path))
+        destination_info = os.stat(
+            name, dir_fd=directory_fd, follow_symlinks=False)
+        if (destination_info.st_dev, destination_info.st_ino) != (
+                staged_identity):
+            fail("published artifact identity mismatch for {}".format(
+                display_path))
+        os.fsync(directory_fd)
+        return staged_identity
+    except BaseException:
+        if staged_identity is not None:
+            try:
+                _remove_if_identity_at(
+                    directory_fd, name, staged_identity, display_path)
+            except BaseException:
                 pass
         raise
     finally:
+        initiating_exception = sys.exc_info()[0] is not None
+        cleanup_error: Optional[BaseException] = None
+        if descriptor >= 0:
+            if staged_identity is None:
+                try:
+                    fallback_info = os.stat(descriptor)
+                    staged_identity = (
+                        fallback_info.st_dev, fallback_info.st_ino)
+                except BaseException:
+                    pass
+            try:
+                os.close(descriptor)
+            except BaseException as exc:
+                cleanup_error = exc
+        if not caller_owns_staged and staged_identity is not None:
+            try:
+                _quarantine_unlink_if_identity_at(
+                    directory_fd, staged_name, staged_identity, display_path)
+            except BaseException as exc:
+                if cleanup_error is None:
+                    cleanup_error = exc
+        if cleanup_error is not None and not initiating_exception:
+            raise cleanup_error
+        if name not in expected_identities and retained_descriptor >= 0:
+            try:
+                os.close(retained_descriptor)
+            except BaseException:
+                pass
+
+
+def _atomic_write(path: Path, data: bytes) -> Tuple[int, int]:
+    directory_fd, directory_identity = _open_pinned_directory(path.parent)
+    expected: Dict[str, _PublishedArtifact] = {}
+    try:
+        _probe_rename_noreplace(directory_fd)
+        identity = _atomic_write_at(
+            directory_fd, path.name, path, data, expected)
+        _verify_identity_at(
+            directory_fd, path.name, expected[path.name], path)
+        _verify_pinned_directory(path.parent, directory_identity)
+        _discard_staged_at(directory_fd, expected[path.name], path)
+        os.fsync(directory_fd)
+        _verify_identity_at(
+            directory_fd, path.name, expected[path.name], path,
+            require_staged=False)
+        _verify_pinned_directory(path.parent, directory_identity)
+        return identity
+    except BaseException:
+        _rollback_publications_at(directory_fd, (path,), expected)
+        raise
+    finally:
         try:
-            staged.unlink()
-        except FileNotFoundError:
-            pass
+            _close_publication_descriptors(expected)
+        finally:
+            try:
+                os.close(directory_fd)
+            except BaseException:
+                pass
+
+
+def _publish_artifact_pair(
+        result_path: Path, result_bytes: bytes,
+        summary_path: Path, summary_bytes: bytes) -> None:
+    if result_path.parent != summary_path.parent:
+        fail("artifact pair must share one output directory")
+    if result_path.name == summary_path.name:
+        fail("artifact pair destinations must be distinct")
+    directory_fd, directory_identity = _open_pinned_directory(
+        result_path.parent)
+    expected: Dict[str, _PublishedArtifact] = {}
+    try:
+        _probe_rename_noreplace(directory_fd)
+        _atomic_write_at(
+            directory_fd, result_path.name, result_path, result_bytes,
+            expected)
+        _atomic_write_at(
+            directory_fd, summary_path.name, summary_path, summary_bytes,
+            expected)
+        for path in (result_path, summary_path):
+            _verify_identity_at(
+                directory_fd, path.name, expected[path.name], path)
+        _verify_pinned_directory(result_path.parent, directory_identity)
+        for path in (summary_path, result_path):
+            _discard_staged_at(directory_fd, expected[path.name], path)
+        os.fsync(directory_fd)
+        for path in (result_path, summary_path):
+            _verify_identity_at(
+                directory_fd, path.name, expected[path.name], path,
+                require_staged=False)
+        _verify_pinned_directory(result_path.parent, directory_identity)
+        return
+    except BaseException:
+        _rollback_publications_at(
+            directory_fd, (summary_path, result_path), expected)
+        raise
+    finally:
+        try:
+            _close_publication_descriptors(expected)
+        finally:
+            try:
+                os.close(directory_fd)
+            except BaseException:
+                pass
 
 
 def run_campaign(
@@ -1029,10 +1662,20 @@ def run_campaign(
             deadline_seconds > MAX_WALL_SECONDS):
         fail("deadline must be finite and in (0,{}]".format(
             int(MAX_WALL_SECONDS)))
-    worker = worker.resolve(strict=True)
-    info = worker.stat()
-    if not stat.S_ISREG(info.st_mode) or not os.access(str(worker), os.X_OK):
-        fail("worker must be an executable regular file")
+    worker, worker_fd = _open_pinned_worker(worker)
+    try:
+        return _run_campaign_pinned(
+            worker, worker_fd, output_dir, jobs, deadline_seconds)
+    finally:
+        try:
+            os.close(worker_fd)
+        except BaseException:
+            pass
+
+
+def _run_campaign_pinned(
+        worker: Path, worker_fd: int, output_dir: Path, jobs: int,
+        deadline_seconds: float) -> Mapping[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     if output_dir.is_symlink() or not output_dir.is_dir():
         fail("output directory must be a real directory")
@@ -1044,7 +1687,10 @@ def run_campaign(
 
     contract = contract_api.load_contract()
     cell_map, trace_map, trace_identity = build_frozen_domain(contract)
-    source_provenance = _source_provenance(worker)
+    source_provenance = _source_provenance(worker, worker_fd)
+    if (source_provenance["tracked_worktree_clean"] is not True or
+            source_provenance["untracked_source_clean"] is not True):
+        fail("work/rank campaign requires a clean codec source worktree")
     source_provenance_sha256 = _sha256_json(source_provenance)
     worker_binary_sha256 = source_provenance["worker_binary_sha256"]
     invocations = make_invocations()
@@ -1058,7 +1704,8 @@ def run_campaign(
         for invocation in invocations:
             future = executor.submit(
                 _run_invocation, invocation, worker, deadline, registry,
-                cell_map, trace_map, worker_binary_sha256)
+                cell_map, trace_map, worker_binary_sha256,
+                source_provenance["source_git_commit"], worker_fd)
             futures[future] = invocation.ordinal
         remaining = deadline - time.monotonic()
         if remaining <= 0.0:
@@ -1083,7 +1730,7 @@ def run_campaign(
             executor.shutdown(wait=True)
     if len(results) != EXPECTED_INVOCATIONS:
         fail("work/rank campaign did not complete all invocations")
-    if _source_provenance(worker) != source_provenance:
+    if _source_provenance(worker, worker_fd) != source_provenance:
         fail("worker, audited source, or tracked git state changed during run")
 
     rows: List[Mapping[str, Any]] = []
@@ -1128,7 +1775,7 @@ def run_campaign(
         "contract_sha256": contract_api.contract_sha256(contract),
         "recovery_domain_sha256": contract_api.recovery_domain_sha256(
             contract, "development"),
-        "work_domain_sha256": _domain_sha256(),
+        "work_domain_sha256": _domain_sha256(records),
         "worker_binary_sha256": worker_binary_sha256,
         "source_provenance": source_provenance,
         "source_provenance_sha256": source_provenance_sha256,
@@ -1138,7 +1785,7 @@ def run_campaign(
         "invocations": receipts,
         "trace_identity": trace_identity,
         "arms": _aggregate(records),
-        "seed_basis": RAW_SEED_BASIS,
+        "construction_seed_basis": RAW_SEED_BASIS,
         "seed_schedule_sha256": RAW_SEED_SCHEDULE_SHA256,
         "selection_performed": False,
         "timing_metrics_included": False,
@@ -1146,9 +1793,360 @@ def run_campaign(
     summary = dict(unsigned_summary)
     summary["summary_sha256"] = _sha256_json(unsigned_summary)
     summary_bytes = (_canonical(summary) + "\n").encode("utf-8")
-    _atomic_write(result_path, result_bytes)
-    _atomic_write(summary_path, summary_bytes)
+    _publish_artifact_pair(
+        result_path, result_bytes, summary_path, summary_bytes)
     return summary
+
+
+def _is_sha256(value: Any) -> bool:
+    return isinstance(value, str) and re.fullmatch(
+        r"[0-9a-f]{64}", value) is not None
+
+
+def _read_regular_bytes(
+        path: Path, byte_cap: int, context: str,
+        directory_fd: Optional[int] = None) -> bytes:
+    descriptor = -1
+    try:
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        if nofollow == 0:
+            fail("{} cannot be opened fail-closed without O_NOFOLLOW".format(
+                context))
+        descriptor = os.open(
+            str(path), os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) |
+            getattr(os, "O_NONBLOCK", 0) | nofollow, dir_fd=directory_fd)
+        before = os.fstat(descriptor)
+        if (not stat.S_ISREG(before.st_mode) or before.st_size <= 0 or
+                before.st_size > byte_cap):
+            fail("{} has an invalid type or size".format(context))
+        blocks = []
+        size = 0
+        while True:
+            block = os.read(descriptor, min(1024 * 1024, byte_cap + 1 - size))
+            if not block:
+                break
+            blocks.append(block)
+            size += len(block)
+            if size > byte_cap:
+                fail("{} exceeds its bounded size".format(context))
+        after = os.fstat(descriptor)
+        stable_before = (
+            before.st_dev, before.st_ino, before.st_size,
+            getattr(before, "st_mtime_ns", None),
+            getattr(before, "st_ctime_ns", None))
+        stable_after = (
+            after.st_dev, after.st_ino, after.st_size,
+            getattr(after, "st_mtime_ns", None),
+            getattr(after, "st_ctime_ns", None))
+        data = b"".join(blocks)
+        if stable_before != stable_after or len(data) != before.st_size:
+            fail("{} changed while it was being read".format(context))
+        return data
+    except OSError as exc:
+        fail("cannot read {} {}: {}".format(context, path, exc))
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    return b""
+
+
+def _read_canonical_json(
+        path: Path, byte_cap: int,
+        directory_fd: Optional[int] = None) -> Mapping[str, Any]:
+    data = _read_regular_bytes(
+        path, byte_cap, "work/rank summary", directory_fd)
+    try:
+        value = contract_api._load_json_bytes(data, "work/rank summary")
+    except contract_api.ContractError as exc:
+        fail("cannot parse artifact {}: {}".format(path, exc))
+    if not isinstance(value, dict) or \
+            data != (_canonical(value) + "\n").encode("utf-8"):
+        fail("artifact is not canonical JSON: {}".format(path))
+    return value
+
+
+def load_completed_work_screen(
+        contract: Mapping[str, Any], artifact_dir: Path) -> Mapping[str, Any]:
+    """Strictly load one complete v2 work/rank campaign.
+
+    This is the only supported ingestion seam for joining sidecar algebraic
+    work with native recovery records.  It deliberately replays every raw
+    construction identity instead of trusting the summary's self-hash.
+    """
+    artifact_dir = Path(artifact_dir)
+    directory_fd = -1
+    try:
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        directory_flag = getattr(os, "O_DIRECTORY", 0)
+        if nofollow == 0 or directory_flag == 0:
+            fail("work/rank artifact directory cannot be opened fail-closed")
+        directory_fd = os.open(
+            str(artifact_dir), os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) |
+            nofollow | directory_flag)
+        directory_info = os.fstat(directory_fd)
+        if not stat.S_ISDIR(directory_info.st_mode):
+            fail("work/rank artifact directory must be a real directory")
+        resolved_dir = artifact_dir.resolve(strict=True)
+        resolved_info = resolved_dir.stat()
+        if (directory_info.st_dev, directory_info.st_ino) != \
+                (resolved_info.st_dev, resolved_info.st_ino):
+            fail("work/rank artifact directory identity changed")
+        summary = _read_canonical_json(
+            Path(SUMMARY_NAME), 16 * 1024 * 1024, directory_fd)
+        result_bytes = _read_regular_bytes(
+            Path(RESULT_NAME), 64 * 1024 * 1024,
+            "work/rank result stream", directory_fd)
+    except OSError as exc:
+        fail("work/rank artifact directory must be a real directory: {}"
+             .format(exc))
+    finally:
+        if directory_fd >= 0:
+            os.close(directory_fd)
+    if set(summary) != set(SUMMARY_FIELDS) or \
+            summary.get("schema") != SUMMARY_SCHEMA:
+        fail("work/rank summary schema or fields changed")
+    unsigned_summary = dict(summary)
+    summary_sha256 = unsigned_summary.pop("summary_sha256", None)
+    if not _is_sha256(summary_sha256) or \
+            summary_sha256 != _sha256_json(unsigned_summary):
+        fail("work/rank summary self-hash is invalid")
+    expected_contract_sha256 = contract_api.contract_sha256(contract)
+    expected_domain_sha256 = contract_api.recovery_domain_sha256(
+        contract, "development")
+    if (summary.get("contract_sha256") != expected_contract_sha256 or
+            summary.get("recovery_domain_sha256") != expected_domain_sha256):
+        fail("work/rank summary is bound to a different contract or domain")
+    if (summary.get("record_count") != EXPECTED_RECORDS or
+            summary.get("invocation_count") != EXPECTED_INVOCATIONS or
+            summary.get("construction_seed_basis") != RAW_SEED_BASIS or
+            summary.get("seed_schedule_sha256") !=
+                RAW_SEED_SCHEDULE_SHA256 or
+            summary.get("selection_performed") is not False or
+            summary.get("timing_metrics_included") is not False):
+        fail("work/rank summary policy or cardinality is invalid")
+
+    provenance = summary.get("source_provenance")
+    if not isinstance(provenance, dict) or \
+            set(provenance) != set(SOURCE_PROVENANCE_FIELDS) or \
+            summary.get("source_provenance_sha256") != \
+                _sha256_json(provenance):
+        fail("work/rank source provenance is invalid")
+    source_git_commit = provenance.get("source_git_commit")
+    if (not isinstance(source_git_commit, str) or
+            re.fullmatch(r"[0-9a-f]{40}", source_git_commit) is None or
+            provenance.get("worker_source_git_commit") !=
+                source_git_commit or
+            provenance.get("tracked_worktree_clean") is not True or
+            provenance.get("untracked_source_clean") is not True or
+            any(not _is_sha256(provenance.get(field)) for field in
+                SOURCE_PROVENANCE_FIELDS - {
+                    "source_git_commit", "tracked_worktree_clean",
+                    "untracked_source_clean", "worker_source_git_commit"}) or
+            provenance["tracked_status_sha256"] !=
+                hashlib.sha256(b"").hexdigest() or
+            provenance["untracked_source_sha256"] !=
+                hashlib.sha256(b"").hexdigest() or
+            provenance["worker_binary_sha256"] !=
+                summary.get("worker_binary_sha256")):
+        fail("work/rank source provenance fields are malformed")
+
+    if (not result_bytes.endswith(b"\n") or b"\r" in result_bytes or
+            hashlib.sha256(result_bytes).hexdigest() !=
+                summary.get("result_stream_sha256")):
+        fail("work/rank result stream hash, type, or framing is invalid")
+    raw_lines = result_bytes.splitlines()
+    if len(raw_lines) != EXPECTED_RECORDS:
+        fail("work/rank result stream has the wrong cardinality")
+
+    cell_map, trace_map, trace_identity = build_frozen_domain(contract)
+    if summary.get("trace_identity") != trace_identity:
+        fail("work/rank trace identity is invalid")
+    arm_shapes = {arm: (dense, heavy) for arm, dense, heavy in ARMS}
+    rows: List[Mapping[str, Any]] = []
+    seen = set()
+    hash_fields = (
+        "arm_descriptor_sha256", "realized_construction_sha256",
+        "seed_schedule_sha256", "cell_sha256", "frozen_trace_sha256",
+        "frozen_packet_prefix_sha256", "command_sha256",
+        "worker_stdout_sha256", "worker_binary_sha256",
+        "source_provenance_sha256",
+    )
+    counter_fields = (
+        "inactivated_columns", "binary_deficiency", "gf256_rank_gain",
+        "heavy_shortfall", "block_xors", "gf256_muladds",
+        "frozen_trace_attempted_candidates",
+        "frozen_prefix_attempted_candidates",
+    )
+    for ordinal, raw_line in enumerate(raw_lines):
+        try:
+            row = contract_api._load_json_bytes(
+                raw_line, "work/rank record {}".format(ordinal))
+        except contract_api.ContractError as exc:
+            fail("work/rank record is not JSON: {}".format(exc))
+        if (not isinstance(row, dict) or set(row) != set(RECORD_FIELDS) or
+                raw_line.decode("utf-8") != _canonical(row) or
+                row.get("schema") != RECORD_SCHEMA or
+                type(row.get("ordinal")) is not int or
+                row.get("ordinal") != ordinal):
+            fail("work/rank record schema, canonical form, or ordinal changed")
+        if any(not _is_sha256(row.get(field)) for field in hash_fields):
+            fail("work/rank record contains a malformed hash")
+        arm = row.get("arm")
+        if not isinstance(arm, str) or arm not in arm_shapes or \
+                row.get("arm_descriptor_sha256") != \
+                _arm_descriptor_sha256(arm):
+            fail("work/rank record has an unknown raw arm descriptor")
+        dense_rows, heavy_rows = arm_shapes[arm]
+        K = row.get("K")
+        overhead = row.get("overhead")
+        trial = row.get("trial")
+        schedule = row.get("schedule")
+        if (type(K) is not int or K not in K_VALUES or
+                type(overhead) is not int or overhead not in OVERHEADS or
+                type(trial) is not int or not 0 <= trial < len(ROOTS) or
+                not isinstance(schedule, str) or
+                schedule not in {value[0] for value in STRATA}):
+            fail("work/rank record has an invalid frozen cell coordinate")
+        expected_loss_ppm = dict(STRATA)[schedule]
+        staircase = row.get("staircase")
+        source_hits = row.get("source_hits")
+        if (row.get("phase") != "development" or
+                row.get("block_bytes") != 2 or
+                row.get("loss_ppm") != expected_loss_ppm or
+                row.get("loss_seed") != ROOTS[trial] or
+                row.get("base_seed_attempt") != trial or
+                row.get("precode_attempt") != trial or
+                row.get("packet_attempt") != trial or
+                row.get("attempt_mode") != "exact" or
+                row.get("construction_seed_basis") != RAW_SEED_BASIS or
+                row.get("seed_schedule_sha256") !=
+                    RAW_SEED_SCHEDULE_SHA256 or
+                row.get("effective_precode_seed") !=
+                    _effective_precode_seed(trial) or
+                row.get("effective_packet_seed") !=
+                    _effective_packet_seed(trial) or
+                type(staircase) is not int or not 1 <= staircase <= 400 or
+                row.get("binary_dense_rows") != dense_rows or
+                row.get("gf256_heavy_rows") != heavy_rows or
+                type(source_hits) is not int or
+                source_hits != (3 if K >= 10000 else 2) or
+                row.get("dense_identity_corner") is not False or
+                row.get("heavy_family") != "periodic-cauchy" or
+                row.get("mix_count") != 3 or
+                K + staircase + dense_rows + heavy_rows > 65535):
+            fail("work/rank record has an invalid raw construction payload")
+        raw_fields = {
+            field: row[field] for field in (
+                "construction_seed_basis", "seed_schedule_sha256",
+                "precode_attempt", "packet_attempt",
+                "effective_precode_seed", "effective_packet_seed",
+                "staircase", "binary_dense_rows", "gf256_heavy_rows",
+                "source_hits", "dense_identity_corner", "heavy_family",
+                "mix_count")
+        }
+        if row["realized_construction_sha256"] != \
+                _raw_realized_construction_sha256(arm, K, 2, raw_fields):
+            fail("work/rank realized construction hash is invalid")
+
+        cell_key = (trial, schedule, K)
+        cell = cell_map.get(cell_key)
+        trace = trace_map.get(cell_key)
+        if cell is None or trace is None:
+            fail("work/rank record is outside the frozen domain")
+        prefix = trace.packet_ids[:K + overhead]
+        if (row.get("band") != cell["band"] or
+                row.get("cell_sha256") != _sha256_json(cell) or
+                row.get("frozen_trace_sha256") != trace.trace_sha256 or
+                row.get("frozen_packet_prefix_sha256") !=
+                    _packet_hash(prefix) or
+                row.get("packet_count") != K + overhead or
+                row.get("frozen_trace_attempted_candidates") !=
+                    trace.attempted_candidates or
+                row.get("frozen_prefix_attempted_candidates") !=
+                    trace.prefix_attempted_candidates[
+                        OVERHEADS.index(overhead)]):
+            fail("work/rank record trace identity is invalid")
+        if (row.get("worker_binary_sha256") !=
+                summary["worker_binary_sha256"] or
+                row.get("source_provenance_sha256") !=
+                summary["source_provenance_sha256"] or
+                any(type(row.get(field)) is not int or
+                    not 0 <= row[field] <= MASK64
+                    for field in counter_fields) or
+                any(type(row.get(field)) is not int or row[field] not in (0, 1)
+                    for field in ("success", "rank_fail", "error")) or
+                row["success"] + row["rank_fail"] + row["error"] != 1 or
+                row["error"] != 0 or
+                row["binary_deficiency"] > row["inactivated_columns"] or
+                row["gf256_rank_gain"] > row["binary_deficiency"] or
+                bool(row["success"]) !=
+                    (row["gf256_rank_gain"] == row["binary_deficiency"]) or
+                bool(row["rank_fail"]) !=
+                    (row["gf256_rank_gain"] < row["binary_deficiency"])):
+            fail("work/rank record counters or provenance are invalid")
+        expected_shortfall = int(
+            bool(row["rank_fail"]) and
+            row["binary_deficiency"] <= heavy_rows and
+            row["gf256_rank_gain"] < row["binary_deficiency"])
+        if row["heavy_shortfall"] != expected_shortfall:
+            fail("work/rank record heavy shortfall is invalid")
+        coordinate = (arm, trial, schedule, K, overhead)
+        if coordinate in seen:
+            fail("work/rank result stream contains a duplicate coordinate")
+        seen.add(coordinate)
+        rows.append(row)
+
+    expected_coordinates = {
+        (arm, trial, schedule, K, overhead)
+        for arm, _dense, _heavy in ARMS
+        for trial in range(len(ROOTS))
+        for schedule, _loss_ppm in STRATA
+        for K in K_VALUES for overhead in OVERHEADS
+    }
+    if seen != expected_coordinates:
+        fail("work/rank result stream omitted a frozen coordinate")
+    if summary.get("work_domain_sha256") != _domain_sha256(rows):
+        fail("work/rank domain hash is invalid")
+    if summary.get("arms") != _aggregate(rows):
+        fail("work/rank arm summary is invalid")
+
+    receipts = []
+    for invocation in make_invocations():
+        invocation_rows = [
+            row for row in rows
+            if row["arm"] == invocation.arm and
+               row["trial"] == invocation.trial and
+               row["schedule"] == invocation.schedule
+        ]
+        commands = {row["command_sha256"] for row in invocation_rows}
+        outputs = {row["worker_stdout_sha256"] for row in invocation_rows}
+        if len(invocation_rows) != len(K_VALUES) * len(OVERHEADS) or \
+                len(commands) != 1 or len(outputs) != 1:
+            fail("work/rank invocation receipt cannot be reconstructed")
+        receipts.append({
+            "ordinal": invocation.ordinal,
+            "arm": invocation.arm,
+            "trial": invocation.trial,
+            "schedule": invocation.schedule,
+            "row_count": len(invocation_rows),
+            "command_sha256": next(iter(commands)),
+            "worker_stdout_sha256": next(iter(outputs)),
+        })
+    summary_receipts = summary.get("invocations")
+    if (not isinstance(summary_receipts, list) or
+            any(not isinstance(value, dict) or
+                set(value) != set(INVOCATION_RECEIPT_FIELDS)
+                for value in summary_receipts) or
+            summary_receipts != receipts):
+        fail("work/rank invocation receipts are invalid")
+    return {
+        "summary": summary,
+        "rows": tuple(rows),
+        "summary_sha256": summary_sha256,
+        "result_stream_sha256": summary["result_stream_sha256"],
+        "work_domain_sha256": summary["work_domain_sha256"],
+        "source_git_commit": provenance["source_git_commit"],
+    }
 
 
 def _parser() -> argparse.ArgumentParser:

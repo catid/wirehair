@@ -91,6 +91,34 @@ NativeArmSpec MakeExperimentalWh2Arm(
     NativeWh2BaseKind base_kind = NativeWh2BaseKind::ProductionProfile);
 
 /**
+    Fully resolved WH2 equation configuration after the optional experiment
+    transform and both construction-attempt offsets have been applied.
+
+    This is the single configuration resolver used by native execution and by
+    benchmark provenance.  Keeping the resolved values observable prevents a
+    worker from describing expected seeds or geometry that differ from the
+    equations it actually constructs.
+*/
+struct ResolvedNativeWh2Configuration
+{
+    wirehair_v2::PrecodeParams Params = {};
+    wirehair_v2::PacketRowConfig PacketConfig = {};
+    uint32_t PrecodeAttempt = 0u;
+    uint32_t PacketAttempt = 0u;
+};
+
+/**
+    Resolve a WH2 arm without allocating source or solving its precode.
+    Wirehair1 specs and invalid shapes fail closed.  On failure, result_out is
+    left unchanged.
+*/
+bool ResolveNativeWh2Configuration(
+    const NativeArmSpec& spec,
+    uint32_t block_count,
+    uint32_t block_bytes,
+    ResolvedNativeWh2Configuration& result_out);
+
+/**
     Generate an arm-independent, byte-stable message of exactly
     block_count * block_bytes bytes.  SplitMix64 output words are serialized
     little-endian so the same inputs produce identical bytes on every host.
