@@ -30,7 +30,7 @@ import wh2_benchmark_contract as contract_api
 
 TRACE_RECORD_SCHEMA = "wirehair.wh2.native-trace-record.v1"
 RECOVERY_RECORD_SCHEMA = "wirehair.wh2.native-recovery-record.v1"
-TIMING_RECORD_SCHEMA = "wirehair.wh2.native-timing-record.v1"
+TIMING_RECORD_SCHEMA = "wirehair.wh2.native-timing-record.v2"
 SAMPLER_SCHEMA = "wirehair.wh2.sampler-attestation.v1"
 EXECUTION_SCHEMA = "wirehair.wh2.native-execution-receipt.v1"
 
@@ -807,8 +807,11 @@ def _validate_native_records(
             fail("native result record has an unknown schema")
         payload = row["payload"]
         _exact_keys(payload, payload_fields, "native result payload")
-        expected_ordinal, message_key = _expected_record_ordinal(
-            contract, freeze, evidence_kind, phase, payload)
+        try:
+            expected_ordinal, message_key = _expected_record_ordinal(
+                contract, freeze, evidence_kind, phase, payload)
+        except contract_api.ContractError as exc:
+            fail(str(exc))
         ordinal = row["ordinal"]
         if type(ordinal) is not int or ordinal != expected_ordinal:
             fail("native result ordinal does not bind its payload identity")

@@ -25,7 +25,7 @@ bool Check(bool condition, const char* message)
 void TestTimingSeeds()
 {
     static const uint32_t attempts[] = {
-        0u, 1u, 2u, 0u, 1u, 2u, 0u, 1u
+        0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u
     };
     static const uint64_t seeds[] = {
         UINT64_C(0x2d0f28c7e7e786b2),
@@ -44,7 +44,7 @@ void TestTimingSeeds()
         Check(DevelopmentTimingSeed(replicate, attempt, seed),
             "valid development timing replicate was rejected");
         Check(attempt == attempts[replicate],
-            "paired public construction attempt changed");
+            "fixed production construction attempt changed");
         Check(seed == seeds[replicate],
             "paired SplitMix64 timing loss seed changed");
     }
@@ -54,6 +54,23 @@ void TestTimingSeeds()
     Check(!DevelopmentTimingSeed(8u, attempt, seed) &&
             attempt == 0u && seed == 0u,
         "out-of-domain timing replicate was accepted");
+}
+
+void TestInvocationsPerSlotFormula()
+{
+    Check(DevelopmentTimingInvocationsPerSlot(0u) == 0u,
+        "zero K did not produce an invalid zero batch count");
+    Check(DevelopmentTimingInvocationsPerSlot(1u) == 65536u,
+        "K=1 batch count changed");
+    Check(DevelopmentTimingInvocationsPerSlot(2u) == 32768u,
+        "exactly divisible batch count changed");
+    Check(DevelopmentTimingInvocationsPerSlot(3u) == 21846u,
+        "batch count did not round division upward");
+    Check(DevelopmentTimingInvocationsPerSlot(65535u) == 2u &&
+            DevelopmentTimingInvocationsPerSlot(65536u) == 1u &&
+            DevelopmentTimingInvocationsPerSlot(65537u) == 1u &&
+            DevelopmentTimingInvocationsPerSlot(UINT32_MAX) == 1u,
+        "batch-count boundary or overflow handling changed");
 }
 
 void TestDefaultTimingValuesAreSafelyInvalid()
@@ -106,13 +123,16 @@ void TestTimingCellEnumeration()
         Check(cell.phase == "development" &&
                 cell.loss_ppm == 100000u &&
                 cell.schedule == FrozenSchedule::Iid &&
-                cell.fixed_received_overhead == 4u,
+                cell.fixed_received_overhead == 4u &&
+                cell.invocations_per_slot ==
+                    DevelopmentTimingInvocationsPerSlot(cell.K),
             "development timing fixed field changed");
     }
 
     const std::string first_json =
         "{\"K\":8,\"band\":\"2-100\",\"base_seed_attempt\":0,"
         "\"block_bytes\":64,\"fixed_received_overhead\":4,"
+        "\"invocations_per_slot\":8192,"
         "\"loss_ppm\":100000,\"loss_seed\":\"0x2d0f28c7e7e786b2\","
         "\"phase\":\"development\",\"replicate\":0,"
         "\"schedule\":\"iid\"}";
@@ -120,23 +140,23 @@ void TestTimingCellEnumeration()
         "first canonical timing cell changed");
     Check(
         TimingCellSha256(cells[0]) ==
-            "aa5c4c40257eacb6d01d44ef5ef9ac45"
-            "e0e7c43a454b8b16ffa858364140a0a2",
+            "1a059880adb0a19f5c0d1d457df25447"
+            "9688a6fa89677503e7d12cc4736f0a9f",
         "first timing cell SHA-256 changed");
     Check(
         TimingCellSha256(cells[96]) ==
-            "d663c2956a16c515da0b33ad684fe84d"
-            "b5f67988b87c89cbfe5fde3d5f935bc7",
+            "66f9fe3a15beb8a6284e3609a79c4743"
+            "c73fc34f698cf3720389633956104ee9",
         "first wide timing cell SHA-256 changed");
     Check(
         TimingCellSha256(cells[191]) ==
-            "56ea96402d6b7d39d5211fe0774491bb"
-            "57f3a32a204271f159a37c0d6d726764",
+            "24edfb573e66d4bd5763927938b00a1c6"
+            "6ea59abab38f770c8f131cbd4b50973",
         "last timing cell SHA-256 changed");
     Check(
         DevelopmentTimingDomainSha256() ==
-            "1a15ee48e893280013b74f448d81607e"
-            "45630fbf631d4e73960b3a2194e204c3",
+            "289111f2fe4ecf3aff3875f852e386f5"
+            "44cc52b261ef9c2ce0159302c4f5bb61",
         "development timing domain SHA-256 changed");
 
     const std::vector<FrozenTimingCell> repeat =
@@ -161,6 +181,14 @@ void TestTimingCellEnumeration()
     mutant.loss_seed ^= 1u;
     Check(CanonicalTimingCellJson(mutant).empty(),
         "wrong paired timing loss seed was accepted");
+    mutant = cells[0];
+    --mutant.invocations_per_slot;
+    Check(CanonicalTimingCellJson(mutant).empty(),
+        "wrong timing invocation batch was accepted");
+    mutant = cells[0];
+    mutant.base_seed_attempt = 1u;
+    Check(CanonicalTimingCellJson(mutant).empty(),
+        "non-production development timing attempt was accepted");
 }
 
 void TestAllTimingTracesAndReceipts()
@@ -222,8 +250,8 @@ void TestAllTimingTracesAndReceipts()
                 "first native timing trace golden changed");
             Check(
                 CanonicalTimingTraceManifestRow(receipt) ==
-                    "{\"cell_sha256\":\"aa5c4c40257eacb6d01d44ef5ef9ac45"
-                    "e0e7c43a454b8b16ffa858364140a0a2\",\"ordinal\":0,"
+                    "{\"cell_sha256\":\"1a059880adb0a19f5c0d1d457df25447"
+                    "9688a6fa89677503e7d12cc4736f0a9f\",\"ordinal\":0,"
                     "\"trace_sha256\":\"0e773013a48e8a4aaa2858ca7eedec25"
                     "4bbef05c82c93d6e0e75bcf482e36e94\"}",
                 "first canonical timing trace manifest row changed");
@@ -248,8 +276,8 @@ void TestAllTimingTracesAndReceipts()
         "all 192 timing trace hashes disagree with Python reference");
     Check(
         Sha256Hex(pair_aggregate) ==
-            "2f4f9fb10c2747715b053c3d1e7334e"
-            "2aee42a24ddf7f0a40930b90334ac9fe8",
+            "690a4b3762df2d65aa18bdc9900b9223"
+            "19753f7b1615d0674953f7230ab117cd",
         "timing cell-to-trace mapping disagrees with Python reference");
 
     FrozenPacketTrace first_trace;
@@ -476,6 +504,7 @@ void TestOneCandidatePanelsAndOrders()
 int main()
 {
     TestTimingSeeds();
+    TestInvocationsPerSlotFormula();
     TestDefaultTimingValuesAreSafelyInvalid();
     TestTimingCellEnumeration();
     TestAllTimingTracesAndReceipts();

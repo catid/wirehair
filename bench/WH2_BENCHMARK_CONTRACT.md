@@ -1,7 +1,7 @@
-# Wirehair2 benchmark contract v1
+# Wirehair2 benchmark contract v2
 
 The machine-readable source of truth is
-[`wh2_benchmark_contract_v1.json`](wh2_benchmark_contract_v1.json).  The
+[`wh2_benchmark_contract_v2.json`](wh2_benchmark_contract_v2.json).  The
 companion checker, [`wh2_benchmark_contract.py`](wh2_benchmark_contract.py),
 validates its exact domains and rejects result ledgers that omit or replace a
 cell.  This is intentionally a small contract and checker, not another
@@ -34,10 +34,14 @@ training-loss roots and uses these four strata:
 
 That is 360 recovery cells per arm at the two-byte structure width.  The
 separate speed screen is 192 common cells: 12 K anchors, widths 64 and 1280,
-and eight paired repetitions.  A candidate gets at most 7,200 seconds of wall
-time.  A timeout is unresolved and non-selectable, not permission to shrink
-the domain.  Fatal errors, byte mismatches, semantic/equation mismatches, and
-domain mismatches stop immediately.
+and eight paired repetitions.  Unlike raw recovery, development timing uses
+the production base attempt zero with the three training roots.  Timing is a
+speed measurement of one predeclared production construction, not another raw
+seed census; raw attempts 0, 1, and 2 remain fully represented by the recovery
+screen.  A candidate gets at most 7,200 seconds of wall time.  A timeout is
+unresolved and non-selectable, not permission to shrink the domain.  Fatal
+errors, byte mismatches, semantic/equation mismatches, and domain mismatches
+stop immediately.
 
 Each raw cell uses its declared base attempt exactly once: no retry, rescue, or
 per-K fix.  A weak raw seed unit is one
@@ -191,8 +195,34 @@ rows invalidate the receipt.
 For the canonical panel key `(kind, scope, left_arm, right_arm)`, take the low
 bit of its SHA-256.  Use ABBA exactly when that bit equals replicate parity and
 BAAB otherwise.  Run one untimed fresh warm-up per logical side immediately
-before four fresh measured invocations.  For elapsed nanoseconds `e0..e3`, one
-panel observation is:
+before the four measured slots.
+
+Contract v2 replaces each underpowered one-shot measured slot with a
+deterministic batch.  The machine-readable block target is 65,536 and every
+timing cell receipts
+
+```text
+invocations_per_slot = max(1, ceil(65536 / K))
+```
+
+Each slot constructs and executes exactly that many fresh invocations of its
+declared scope, checks every invocation's stable identity and outcome, and
+sums only the exact-scope duration reported by each invocation.  Setup outside
+the declared scope is not added to the sum.  The count is arm-independent,
+fixed before results, part of the timing cell key and domain hash, and may not
+be calibrated or shortened from observed timings.  A sum that cannot fit in a
+positive signed 63-bit nanosecond value is fatal rather than wrapped.  The
+arm-free timing cell key is:
+
+```text
+(phase, band, K, block_bytes, loss_ppm, schedule, replicate,
+ base_seed_attempt, loss_seed, fixed_received_overhead,
+ invocations_per_slot)
+```
+
+Changing the batch count therefore cannot preserve either the cell identity
+or its frozen trace/domain binding.
+For the four aggregate elapsed nanoseconds `e0..e3`, one panel observation is:
 
 ```text
 ABBA: ((ln e0 - ln e1) + (ln e3 - ln e2)) / 2
@@ -209,9 +239,10 @@ cell equal weight within its replicate.  No rounding occurs before a decision.
 Timing may not form an observed common-success intersection: every compared
 arm must succeed on every predeclared cell.  A non-success row carries four
 null durations, remains explicit, and makes the affected panel non-selectable;
-it is never dropped.  Successful timings require four integer durations in
-`[1,2^63-1]`.  Final WH2 timing replays and receipts the same frozen repair map
-and construction attempt used by recovery validation.
+it is never dropped.  Successful timings require the exact derived
+`invocations_per_slot` and four integer aggregate durations in `[1,2^63-1]`.
+Final WH2 timing replays and receipts the same frozen repair map and
+construction attempt used by recovery validation.
 
 Isolated solve uses a fresh decoder after the identical K+4 received prefix is
 loaded.  Encoder timing covers initialization and exactly IDs 0 through K-1.

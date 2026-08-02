@@ -313,6 +313,81 @@ class NativeShortScreenTests(unittest.TestCase):
                         completed.returncode, 0,
                         completed.stderr.decode("utf-8", "replace"))
 
+    def test_native_record_schema_versions_and_timing_batch_formula(self) \
+            -> None:
+        self.assertEqual(
+            subject.RECOVERY_RECORD_SCHEMA,
+            "wirehair.wh2.native-recovery-record.v1")
+        self.assertEqual(
+            subject.TIMING_RECORD_SCHEMA,
+            "wirehair.wh2.native-timing-record.v2")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _, _, _, recovery = self.build_kind(root, "recovery")
+            self.assertTrue(all(
+                row["schema"] == subject.RECOVERY_RECORD_SCHEMA
+                for row in recovery))
+            self.assertTrue(all(
+                "invocations_per_slot" not in row["payload"]
+                for row in recovery))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            freeze_path, _, _, timing = self.build_kind(root, "timing")
+            freeze = contract_api.load_freeze_manifest(
+                self.contract, "development", freeze_path, "timing")
+            self.assertTrue(all(
+                row["schema"] == subject.TIMING_RECORD_SCHEMA
+                for row in timing))
+            for row in timing:
+                payload = row["payload"]
+                expected = max(1, (65536 + payload["K"] - 1) // payload["K"])
+                self.assertEqual(payload["invocations_per_slot"], expected)
+            legacy = copy.deepcopy(timing)
+            legacy[0]["schema"] = "wirehair.wh2.native-timing-record.v1"
+            with self.assertRaises(subject.NativeEvidenceError):
+                subject._validate_native_records(
+                    self.contract, freeze, "timing", "development", legacy)
+
+    def test_timing_batch_count_mutations_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            freeze, traces, _, records = self.build_kind(root, "timing")
+            for mutation in ("missing", "wrong", "noncanonical"):
+                case = root / mutation
+                case.mkdir()
+                changed = copy.deepcopy(records)
+                payload = changed[0]["payload"]
+                if mutation == "missing":
+                    del payload["invocations_per_slot"]
+                elif mutation == "wrong":
+                    payload["invocations_per_slot"] += 1
+                else:
+                    # bool is deliberately chosen because it is an int
+                    # subclass: the authoritative cell validator must use
+                    # exact scalar types rather than isinstance(value, int).
+                    payload["invocations_per_slot"] = True
+                native = case / "mutant-native.jsonl"
+                canonical_jsonl(native, changed)
+                output = case / "output.jsonl"
+                receipt = case / "receipt.json"
+                expected_error = {
+                    "missing": "native result payload has an unexpected schema",
+                    "wrong": (
+                        "timing row is outside the frozen development domain"),
+                    "noncanonical": (
+                        "timing cell key uses a noncanonical scalar type"),
+                }[mutation]
+                with self.subTest(mutation=mutation), \
+                        self.assertRaisesRegex(
+                            subject.NativeEvidenceError, expected_error):
+                    subject.assemble_results(
+                        self.contract, "timing", "development", freeze,
+                        traces, native, sampler_fixture(case), output,
+                        receipt, verify_live_sampler=False)
+                self.assertFalse(output.exists())
+                self.assertFalse(receipt.exists())
+
     def test_trace_stream_rejects_missing_duplicate_and_bad_identity(self) -> None:
         mutations = ("missing", "duplicate", "identity", "candidate_count")
         for mutation in mutations:

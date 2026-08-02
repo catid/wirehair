@@ -103,6 +103,10 @@ const char* NativePanelStatusName(NativePanelStatus status);
 struct NativePanelSlot
 {
     NativePanelSide Side;
+    /**
+        Stable outcome from the final repeat.  For a comparable completed
+        batch, ElapsedNanoseconds is replaced with the full slot aggregate.
+    */
     NativePanelInvocationResult Invocation;
     /** False is the native equivalent of a null timing receipt value. */
     bool HasElapsedNanoseconds;
@@ -117,6 +121,7 @@ struct NativePanelResult
     std::string Diagnostic;
     NativePanelOrder Order;
     int TargetCpu;
+    uint32_t InvocationsPerSlot;
     bool HasLeftPreflight;
     bool HasRightPreflight;
     NativePanelInvocationResult LeftPreflight;
@@ -151,19 +156,23 @@ public:
 bool NativePanelPlatformSupported();
 
 /**
-    Pin the calling worker to target_cpu, execute warm-left, warm-right, then
-    exactly four fresh invocations in the declared chronology, and verify the
-    singleton CPU immediately before and after every Invoke().
+    Pin the calling worker to target_cpu, execute one fresh warm-left and one
+    fresh warm-right invocation, then exactly invocations_per_slot fresh
+    invocations in each of four slots in the declared chronology.  Verify the
+    singleton CPU immediately before and after every Invoke(), require every
+    repeat to retain its side's preflight identity/outcome, and report each
+    slot's overflow-safe elapsed-nanosecond sum.
 
-    If either warmup returns PreflightFailure, all four measured invocations
-    are still executed and checked for stable identity/outcome, but all four
-    timing flags are cleared.  Migration, affinity drift, identity drift,
-    outcome drift, fatal callbacks, and invalid successful timings fail the
-    panel and clear every timing flag.
+    If either warmup returns PreflightFailure, every invocation in all four
+    measured batches is still executed and checked for stable identity/outcome,
+    but all four timing flags are cleared.  Migration, affinity drift, identity
+    drift, outcome drift, fatal callbacks, and invalid successful timings fail
+    the panel and clear every timing flag.
 */
 NativePanelResult ExecuteNativeTimingPanel(
     int target_cpu,
     NativePanelOrder order,
+    uint32_t invocations_per_slot,
     const NativePanelArm& left,
     const NativePanelArm& right);
 
@@ -171,6 +180,7 @@ NativePanelResult ExecuteNativeTimingPanel(
 NativePanelResult ExecuteNativeTimingPanelWithRuntime(
     int target_cpu,
     NativePanelOrder order,
+    uint32_t invocations_per_slot,
     const NativePanelArm& left,
     const NativePanelArm& right,
     NativePanelRuntime& runtime);

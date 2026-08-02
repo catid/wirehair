@@ -24,6 +24,7 @@ struct FrozenTimingCell
     uint32_t base_seed_attempt;
     uint64_t loss_seed;
     uint32_t fixed_received_overhead;
+    uint32_t invocations_per_slot;
 
     FrozenTimingCell();
 };
@@ -35,8 +36,14 @@ std::string CanonicalTimingCellJson(const FrozenTimingCell& cell);
 std::string TimingCellSha256(const FrozenTimingCell& cell);
 std::string DevelopmentTimingDomainSha256();
 
-// Derive the paired development loss seed and public construction attempt for
-// one of the eight frozen replicates.
+// Deterministic work multiplier for each of the four measured panel slots.
+// Zero K is invalid and returns zero; all positive K values use
+// max(1, ceil(65536 / K)) without overflowing at UINT32_MAX.
+uint32_t DevelopmentTimingInvocationsPerSlot(uint32_t K);
+
+// Derive the paired development loss seed and fixed production construction
+// attempt for one of the eight frozen replicates.  Loss roots continue to
+// cycle, while timing always uses public construction attempt zero.
 bool DevelopmentTimingSeed(
     uint32_t replicate,
     uint32_t& base_seed_attempt,

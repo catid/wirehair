@@ -66,7 +66,7 @@ static const char kTraceSchema[] =
 static const char kRecoverySchema[] =
     "wirehair.wh2.native-recovery-record.v1";
 static const char kTimingSchema[] =
-    "wirehair.wh2.native-timing-record.v1";
+    "wirehair.wh2.native-timing-record.v2";
 static const char kDescriptionSchema[] =
     "wirehair.wh2.native-worker-description.v1";
 static const char kDescriptorSchema[] =
@@ -1282,6 +1282,8 @@ std::string TimingPayload(
     }
     json += "],\"fixed_received_overhead\":";
     json += std::to_string(cell.fixed_received_overhead);
+    json += ",\"invocations_per_slot\":";
+    json += std::to_string(cell.invocations_per_slot);
     json += ",\"left_arm\":\"";
     json += left.Arm;
     json += "\",\"left_arm_descriptor_sha256\":\"";
@@ -1359,7 +1361,11 @@ bool RunTimingJob(
     const FrozenTimingCell& cell = cells[cell_ordinal];
     const FrozenTimingPanel& panel = panels[panel_index];
     if (cell.ordinal != cell_ordinal || panel.ordinal != panel_index ||
-        cell.fixed_received_overhead != 4u)
+        cell.fixed_received_overhead != 4u ||
+        cell.invocations_per_slot == 0u ||
+        cell.invocations_per_slot !=
+            wirehair::wh2_benchmark::
+                DevelopmentTimingInvocationsPerSlot(cell.K))
     {
         error = "timing cell or panel differs from the frozen domain";
         return false;
@@ -1476,7 +1482,8 @@ bool RunTimingJob(
     }
     const NativePanelResult result =
         wirehair_wh2_bench::ExecuteNativeTimingPanel(
-            context.Cpu, native_order, left_arm, right_arm);
+            context.Cpu, native_order, cell.invocations_per_slot,
+            left_arm, right_arm);
     if (result.Status != NativePanelStatus::Complete ||
         !result.HasLeftPreflight || !result.HasRightPreflight)
     {
@@ -1528,7 +1535,8 @@ bool RunTimingJob(
         result.LeftPreflight.Disposition == NativePanelDisposition::Success &&
         result.RightPreflight.Disposition == NativePanelDisposition::Success;
     bool slots_valid = result.Order == native_order &&
-        result.TargetCpu == context.Cpu;
+        result.TargetCpu == context.Cpu &&
+        result.InvocationsPerSlot == cell.invocations_per_slot;
     for (std::size_t slot = 0u; slot < result.Slots.size(); ++slot)
     {
         const bool left_slot = native_order == NativePanelOrder::ABBA ?

@@ -363,6 +363,7 @@ NativePanelResult::NativePanelResult()
     : Status(NativePanelStatus::InvalidArgument)
     , Order(NativePanelOrder::ABBA)
     , TargetCpu(-1)
+    , InvocationsPerSlot(0u)
     , HasLeftPreflight(false)
     , HasRightPreflight(false)
     , PanelComparable(false)
@@ -396,17 +397,19 @@ bool NativePanelPlatformSupported()
 NativePanelResult ExecuteNativeTimingPanel(
     int target_cpu,
     NativePanelOrder order,
+    uint32_t invocations_per_slot,
     const NativePanelArm& left,
     const NativePanelArm& right)
 {
     SystemNativePanelRuntime runtime;
     return ExecuteNativeTimingPanelWithRuntime(
-        target_cpu, order, left, right, runtime);
+        target_cpu, order, invocations_per_slot, left, right, runtime);
 }
 
 NativePanelResult ExecuteNativeTimingPanelWithRuntime(
     int target_cpu,
     NativePanelOrder order,
+    uint32_t invocations_per_slot,
     const NativePanelArm& left,
     const NativePanelArm& right,
     NativePanelRuntime& runtime)
@@ -414,6 +417,7 @@ NativePanelResult ExecuteNativeTimingPanelWithRuntime(
     NativePanelResult result;
     result.Order = order;
     result.TargetCpu = target_cpu;
+    result.InvocationsPerSlot = invocations_per_slot;
 
     if (order == NativePanelOrder::ABBA)
     {
@@ -430,7 +434,8 @@ NativePanelResult ExecuteNativeTimingPanelWithRuntime(
         result.Slots[3].Side = NativePanelSide::Right;
     }
 
-    if (target_cpu < 0 || !IsKnownOrder(order) ||
+    if (target_cpu < 0 || invocations_per_slot == 0u ||
+        !IsKnownOrder(order) ||
         left.ExpectedIdentity.empty() || right.ExpectedIdentity.empty() ||
         !left.MakeInvocation || !right.MakeInvocation)
     {
@@ -469,26 +474,40 @@ NativePanelResult ExecuteNativeTimingPanelWithRuntime(
     {
         NativePanelSlot& slot = result.Slots[slot_index];
         const NativePanelArm& arm = SelectArm(slot.Side, left, right);
-        InvocationObservation measured = RunFreshInvocation(
-            target_cpu, arm, runtime);
-        if (measured.Status != NativePanelStatus::Complete) {
-            return Fail(result, measured.Status, measured.Diagnostic);
-        }
-
         const NativePanelInvocationResult& expected =
             slot.Side == NativePanelSide::Left ?
                 result.LeftPreflight : result.RightPreflight;
-        if (!SameOutcome(expected, measured.Result))
+        uint64_t elapsed_sum = 0u;
+        for (uint32_t repeat = 0u; repeat < invocations_per_slot; ++repeat)
         {
-            return Fail(result, NativePanelStatus::OutcomeDrift,
-                "measured outcome or decoded-extra drifted from warmup");
-        }
+            InvocationObservation measured = RunFreshInvocation(
+                target_cpu, arm, runtime);
+            if (measured.Status != NativePanelStatus::Complete) {
+                return Fail(result, measured.Status, measured.Diagnostic);
+            }
+            if (!SameOutcome(expected, measured.Result))
+            {
+                return Fail(result, NativePanelStatus::OutcomeDrift,
+                    "measured outcome or decoded-extra drifted from warmup");
+            }
 
-        slot.Invocation = measured.Result;
+            slot.Invocation = measured.Result;
+            if (comparable)
+            {
+                const uint64_t elapsed = measured.Result.ElapsedNanoseconds;
+                if (elapsed > kMaxInt63 - elapsed_sum)
+                {
+                    return Fail(result, NativePanelStatus::InvalidElapsed,
+                        "measured batch elapsed time exceeds positive int63");
+                }
+                elapsed_sum += elapsed;
+            }
+        }
         if (comparable)
         {
             slot.HasElapsedNanoseconds = true;
-            slot.ElapsedNanoseconds = measured.Result.ElapsedNanoseconds;
+            slot.ElapsedNanoseconds = elapsed_sum;
+            slot.Invocation.ElapsedNanoseconds = elapsed_sum;
         }
     }
 

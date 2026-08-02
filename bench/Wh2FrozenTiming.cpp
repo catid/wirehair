@@ -211,7 +211,9 @@ bool ExactDevelopmentTimingCell(const FrozenTimingCell& cell)
         cell.schedule == FrozenSchedule::Iid &&
         cell.base_seed_attempt == expected_attempt &&
         cell.loss_seed == expected_loss_seed &&
-        cell.fixed_received_overhead == 4u;
+        cell.fixed_received_overhead == 4u &&
+        cell.invocations_per_slot ==
+            DevelopmentTimingInvocationsPerSlot(cell.K);
 }
 
 bool ExactTimingPanel(const FrozenTimingPanel& panel)
@@ -301,7 +303,18 @@ FrozenTimingCell::FrozenTimingCell()
     , base_seed_attempt(0u)
     , loss_seed(0u)
     , fixed_received_overhead(0u)
+    , invocations_per_slot(0u)
 {
+}
+
+uint32_t DevelopmentTimingInvocationsPerSlot(uint32_t K)
+{
+    if (K == 0u) {
+        return 0u;
+    }
+    const uint32_t quotient = 65536u / K;
+    const uint32_t rounded_up = quotient + (65536u % K != 0u ? 1u : 0u);
+    return std::max(1u, rounded_up);
 }
 
 bool DevelopmentTimingSeed(
@@ -315,7 +328,7 @@ bool DevelopmentTimingSeed(
         return false;
     }
     const uint32_t pair_index = replicate % 3u;
-    base_seed_attempt = pair_index;
+    base_seed_attempt = 0u;
     const uint64_t salt =
         static_cast<uint64_t>(replicate) * kSplitMixIncrement;
     loss_seed = SplitMix64Once(kTrainingRoots[pair_index] ^ salt);
@@ -353,6 +366,11 @@ std::vector<FrozenTimingCell> EnumerateDevelopmentTimingCells()
                 cell.base_seed_attempt = attempt;
                 cell.loss_seed = loss_seed;
                 cell.fixed_received_overhead = 4u;
+                cell.invocations_per_slot =
+                    DevelopmentTimingInvocationsPerSlot(cell.K);
+                if (cell.invocations_per_slot == 0u) {
+                    return std::vector<FrozenTimingCell>();
+                }
                 cells.push_back(cell);
             }
         }
@@ -377,6 +395,8 @@ std::string CanonicalTimingCellJson(const FrozenTimingCell& cell)
     json += std::to_string(cell.block_bytes);
     json += ",\"fixed_received_overhead\":";
     json += std::to_string(cell.fixed_received_overhead);
+    json += ",\"invocations_per_slot\":";
+    json += std::to_string(cell.invocations_per_slot);
     json += ",\"loss_ppm\":";
     json += std::to_string(cell.loss_ppm);
     json += ",\"loss_seed\":\"";

@@ -25,9 +25,11 @@ EXPECTED_RECOVERY_HASHES = {
     "cross_width_validation": "80fb4c19b31f88101ef4b3c480e6d5ff4a3bba7d45c96f02dc3518cd7c1c0399",
 }
 EXPECTED_TIMING_HASHES = {
-    "development": "1a15ee48e893280013b74f448d81607e45630fbf631d4e73960b3a2194e204c3",
-    "final": "90bd3ea12b21b5a04290d7e55aac95287f9d0fe3150ff27047027dfe84ba63ec",
+    "development": "289111f2fe4ecf3aff3875f852e386f544cc52b261ef9c2ce0159302c4f5bb61",
+    "final": "62e8fdbe636dba08eefd5bd7ff48b6c63fb5f021253d5a1df0d27e1a6bbc71e1",
 }
+EXPECTED_CONTRACT_SHA256 = \
+    "1fbc60bc6841a44b90fe5a79304645ef40508c68fddf9006ea6f9396155d6c5c"
 
 
 def digest(label: str) -> str:
@@ -440,6 +442,17 @@ class ContractTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.contract = subject.load_contract()
 
+    def test_v2_identity_and_default_contract_path_are_exact(self) -> None:
+        self.assertEqual(subject.SCHEMA,
+                         "wirehair.wh2.benchmark-contract.v2")
+        self.assertEqual(subject.DEFAULT_CONTRACT.name,
+                         "wh2_benchmark_contract_v2.json")
+        self.assertEqual(self.contract["schema"], subject.SCHEMA)
+        self.assertEqual(self.contract["contract_id"],
+                         "wh2-pure-gf256-1pct-v2")
+        self.assertEqual(subject.contract_sha256(self.contract),
+                         EXPECTED_CONTRACT_SHA256)
+
     def test_exact_recovery_domains_and_hashes(self) -> None:
         expected_counts = {
             "development": 360,
@@ -472,6 +485,77 @@ class ContractTests(unittest.TestCase):
             3600,
         )
 
+    def test_timing_batch_formula_and_production_training_seed_are_exact(
+            self) -> None:
+        protocol = self.contract["timing"]["panel_protocol"]
+        self.assertEqual(protocol["measured_batch_block_target"], 65536)
+        self.assertEqual(
+            protocol["invocations_per_slot"],
+            "max(1,ceil(measured_batch_block_target/K))")
+        expected = {
+            8: 8192, 32: 2048, 100: 656, 128: 512,
+            512: 128, 1000: 66, 2048: 32, 5000: 14,
+            8192: 8, 20000: 4, 32768: 2, 64000: 2,
+            65536: 1, 65537: 1,
+        }
+        for K, invocations in expected.items():
+            with self.subTest(K=K):
+                self.assertEqual(subject.timing_invocations_per_slot(
+                    self.contract, K), invocations)
+        for K in (0, -1, True, 1.0):
+            with self.subTest(invalid_K=K), \
+                    self.assertRaises(subject.ContractError):
+                subject.timing_invocations_per_slot(self.contract, K)
+
+        development = list(subject.iter_timing_cells(
+            self.contract, "development"))
+        self.assertEqual(self.contract["timing"]["domains"]["development"]
+                         ["seed_mode"], "production_training")
+        self.assertEqual({cell["base_seed_attempt"] for cell in development},
+                         {self.contract["seeds"]
+                          ["production_base_seed_attempt"]})
+        for cell in development:
+            self.assertEqual(
+                cell["invocations_per_slot"],
+                max(1, (65536 + cell["K"] - 1) // cell["K"]))
+        first_by_replicate = {}
+        for cell in development:
+            first_by_replicate.setdefault(cell["replicate"], cell)
+        mask = (1 << 64) - 1
+        roots = self.contract["seeds"]["training_loss_roots"]
+        for replicate, cell in first_by_replicate.items():
+            salt = (replicate * 0x9e3779b97f4a7c15) & mask
+            expected_seed = subject._splitmix64(
+                int(roots[replicate % len(roots)], 16) ^ salt)
+            self.assertEqual(cell["loss_seed"],
+                             "0x{:016x}".format(expected_seed))
+
+    def test_timing_batch_contract_mutations_fail_closed(self) -> None:
+        mutations = []
+        wrong_target = copy.deepcopy(self.contract)
+        wrong_target["timing"]["panel_protocol"][
+            "measured_batch_block_target"] = 65535
+        mutations.append(("target", wrong_target))
+        bool_target = copy.deepcopy(self.contract)
+        bool_target["timing"]["panel_protocol"][
+            "measured_batch_block_target"] = True
+        mutations.append(("target_type", bool_target))
+        wrong_formula = copy.deepcopy(self.contract)
+        wrong_formula["timing"]["panel_protocol"][
+            "invocations_per_slot"] = "max(1,65536//K)"
+        mutations.append(("formula", wrong_formula))
+        missing_key = copy.deepcopy(self.contract)
+        missing_key["timing"]["cell_key"].remove("invocations_per_slot")
+        mutations.append(("cell_key", missing_key))
+        raw_timing = copy.deepcopy(self.contract)
+        raw_timing["timing"]["domains"]["development"][
+            "seed_mode"] = "raw_paired_training"
+        mutations.append(("development_seed_mode", raw_timing))
+        for name, changed in mutations:
+            with self.subTest(name=name), \
+                    self.assertRaises(subject.ContractError):
+                subject._validate_structure(changed, check_domain_hashes=False)
+
     def test_every_k_hard_domain_is_575991_not_a_cross_product(self) -> None:
         cells = self.contract["recovery"]["domains"]["final_raw"][
             "expected_cells_per_arm"]
@@ -483,7 +567,7 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(first["loss_seed"],
                          self.contract["seeds"]["training_loss_roots"][0])
 
-    def test_v1_bands_and_short_cohorts_are_immutable(self) -> None:
+    def test_v2_bands_and_short_cohorts_are_immutable(self) -> None:
         for mutation in ("band", "short", "timing"):
             changed = copy.deepcopy(self.contract)
             if mutation == "band":
@@ -498,12 +582,15 @@ class ContractTests(unittest.TestCase):
                 subject._validate_structure(changed, check_domain_hashes=False)
 
     def test_mutated_domain_hash_rejects(self) -> None:
-        changed = copy.deepcopy(self.contract)
-        changed["recovery"]["domains"]["development"]["domain_sha256"] = "0" * 64
-        with self.assertRaises(subject.ContractError):
-            subject._validate_structure(changed, check_domain_hashes=True)
+        for evidence_kind in ("recovery", "timing"):
+            changed = copy.deepcopy(self.contract)
+            changed[evidence_kind]["domains"]["development"][
+                "domain_sha256"] = "0" * 64
+            with self.subTest(evidence_kind=evidence_kind), \
+                    self.assertRaises(subject.ContractError):
+                subject._validate_structure(changed, check_domain_hashes=True)
 
-    def test_v1_semantics_cannot_be_resealed_to_an_easier_contract(self) -> None:
+    def test_v2_semantics_cannot_be_resealed_to_an_easier_contract(self) -> None:
         changes = []
         easy_loss = copy.deepcopy(self.contract)
         easy_loss["strata_sets"]["development"][1] = {
@@ -1056,6 +1143,21 @@ class TimingReceiptTests(unittest.TestCase):
         zero_timer = copy.deepcopy(self.valid_rows)
         zero_timer[0]["elapsed_ns"][0] = 0
         cases.append(("timer", zero_timer))
+        wrong_batch = copy.deepcopy(self.valid_rows)
+        wrong_batch[0]["invocations_per_slot"] += 1
+        wrong_batch_cell = {
+            key: wrong_batch[0][key]
+            for key in self.contract["timing"]["cell_key"]
+        }
+        wrong_batch[0]["cell_sha256"] = subject.sha256_json(wrong_batch_cell)
+        cases.append(("batch", wrong_batch))
+        bool_batch = copy.deepcopy(self.valid_rows)
+        bool_batch[0]["invocations_per_slot"] = True
+        cases.append(("batch type", bool_batch))
+        float_batch = copy.deepcopy(self.valid_rows)
+        float_batch[0]["invocations_per_slot"] = float(
+            float_batch[0]["invocations_per_slot"])
+        cases.append(("batch float", float_batch))
         descriptor_drift = copy.deepcopy(self.valid_rows)
         descriptor_drift[0]["left_arm_descriptor_sha256"] = digest("drift")
         cases.append(("identity", descriptor_drift))

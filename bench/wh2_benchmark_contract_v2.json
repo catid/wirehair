@@ -1,6 +1,6 @@
 {
-  "schema": "wirehair.wh2.benchmark-contract.v1",
-  "contract_id": "wh2-pure-gf256-1pct-v1",
+  "schema": "wirehair.wh2.benchmark-contract.v2",
+  "contract_id": "wh2-pure-gf256-1pct-v2",
   "field": "GF(256)",
   "goal": {
     "primary_failure_threshold_ppm": 10000,
@@ -147,17 +147,18 @@
     "fixed_received_overhead": 4,
     "cell_key": [
       "phase", "band", "K", "block_bytes", "loss_ppm", "schedule",
-      "replicate", "base_seed_attempt", "loss_seed", "fixed_received_overhead"
+      "replicate", "base_seed_attempt", "loss_seed", "fixed_received_overhead",
+      "invocations_per_slot"
     ],
     "seed_derivation": "construction seed is selected by seed_mode and unchanged; loss seed=SplitMix64(base_loss_seed xor (replicate * 0x9e3779b97f4a7c15 mod 2^64))",
     "domains": {
       "development": {
         "k_set": "timing_short",
         "block_bytes": [64, 1280],
-        "seed_mode": "raw_paired_training",
+        "seed_mode": "production_training",
         "paired_repetitions": 8,
         "expected_cells": 192,
-        "domain_sha256": "1a15ee48e893280013b74f448d81607e45630fbf631d4e73960b3a2194e204c3"
+        "domain_sha256": "289111f2fe4ecf3aff3875f852e386f544cc52b261ef9c2ce0159302c4f5bb61"
       },
       "final": {
         "k_set": "short",
@@ -165,7 +166,7 @@
         "seed_mode": "production_validation",
         "paired_repetitions": 24,
         "expected_cells": 3600,
-        "domain_sha256": "90bd3ea12b21b5a04290d7e55aac95287f9d0fe3150ff27047027dfe84ba63ec"
+        "domain_sha256": "62e8fdbe636dba08eefd5bd7ff48b6c63fb5f021253d5a1df0d27e1a6bbc71e1"
       }
     },
     "confidence": "two-sided Student-t 95% interval over paired log seconds",
@@ -206,6 +207,8 @@
       ],
       "slots_per_panel": 4,
       "warmups_per_logical_side": 1,
+      "measured_batch_block_target": 65536,
+      "invocations_per_slot": "max(1,ceil(measured_batch_block_target/K))",
       "order_assignment": "phase_bit=low bit of SHA256(canonical panel key); ABBA iff replicate parity equals phase_bit, otherwise BAAB"
     },
     "statistics": {
@@ -222,7 +225,7 @@
       "resolved_slower": "A/B lower 95% bound > effective_floor",
       "strict_inequalities": true
     },
-    "invalid_timer_policy": "success requires four integer elapsed_ns values in [1,2^63-1]; any non-success requires four nulls and makes the complete comparison panel non-selectable; rows are never dropped"
+    "invalid_timer_policy": "each successful slot sums exactly invocations_per_slot fresh exact-scope invocation-reported durations into one integer elapsed_ns value in [1,2^63-1]; any non-success requires four nulls and makes the complete comparison panel non-selectable; rows are never dropped"
   },
   "selection": {
     "controls": ["wirehair2_head", "wirehair1"],
@@ -263,7 +266,7 @@
       "missing", "duplicate", "extra", "seed_swapped", "partial",
       "wrong_band", "wrong_loss", "incomplete_roster", "domain_hash_drift",
       "trace_drift", "repair_map_drift", "construction_attempt_drift",
-      "timing_panel_drift", "timing_order_drift"
+      "timing_panel_drift", "timing_order_drift", "timing_batch_drift"
     ],
     "selectable_excluded_cells": 0,
     "unsupported_policy": "only an explicitly measured routed composite is selectable",
