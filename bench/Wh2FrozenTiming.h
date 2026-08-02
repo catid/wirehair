@@ -24,26 +24,30 @@ struct FrozenTimingCell
     uint32_t base_seed_attempt;
     uint64_t loss_seed;
     uint32_t fixed_received_overhead;
+    std::string interleave_policy;
     uint32_t invocations_per_slot;
 
     FrozenTimingCell();
 };
 
-// The exact 2 widths x 16 replicates x 12 K values, in checker order.
+// The exact 2 widths x 96 replicates x 12 K values, in round, width, K,
+// then eight-lane checker order.
 std::vector<FrozenTimingCell> EnumerateDevelopmentTimingCells();
 
 std::string CanonicalTimingCellJson(const FrozenTimingCell& cell);
 std::string TimingCellSha256(const FrozenTimingCell& cell);
 std::string DevelopmentTimingDomainSha256();
 
-// Deterministic work multiplier for each of the four measured panel slots.
-// Zero K is invalid and returns zero; all positive K values use
-// max(1, ceil(65536 / K)) without overflowing at UINT32_MAX.
+// Deterministic n for the self-counterbalanced measured panel.  Its primary
+// four slots receive ceil(n/2) calls each and the opposite four slots receive
+// floor(n/2) calls each.  Zero K is invalid and returns zero; all positive K
+// values use max(2, ceil(65536 / K)) without overflowing at UINT32_MAX.
 uint32_t DevelopmentTimingInvocationsPerSlot(uint32_t K);
 
-// Frozen v3 execution geometry for the one-candidate development timing
-// screen: 264 homogeneous (K, width, panel) cohorts, two eight-job waves, and
-// a barrier after every wave.  Worker slots index the sorted eight-CPU roster.
+// Frozen v4 execution geometry for the one-candidate development timing
+// screen: 264 homogeneous (K, width, panel) cohorts, twelve independent
+// eight-job rounds, and a barrier after every wave.  Worker slots index the
+// sorted eight-CPU roster.
 uint32_t DevelopmentTimingWorkerCount();
 std::size_t DevelopmentTimingCohortCount();
 bool DevelopmentTimingWorkerSlot(
@@ -52,7 +56,7 @@ bool DevelopmentTimingWorkerSlot(
     uint32_t& worker_slot);
 
 // Derive the paired development loss seed and fixed production construction
-// attempt for one of the sixteen frozen replicates.  Loss roots continue to
+// attempt for one of the 96 frozen replicates.  Loss roots continue to
 // cycle, while timing always uses public construction attempt zero.
 bool DevelopmentTimingSeed(
     uint32_t replicate,
@@ -127,7 +131,8 @@ enum class FrozenTimingOrder
 
 const char* FrozenTimingOrderName(FrozenTimingOrder order);
 
-// ABBA iff replicate parity equals the low bit of the canonical panel SHA.
+// The primary block is ABBA iff replicate parity equals the low bit of the
+// canonical panel SHA.  The panel's second block always uses the opposite.
 FrozenTimingOrder TimingPanelOrder(
     const FrozenTimingPanel& panel,
     uint32_t replicate);

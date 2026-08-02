@@ -200,7 +200,11 @@ def timing_records(
         "paired_repetitions"]
     jobs_per_wave = contract["timing"]["execution_geometry"][
         "jobs_per_wave"]
-    waves_per_cohort = repetitions // jobs_per_wave
+    independent_rounds = contract["timing"]["domains"]["development"][
+        "independent_rounds"]
+    if independent_rounds * jobs_per_wave != repetitions:
+        raise AssertionError("fixture timing rounds do not partition repetitions")
+    cohort_count = len(identity_order) * len(panels)
     for cell_ordinal, cell in enumerate(cells):
         for panel_index, panel in enumerate(panels):
             order = contract_api.timing_order(panel, cell["replicate"])
@@ -214,7 +218,7 @@ def timing_records(
                     "encoder_init_plus_first_K_symbols" else 4,
                 "right_decoded_extra": None if panel["scope"] ==
                     "encoder_init_plus_first_K_symbols" else 4,
-                "elapsed_ns": [100000, 100000, 100000, 100000],
+                "elapsed_ns": [100000] * 8,
                 "cell_sha256": contract_api.sha256_json(cell),
                 "trace_sha256": hashes[cell_ordinal],
             }
@@ -232,8 +236,8 @@ def timing_records(
             ordinal = cell_ordinal * len(panels) + panel_index
             cohort_index = identity_indexes[identities[cell_ordinal]] * \
                 len(panels) + panel_index
-            wave_index = cell["replicate"] // jobs_per_wave
-            global_wave = cohort_index * waves_per_cohort + wave_index
+            round_index = cell["replicate"] // jobs_per_wave
+            global_wave = round_index * cohort_count + cohort_index
             position = cell["replicate"] % jobs_per_wave
             cpu = WORKER_CPUS[contract_api.timing_worker_slot(
                 contract, "development", ARMS, cohort_index,
@@ -298,9 +302,9 @@ def sampler_fixture(root: Path, *, edac: int = 0,
     with csv_path.open("w", encoding="ascii", newline="") as output:
         writer = csv.writer(output, lineterminator="\n")
         writer.writerow(subject.THERMAL_HEADER)
-        for second in range(1, 5):
+        for second in range(1, 11):
             writer.writerow([
-                "2026-08-02T00:00:0{}.000Z".format(second),
+                "2026-08-02T00:00:{:02d}.000Z".format(second),
                 "{}.0".format(second), "99.0", "4000.0", str(cpu_c),
                 "40.0", "40.25", "40.5", "40.75",
                 "41.0", "41.25", "41.5", "41.75",
@@ -318,7 +322,7 @@ def sampler_fixture(root: Path, *, edac: int = 0,
         "csv_device": info.st_dev,
         "csv_inode": info.st_ino,
         "window_start_monotonic_ns": 1000000000,
-        "window_end_monotonic_ns": 4000000000,
+        "window_end_monotonic_ns": 10000000000,
         "terminal_status": "ok",
     }
     path = root / "sampler.json"
@@ -366,7 +370,11 @@ class NativeShortScreenTests(unittest.TestCase):
             root = Path(temporary)
             sampler_path = sampler_fixture(root)
             outputs = {}
-            for kind, expected in (("recovery", 1080), ("timing", 4224)):
+            timing_expected = self.contract["timing"]["domains"][
+                "development"]["expected_cells"] * len(
+                    contract_api.timing_panels(self.contract, ARMS))
+            for kind, expected in (
+                    ("recovery", 1080), ("timing", timing_expected)):
                 freeze, traces, native, _ = self.build_kind(root, kind)
                 output = root / (kind + "-output.jsonl")
                 receipt = root / (kind + "-execution.json")
@@ -419,7 +427,7 @@ class NativeShortScreenTests(unittest.TestCase):
             "wirehair.wh2.native-recovery-record.v1")
         self.assertEqual(
             subject.TIMING_RECORD_SCHEMA,
-            "wirehair.wh2.native-timing-record.v2")
+            "wirehair.wh2.native-timing-record.v3")
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             _, _, _, recovery = self.build_kind(root, "recovery")
@@ -440,10 +448,13 @@ class NativeShortScreenTests(unittest.TestCase):
                 for row in timing))
             for row in timing:
                 payload = row["payload"]
-                expected = max(1, (65536 + payload["K"] - 1) // payload["K"])
+                expected = max(2, (65536 + payload["K"] - 1) // payload["K"])
                 self.assertEqual(payload["invocations_per_slot"], expected)
+                self.assertEqual(
+                    payload["interleave_policy"],
+                    "self-counterbalanced-repeat-major-v1")
             legacy = copy.deepcopy(timing)
-            legacy[0]["schema"] = "wirehair.wh2.native-timing-record.v1"
+            legacy[0]["schema"] = "wirehair.wh2.native-timing-record.v2"
             with self.assertRaises(subject.NativeEvidenceError):
                 subject._validate_native_records(
                     self.contract, freeze, "timing", "development", legacy)
@@ -474,12 +485,22 @@ class NativeShortScreenTests(unittest.TestCase):
             freeze = contract_api.load_freeze_manifest(
                 self.contract, "development", freeze_path, "timing")
             waves = timing_wave_rows(self.contract, records)
-            self.assertEqual(len(records), 4224)
-            self.assertEqual(len(waves), 528)
+            rounds = self.contract["timing"]["domains"]["development"][
+                "independent_rounds"]
+            expected_cells = self.contract["timing"]["domains"][
+                "development"]["expected_cells"]
+            self.assertEqual(len(records), expected_cells * 11)
+            self.assertEqual(len(waves), 264 * rounds)
             self.assertTrue(all(len(indexes) == 8
                                 for indexes in waves.values()))
-            subject._validate_native_records(
-                self.contract, freeze, "timing", "development", records)
+            # The v4 domain has 25,344 rows.  Rebuilding the 2,304-cell index
+            # for every row is both unnecessary and pathologically expensive.
+            with mock.patch.object(
+                    contract_api, "_timing_cell_indexes",
+                    wraps=contract_api._timing_cell_indexes) as cell_indexes:
+                subject._validate_native_records(
+                    self.contract, freeze, "timing", "development", records)
+            self.assertEqual(cell_indexes.call_count, 1)
 
             first_wave = waves[(0, 0)]
             second_wave = waves[(0, 1)]
@@ -542,7 +563,7 @@ class NativeShortScreenTests(unittest.TestCase):
 
             ordered_wave_keys = [
                 (cohort, wave)
-                for cohort in range(264) for wave in range(2)
+                for wave in range(rounds) for cohort in range(264)
             ]
             prior_indexes = waves[ordered_wave_keys[0]]
             next_indexes = waves[ordered_wave_keys[1]]
@@ -562,6 +583,24 @@ class NativeShortScreenTests(unittest.TestCase):
                     subject.NativeEvidenceError, "overlap"):
                 subject._validate_native_records(
                     self.contract, freeze, "timing", "development", overlap)
+
+            # The superseded v3 scheduler completed every round for one
+            # cohort before moving to the next cohort.  Even if each old wave
+            # is internally well formed, its chronology is not a v4 proof.
+            cohort_major = copy.deepcopy(records)
+            for (cohort_index, round_index), indexes in waves.items():
+                old_wave = cohort_index * rounds + round_index
+                for index in indexes:
+                    position = cohort_major[index]["payload"]["replicate"] % 8
+                    start = 2000000000 + old_wave * 1000000 + position * 10
+                    cohort_major[index]["started_monotonic_ns"] = start
+                    cohort_major[index]["finished_monotonic_ns"] = \
+                        start + 500000
+            with self.assertRaisesRegex(
+                    subject.NativeEvidenceError, "overlap"):
+                subject._validate_native_records(
+                    self.contract, freeze, "timing", "development",
+                    cohort_major)
 
             with self.assertRaises(subject.NativeEvidenceError):
                 subject._validate_native_records(
@@ -1027,7 +1066,7 @@ class NativeShortScreenTests(unittest.TestCase):
                 encoding="ascii")
             summary = subject._thermal_window(
                 sampler, 2000000000, 3000000000, WORKER_CPUS, False)
-            self.assertEqual(summary["sample_count"], 4)
+            self.assertEqual(summary["sample_count"], 10)
 
             lines = csv_path.read_text(encoding="ascii").splitlines(True)
             # Header, ignored historical row, first valid row, then a row

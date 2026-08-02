@@ -16,6 +16,7 @@ RAW_DESCRIPTION_SCHEMA = "wirehair.wh2.native-worker-description.v2"
 DESCRIPTOR_SCHEMA = "wirehair.wh2.native-arm-descriptor.v1"
 RECOVERY_SCHEMA = "wirehair.wh2.native-recovery-record.v1"
 RAW_RECOVERY_SCHEMA = "wirehair.wh2.native-recovery-record.v2"
+TIMING_SCHEMA = "wirehair.wh2.native-timing-record.v3"
 RAW_REALIZED_SCHEMA = "wirehair.wh2.raw-realized-construction.v1"
 ZERO_SHA256 = "0" * 64
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -591,6 +592,44 @@ class ContractWorkerCliTest(unittest.TestCase):
                      candidate_discriminator["decoded_extra"]),
                     discriminator["candidate"],
                 )
+
+    @unittest.skipUnless(
+        hasattr(os, "sched_getaffinity"), "Linux CPU affinity is required")
+    def test_timing_v3_binds_self_counterbalanced_eight_slot_payload(self):
+        affinity = os.sched_getaffinity(0)
+        self.assertTrue(affinity)
+        cpu = str(min(affinity))
+        result = self.run_worker(
+            "--worker", cpu, stdin="T 0 0\nQ\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        lines = result.stdout.splitlines()
+        self.assertEqual(len(lines), 1)
+        record = json.loads(lines[0])
+        self.assertEqual(
+            lines[0], json.dumps(record, sort_keys=True, separators=(",", ":")))
+        self.assertEqual(record["schema"], TIMING_SCHEMA)
+        self.assertEqual(record["ordinal"], 0)
+        payload = record["payload"]
+        self.assertEqual(payload["K"], 8)
+        self.assertEqual(payload["block_bytes"], 64)
+        self.assertEqual(payload["replicate"], 0)
+        self.assertEqual(payload["interleave_policy"],
+                         "self-counterbalanced-repeat-major-v1")
+        self.assertEqual(payload["invocations_per_slot"], 8192)
+        self.assertEqual(payload["order"], "BAAB")
+        self.assertEqual(payload["scope"], "decoder_solve")
+        self.assertEqual(
+            payload["cell_sha256"],
+            "cf076b108f93f8268db4bc33a4415549"
+            "bddeb8d57b6c156dab48e5b56f5e6011")
+        self.assertEqual(
+            payload["trace_sha256"],
+            "0e773013a48e8a4aaa2858ca7eedec25"
+            "4bbef05c82c93d6e0e75bcf482e36e94")
+        self.assertEqual(len(payload["elapsed_ns"]), 8)
+        self.assertTrue(all(type(value) is int and value > 0
+                            for value in payload["elapsed_ns"]))
 
 
 def main():

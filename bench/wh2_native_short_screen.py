@@ -7,8 +7,9 @@ ledger/timing schemas, runs the authoritative contract validator, and only
 then publishes the result stream and its terminal execution receipt.
 
 It is intentionally not a campaign scheduler.  Recovery work may be
-distributed over the frozen workers, but v3 timing evidence must also prove
-the frozen homogeneous-wave CPU placement and non-overlapping wave barriers.
+distributed over the frozen workers, but v4 timing evidence must also prove
+the frozen round-major homogeneous-wave CPU placement and non-overlapping
+wave barriers.
 """
 
 from __future__ import annotations
@@ -32,7 +33,7 @@ import wh2_benchmark_contract as contract_api
 TRACE_RECORD_SCHEMA = "wirehair.wh2.native-trace-record.v1"
 RECOVERY_RECORD_SCHEMA = "wirehair.wh2.native-recovery-record.v1"
 RAW_RECOVERY_RECORD_SCHEMA = "wirehair.wh2.native-recovery-record.v2"
-TIMING_RECORD_SCHEMA = "wirehair.wh2.native-timing-record.v2"
+TIMING_RECORD_SCHEMA = "wirehair.wh2.native-timing-record.v3"
 SAMPLER_SCHEMA = "wirehair.wh2.sampler-attestation.v1"
 EXECUTION_SCHEMA = "wirehair.wh2.native-execution-receipt.v1"
 RAW_EXECUTION_SCHEMA = "wirehair.wh2.native-execution-receipt.v2"
@@ -751,35 +752,55 @@ def write_sampler_attestation(
     return value
 
 
+def _record_ordinal_context(
+        contract: Mapping[str, Any], freeze: Mapping[str, Any],
+        evidence_kind: str, phase: str,
+        ) -> Tuple[Any, Mapping[str, int]]:
+    """Precompute immutable indexes shared by every row in one receipt."""
+    if evidence_kind == "recovery":
+        return (
+            contract_api._domain_indexes(contract, phase),
+            {arm: index for index, arm in enumerate(freeze["arm_roster"])},
+        )
+    if evidence_kind == "timing":
+        panels = contract_api.timing_panels(contract, freeze["arm_roster"])
+        return (
+            contract_api._timing_cell_indexes(contract, phase),
+            {
+                contract_api.canonical_json(panel): index
+                for index, panel in enumerate(panels)
+            },
+        )
+    fail("evidence kind must be recovery or timing")
+    return (), {}
+
+
 def _expected_record_ordinal(
         contract: Mapping[str, Any], freeze: Mapping[str, Any],
-        evidence_kind: str, phase: str, payload: Mapping[str, Any]) \
+        evidence_kind: str, phase: str, payload: Mapping[str, Any],
+        ordinal_context: Tuple[Any, Mapping[str, int]]) \
         -> Tuple[int, str]:
+    cell_indexes, item_indexes = ordinal_context
     if evidence_kind == "recovery":
-        indexes = contract_api._domain_indexes(contract, phase)
         cell_ordinal, _ = contract_api._cell_ordinal(
-            contract, phase, payload, indexes)
+            contract, phase, payload, cell_indexes)
         arm = payload.get("arm")
-        if arm not in freeze["arm_roster"]:
+        arm_index = item_indexes.get(arm) if isinstance(arm, str) else None
+        if arm_index is None:
             fail("native recovery payload arm is outside the frozen roster")
-        arm_index = freeze["arm_roster"].index(arm)
         return cell_ordinal * len(freeze["arm_roster"]) + arm_index, arm
-    cells = contract_api._timing_cell_indexes(contract, phase)
     cell_ordinal, _ = contract_api._timing_cell_ordinal(
-        contract, phase, payload, cells)
+        contract, phase, payload, cell_indexes)
     panel = {
         "panel_kind": payload.get("panel_kind"),
         "scope": payload.get("scope"),
         "left_arm": payload.get("left_arm"),
         "right_arm": payload.get("right_arm"),
     }
-    panels = contract_api.timing_panels(contract, freeze["arm_roster"])
-    panel_keys = [contract_api.canonical_json(value) for value in panels]
-    try:
-        panel_index = panel_keys.index(contract_api.canonical_json(panel))
-    except ValueError:
+    panel_index = item_indexes.get(contract_api.canonical_json(panel))
+    if panel_index is None:
         fail("native timing payload has an undeclared or relabeled panel")
-    return cell_ordinal * len(panels) + panel_index, str(cell_ordinal)
+    return cell_ordinal * len(item_indexes) + panel_index, str(cell_ordinal)
 
 
 def _expected_work_sha256(
@@ -848,7 +869,7 @@ def _validate_timing_execution_geometry(
         contract: Mapping[str, Any], freeze: Mapping[str, Any], phase: str,
         envelopes: Sequence[Mapping[str, Any]],
         sysfs_root: Optional[Path] = None) -> None:
-    """Verify exact v3 timing placement and every inter-wave barrier."""
+    """Verify exact v4 round-major placement and every inter-wave barrier."""
     worker_cpus = _timing_worker_roster(contract, freeze)
     worker_cores = [
         _cpu_physical_core(cpu, sysfs_root) for cpu in worker_cpus
@@ -868,10 +889,14 @@ def _validate_timing_execution_geometry(
     domain = contract["timing"]["domains"].get(phase)
     repetitions = domain.get("paired_repetitions") \
         if isinstance(domain, Mapping) else None
+    independent_rounds = domain.get("independent_rounds") \
+        if isinstance(domain, Mapping) else None
     expected_cells = domain.get("expected_cells") \
         if isinstance(domain, Mapping) else None
     if (type(repetitions) is not int or repetitions <= 0 or
             repetitions % jobs_per_wave != 0 or
+            type(independent_rounds) is not int or independent_rounds <= 0 or
+            independent_rounds * jobs_per_wave != repetitions or
             type(expected_cells) is not int or expected_cells <= 0):
         fail("timing wave domain has invalid cardinality")
     try:
@@ -919,8 +944,7 @@ def _validate_timing_execution_geometry(
         fail(str(exc))
     if cohort_count != frozen_cohort_count:
         fail("timing cohort count differs from frozen execution geometry")
-    waves_per_cohort = repetitions // jobs_per_wave
-    expected_wave_count = cohort_count * waves_per_cohort
+    expected_wave_count = cohort_count * independent_rounds
     expected_record_count = expected_cells * panel_count
     if len(envelopes) != expected_record_count:
         fail("timing execution has an invalid record cardinality")
@@ -938,8 +962,11 @@ def _validate_timing_execution_geometry(
             fail("timing execution has an invalid replicate")
         stable_index = identity_indexes[cell_identities[cell_ordinal]]
         cohort_index = stable_index * panel_count + panel_index
-        wave_index = replicate // jobs_per_wave
-        wave_ordinal = cohort_index * waves_per_cohort + wave_index
+        round_index = replicate // jobs_per_wave
+        # The controller traverses the complete cohort domain once per
+        # independent round.  Preserve that chronology in the terminal proof
+        # instead of regrouping concurrent lanes as independent samples.
+        wave_ordinal = round_index * cohort_count + cohort_index
         try:
             worker_slot = contract_api.timing_worker_slot(
                 contract, phase, freeze["arm_roster"], cohort_index,
@@ -956,10 +983,10 @@ def _validate_timing_execution_geometry(
 
     prior_wave_finish: Optional[int] = None
     for wave_ordinal, values in enumerate(waves):
-        wave_index = wave_ordinal % waves_per_cohort
+        round_index = wave_ordinal // cohort_count
         expected_replicates = list(range(
-            wave_index * jobs_per_wave,
-            (wave_index + 1) * jobs_per_wave))
+            round_index * jobs_per_wave,
+            (round_index + 1) * jobs_per_wave))
         if (len(values) != jobs_per_wave or
                 sorted(value[0] for value in values) != expected_replicates):
             fail("timing wave does not contain its exact replicate roster")
@@ -991,6 +1018,11 @@ def _validate_native_records(
             contract, freeze["arm_roster"]))
     else:
         fail("evidence kind must be recovery or timing")
+    try:
+        ordinal_context = _record_ordinal_context(
+            contract, freeze, evidence_kind, phase)
+    except contract_api.ContractError as exc:
+        fail(str(exc))
     ordered: List[Optional[Mapping[str, Any]]] = [None] * expected_count
     envelope_ordered: List[Optional[Mapping[str, Any]]] = [None] * expected_count
     worker_start: Optional[int] = None
@@ -1014,7 +1046,8 @@ def _validate_native_records(
         _exact_keys(payload, payload_fields, "native result payload")
         try:
             expected_ordinal, message_key = _expected_record_ordinal(
-                contract, freeze, evidence_kind, phase, payload)
+                contract, freeze, evidence_kind, phase, payload,
+                ordinal_context)
         except contract_api.ContractError as exc:
             fail(str(exc))
         ordinal = row["ordinal"]

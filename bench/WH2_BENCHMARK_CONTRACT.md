@@ -1,4 +1,4 @@
-# Wirehair2 benchmark contract v3
+# Wirehair2 benchmark contract v3, timing protocol v4
 
 The machine-readable source of truth is
 [`wh2_benchmark_contract_v3.json`](wh2_benchmark_contract_v3.json).  The
@@ -6,6 +6,11 @@ companion checker, [`wh2_benchmark_contract.py`](wh2_benchmark_contract.py),
 validates its exact domains and rejects result ledgers that omit or replace a
 cell.  This is intentionally a small contract and checker, not another
 campaign framework.
+
+The top-level JSON schema remains `wirehair.wh2.benchmark-contract.v3` because
+the recovery protocol and every recovery cell/domain hash are byte-identical.
+The contract identity is `wh2-pure-gf256-1pct-v4`; v4 denotes the revised
+timing protocol and timing-domain hashes only.
 
 ## Target
 
@@ -33,8 +38,9 @@ training-loss roots and uses these four strata:
 - repair-only loss at 50%.
 
 That is 360 recovery cells per arm at the two-byte structure width.  The
-separate speed screen is 384 common cells: 12 K anchors, widths 64 and 1280,
-and sixteen paired repetitions.  Unlike raw recovery, development timing uses
+separate speed screen is 2,304 common cells: 12 K anchors, widths 64 and 1280,
+and 96 technical lane repetitions grouped into twelve independent rounds.
+Unlike raw recovery, development timing uses
 the production base attempt zero with the three training roots.  Timing is a
 speed measurement of one predeclared production construction, not another raw
 seed census; raw attempts 0, 1, and 2 remain fully represented by the recovery
@@ -218,59 +224,71 @@ integers, missing rows, and extra rows fail closed.
 
 ## Timing decision
 
-Timing uses warm-cache, pinned four-slot panels.  With one candidate, each base
-cell has seven A/A panels (one for every arm/scope used) and four A/B panels:
+Timing uses warm-cache, pinned self-counterbalanced eight-slot panels.  With
+one candidate, each base cell has seven A/A panels (one for every arm/scope
+used) and four A/B panels:
 candidate versus Wirehair2 solve, candidate versus Wirehair1
 receive-to-success, and candidate versus each control for encoder work.  Thus
-development has exactly 384 × 11 = 4,224 timing rows and final timing has
-3,600 × 11 = 39,600.  Missing, duplicate, extra, side-swapped, or omitted A/A
+development has exactly 2,304 × 11 = 25,344 timing rows and final timing has
+14,400 × 11 = 158,400.  Missing, duplicate, extra, side-swapped, or omitted A/A
 rows invalidate the receipt.
 
 For the canonical panel key `(kind, scope, left_arm, right_arm)`, take the low
-bit of its SHA-256.  Use ABBA exactly when that bit equals replicate parity and
-BAAB otherwise.  Run one untimed fresh warm-up per logical side immediately
-before the four measured slots.
+bit of its SHA-256.  Within an independent round, use ABBA as the primary order
+exactly when that bit equals lane parity and BAAB otherwise.  Slots zero through
+three use that primary order; slots four through seven use the opposite order.
+Thus every native job is self-counterbalanced rather than relying on separate
+jobs to cancel order.  Run one untimed fresh warm-up per logical side before
+measurement.
 
 The frozen protocol replaces each underpowered one-shot measured slot with a
 deterministic batch.  The machine-readable block target is 65,536 and every
 timing cell receipts
 
 ```text
-invocations_per_slot = max(1, ceil(65536 / K))
+invocations_per_slot = n = max(2, ceil(65536 / K))
 ```
 
-Each slot constructs and executes exactly that many fresh invocations of its
-declared scope, checks every invocation's stable identity and outcome, and
-sums only the exact-scope duration reported by each invocation.  Setup outside
-the declared scope is not added to the sum.  The count is arm-independent,
-fixed before results, part of the timing cell key and domain hash, and may not
-be calibrated or shortened from observed timings.  A sum that cannot fit in a
-positive signed 63-bit nanosecond value is fatal rather than wrapped.  The
-arm-free timing cell key is:
+The historical field name is retained, but `n` is now the frozen job batch
+budget: each of the four primary-order slots executes `ceil(n/2)` fresh
+invocations and each of the four opposite-order slots executes `floor(n/2)`.
+This preserves the total work per logical side while giving both orders within
+the same job.  Traversal inside each four-slot block is repeat-major.  Every
+invocation's stable identity and outcome is checked, and each slot sums only
+the exact-scope duration reported by its invocations.  Setup outside the
+declared scope is not added to the sum.  The count and exact interleave policy
+are arm-independent, fixed before results, part of the timing cell key and
+domain hash, and may not be calibrated or shortened from observed timings.  A
+sum that cannot fit in a positive signed 63-bit nanosecond value is fatal
+rather than wrapped.  The arm-free timing cell key is:
 
 ```text
 (phase, band, K, block_bytes, loss_ppm, schedule, replicate,
  base_seed_attempt, loss_seed, fixed_received_overhead,
- invocations_per_slot)
+ invocations_per_slot, interleave_policy)
 ```
 
-Changing the batch count therefore cannot preserve either the cell identity
-or its frozen trace/domain binding.
+`interleave_policy` must equal
+`self-counterbalanced-repeat-major-v1`.  Changing the batch count or omitting,
+forging, or relabeling that token therefore cannot preserve either the cell
+identity or its frozen trace/domain binding.
 
-Contract v3 additionally freezes the execution geometry that removed the
+Timing protocol v4 freezes the execution geometry that removed the
 heterogeneous-load artifact.  Timing uses exactly eight singleton-pinned
 workers on distinct physical cores.  For one candidate, the 12 K values, two
 widths, and eleven frozen panels form 264 homogeneous cohorts ordered by width,
 K-set position, then panel ordinal.  A cohort contains only one K, width, and
-panel.  Its sixteen development replicates run as two waves of eight jobs:
-wave `w` contains replicates with `floor(replicate / 8) == w`, and the next
-wave or cohort may not start until all eight jobs in the current wave finish.
-The one-candidate final domain analogously has 1,650 cohorts and three waves;
-both phase bounds reject out-of-range cohort indices.
-For zero-based cohort and wave indices, replicate `r` runs on
+panel.  Both development and final timing use 96 technical lane repetitions:
+twelve independent rounds with eight lanes each.  The independent round is
+the outer traversal.  Within a round, visit the complete frozen cohort domain
+in order, executing one eight-job lane wave for each cohort; the next cohort
+may not start until that wave finishes.  The one-candidate final domain has
+1,650 cohorts.  Both phase bounds reject out-of-range cohort indices.
+For zero-based cohort index `c`, round `q`, and lane `l`, replicate
+`r = 8q + l` runs on
 
 ```text
-sorted_worker_cpus[(r % 8 + cohort_index + wave_index) % 8]
+sorted_worker_cpus[(l + c + q) % 8]
 ```
 
 This Latin rotation balances replicate identity over worker slots without
@@ -286,25 +304,34 @@ not selectable.  Maximum-LLC coverage itself is a runner pre-freeze check;
 reconstructing that decision offline would also require freezing the complete
 pre-pin eligible CPU roster.
 
-For the four aggregate elapsed nanoseconds `e0..e3`, one panel observation is:
+Let `C(order, e0..e3)` be the left/right-oriented four-slot contrast:
 
 ```text
-ABBA: ((ln e0 - ln e1) + (ln e3 - ln e2)) / 2
-BAAB: ((ln e1 - ln e0) + (ln e2 - ln e3)) / 2
+ABBA: C = ((ln e0 - ln e1) + (ln e3 - ln e2)) / 2
+BAAB: C = ((ln e1 - ln e0) + (ln e2 - ln e3)) / 2
 ```
 
-The independent statistical unit is the replicate, not an individual K or one
-of the two adjacent pairs.  Within each band × width, average all frozen K
-observations for a replicate, then use the 16 or 24 replicate means with unbiased
-sample variance and the exact two-sided Student-t critical value (2.131449545559323
-or 2.0686576104190477).  Aggregate encoder results give every frozen K × width
-cell equal weight within its replicate.  No rounding occurs before a decision.
+For primary order `P` and its opposite `O`, the lane observation is
+`(C(P,e0..e3) + C(O,e4..e7))/2`.  The diagnostic block-phase difference is
+`C(P,e0..e3) - C(O,e4..e7)`.  It measures first-block versus second-block drift
+and is summarized using the same grouping; it does not alter the frozen
+decision thresholds.
+
+The independent statistical unit is the round, not an individual K, lane, or
+adjacent pair.  Within each band × width, first equal-weight all frozen K
+observations for each lane, then equal-weight the eight lane means into one
+round mean.  Use the twelve round means with unbiased sample variance and the
+ordinary two-sided Student-t critical value `2.200985160082949` for eleven
+degrees of freedom.  Aggregate encoder results give every frozen K × width cell
+equal weight within each lane before the eight-lane round average.  No rounding
+occurs before a decision.
 
 Timing may not form an observed common-success intersection: every compared
-arm must succeed on every predeclared cell.  A non-success row carries four
+arm must succeed on every predeclared cell.  A non-success row carries eight
 null durations, remains explicit, and makes the affected panel non-selectable;
 it is never dropped.  Successful timings require the exact derived
-`invocations_per_slot` and four integer aggregate durations in `[1,2^63-1]`.
+`invocations_per_slot`, the exact interleave token, and eight integer aggregate
+durations in `[1,2^63-1]`.
 Final WH2 timing replays and receipts the same frozen repair map and
 construction attempt used by recovery validation.
 

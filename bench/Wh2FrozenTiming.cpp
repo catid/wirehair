@@ -9,9 +9,11 @@ namespace {
 static const uint64_t kSplitMixIncrement = UINT64_C(0x9e3779b97f4a7c15);
 static const uint64_t kSplitMixMultiplier1 = UINT64_C(0xbf58476d1ce4e5b9);
 static const uint64_t kSplitMixMultiplier2 = UINT64_C(0x94d049bb133111eb);
-static const uint32_t kDevelopmentTimingRepetitions = 16u;
+static const uint32_t kDevelopmentTimingRepetitions = 96u;
 static const uint32_t kDevelopmentTimingWorkers = 8u;
 static const std::size_t kDevelopmentTimingCohorts = 264u;
+static const char kDevelopmentTimingInterleavePolicy[] =
+    "self-counterbalanced-repeat-major-v1";
 
 static const uint32_t kTimingK[] = {
     8u, 32u, 100u, 128u, 512u, 1000u,
@@ -203,10 +205,13 @@ bool ExactDevelopmentTimingCell(const FrozenTimingCell& cell)
     {
         return false;
     }
+    const uint32_t round_index =
+        cell.replicate / kDevelopmentTimingWorkers;
+    const uint32_t lane = cell.replicate % kDevelopmentTimingWorkers;
     const std::size_t expected_ordinal =
-        static_cast<std::size_t>(width_position - kTimingWidths) * 192u +
-        static_cast<std::size_t>(cell.replicate) * 12u +
-        static_cast<std::size_t>(k_position - kTimingK);
+        static_cast<std::size_t>(round_index) * 192u +
+        static_cast<std::size_t>(width_position - kTimingWidths) * 96u +
+        static_cast<std::size_t>(k_position - kTimingK) * 8u + lane;
     return cell.ordinal == expected_ordinal &&
         cell.phase == "development" &&
         cell.band == BandForK(cell.K) &&
@@ -215,6 +220,7 @@ bool ExactDevelopmentTimingCell(const FrozenTimingCell& cell)
         cell.base_seed_attempt == expected_attempt &&
         cell.loss_seed == expected_loss_seed &&
         cell.fixed_received_overhead == 4u &&
+        cell.interleave_policy == kDevelopmentTimingInterleavePolicy &&
         cell.invocations_per_slot ==
             DevelopmentTimingInvocationsPerSlot(cell.K);
 }
@@ -306,6 +312,7 @@ FrozenTimingCell::FrozenTimingCell()
     , base_seed_attempt(0u)
     , loss_seed(0u)
     , fixed_received_overhead(0u)
+    , interleave_policy()
     , invocations_per_slot(0u)
 {
 }
@@ -317,7 +324,7 @@ uint32_t DevelopmentTimingInvocationsPerSlot(uint32_t K)
     }
     const uint32_t quotient = 65536u / K;
     const uint32_t rounded_up = quotient + (65536u % K != 0u ? 1u : 0u);
-    return std::max(1u, rounded_up);
+    return std::max(2u, rounded_up);
 }
 
 uint32_t DevelopmentTimingWorkerCount()
@@ -370,42 +377,54 @@ bool DevelopmentTimingSeed(
 std::vector<FrozenTimingCell> EnumerateDevelopmentTimingCells()
 {
     std::vector<FrozenTimingCell> cells;
-    cells.reserve(384u);
-    for (std::size_t width_index = 0u;
-        width_index < sizeof(kTimingWidths) / sizeof(kTimingWidths[0]);
-        ++width_index)
+    cells.reserve(2304u);
+    for (uint32_t round_index = 0u;
+        round_index < kDevelopmentTimingRepetitions /
+            kDevelopmentTimingWorkers;
+        ++round_index)
     {
-        for (uint32_t replicate = 0u;
-            replicate < kDevelopmentTimingRepetitions;
-            ++replicate)
+        for (std::size_t width_index = 0u;
+            width_index < sizeof(kTimingWidths) / sizeof(kTimingWidths[0]);
+            ++width_index)
         {
-            uint32_t attempt = 0u;
-            uint64_t loss_seed = 0u;
-            if (!DevelopmentTimingSeed(replicate, attempt, loss_seed)) {
-                return std::vector<FrozenTimingCell>();
-            }
             for (std::size_t k_index = 0u;
                 k_index < sizeof(kTimingK) / sizeof(kTimingK[0]);
                 ++k_index)
             {
-                FrozenTimingCell cell;
-                cell.ordinal = cells.size();
-                cell.phase = "development";
-                cell.band = BandForK(kTimingK[k_index]);
-                cell.K = kTimingK[k_index];
-                cell.block_bytes = kTimingWidths[width_index];
-                cell.loss_ppm = 100000u;
-                cell.schedule = FrozenSchedule::Iid;
-                cell.replicate = replicate;
-                cell.base_seed_attempt = attempt;
-                cell.loss_seed = loss_seed;
-                cell.fixed_received_overhead = 4u;
-                cell.invocations_per_slot =
-                    DevelopmentTimingInvocationsPerSlot(cell.K);
-                if (cell.invocations_per_slot == 0u) {
-                    return std::vector<FrozenTimingCell>();
+                for (uint32_t lane = 0u;
+                    lane < kDevelopmentTimingWorkers;
+                    ++lane)
+                {
+                    const uint32_t replicate =
+                        round_index * kDevelopmentTimingWorkers + lane;
+                    uint32_t attempt = 0u;
+                    uint64_t loss_seed = 0u;
+                    if (!DevelopmentTimingSeed(
+                            replicate, attempt, loss_seed))
+                    {
+                        return std::vector<FrozenTimingCell>();
+                    }
+                    FrozenTimingCell cell;
+                    cell.ordinal = cells.size();
+                    cell.phase = "development";
+                    cell.band = BandForK(kTimingK[k_index]);
+                    cell.K = kTimingK[k_index];
+                    cell.block_bytes = kTimingWidths[width_index];
+                    cell.loss_ppm = 100000u;
+                    cell.schedule = FrozenSchedule::Iid;
+                    cell.replicate = replicate;
+                    cell.base_seed_attempt = attempt;
+                    cell.loss_seed = loss_seed;
+                    cell.fixed_received_overhead = 4u;
+                    cell.interleave_policy =
+                        kDevelopmentTimingInterleavePolicy;
+                    cell.invocations_per_slot =
+                        DevelopmentTimingInvocationsPerSlot(cell.K);
+                    if (cell.invocations_per_slot == 0u) {
+                        return std::vector<FrozenTimingCell>();
+                    }
+                    cells.push_back(cell);
                 }
-                cells.push_back(cell);
             }
         }
     }
@@ -418,7 +437,7 @@ std::string CanonicalTimingCellJson(const FrozenTimingCell& cell)
         return std::string();
     }
     std::string json;
-    json.reserve(224u);
+    json.reserve(280u);
     json += "{\"K\":";
     json += std::to_string(cell.K);
     json += ",\"band\":\"";
@@ -429,6 +448,9 @@ std::string CanonicalTimingCellJson(const FrozenTimingCell& cell)
     json += std::to_string(cell.block_bytes);
     json += ",\"fixed_received_overhead\":";
     json += std::to_string(cell.fixed_received_overhead);
+    json += ",\"interleave_policy\":\"";
+    json += cell.interleave_policy;
+    json += "\"";
     json += ",\"invocations_per_slot\":";
     json += std::to_string(cell.invocations_per_slot);
     json += ",\"loss_ppm\":";
@@ -452,7 +474,7 @@ std::string DevelopmentTimingDomainSha256()
     const std::vector<FrozenTimingCell> cells =
         EnumerateDevelopmentTimingCells();
     std::string stream;
-    stream.reserve(88000u);
+    stream.reserve(600000u);
     for (std::size_t i = 0u; i < cells.size(); ++i)
     {
         const std::string json = CanonicalTimingCellJson(cells[i]);
@@ -503,12 +525,12 @@ FrozenTraceStatus GenerateDevelopmentTimingTrace(
 std::string CanonicalTimingTraceManifestRow(
     const FrozenTimingTraceReceipt& receipt)
 {
-    if (receipt.ordinal >= 384u) {
+    if (receipt.ordinal >= 2304u) {
         return std::string();
     }
     const std::vector<FrozenTimingCell> cells =
         EnumerateDevelopmentTimingCells();
-    if (cells.size() != 384u) {
+    if (cells.size() != 2304u) {
         return std::string();
     }
     FrozenPacketTrace expected_trace;

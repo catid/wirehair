@@ -375,7 +375,7 @@ bool NativePanelResult::IsFatal() const
     return Status != NativePanelStatus::Complete;
 }
 
-bool NativePanelResult::HasFourNullTimings() const
+bool NativePanelResult::HasEightNullTimings() const
 {
     for (size_t i = 0; i < Slots.size(); ++i) {
         if (Slots[i].HasElapsedNanoseconds) {
@@ -425,6 +425,10 @@ NativePanelResult ExecuteNativeTimingPanelWithRuntime(
         result.Slots[1].Side = NativePanelSide::Right;
         result.Slots[2].Side = NativePanelSide::Right;
         result.Slots[3].Side = NativePanelSide::Left;
+        result.Slots[4].Side = NativePanelSide::Right;
+        result.Slots[5].Side = NativePanelSide::Left;
+        result.Slots[6].Side = NativePanelSide::Left;
+        result.Slots[7].Side = NativePanelSide::Right;
     }
     else if (order == NativePanelOrder::BAAB)
     {
@@ -432,9 +436,13 @@ NativePanelResult ExecuteNativeTimingPanelWithRuntime(
         result.Slots[1].Side = NativePanelSide::Left;
         result.Slots[2].Side = NativePanelSide::Left;
         result.Slots[3].Side = NativePanelSide::Right;
+        result.Slots[4].Side = NativePanelSide::Left;
+        result.Slots[5].Side = NativePanelSide::Right;
+        result.Slots[6].Side = NativePanelSide::Right;
+        result.Slots[7].Side = NativePanelSide::Left;
     }
 
-    if (target_cpu < 0 || invocations_per_slot == 0u ||
+    if (target_cpu < 0 || invocations_per_slot < 2u ||
         !IsKnownOrder(order) ||
         left.ExpectedIdentity.empty() || right.ExpectedIdentity.empty() ||
         !left.MakeInvocation || !right.MakeInvocation)
@@ -470,44 +478,66 @@ NativePanelResult ExecuteNativeTimingPanelWithRuntime(
         result.LeftPreflight.Disposition == NativePanelDisposition::Success &&
         result.RightPreflight.Disposition == NativePanelDisposition::Success;
 
-    for (size_t slot_index = 0; slot_index < result.Slots.size(); ++slot_index)
-    {
-        NativePanelSlot& slot = result.Slots[slot_index];
-        const NativePanelArm& arm = SelectArm(slot.Side, left, right);
-        const NativePanelInvocationResult& expected =
-            slot.Side == NativePanelSide::Left ?
-                result.LeftPreflight : result.RightPreflight;
-        uint64_t elapsed_sum = 0u;
-        for (uint32_t repeat = 0u; repeat < invocations_per_slot; ++repeat)
-        {
-            InvocationObservation measured = RunFreshInvocation(
-                target_cpu, arm, runtime);
-            if (measured.Status != NativePanelStatus::Complete) {
-                return Fail(result, measured.Status, measured.Diagnostic);
-            }
-            if (!SameOutcome(expected, measured.Result))
-            {
-                return Fail(result, NativePanelStatus::OutcomeDrift,
-                    "measured outcome or decoded-extra drifted from warmup");
-            }
+    std::array<uint64_t, 8> elapsed_sums = {{ 0u }};
+    std::array<NativePanelInvocationResult, 8> final_invocations;
+    const uint32_t primary_count =
+        invocations_per_slot / 2u + invocations_per_slot % 2u;
+    const uint32_t secondary_count = invocations_per_slot / 2u;
 
-            slot.Invocation = measured.Result;
-            if (comparable)
+    for (size_t block = 0u; block < 2u; ++block)
+    {
+        const size_t first_slot = block * 4u;
+        const uint32_t repeat_count = block == 0u ?
+            primary_count : secondary_count;
+        for (uint32_t repeat = 0u; repeat < repeat_count; ++repeat)
+        {
+            for (size_t block_slot = 0u; block_slot < 4u; ++block_slot)
             {
-                const uint64_t elapsed = measured.Result.ElapsedNanoseconds;
-                if (elapsed > kMaxInt63 - elapsed_sum)
-                {
-                    return Fail(result, NativePanelStatus::InvalidElapsed,
-                        "measured batch elapsed time exceeds positive int63");
+                const size_t slot_index = first_slot + block_slot;
+                const NativePanelSlot& slot = result.Slots[slot_index];
+                const NativePanelArm& arm = SelectArm(slot.Side, left, right);
+                const NativePanelInvocationResult& expected =
+                    slot.Side == NativePanelSide::Left ?
+                        result.LeftPreflight : result.RightPreflight;
+                InvocationObservation measured = RunFreshInvocation(
+                    target_cpu, arm, runtime);
+                if (measured.Status != NativePanelStatus::Complete) {
+                    return Fail(result, measured.Status, measured.Diagnostic);
                 }
-                elapsed_sum += elapsed;
+                if (!SameOutcome(expected, measured.Result))
+                {
+                    return Fail(result, NativePanelStatus::OutcomeDrift,
+                        "measured outcome or decoded-extra drifted from warmup");
+                }
+
+                final_invocations[slot_index] = measured.Result;
+                if (comparable)
+                {
+                    const uint64_t elapsed =
+                        measured.Result.ElapsedNanoseconds;
+                    if (elapsed > kMaxInt63 - elapsed_sums[slot_index])
+                    {
+                        return Fail(result, NativePanelStatus::InvalidElapsed,
+                            "measured batch elapsed time exceeds positive int63");
+                    }
+                    elapsed_sums[slot_index] += elapsed;
+                }
             }
         }
+    }
+
+    // Publish the eight slot observations only after both counterbalanced
+    // blocks have completed.  Thus every earlier failure returns eight null
+    // timings without exposing a completed prefix.
+    for (size_t slot_index = 0u; slot_index < result.Slots.size(); ++slot_index)
+    {
+        NativePanelSlot& slot = result.Slots[slot_index];
+        slot.Invocation = final_invocations[slot_index];
         if (comparable)
         {
             slot.HasElapsedNanoseconds = true;
-            slot.ElapsedNanoseconds = elapsed_sum;
-            slot.Invocation.ElapsedNanoseconds = elapsed_sum;
+            slot.ElapsedNanoseconds = elapsed_sums[slot_index];
+            slot.Invocation.ElapsedNanoseconds = elapsed_sums[slot_index];
         }
     }
 

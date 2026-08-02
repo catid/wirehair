@@ -104,8 +104,9 @@ struct NativePanelSlot
 {
     NativePanelSide Side;
     /**
-        Stable outcome from the final repeat.  For a comparable completed
-        batch, ElapsedNanoseconds is replaced with the full slot aggregate.
+        Stable outcome from the final repeat in this slot's four-slot block.
+        For a comparable completed panel, ElapsedNanoseconds is replaced with
+        the full slot aggregate.
     */
     NativePanelInvocationResult Invocation;
     /** False is the native equivalent of a null timing receipt value. */
@@ -127,11 +128,12 @@ struct NativePanelResult
     NativePanelInvocationResult LeftPreflight;
     NativePanelInvocationResult RightPreflight;
     bool PanelComparable;
-    std::array<NativePanelSlot, 4> Slots;
+    /** Primary four-slot block followed by its opposite-order block. */
+    std::array<NativePanelSlot, 8> Slots;
 
     NativePanelResult();
     bool IsFatal() const;
-    bool HasFourNullTimings() const;
+    bool HasEightNullTimings() const;
 };
 
 /**
@@ -157,17 +159,21 @@ bool NativePanelPlatformSupported();
 
 /**
     Pin the calling worker to target_cpu, execute one fresh warm-left and one
-    fresh warm-right invocation, then exactly invocations_per_slot fresh
-    invocations in each of four slots in the declared chronology.  Verify the
-    singleton CPU immediately before and after every Invoke(), require every
-    repeat to retain its side's preflight identity/outcome, and report each
-    slot's overflow-safe elapsed-nanosecond sum.
+    fresh warm-right invocation, then split invocations_per_slot into
+    ceil(n/2) repeats of the declared primary four-slot order followed by
+    floor(n/2) repeats of the opposite order.  Each block is repeat-major and
+    slot-inner, preserving exactly 4*n measured invocations while exposing
+    eight independent overflow-safe elapsed-nanosecond sums.  Values below two
+    are invalid because both counterbalanced blocks must execute.  Verify the
+    singleton CPU immediately before and after every Invoke() and require every
+    repeat to retain its side's preflight identity/outcome.
 
     If either warmup returns PreflightFailure, every invocation in all four
-    measured batches is still executed and checked for stable identity/outcome,
-    but all four timing flags are cleared.  Migration, affinity drift, identity
-    drift, outcome drift, fatal callbacks, and invalid successful timings fail
-    the panel and clear every timing flag.
+    slots of both measured blocks is still executed and checked for stable
+    identity/outcome, but all eight timing flags are cleared.  Migration,
+    affinity drift, identity drift, outcome drift, fatal callbacks, and invalid
+    successful timings fail the panel and clear every timing flag.  No timing
+    is committed until every measured callback has completed successfully.
 */
 NativePanelResult ExecuteNativeTimingPanel(
     int target_cpu,

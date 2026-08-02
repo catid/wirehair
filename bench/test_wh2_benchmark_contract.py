@@ -7,6 +7,7 @@ import copy
 import hashlib
 import io
 import json
+import math
 from pathlib import Path
 import sys
 import tempfile
@@ -25,11 +26,11 @@ EXPECTED_RECOVERY_HASHES = {
     "cross_width_validation": "80fb4c19b31f88101ef4b3c480e6d5ff4a3bba7d45c96f02dc3518cd7c1c0399",
 }
 EXPECTED_TIMING_HASHES = {
-    "development": "4d094a6d351d3b57cbc2654bf269b1da41886a68c7bebd14803b2892d1cd89d7",
-    "final": "62e8fdbe636dba08eefd5bd7ff48b6c63fb5f021253d5a1df0d27e1a6bbc71e1",
+    "development": "ca82f8774f0cb1b865a0bbc01b8de79d2239df13ab3ef17ef5eb4e3e39ab6913",
+    "final": "3b1aa0274f690769111ffa239eba3797e8893757ab8bab1db1c224eba043f246",
 }
 EXPECTED_CONTRACT_SHA256 = \
-    "1ca0e416b3f4d66fb9ea5f0041dbdde95d53527ea08b27ebd91714dc6b8b0593"
+    "0702ca7f3bea7b0e06b1bd0dde1f49e788b5d7904fbf28fdc2cf1cc4a2662ffc"
 
 
 def digest(label: str) -> str:
@@ -419,7 +420,7 @@ def architecture_selection_receipt(
         "timing_freeze_manifest_sha256": digest("timing freeze"),
         "architecture_artifact_sha256": digest("architecture artifacts"),
         "recovery_cells_per_arm": 360,
-        "timing_rows": 4224,
+        "timing_rows": 25344,
         "candidate_roster": [selected],
         "eligible_candidates": [selected],
         "eligible_overhead0_failures": {selected: 0},
@@ -462,9 +463,13 @@ def timing_receipt_rows(
             else:
                 left_ns = int(100000 * candidate_scale)
                 right_ns = 100000
-            elapsed = [left_ns, right_ns, right_ns, left_ns] \
+            primary = [left_ns, right_ns, right_ns, left_ns] \
                 if order == "ABBA" else \
                 [right_ns, left_ns, left_ns, right_ns]
+            opposite = [right_ns, left_ns, left_ns, right_ns] \
+                if order == "ABBA" else \
+                [left_ns, right_ns, right_ns, left_ns]
+            elapsed = primary + opposite
             row: Dict[str, Any] = {
                 **cell,
                 **panel,
@@ -541,14 +546,14 @@ class ContractTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.contract = subject.load_contract()
 
-    def test_v3_identity_and_default_contract_path_are_exact(self) -> None:
+    def test_v4_timing_identity_and_default_contract_path_are_exact(self) -> None:
         self.assertEqual(subject.SCHEMA,
                          "wirehair.wh2.benchmark-contract.v3")
         self.assertEqual(subject.DEFAULT_CONTRACT.name,
                          "wh2_benchmark_contract_v3.json")
         self.assertEqual(self.contract["schema"], subject.SCHEMA)
         self.assertEqual(self.contract["contract_id"],
-                         "wh2-pure-gf256-1pct-v3")
+                         "wh2-pure-gf256-1pct-v4")
         self.assertEqual(subject.contract_sha256(self.contract),
                          EXPECTED_CONTRACT_SHA256)
 
@@ -577,11 +582,11 @@ class ContractTests(unittest.TestCase):
                 self.assertEqual(domain["domain_sha256"], expected_hash)
         self.assertEqual(
             self.contract["timing"]["domains"]["development"]["expected_cells"],
-            384,
+            2304,
         )
         self.assertEqual(
             self.contract["timing"]["domains"]["final"]["expected_cells"],
-            3600,
+            14400,
         )
 
     def test_timing_batch_formula_and_production_training_seed_are_exact(
@@ -591,20 +596,25 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(protocol["measured_batch_block_target"], 65536)
         self.assertEqual(
             protocol["invocations_per_slot"],
-            "max(1,ceil(measured_batch_block_target/K))")
+            "max(2,ceil(measured_batch_block_target/K))")
+        self.assertEqual(protocol["interleave_policy"],
+                         subject.TIMING_INTERLEAVE_POLICY)
+        self.assertEqual(protocol["slots_per_panel"], 8)
         self.assertEqual(
             geometry, subject.EXPECTED_TIMING_EXECUTION_GEOMETRY)
         self.assertEqual(geometry["timing_worker_count"], 8)
         self.assertEqual(geometry["jobs_per_wave"], 8)
         for domain in self.contract["timing"]["domains"].values():
-            self.assertGreater(domain["paired_repetitions"], 0)
+            self.assertEqual(domain["paired_repetitions"], 96)
+            self.assertEqual(domain["independent_rounds"], 12)
             self.assertEqual(
-                domain["paired_repetitions"] %
-                geometry["timing_worker_count"], 0)
+                domain["paired_repetitions"],
+                domain["independent_rounds"] *
+                geometry["timing_worker_count"])
         self.assertEqual(
             self.contract["timing"]["statistics"][
-                "t_critical_by_repetitions"]["16"],
-            2.131449545559323)
+                "t_critical_by_independent_rounds"]["12"],
+            2.200985160082949)
         arms = ("wirehair2_head", "wirehair1", "candidate")
         multi_arms = arms + ("candidate2",)
         self.assertEqual(subject.timing_cohort_count(
@@ -614,15 +624,15 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(subject.timing_cohort_count(
             self.contract, "final", arms), 1650)
         for cohort in range(264):
-            for wave in range(2):
+            for independent_round in range(12):
                 slots = {
                     subject.timing_worker_slot(
                         self.contract, "development", arms, cohort,
-                        wave * 8 + local)
-                    for local in range(8)
+                        independent_round * 8 + lane)
+                    for lane in range(8)
                 }
                 self.assertEqual(slots, set(range(8)))
-        for replicate in range(16):
+        for replicate in range(96):
             counts = [0] * 8
             for cohort in range(264):
                 counts[subject.timing_worker_slot(
@@ -635,21 +645,21 @@ class ContractTests(unittest.TestCase):
             (15 % 8 + 263 + 1) % 8)
         self.assertEqual(
             subject.timing_worker_slot(
-                self.contract, "final", arms, 1649, 23),
-            (23 % 8 + 1649 + 2) % 8)
+                self.contract, "final", arms, 1649, 95),
+            (95 % 8 + 1649 + 11) % 8)
         for phase, cohort, replicate in (
                 ("missing", 0, 0), (True, 0, 0),
                 ("development", -1, 0),
                 ("development", True, 0), ("development", 0, True),
-                ("development", 264, 0), ("development", 0, 16),
-                ("final", 1650, 0), ("final", 0, 24)):
+                ("development", 264, 0), ("development", 0, 96),
+                ("final", 1650, 0), ("final", 0, 96)):
             with self.assertRaises(subject.ContractError):
                 subject.timing_worker_slot(
                     self.contract, phase, arms, cohort, replicate)
         self.assertEqual(
             subject.timing_worker_slot(
-                self.contract, "development", multi_arms, 431, 15),
-            (15 % 8 + 431 + 1) % 8)
+                self.contract, "development", multi_arms, 431, 95),
+            (95 % 8 + 431 + 11) % 8)
         with self.assertRaises(subject.ContractError):
             subject.timing_worker_slot(
                 self.contract, "development", multi_arms, 432, 0)
@@ -664,16 +674,35 @@ class ContractTests(unittest.TestCase):
             8: 8192, 32: 2048, 100: 656, 128: 512,
             512: 128, 1000: 66, 2048: 32, 5000: 14,
             8192: 8, 20000: 4, 32768: 2, 64000: 2,
-            65536: 1, 65537: 1,
+            65536: 2, 65537: 2,
         }
         for K, invocations in expected.items():
             with self.subTest(K=K):
                 self.assertEqual(subject.timing_invocations_per_slot(
                     self.contract, K), invocations)
+                self.assertEqual(
+                    subject.timing_invocations_for_elapsed_slot(
+                        self.contract, K, 0),
+                    (invocations + 1) // 2)
+                self.assertEqual(
+                    subject.timing_invocations_for_elapsed_slot(
+                        self.contract, K, 7),
+                    invocations // 2)
+        self.assertEqual(subject.timing_invocations_per_slot(
+            self.contract, 6), 10923)
+        self.assertEqual([
+            subject.timing_invocations_for_elapsed_slot(
+                self.contract, 6, slot) for slot in range(8)
+        ], [5462] * 4 + [5461] * 4)
         for K in (0, -1, True, 1.0):
             with self.subTest(invalid_K=K), \
                     self.assertRaises(subject.ContractError):
                 subject.timing_invocations_per_slot(self.contract, K)
+        for slot in (-1, 8, True, 1.0):
+            with self.subTest(invalid_slot=slot), \
+                    self.assertRaises(subject.ContractError):
+                subject.timing_invocations_for_elapsed_slot(
+                    self.contract, 8, slot)
 
         development = list(subject.iter_timing_cells(
             self.contract, "development"))
@@ -685,7 +714,9 @@ class ContractTests(unittest.TestCase):
         for cell in development:
             self.assertEqual(
                 cell["invocations_per_slot"],
-                max(1, (65536 + cell["K"] - 1) // cell["K"]))
+                max(2, (65536 + cell["K"] - 1) // cell["K"]))
+            self.assertEqual(cell["interleave_policy"],
+                             subject.TIMING_INTERLEAVE_POLICY)
         first_by_replicate = {}
         for cell in development:
             first_by_replicate.setdefault(cell["replicate"], cell)
@@ -697,6 +728,17 @@ class ContractTests(unittest.TestCase):
                 int(roots[replicate % len(roots)], 16) ^ salt)
             self.assertEqual(cell["loss_seed"],
                              "0x{:016x}".format(expected_seed))
+        cells_per_round = len(self.contract["k_sets"]["timing_short"]) * 2 * 8
+        self.assertEqual(
+            [cell["replicate"] for cell in development[:16]],
+            list(range(8)) + list(range(8)))
+        self.assertEqual(
+            {cell["replicate"] // 8
+             for cell in development[:cells_per_round]}, {0})
+        self.assertEqual(
+            {cell["replicate"] // 8
+             for cell in development[cells_per_round:2 * cells_per_round]},
+            {1})
 
     def test_timing_batch_contract_mutations_fail_closed(self) -> None:
         mutations = []
@@ -710,11 +752,23 @@ class ContractTests(unittest.TestCase):
         mutations.append(("target_type", bool_target))
         wrong_formula = copy.deepcopy(self.contract)
         wrong_formula["timing"]["panel_protocol"][
-            "invocations_per_slot"] = "max(1,65536//K)"
+            "invocations_per_slot"] = "max(2,65536//K)"
         mutations.append(("formula", wrong_formula))
         missing_key = copy.deepcopy(self.contract)
         missing_key["timing"]["cell_key"].remove("invocations_per_slot")
         mutations.append(("cell_key", missing_key))
+        missing_interleave_key = copy.deepcopy(self.contract)
+        missing_interleave_key["timing"]["cell_key"].remove(
+            "interleave_policy")
+        mutations.append(("interleave_cell_key", missing_interleave_key))
+        forged_interleave = copy.deepcopy(self.contract)
+        forged_interleave["timing"]["panel_protocol"][
+            "interleave_policy"] = "forged"
+        mutations.append(("interleave_policy", forged_interleave))
+        wrong_round_count = copy.deepcopy(self.contract)
+        wrong_round_count["timing"]["domains"]["development"][
+            "independent_rounds"] = 96
+        mutations.append(("independent_rounds", wrong_round_count))
         raw_timing = copy.deepcopy(self.contract)
         raw_timing["timing"]["domains"]["development"][
             "seed_mode"] = "raw_paired_training"
@@ -750,6 +804,30 @@ class ContractTests(unittest.TestCase):
             with self.subTest(name=name), \
                     self.assertRaises(subject.ContractError):
                 subject._validate_structure(changed, check_domain_hashes=False)
+
+    def test_aa_repeatability_rejects_exact_margin_equality(self) -> None:
+        floor = math.log1p(
+            self.contract["timing"]["practical_margin_ppm"] / 1000000.0)
+        ab = {
+            "selectable": True, "mean_log_ratio": 0.0,
+            "lower_95": 0.0, "upper_95": 0.0,
+        }
+        stable_aa = dict(ab)
+        for boundary_aa in (
+                {**stable_aa, "lower_95": -floor},
+                {**stable_aa, "upper_95": floor}):
+            decision = subject._timing_group_decision(
+                self.contract, ab, boundary_aa, stable_aa)
+            self.assertFalse(decision["selectable"])
+            self.assertEqual(
+                decision["reason"], "aa_repeatability_threshold")
+        inside = {
+            **stable_aa,
+            "lower_95": -floor + 1e-15,
+            "upper_95": floor - 1e-15,
+        }
+        self.assertTrue(subject._timing_group_decision(
+            self.contract, ab, inside, stable_aa)["selectable"])
 
     def test_every_k_hard_domain_is_575991_not_a_cross_product(self) -> None:
         cells = self.contract["recovery"]["domains"]["final_raw"][
@@ -1620,7 +1698,7 @@ class TimingReceiptTests(unittest.TestCase):
 
     def test_exact_panels_counterbalancing_and_student_t_gate(self) -> None:
         summary = self.validate(self.valid_rows)
-        self.assertEqual(summary["rows"], 384 * 11)
+        self.assertEqual(summary["rows"], 2304 * 11)
         self.assertTrue(summary["candidates"]["candidate"][
             "phase_speed_gate_pass"])
         decisions = summary["candidates"]["candidate"]["panels"]
@@ -1629,6 +1707,117 @@ class TimingReceiptTests(unittest.TestCase):
                 self.assertEqual(decision["status"], "faster")
                 self.assertLess(decision["upper_95"],
                                 -decision["effective_floor"])
+                self.assertAlmostEqual(
+                    decision["block_phase_difference"]["mean_log_ratio"],
+                    0.0)
+
+    def test_opposite_order_blocks_are_averaged_and_diagnosed(self) -> None:
+        rows = copy.deepcopy(self.valid_rows)
+        for row in rows:
+            if row["panel_kind"] != "AB":
+                continue
+            left_primary = 64000
+            right_primary = 100000
+            primary = [left_primary, right_primary,
+                       right_primary, left_primary] \
+                if row["order"] == "ABBA" else \
+                [right_primary, left_primary,
+                 left_primary, right_primary]
+            # The opposite block is an exact tie.  Its left/right-oriented
+            # contrast is therefore zero regardless of the opposite order.
+            row["elapsed_ns"] = primary + [100000] * 4
+        summary = self.validate(rows)
+        panel = {
+            "panel_kind": "AB", "scope": "decoder_solve",
+            "left_arm": "candidate", "right_arm": "wirehair2_head",
+        }
+        stats = summary["panel_statistics"][subject.canonical_json(panel)][
+            "by_band_width"]["2-100|64"]
+        self.assertAlmostEqual(stats["mean_log_ratio"], math.log(0.8),
+                               places=12)
+        block_phase = stats["block_phase_difference"]
+        self.assertAlmostEqual(block_phase["mean_log_ratio"], math.log(0.64),
+                               places=12)
+
+    def test_student_t_uses_twelve_round_means_not_ninety_six_lanes(
+            self) -> None:
+        rows = copy.deepcopy(self.valid_rows)
+        realized_round_logs: Dict[int, float] = {}
+        for row in rows:
+            if row["panel_kind"] != "AB":
+                continue
+            independent_round = row["replicate"] // 8
+            lane = row["replicate"] % 8
+            target_log = -0.10 + independent_round * 0.004 + \
+                (lane - 3.5) * 0.0002
+            right_ns = 1000000
+            left_ns = int(round(right_ns * math.exp(target_log)))
+            realized_log = math.log(left_ns) - math.log(right_ns)
+            realized_round_logs.setdefault(independent_round, 0.0)
+            # Every frozen K has this same lane value, so equal-K weighting
+            # leaves the lane mean unchanged.
+            if row["K"] == 8 and row["block_bytes"] == 64 and \
+                    row["scope"] == "decoder_solve" and \
+                    row["right_arm"] == "wirehair2_head":
+                realized_round_logs[independent_round] += realized_log / 8.0
+            primary = [left_ns, right_ns, right_ns, left_ns] \
+                if row["order"] == "ABBA" else \
+                [right_ns, left_ns, left_ns, right_ns]
+            opposite = [right_ns, left_ns, left_ns, right_ns] \
+                if row["order"] == "ABBA" else \
+                [left_ns, right_ns, right_ns, left_ns]
+            row["elapsed_ns"] = primary + opposite
+        summary = self.validate(rows)
+        panel = {
+            "panel_kind": "AB", "scope": "decoder_solve",
+            "left_arm": "candidate", "right_arm": "wirehair2_head",
+        }
+        stats = summary["panel_statistics"][subject.canonical_json(panel)][
+            "by_band_width"]["2-100|64"]
+        expected = subject._timing_confidence_interval(
+            self.contract,
+            [realized_round_logs[round_index] for round_index in range(12)],
+            12)
+        for field in ("mean_log_ratio", "lower_95", "upper_95"):
+            self.assertAlmostEqual(stats[field], expected[field], places=12)
+
+    def test_aggregate_equal_weights_every_k_and_width_cell(self) -> None:
+        rows = copy.deepcopy(self.valid_rows)
+        realized_by_cell: Dict[Tuple[int, int], float] = {}
+        k_indexes = {
+            K: index for index, K in enumerate(
+                subject.EXPECTED_TIMING_SHORT_K)
+        }
+        for row in rows:
+            if (row["panel_kind"] != "AB" or
+                    row["scope"] != "decoder_solve" or
+                    row["right_arm"] != "wirehair2_head"):
+                continue
+            target_log = -0.08 + 0.002 * k_indexes[row["K"]] + \
+                (0.007 if row["block_bytes"] == 1280 else 0.0)
+            right_ns = 1000000000
+            left_ns = int(round(right_ns * math.exp(target_log)))
+            realized_log = math.log(left_ns) - math.log(right_ns)
+            realized_by_cell[(row["K"], row["block_bytes"])] = realized_log
+            primary = [left_ns, right_ns, right_ns, left_ns] \
+                if row["order"] == "ABBA" else \
+                [right_ns, left_ns, left_ns, right_ns]
+            opposite = [right_ns, left_ns, left_ns, right_ns] \
+                if row["order"] == "ABBA" else \
+                [left_ns, right_ns, right_ns, left_ns]
+            row["elapsed_ns"] = primary + opposite
+        self.assertEqual(len(realized_by_cell), 24)
+        summary = self.validate(rows)
+        panel = {
+            "panel_kind": "AB", "scope": "decoder_solve",
+            "left_arm": "candidate", "right_arm": "wirehair2_head",
+        }
+        aggregate = summary["panel_statistics"][
+            subject.canonical_json(panel)]["aggregate"]
+        expected = math.fsum(realized_by_cell.values()) / \
+            len(realized_by_cell)
+        self.assertAlmostEqual(
+            aggregate["mean_log_ratio"], expected, places=12)
 
     def test_resolved_slowdown_fails_development_gate(self) -> None:
         rows = timing_receipt_rows(
@@ -1649,10 +1838,13 @@ class TimingReceiptTests(unittest.TestCase):
         for row in rows:
             if row["panel_kind"] != "AA":
                 continue
-            row["elapsed_ns"] = \
-                [200000, 100000, 100000, 200000] \
+            primary = [200000, 100000, 100000, 200000] \
                 if row["order"] == "ABBA" else \
                 [100000, 200000, 200000, 100000]
+            opposite = [100000, 200000, 200000, 100000] \
+                if row["order"] == "ABBA" else \
+                [200000, 100000, 100000, 200000]
+            row["elapsed_ns"] = primary + opposite
         summary = self.validate(rows)
         candidate = summary["candidates"]["candidate"]
         self.assertFalse(candidate["phase_speed_gate_pass"])
@@ -1704,9 +1896,23 @@ class TimingReceiptTests(unittest.TestCase):
         wrong_trace = copy.deepcopy(self.valid_rows)
         wrong_trace[0]["trace_sha256"] = digest("wrong timing trace")
         cases.append(("trace", wrong_trace))
+        missing_interleave = copy.deepcopy(self.valid_rows)
+        del missing_interleave[0]["interleave_policy"]
+        cases.append(("missing interleave policy", missing_interleave))
+        forged_interleave = copy.deepcopy(self.valid_rows)
+        forged_interleave[0]["interleave_policy"] = "forged"
+        forged_cell = {
+            key: forged_interleave[0][key]
+            for key in self.contract["timing"]["cell_key"]
+        }
+        forged_interleave[0]["cell_sha256"] = subject.sha256_json(forged_cell)
+        cases.append(("forged interleave policy", forged_interleave))
         zero_timer = copy.deepcopy(self.valid_rows)
         zero_timer[0]["elapsed_ns"][0] = 0
         cases.append(("timer", zero_timer))
+        short_timer = copy.deepcopy(self.valid_rows)
+        short_timer[0]["elapsed_ns"] = short_timer[0]["elapsed_ns"][:4]
+        cases.append(("eight-slot cardinality", short_timer))
         wrong_batch = copy.deepcopy(self.valid_rows)
         wrong_batch[0]["invocations_per_slot"] += 1
         wrong_batch_cell = {
@@ -1747,7 +1953,7 @@ class TimingReceiptTests(unittest.TestCase):
                         row[side + "_decoded_extra"] = None
                         changed = True
                 if changed:
-                    row["elapsed_ns"] = [None, None, None, None]
+                    row["elapsed_ns"] = [None] * 8
         summary = self.validate(rows)
         self.assertFalse(summary["candidates"]["candidate"][
             "phase_speed_gate_pass"])
@@ -1818,7 +2024,7 @@ class SelectionTests(unittest.TestCase):
             "architecture_artifact_sha256": artifact,
             "arm_artifacts": copy.deepcopy(arm_artifacts),
             "excluded_cells": 0,
-            "rows": 384 * (4 + 7 * len(candidates)),
+            "rows": 2304 * (4 + 7 * len(candidates)),
             "candidates": {
                 arm: {
                     "phase_speed_gate_pass": True,

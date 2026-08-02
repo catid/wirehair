@@ -203,9 +203,10 @@ bool SameChronology(
 
 void CheckSuccessfulPanel(
     NativePanelOrder order,
+    uint32_t invocations_per_slot,
     const char* expected_chronology,
-    const NativePanelSide expected_sides[4],
-    const uint64_t expected_elapsed[4])
+    const NativePanelSide expected_sides[8],
+    const uint64_t expected_elapsed[8])
 {
     std::vector<char> chronology;
     FakeArmState left('L', "left-id", chronology);
@@ -213,26 +214,31 @@ void CheckSuccessfulPanel(
     FakeRuntime runtime;
 
     const NativePanelResult result = ExecuteNativeTimingPanelWithRuntime(
-        17, order, 2u, MakeFakeArm(left), MakeFakeArm(right), runtime);
+        17, order, invocations_per_slot,
+        MakeFakeArm(left), MakeFakeArm(right), runtime);
 
     Check(result.Status == NativePanelStatus::Complete,
         "successful panel did not complete");
     Check(!result.IsFatal(), "successful panel reported fatal");
     Check(result.PanelComparable, "successful panel is not comparable");
-    Check(!result.HasFourNullTimings(),
-        "successful panel emitted four null timings");
+    Check(!result.HasEightNullTimings(),
+        "successful panel emitted eight null timings");
     Check(result.HasLeftPreflight && result.HasRightPreflight,
         "successful panel omitted a warmup outcome");
-    Check(result.InvocationsPerSlot == 2u,
+    Check(result.InvocationsPerSlot == invocations_per_slot,
         "successful panel did not receipt its exact batch count");
-    Check(left.Created == 5 && right.Created == 5,
-        "panel did not create one warmup plus four fresh callbacks per side");
-    Check(left.Invoked == 5 && right.Invoked == 5,
+    const int expected_per_side = 1 + (int)(2u * invocations_per_slot);
+    Check(left.Created == expected_per_side &&
+          right.Created == expected_per_side,
+        "panel did not create one warmup plus 2*n callbacks per side");
+    Check(left.Invoked == expected_per_side &&
+          right.Invoked == expected_per_side,
         "panel did not invoke each fresh callback exactly once");
     Check(SameChronology(chronology, expected_chronology),
         "panel callback chronology changed");
-    Check(runtime.PinCalls == 1 && runtime.VerifyCalls == 20,
-        "panel did not verify CPU around all ten fresh callbacks");
+    Check(runtime.PinCalls == 1 &&
+          runtime.VerifyCalls == 4 + (int)(8u * invocations_per_slot),
+        "panel did not verify CPU around every fresh callback");
     Check(runtime.LastTargetCpu == 17,
         "panel runtime observed the wrong target CPU");
 
@@ -252,34 +258,71 @@ void CheckSuccessfulPanel(
 
 void CheckAbbaAndBaab()
 {
-    const NativePanelSide abba_sides[4] = {
+    const NativePanelSide abba_sides[8] = {
         NativePanelSide::Left,
         NativePanelSide::Right,
         NativePanelSide::Right,
-        NativePanelSide::Left
-    };
-    const uint64_t abba_elapsed[4] = { 203u, 403u, 407u, 207u };
-    CheckSuccessfulPanel(
-        NativePanelOrder::ABBA,
-        "LRLLRRRRLL",
-        abba_sides,
-        abba_elapsed);
-
-    const NativePanelSide baab_sides[4] = {
+        NativePanelSide::Left,
         NativePanelSide::Right,
         NativePanelSide::Left,
         NativePanelSide::Left,
         NativePanelSide::Right
     };
-    const uint64_t baab_elapsed[4] = { 403u, 203u, 207u, 407u };
+    const uint64_t abba_elapsed_two[8] = {
+        101u, 201u, 202u, 102u, 203u, 103u, 104u, 204u
+    };
+    CheckSuccessfulPanel(
+        NativePanelOrder::ABBA,
+        2u,
+        "LRLRRLRLLR",
+        abba_sides,
+        abba_elapsed_two);
+
+    const NativePanelSide baab_sides[8] = {
+        NativePanelSide::Right,
+        NativePanelSide::Left,
+        NativePanelSide::Left,
+        NativePanelSide::Right,
+        NativePanelSide::Left,
+        NativePanelSide::Right,
+        NativePanelSide::Right,
+        NativePanelSide::Left
+    };
+    const uint64_t baab_elapsed_two[8] = {
+        201u, 101u, 102u, 202u, 103u, 203u, 204u, 104u
+    };
     CheckSuccessfulPanel(
         NativePanelOrder::BAAB,
-        "LRRRLLLLRR",
+        2u,
+        "LRRLLRLRRL",
         baab_sides,
-        baab_elapsed);
+        baab_elapsed_two);
+
+    // An odd n gives the declared primary block one more repeat.  The
+    // serial-dependent elapsed values make this an exhaustive check of both
+    // repeat-major block chronology and independent per-slot accumulation.
+    const uint64_t abba_elapsed_three[8] = {
+        204u, 404u, 406u, 206u, 205u, 105u, 106u, 206u
+    };
+    CheckSuccessfulPanel(
+        NativePanelOrder::ABBA,
+        3u,
+        "LRLRRLLRRLRLLR",
+        abba_sides,
+        abba_elapsed_three);
+
+    const uint64_t baab_elapsed_three[8] = {
+        404u, 204u, 206u, 406u, 105u, 205u, 206u, 106u
+    };
+    CheckSuccessfulPanel(
+        NativePanelOrder::BAAB,
+        3u,
+        "LRRLLRRLLRLRRL",
+        baab_sides,
+        baab_elapsed_three);
 }
 
-void CheckPreflightFailureProducesFourNulls()
+void CheckPreflightFailureProducesEightNulls()
 {
     std::vector<char> chronology;
     FakeArmState left('L', "left-id", chronology);
@@ -298,15 +341,15 @@ void CheckPreflightFailureProducesFourNulls()
         "stable preflight failure was treated as fatal");
     Check(!result.PanelComparable,
         "panel with a failed preflight is comparable");
-    Check(result.HasFourNullTimings(),
-        "preflight failure did not clear all four timings");
+    Check(result.HasEightNullTimings(),
+        "preflight failure did not clear all eight timings");
     for (size_t i = 0; i < result.Slots.size(); ++i)
     {
         Check(result.Slots[i].ElapsedNanoseconds == 0u &&
               result.Slots[i].Invocation.ElapsedNanoseconds == 0u,
             "null timing retained a hidden elapsed value");
     }
-    Check(SameChronology(chronology, "LRLLRRRRLL"),
+    Check(SameChronology(chronology, "LRLRRLRLLR"),
         "preflight failure skipped or reordered measured callbacks");
     Check(result.InvocationsPerSlot == 2u &&
           left.Created == 5 && right.Created == 5 &&
@@ -327,9 +370,9 @@ void CheckOutcomeAndExtraDriftAreFatal()
             MakeFakeArm(left), MakeFakeArm(right), runtime);
         Check(result.Status == NativePanelStatus::OutcomeDrift,
             "outcome-code drift was accepted");
-        Check(result.HasFourNullTimings(),
+        Check(result.HasEightNullTimings(),
             "outcome drift retained partial timings");
-        Check(SameChronology(chronology, "LRLL"),
+        Check(SameChronology(chronology, "LRLRRL"),
             "later-repeat outcome drift ran an extra callback");
     }
 
@@ -337,15 +380,23 @@ void CheckOutcomeAndExtraDriftAreFatal()
         std::vector<char> chronology;
         FakeArmState left('L', "left-id", chronology);
         FakeArmState right('R', "right-id", chronology);
-        right.DriftExtraSerial = 2;
+        right.DriftExtraSerial = 4;
         FakeRuntime runtime;
         const NativePanelResult result = ExecuteNativeTimingPanelWithRuntime(
             4, NativePanelOrder::ABBA, 2u,
             MakeFakeArm(left), MakeFakeArm(right), runtime);
         Check(result.Status == NativePanelStatus::OutcomeDrift,
             "decoded-extra drift was accepted");
-        Check(result.HasFourNullTimings(),
+        Check(result.HasEightNullTimings(),
             "decoded-extra drift retained partial timings");
+        Check(SameChronology(chronology, "LRLRRLRLLR"),
+            "final-callback outcome drift changed chronology");
+        for (size_t i = 0u; i < result.Slots.size(); ++i)
+        {
+            Check(result.Slots[i].ElapsedNanoseconds == 0u &&
+                  result.Slots[i].Invocation.ElapsedNanoseconds == 0u,
+                "final-callback failure exposed a completed timing prefix");
+        }
     }
 }
 
@@ -362,8 +413,10 @@ void CheckIdentityAndTimingFailuresAreFatal()
             MakeFakeArm(left), MakeFakeArm(right), runtime);
         Check(result.Status == NativePanelStatus::IdentityDrift,
             "post-callback identity drift was accepted");
-        Check(result.HasFourNullTimings(),
+        Check(result.HasEightNullTimings(),
             "identity drift retained partial timings");
+        Check(SameChronology(chronology, "LRLRRL"),
+            "identity drift failed at the wrong callback");
     }
 
     {
@@ -377,8 +430,10 @@ void CheckIdentityAndTimingFailuresAreFatal()
             MakeFakeArm(left), MakeFakeArm(right), runtime);
         Check(result.Status == NativePanelStatus::InvalidElapsed,
             "zero successful elapsed time was accepted");
-        Check(result.HasFourNullTimings(),
+        Check(result.HasEightNullTimings(),
             "invalid elapsed time retained partial timings");
+        Check(SameChronology(chronology, "LRLRRL"),
+            "invalid elapsed failed at the wrong callback");
     }
 
     {
@@ -394,7 +449,7 @@ void CheckIdentityAndTimingFailuresAreFatal()
             "successful elapsed time above int63 was accepted");
         Check(chronology == std::vector<char>(1u, 'L'),
             "invalid warmup elapsed ran another callback");
-        Check(result.HasFourNullTimings(),
+        Check(result.HasEightNullTimings(),
             "elapsed time above int63 retained timings");
     }
 
@@ -406,13 +461,13 @@ void CheckIdentityAndTimingFailuresAreFatal()
             static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) / 2u;
         FakeRuntime runtime;
         const NativePanelResult result = ExecuteNativeTimingPanelWithRuntime(
-            5, NativePanelOrder::ABBA, 2u,
+            5, NativePanelOrder::ABBA, 3u,
             MakeFakeArm(left), MakeFakeArm(right), runtime);
         Check(result.Status == NativePanelStatus::InvalidElapsed,
             "overflowing batch elapsed sum was accepted");
-        Check(SameChronology(chronology, "LRLL"),
+        Check(SameChronology(chronology, "LRLRRLL"),
             "batch overflow did not fail at the exact later repeat");
-        Check(result.HasFourNullTimings(),
+        Check(result.HasEightNullTimings(),
             "batch elapsed overflow retained partial timings");
     }
 }
@@ -429,9 +484,11 @@ void CheckThrowStillGetsPostCpuVerification()
         MakeFakeArm(left), MakeFakeArm(right), runtime);
     Check(result.Status == NativePanelStatus::InvocationFailed,
         "throwing callback was not rejected");
-    Check(runtime.VerifyCalls == 8,
+    Check(runtime.VerifyCalls == 12,
         "throwing callback skipped its post-invocation CPU check");
-    Check(result.HasFourNullTimings(),
+    Check(SameChronology(chronology, "LRLRRL"),
+        "throwing callback failed at the wrong chronology position");
+    Check(result.HasEightNullTimings(),
         "throwing callback retained timings");
 }
 
@@ -450,7 +507,7 @@ void CheckWrongCoreAndMigrationAreFatal()
             "wrong initial CPU was accepted");
         Check(chronology.empty(),
             "callback ran after initial CPU rejection");
-        Check(result.HasFourNullTimings(),
+        Check(result.HasEightNullTimings(),
             "initial CPU rejection retained timings");
     }
 
@@ -467,7 +524,7 @@ void CheckWrongCoreAndMigrationAreFatal()
             "post-callback migration was accepted");
         Check(chronology == std::vector<char>(1u, 'L'),
             "migration rejection ran an extra callback");
-        Check(result.HasFourNullTimings(),
+        Check(result.HasEightNullTimings(),
             "migration rejection retained timings");
     }
 }
@@ -481,13 +538,13 @@ void CheckInvalidInputsFailClosed()
     const NativePanelResult bad_order = ExecuteNativeTimingPanelWithRuntime(
         1,
         static_cast<NativePanelOrder>(99u),
-        1u,
+        2u,
         MakeFakeArm(left),
         MakeFakeArm(right),
         runtime);
     Check(bad_order.Status == NativePanelStatus::InvalidArgument,
         "invalid chronology was accepted");
-    Check(bad_order.HasFourNullTimings(),
+    Check(bad_order.HasEightNullTimings(),
         "invalid chronology retained timings");
     Check(runtime.PinCalls == 0 && chronology.empty(),
         "invalid chronology reached the runtime or callback");
@@ -501,10 +558,24 @@ void CheckInvalidInputsFailClosed()
         runtime);
     Check(zero_batch.Status == NativePanelStatus::InvalidArgument &&
             zero_batch.InvocationsPerSlot == 0u &&
-            zero_batch.HasFourNullTimings(),
+            zero_batch.HasEightNullTimings(),
         "zero invocation batch did not fail closed");
     Check(runtime.PinCalls == 0 && chronology.empty(),
         "zero invocation batch reached the runtime or callback");
+
+    const NativePanelResult one_batch = ExecuteNativeTimingPanelWithRuntime(
+        1,
+        NativePanelOrder::ABBA,
+        1u,
+        MakeFakeArm(left),
+        MakeFakeArm(right),
+        runtime);
+    Check(one_batch.Status == NativePanelStatus::InvalidArgument &&
+            one_batch.InvocationsPerSlot == 1u &&
+            one_batch.HasEightNullTimings(),
+        "single invocation batch did not reject its empty opposite block");
+    Check(runtime.PinCalls == 0 && chronology.empty(),
+        "single invocation batch reached the runtime or callback");
 }
 
 void CheckAaBatchUsesFreshInvocations()
@@ -539,7 +610,7 @@ void CheckAaBatchUsesFreshInvocations()
 int main()
 {
     CheckAbbaAndBaab();
-    CheckPreflightFailureProducesFourNulls();
+    CheckPreflightFailureProducesEightNulls();
     CheckOutcomeAndExtraDriftAreFatal();
     CheckIdentityAndTimingFailuresAreFatal();
     CheckThrowStillGetsPostCpuVerification();

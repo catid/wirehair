@@ -1,6 +1,6 @@
 {
   "schema": "wirehair.wh2.benchmark-contract.v3",
-  "contract_id": "wh2-pure-gf256-1pct-v3",
+  "contract_id": "wh2-pure-gf256-1pct-v4",
   "field": "GF(256)",
   "goal": {
     "primary_failure_threshold_ppm": 10000,
@@ -148,7 +148,7 @@
     "cell_key": [
       "phase", "band", "K", "block_bytes", "loss_ppm", "schedule",
       "replicate", "base_seed_attempt", "loss_seed", "fixed_received_overhead",
-      "invocations_per_slot"
+      "invocations_per_slot", "interleave_policy"
     ],
     "seed_derivation": "construction seed is selected by seed_mode and unchanged; loss seed=SplitMix64(base_loss_seed xor (replicate * 0x9e3779b97f4a7c15 mod 2^64))",
     "domains": {
@@ -156,24 +156,26 @@
         "k_set": "timing_short",
         "block_bytes": [64, 1280],
         "seed_mode": "production_training",
-        "paired_repetitions": 16,
-        "expected_cells": 384,
-        "domain_sha256": "4d094a6d351d3b57cbc2654bf269b1da41886a68c7bebd14803b2892d1cd89d7"
+        "paired_repetitions": 96,
+        "independent_rounds": 12,
+        "expected_cells": 2304,
+        "domain_sha256": "ca82f8774f0cb1b865a0bbc01b8de79d2239df13ab3ef17ef5eb4e3e39ab6913"
       },
       "final": {
         "k_set": "short",
         "block_bytes": [2, 64, 256, 1280, 4096],
         "seed_mode": "production_validation",
-        "paired_repetitions": 24,
-        "expected_cells": 3600,
-        "domain_sha256": "62e8fdbe636dba08eefd5bd7ff48b6c63fb5f021253d5a1df0d27e1a6bbc71e1"
+        "paired_repetitions": 96,
+        "independent_rounds": 12,
+        "expected_cells": 14400,
+        "domain_sha256": "3b1aa0274f690769111ffa239eba3797e8893757ab8bab1db1c224eba043f246"
       }
     },
-    "confidence": "two-sided Student-t 95% interval over paired log seconds",
+    "confidence": "two-sided Student-t 95% interval over independent-round mean paired log seconds",
     "practical_margin_ppm": 20000,
     "effective_floor": "log1p(0.02) after both A/A intervals pass",
     "aa_repeatability_rule": "each A/A 95% interval must lie strictly inside [-log1p(0.02),+log1p(0.02)]; otherwise the comparison is non-selectable",
-    "order": "counterbalanced ABBA/BAAB",
+    "order": "self-counterbalanced primary ABBA/BAAB plus opposite order",
     "cache_state": "warm",
     "production_policy": "final timing replays the frozen production repair map; each Wirehair2 timing receipt binds its map SHA-256 and realized attempt",
     "eligibility": "a timing cell is eligible only when every compared arm byte-recovers successfully on the predeclared prefix; any arm failure invalidates the timing panel and remains a recovery failure; observed common-success intersection is forbidden",
@@ -205,38 +207,42 @@
         {"control": "wirehair2_head", "scope": "encoder_init_plus_first_K_symbols"},
         {"control": "wirehair1", "scope": "encoder_init_plus_first_K_symbols"}
       ],
-      "slots_per_panel": 4,
+      "slots_per_panel": 8,
       "warmups_per_logical_side": 1,
       "measured_batch_block_target": 65536,
-      "invocations_per_slot": "max(1,ceil(measured_batch_block_target/K))",
-      "order_assignment": "phase_bit=low bit of SHA256(canonical panel key); ABBA iff replicate parity equals phase_bit, otherwise BAAB"
+      "invocations_per_slot": "max(2,ceil(measured_batch_block_target/K))",
+      "interleave_policy": "self-counterbalanced-repeat-major-v1",
+      "order_assignment": "phase_bit=low bit of SHA256(canonical panel key); primary order is ABBA iff lane parity equals phase_bit, otherwise BAAB; slots 0..3 use primary order and slots 4..7 use its opposite",
+      "batch_split": "n=invocations_per_slot=max(2,ceil(measured_batch_block_target/K)); each primary-order slot executes ceil(n/2) calls and each opposite-order slot executes floor(n/2) calls",
+      "within_block_traversal": "repeat-major"
     },
     "execution_geometry": {
       "timing_worker_count": 8,
       "jobs_per_wave": 8,
       "cohort_identity": "all timing cell fields except replicate and loss_seed, plus panel",
       "cohort_order": "block_bytes order, then K-set order, then frozen panel ordinal",
-      "wave_partition": "floor(replicate/8)",
-      "worker_slot": "(replicate%8+cohort_index+wave_index)%8",
-      "barrier": "after_each_wave",
+      "round_partition": "independent_round=floor(replicate/8); lane=replicate%8",
+      "round_traversal": "independent round outermost; traverse the complete frozen cohort domain in cohort order; execute one eight-lane wave per cohort",
+      "worker_slot": "(lane+cohort_index+independent_round)%8",
+      "barrier": "after_each_eight-lane_cohort_wave",
       "cohort_count_formula": "(expected_cells/paired_repetitions)*len(timing_panels(contract,frozen_arms))",
       "topology_policy": "eight singleton-pinned workers on distinct physical cores; maximize coverage of available L3/LLC groups, then fill deterministically; distinct L3/LLC groups are preferred but not required"
     },
     "statistics": {
-      "block_log_ratio": "ABBA=((ln e0-ln e1)+(ln e3-ln e2))/2; BAAB=((ln e1-ln e0)+(ln e2-ln e3))/2",
-      "independent_unit": "one replicate mean over every frozen K in the reported band and width",
-      "aggregate_weighting": "within each replicate, equal weight for every frozen K x width cell",
-      "variance": "unbiased sample variance over replicate means",
-      "t_critical_by_repetitions": {
-        "16": 2.131449545559323,
-        "24": 2.0686576104190477
+      "lane_log_ratio": "average the left/right-oriented four-slot log contrast from primary slots 0..3 and the opposite-order contrast from slots 4..7",
+      "independent_unit": "one independent-round mean formed from all eight lane replicate means",
+      "aggregate_weighting": "within each lane, equal weight for every frozen K in the reported band and width; aggregate timing equal-weights every frozen K x width cell; then equal-weight all eight lanes in the round",
+      "variance": "unbiased sample variance over independent-round means",
+      "t_critical_by_independent_rounds": {
+        "12": 2.200985160082949
       },
+      "block_phase_difference": "primary four-slot log contrast minus opposite-order four-slot log contrast; this diagnoses first-block versus second-block drift and is summarized over the same 12 independent round means",
       "faster": "A/B upper 95% bound < -effective_floor",
       "noninferior": "A/B upper 95% bound < effective_floor",
       "resolved_slower": "A/B lower 95% bound > effective_floor",
       "strict_inequalities": true
     },
-    "invalid_timer_policy": "each successful slot sums exactly invocations_per_slot fresh exact-scope invocation-reported durations into one integer elapsed_ns value in [1,2^63-1]; any non-success requires four nulls and makes the complete comparison panel non-selectable; rows are never dropped"
+    "invalid_timer_policy": "let n=invocations_per_slot; each successful primary-order slot sums exactly ceil(n/2) fresh exact-scope invocation-reported durations and each successful opposite-order slot sums exactly floor(n/2), producing eight integer elapsed_ns values in [1,2^63-1]; any non-success requires eight nulls and makes the complete comparison panel non-selectable; rows are never dropped"
   },
   "selection": {
     "controls": ["wirehair2_head", "wirehair1"],

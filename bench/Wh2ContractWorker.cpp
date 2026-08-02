@@ -70,7 +70,7 @@ static const char kRecoverySchema[] =
 static const char kRawRecoverySchema[] =
     "wirehair.wh2.native-recovery-record.v2";
 static const char kTimingSchema[] =
-    "wirehair.wh2.native-timing-record.v2";
+    "wirehair.wh2.native-timing-record.v3";
 static const char kDescriptionSchema[] =
     "wirehair.wh2.native-worker-description.v1";
 static const char kRawDescriptionSchema[] =
@@ -1248,7 +1248,7 @@ bool EmitTimingTraces()
 {
     const std::vector<FrozenTimingCell> cells =
         wirehair::wh2_benchmark::EnumerateDevelopmentTimingCells();
-    if (cells.size() != 384u) {
+    if (cells.size() != 2304u) {
         return false;
     }
     for (std::size_t i = 0u; i < cells.size(); ++i)
@@ -2023,6 +2023,9 @@ std::string TimingPayload(
     }
     json += "],\"fixed_received_overhead\":";
     json += std::to_string(cell.fixed_received_overhead);
+    json += ",\"interleave_policy\":\"";
+    json += cell.interleave_policy;
+    json += "\"";
     json += ",\"invocations_per_slot\":";
     json += std::to_string(cell.invocations_per_slot);
     json += ",\"left_arm\":\"";
@@ -2093,7 +2096,7 @@ bool RunTimingJob(
     const std::vector<FrozenTimingPanel> panels =
         wirehair::wh2_benchmark::EnumerateOneCandidateTimingPanels(
             "wirehair2_identity");
-    if (cells.size() != 384u || panels.size() != 11u ||
+    if (cells.size() != 2304u || panels.size() != 11u ||
         cell_ordinal >= cells.size() || panel_index >= panels.size())
     {
         error = "timing job index is outside the frozen domain";
@@ -2103,7 +2106,9 @@ bool RunTimingJob(
     const FrozenTimingPanel& panel = panels[panel_index];
     if (cell.ordinal != cell_ordinal || panel.ordinal != panel_index ||
         cell.fixed_received_overhead != 4u ||
-        cell.invocations_per_slot == 0u ||
+        cell.interleave_policy !=
+            "self-counterbalanced-repeat-major-v1" ||
+        cell.invocations_per_slot < 2u ||
         cell.invocations_per_slot !=
             wirehair::wh2_benchmark::
                 DevelopmentTimingInvocationsPerSlot(cell.K))
@@ -2279,11 +2284,15 @@ bool RunTimingJob(
         result.RightPreflight.Disposition == NativePanelDisposition::Success;
     bool slots_valid = result.Order == native_order &&
         result.TargetCpu == context.Cpu &&
-        result.InvocationsPerSlot == cell.invocations_per_slot;
+        result.InvocationsPerSlot == cell.invocations_per_slot &&
+        result.Slots.size() == 8u;
     for (std::size_t slot = 0u; slot < result.Slots.size(); ++slot)
     {
-        const bool left_slot = native_order == NativePanelOrder::ABBA ?
-            (slot == 0u || slot == 3u) : (slot == 1u || slot == 2u);
+        const std::size_t local_slot = slot % 4u;
+        const bool primary_left = native_order == NativePanelOrder::ABBA ?
+            (local_slot == 0u || local_slot == 3u) :
+            (local_slot == 1u || local_slot == 2u);
+        const bool left_slot = slot < 4u ? primary_left : !primary_left;
         const NativePanelSide expected_side = left_slot ?
             NativePanelSide::Left : NativePanelSide::Right;
         const bool has_elapsed = result.Slots[slot].HasElapsedNanoseconds;
@@ -2302,8 +2311,8 @@ bool RunTimingJob(
         }
     }
     if (result.PanelComparable != both_success || !slots_valid ||
-        (both_success && result.HasFourNullTimings()) ||
-        (!both_success && !result.HasFourNullTimings()))
+        (both_success && result.HasEightNullTimings()) ||
+        (!both_success && !result.HasEightNullTimings()))
     {
         error = "timing panel comparability/timing slots are inconsistent";
         return false;

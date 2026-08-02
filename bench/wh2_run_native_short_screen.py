@@ -3,9 +3,10 @@
 
 This is deliberately a narrow controller for the frozen development domain.
 It emits and freezes arm-free traces before starting any result job, keeps one
-persistent native worker on each selected physical core, executes timing one
-homogeneous eight-job wave and barrier at a time, and delegates publication to
-the fail-closed native evidence assembler.
+persistent native worker on each selected physical core, traverses the full
+timing cohort domain once per independent round with one homogeneous eight-job
+wave and barrier at a time, and delegates publication to the fail-closed native
+evidence assembler.
 """
 
 from __future__ import annotations
@@ -1026,6 +1027,13 @@ def _strict_response_validator(
         contract: Mapping[str, Any], freeze: Mapping[str, Any], kind: str,
         description: Mapping[str, Any], window_start_ns: int,
         ) -> ResponseValidator:
+    try:
+        ordinal_context = native_api._record_ordinal_context(
+            contract, freeze, kind, "development")
+    except (native_api.NativeEvidenceError,
+            contract_api.ContractError) as exc:
+        fail(str(exc))
+
     def validate(value: Mapping[str, Any], _line: bytes,
                  worker: PersistentWorker, job: Job) -> int:
         payload = value.get("payload")
@@ -1068,7 +1076,8 @@ def _strict_response_validator(
             fail("native response payload has an unexpected schema")
         try:
             ordinal, _ = native_api._expected_record_ordinal(
-                contract, freeze, kind, "development", payload)
+                contract, freeze, kind, "development", payload,
+                ordinal_context)
             work_sha256 = native_api._expected_work_sha256(
                 kind, "development", job.ordinal, payload)
         except (native_api.NativeEvidenceError,
@@ -1113,7 +1122,7 @@ def _recovery_jobs(contract: Mapping[str, Any], arm_count: int) -> List[Job]:
 
 def _development_timing_shape(
         contract: Mapping[str, Any], panel_count: int,
-        ) -> Tuple[int, int]:
+        ) -> Tuple[int, int, int]:
     timing = contract.get("timing")
     if not isinstance(timing, Mapping):
         fail("development timing policy is missing")
@@ -1128,11 +1137,16 @@ def _development_timing_shape(
         if isinstance(domains, Mapping) else None
     repetitions = domain.get("paired_repetitions") \
         if isinstance(domain, Mapping) else None
+    independent_rounds = domain.get("independent_rounds") \
+        if isinstance(domain, Mapping) else None
     expected_cells = domain.get("expected_cells") \
         if isinstance(domain, Mapping) else None
     if (type(repetitions) is not int or repetitions <= 0 or
             repetitions % TIMING_WORKER_COUNT != 0):
         fail("development timing repetitions must be a positive multiple of eight")
+    if (type(independent_rounds) is not int or independent_rounds <= 0 or
+            independent_rounds * TIMING_WORKER_COUNT != repetitions):
+        fail("development timing rounds must exactly partition the repetitions")
     if (type(expected_cells) is not int or expected_cells <= 0 or
             expected_cells % repetitions != 0):
         fail("development timing cell cardinality is invalid")
@@ -1143,14 +1157,14 @@ def _development_timing_shape(
         fail(str(exc))
     if type(panel_count) is not int or panel_count != expected_panels:
         fail("development timing panel cardinality is invalid")
-    return repetitions, expected_cells
+    return repetitions, independent_rounds, expected_cells
 
 
 def _timing_job_waves(
         contract: Mapping[str, Any], panel_count: int,
         ) -> List[Tuple[int, List[Job]]]:
     """Build homogeneous, barrier-delimited eight-job timing waves."""
-    repetitions, expected_cells = _development_timing_shape(
+    repetitions, independent_rounds, expected_cells = _development_timing_shape(
         contract, panel_count)
     try:
         cells = list(contract_api.iter_timing_cells(
@@ -1204,41 +1218,47 @@ def _timing_job_waves(
                 replicate))
 
     waves: List[Tuple[int, List[Job]]] = []
-    cohort_index = 0
     frozen_arms = [value[0] for value in EXPECTED_ARMS]
-    for identity in identity_order:
-        for panel in range(panel_count):
-            for wave_index, first_replicate in enumerate(
-                    range(0, repetitions, TIMING_WORKER_COUNT)):
-                jobs = []
-                for replicate in range(
+    cohorts = [
+        (cohort_index, identity, panel)
+        for cohort_index, (identity, panel) in enumerate(
+            (value, panel)
+            for value in identity_order for panel in range(panel_count))
+    ]
+    # A statistical round is one complete traversal of every frozen cohort.
+    # Keeping the round outermost prevents adjacent waves of one K/panel from
+    # masquerading as independent observations of host state.
+    for round_index in range(independent_rounds):
+        first_replicate = round_index * TIMING_WORKER_COUNT
+        for cohort_index, identity, panel in cohorts:
+            jobs = []
+            for replicate in range(
+                    first_replicate,
+                    first_replicate + TIMING_WORKER_COUNT):
+                cell_ordinal, _ = by_replicate[replicate][identity]
+                jobs.append(Job(
+                    "timing", cell_ordinal, panel,
+                    cell_ordinal * panel_count + panel))
+            # run_job_batch assigns job position r to worker slot
+            # (r + rotation) modulo eight.  Derive that rotation from the
+            # bounded contract helper and verify the complete wave before
+            # allowing any native command to be issued.
+            try:
+                rotation = contract_api.timing_worker_slot(
+                    contract, "development", frozen_arms, cohort_index,
+                    first_replicate)
+                for position, replicate in enumerate(range(
                         first_replicate,
-                        first_replicate + TIMING_WORKER_COUNT):
-                    cell_ordinal, _ = by_replicate[replicate][identity]
-                    jobs.append(Job(
-                        "timing", cell_ordinal, panel,
-                        cell_ordinal * panel_count + panel))
-                # run_job_batch assigns job position r to worker slot
-                # (r + rotation) modulo eight.  Derive that rotation from the
-                # bounded contract helper and verify the complete wave before
-                # allowing any native command to be issued.
-                try:
-                    rotation = contract_api.timing_worker_slot(
-                        contract, "development", frozen_arms, cohort_index,
-                        first_replicate)
-                    for position, replicate in enumerate(range(
-                            first_replicate,
-                            first_replicate + TIMING_WORKER_COUNT)):
-                        expected_slot = contract_api.timing_worker_slot(
-                            contract, "development", frozen_arms,
-                            cohort_index, replicate)
-                        if expected_slot != (
-                                position + rotation) % TIMING_WORKER_COUNT:
-                            fail("timing worker-slot formula is not a rotation")
-                except contract_api.ContractError as exc:
-                    fail(str(exc))
-                waves.append((rotation, jobs))
-            cohort_index += 1
+                        first_replicate + TIMING_WORKER_COUNT)):
+                    expected_slot = contract_api.timing_worker_slot(
+                        contract, "development", frozen_arms,
+                        cohort_index, replicate)
+                    if expected_slot != (
+                            position + rotation) % TIMING_WORKER_COUNT:
+                        fail("timing worker-slot formula is not a rotation")
+            except contract_api.ContractError as exc:
+                fail(str(exc))
+            waves.append((rotation, jobs))
 
     expected_cohorts = cells_per_replicate * panel_count
     try:
@@ -1246,8 +1266,7 @@ def _timing_job_waves(
             contract, "development", frozen_arms)
     except contract_api.ContractError as exc:
         fail(str(exc))
-    expected_waves = expected_cohorts * (
-        repetitions // TIMING_WORKER_COUNT)
+    expected_waves = expected_cohorts * independent_rounds
     expected_jobs = {
         (cell, panel, cell * panel_count + panel)
         for cell in range(expected_cells)
@@ -1257,7 +1276,7 @@ def _timing_job_waves(
         (job.cell, job.item, job.ordinal)
         for _, jobs in waves for job in jobs
     ]
-    if (cohort_index != expected_cohorts or
+    if (len(cohorts) != expected_cohorts or
             expected_cohorts != frozen_cohorts or
             len(waves) != expected_waves or
             any(len(jobs) != TIMING_WORKER_COUNT for _, jobs in waves) or

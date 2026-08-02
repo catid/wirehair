@@ -144,6 +144,8 @@ class NativeRunnerTests(unittest.TestCase):
         cells_per_replicate = domain["expected_cells"] // \
             original_repetitions
         domain["paired_repetitions"] = repetitions
+        domain["independent_rounds"] = \
+            repetitions // subject.TIMING_WORKER_COUNT
         domain["expected_cells"] = cells_per_replicate * repetitions
         return contract
 
@@ -389,6 +391,23 @@ class NativeRunnerTests(unittest.TestCase):
         finally:
             sink.abort()
 
+    def test_strict_timing_validator_precomputes_cell_indexes_once(self) -> None:
+        worker = self._fake_worker()
+        description = self._description(worker)
+        contract = contract_api.load_contract()
+        output = self.root / "output"
+        output.mkdir()
+        freezes = subject.write_development_freezes(
+            contract, description, [0], 1, "1" * 40,
+            {"recovery": "2" * 64, "timing": "3" * 64}, output)
+        with mock.patch.object(
+                contract_api, "_timing_cell_indexes",
+                wraps=contract_api._timing_cell_indexes) as cell_indexes:
+            validator = subject._strict_response_validator(
+                contract, freezes["timing"], "timing", description, 0)
+            self.assertTrue(callable(validator))
+            self.assertEqual(cell_indexes.call_count, 1)
+
     def test_post_link_publish_failure_removes_own_artifact(self) -> None:
         destination = self.root / "atomic-output.json"
         with mock.patch.object(
@@ -415,14 +434,14 @@ class NativeRunnerTests(unittest.TestCase):
             {job.ordinal for job in recovery}, set(range(1080)))
         panels = contract_api.timing_panels(
             contract, [value[0] for value in subject.EXPECTED_ARMS])
-        for repetitions in (8, 16):
+        for repetitions in (16, 24):
             with self.subTest(repetitions=repetitions):
                 candidate = self._timing_contract(repetitions)
                 waves = subject._timing_job_waves(candidate, len(panels))
                 cells = list(contract_api.iter_timing_cells(
                     candidate, "development"))
-                waves_per_cohort = repetitions // subject.TIMING_WORKER_COUNT
-                self.assertEqual(len(waves), 264 * waves_per_cohort)
+                round_count = repetitions // subject.TIMING_WORKER_COUNT
+                self.assertEqual(len(waves), 264 * round_count)
                 self.assertTrue(all(
                     len(jobs) == subject.TIMING_WORKER_COUNT
                     for _, jobs in waves))
@@ -440,15 +459,15 @@ class NativeRunnerTests(unittest.TestCase):
                     stable_index, panel = divmod(cohort_index, len(panels))
                     width_index, k_index = divmod(
                         stable_index, len(contract_api.EXPECTED_TIMING_SHORT_K))
-                    for wave_index in range(waves_per_cohort):
+                    for round_index in range(round_count):
                         rotation, jobs = waves[
-                            cohort_index * waves_per_cohort + wave_index]
+                            round_index * 264 + cohort_index]
                         replicates = [
                             cells[job.cell]["replicate"] for job in jobs
                         ]
                         self.assertEqual(replicates, list(range(
-                            wave_index * subject.TIMING_WORKER_COUNT,
-                            (wave_index + 1) * subject.TIMING_WORKER_COUNT)))
+                            round_index * subject.TIMING_WORKER_COUNT,
+                            (round_index + 1) * subject.TIMING_WORKER_COUNT)))
                         self.assertEqual({job.item for job in jobs}, {panel})
                         self.assertEqual(
                             {cells[job.cell]["block_bytes"] for job in jobs},

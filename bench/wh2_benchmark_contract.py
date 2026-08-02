@@ -80,8 +80,9 @@ RAW_ARM_DESCRIPTOR_SHA256S = LEGACY_RAW_ARM_DESCRIPTOR_SHA256S | frozenset(
     RAW_STRUCTURE_BY_DESCRIPTOR)
 MEASURED_BATCH_BLOCK_TARGET = 65536
 INVOCATIONS_PER_SLOT_FORMULA = (
-    "max(1,ceil(measured_batch_block_target/K))"
+    "max(2,ceil(measured_batch_block_target/K))"
 )
+TIMING_INTERLEAVE_POLICY = "self-counterbalanced-repeat-major-v1"
 SCORED_OUTCOMES = ("success", "need_more_at_cap", "construct_failed", "unsupported")
 EXPECTED_OUTCOMES = {
     "success": "decoded_extra is an integer in [0,overhead_cap]",
@@ -270,7 +271,10 @@ EXPECTED_TIMING_POLICY = {
         "loss seed=SplitMix64(base_loss_seed xor (replicate * "
         "0x9e3779b97f4a7c15 mod 2^64))"
     ),
-    "confidence": "two-sided Student-t 95% interval over paired log seconds",
+    "confidence": (
+        "two-sided Student-t 95% interval over independent-round mean paired "
+        "log seconds"
+    ),
     "practical_margin_ppm": 20000,
     "effective_floor": "log1p(0.02) after both A/A intervals pass",
     "aa_repeatability_rule": (
@@ -278,7 +282,7 @@ EXPECTED_TIMING_POLICY = {
         "[-log1p(0.02),+log1p(0.02)]; otherwise the comparison is "
         "non-selectable"
     ),
-    "order": "counterbalanced ABBA/BAAB",
+    "order": "self-counterbalanced primary ABBA/BAAB plus opposite order",
     "cache_state": "warm",
     "production_policy": (
         "final timing replays the frozen production repair map; each "
@@ -318,14 +322,22 @@ EXPECTED_PANEL_PROTOCOL = {
         {"control": "wirehair1",
          "scope": "encoder_init_plus_first_K_symbols"},
     ],
-    "slots_per_panel": 4,
+    "slots_per_panel": 8,
     "warmups_per_logical_side": 1,
     "measured_batch_block_target": MEASURED_BATCH_BLOCK_TARGET,
     "invocations_per_slot": INVOCATIONS_PER_SLOT_FORMULA,
+    "interleave_policy": TIMING_INTERLEAVE_POLICY,
     "order_assignment": (
-        "phase_bit=low bit of SHA256(canonical panel key); ABBA iff "
-        "replicate parity equals phase_bit, otherwise BAAB"
+        "phase_bit=low bit of SHA256(canonical panel key); primary order is "
+        "ABBA iff lane parity equals phase_bit, otherwise BAAB; slots 0..3 "
+        "use primary order and slots 4..7 use its opposite"
     ),
+    "batch_split": (
+        "n=invocations_per_slot=max(2,ceil(measured_batch_block_target/K)); "
+        "each primary-order slot executes ceil(n/2) calls and each "
+        "opposite-order slot executes floor(n/2) calls"
+    ),
+    "within_block_traversal": "repeat-major",
 }
 EXPECTED_TIMING_EXECUTION_GEOMETRY = {
     "timing_worker_count": 8,
@@ -336,9 +348,13 @@ EXPECTED_TIMING_EXECUTION_GEOMETRY = {
     "cohort_order": (
         "block_bytes order, then K-set order, then frozen panel ordinal"
     ),
-    "wave_partition": "floor(replicate/8)",
-    "worker_slot": "(replicate%8+cohort_index+wave_index)%8",
-    "barrier": "after_each_wave",
+    "round_partition": "independent_round=floor(replicate/8); lane=replicate%8",
+    "round_traversal": (
+        "independent round outermost; traverse the complete frozen cohort "
+        "domain in cohort order; execute one eight-lane wave per cohort"
+    ),
+    "worker_slot": "(lane+cohort_index+independent_round)%8",
+    "barrier": "after_each_eight-lane_cohort_wave",
     "cohort_count_formula": (
         "(expected_cells/paired_repetitions)*"
         "len(timing_panels(contract,frozen_arms))"
@@ -350,31 +366,40 @@ EXPECTED_TIMING_EXECUTION_GEOMETRY = {
     ),
 }
 EXPECTED_TIMING_STATISTICS = {
-    "block_log_ratio": (
-        "ABBA=((ln e0-ln e1)+(ln e3-ln e2))/2; "
-        "BAAB=((ln e1-ln e0)+(ln e2-ln e3))/2"
+    "lane_log_ratio": (
+        "average the left/right-oriented four-slot log contrast from primary "
+        "slots 0..3 and the opposite-order contrast from slots 4..7"
     ),
     "independent_unit": (
-        "one replicate mean over every frozen K in the reported band and width"
+        "one independent-round mean formed from all eight lane replicate "
+        "means"
     ),
     "aggregate_weighting": (
-        "within each replicate, equal weight for every frozen K x width cell"
+        "within each lane, equal weight for every frozen K in the reported "
+        "band and width; aggregate timing equal-weights every frozen K x "
+        "width cell; then equal-weight all eight lanes in the round"
     ),
-    "variance": "unbiased sample variance over replicate means",
-    "t_critical_by_repetitions": {
-        "16": 2.131449545559323,
-        "24": 2.0686576104190477,
+    "variance": "unbiased sample variance over independent-round means",
+    "t_critical_by_independent_rounds": {
+        "12": 2.200985160082949,
     },
+    "block_phase_difference": (
+        "primary four-slot log contrast minus opposite-order four-slot log "
+        "contrast; this diagnoses first-block versus second-block drift and "
+        "is summarized over the same 12 independent round means"
+    ),
     "faster": "A/B upper 95% bound < -effective_floor",
     "noninferior": "A/B upper 95% bound < effective_floor",
     "resolved_slower": "A/B lower 95% bound > effective_floor",
     "strict_inequalities": True,
 }
 EXPECTED_INVALID_TIMER_POLICY = (
-    "each successful slot sums exactly invocations_per_slot fresh exact-scope "
-    "invocation-reported durations into one integer elapsed_ns value in "
-    "[1,2^63-1]; any non-success requires four nulls and makes the complete "
-    "comparison panel non-selectable; rows are never dropped"
+    "let n=invocations_per_slot; each successful primary-order slot sums "
+    "exactly ceil(n/2) fresh exact-scope invocation-reported durations and "
+    "each successful opposite-order slot sums exactly floor(n/2), producing "
+    "eight integer elapsed_ns values in [1,2^63-1]; any non-success requires "
+    "eight nulls and makes the complete comparison panel non-selectable; rows "
+    "are never dropped"
 )
 EXPECTED_SELECTION_POLICY = {
     "controls": ["wirehair2_head", "wirehair1"],
@@ -490,7 +515,7 @@ RAW_RECOVERY_RECORD_FIELDS = LEDGER_FIELDS | frozenset(
 TIMING_RECEIPT_FIELDS = frozenset((
     "phase", "band", "K", "block_bytes", "loss_ppm", "schedule",
     "replicate", "base_seed_attempt", "loss_seed", "fixed_received_overhead",
-    "invocations_per_slot",
+    "invocations_per_slot", "interleave_policy",
     "panel_kind", "scope", "left_arm", "right_arm", "order",
     "left_outcome", "right_outcome", "left_decoded_extra",
     "right_decoded_extra", "elapsed_ns", "cell_sha256", "trace_sha256",
@@ -893,7 +918,7 @@ def _validate_structure(contract: Any, check_domain_hashes: bool) -> Mapping[str
     ), "contract")
     if top["schema"] != SCHEMA:
         fail("unexpected contract schema")
-    if (top["contract_id"] != "wh2-pure-gf256-1pct-v3" or
+    if (top["contract_id"] != "wh2-pure-gf256-1pct-v4" or
             top["field"] != "GF(256)"):
         fail("v3 is pure GF(256) only")
 
@@ -1112,7 +1137,8 @@ def _validate_structure(contract: Any, check_domain_hashes: bool) -> Mapping[str
             "aa_repeatability_rule", "order", "cache_state",
             "production_policy", "eligibility", "scope_protocol"):
         if timing[field] != EXPECTED_TIMING_POLICY[field]:
-            fail("v3 timing.{} changed without a schema bump".format(field))
+            fail("timing-v4 {} changed without a contract revision".format(
+                field))
     if (timing["panel_protocol"] != EXPECTED_PANEL_PROTOCOL or
             timing["execution_geometry"] !=
                 EXPECTED_TIMING_EXECUTION_GEOMETRY or
@@ -1126,9 +1152,9 @@ def _validate_structure(contract: Any, check_domain_hashes: bool) -> Mapping[str
             timing["statistics"].get("strict_inequalities") is not True or
             any(type(value) is not float for value in
                 timing["statistics"].get(
-                    "t_critical_by_repetitions", {}).values())):
-        fail("v3 timing execution/panel/statistics protocol changed without "
-             "a schema bump")
+                    "t_critical_by_independent_rounds", {}).values())):
+        fail("timing-v4 execution/panel/statistics protocol changed without "
+             "a contract revision")
     if (timing["required_panels"] != [
                 "each_arm_AA",
                 "candidate_vs_wirehair2_head_decoder_solve",
@@ -1137,39 +1163,45 @@ def _validate_structure(contract: Any, check_domain_hashes: bool) -> Mapping[str
             timing["scopes"] != [
                 "decoder_solve", "encoder_init_plus_first_K_symbols",
                 "receive_to_success"]):
-        fail("v3 timing constants changed without a schema bump")
+        fail("timing-v4 constants changed without a contract revision")
     expected_timing_key = [
         "phase", "band", "K", "block_bytes", "loss_ppm", "schedule",
         "replicate", "base_seed_attempt", "loss_seed",
         "fixed_received_overhead", "invocations_per_slot",
+        "interleave_policy",
     ]
     if timing["cell_key"] != expected_timing_key:
-        fail("v3 timing cell or seed derivation changed without a schema bump")
+        fail("timing-v4 cell or seed derivation changed without a contract "
+             "revision")
     timing_domains = timing["domains"]
     if not isinstance(timing_domains, dict) or set(timing_domains) != {
             "development", "final"}:
         fail("timing domain roster changed without a schema bump")
     expected_timing_domains = {
         "development": (
-            "timing_short", [64, 1280], "production_training", 16, 384),
+            "timing_short", [64, 1280], "production_training",
+            96, 12, 2304),
         "final": (
             "short", [2, 64, 256, 1280, 4096],
-            "production_validation", 24, 3600),
+            "production_validation", 96, 12, 14400),
     }
     for phase, expected in expected_timing_domains.items():
         domain = _exact_keys(timing_domains[phase], (
             "k_set", "block_bytes", "seed_mode", "paired_repetitions",
-            "expected_cells", "domain_sha256",
+            "independent_rounds", "expected_cells", "domain_sha256",
         ), "timing domain " + phase)
-        k_name, expected_widths, seed_mode, repetitions, expected_count = expected
+        (k_name, expected_widths, seed_mode, repetitions,
+         independent_rounds, expected_count) = expected
         if (domain["k_set"] != k_name or domain["block_bytes"] != expected_widths or
                 domain["seed_mode"] != seed_mode or
                 type(domain["paired_repetitions"]) is not int or
                 domain["paired_repetitions"] != repetitions or
+                type(domain["independent_rounds"]) is not int or
+                domain["independent_rounds"] != independent_rounds or
                 type(domain["expected_cells"]) is not int or
                 domain["expected_cells"] != expected_count):
-            fail("v3 {} timing domain changed without a schema bump".format(
-                phase))
+            fail("timing-v4 {} domain changed without a contract revision".
+                 format(phase))
         widths = domain["block_bytes"]
         if (not isinstance(widths, list) or widths != sorted(set(widths)) or
                 any(type(width) is not int or width <= 0 for width in widths)):
@@ -1178,9 +1210,10 @@ def _validate_structure(contract: Any, check_domain_hashes: bool) -> Mapping[str
         if count != expected_count:
             fail("{} timing cell count is inconsistent".format(phase))
         worker_count = timing["execution_geometry"]["timing_worker_count"]
-        if repetitions <= 0 or repetitions % worker_count != 0:
-            fail("{} timing repetitions must be a positive multiple of the "
-                 "frozen worker count".format(phase))
+        if (repetitions <= 0 or independent_rounds <= 1 or
+                repetitions != independent_rounds * worker_count):
+            fail("{} timing repetitions must be exactly eight lanes in each "
+                 "independent round".format(phase))
         if check_domain_hashes:
             digest = timing_domain_sha256(top, phase)
             if domain["domain_sha256"] != digest:
@@ -1698,7 +1731,7 @@ def _splitmix64(value: int) -> int:
 
 def timing_invocations_per_slot(
         contract: Mapping[str, Any], K: int) -> int:
-    """Return the exact arm-independent measured batch size for one slot."""
+    """Return frozen n, split across each pair of opposite-order slots."""
     if type(K) is not int or K <= 0:
         fail("timing batch K must be a positive integer")
     timing = contract.get("timing")
@@ -1712,7 +1745,16 @@ def timing_invocations_per_slot(
             target != MEASURED_BATCH_BLOCK_TARGET or
             formula != INVOCATIONS_PER_SLOT_FORMULA):
         fail("timing measured-batch protocol is invalid")
-    return max(1, (target + K - 1) // K)
+    return max(2, (target + K - 1) // K)
+
+
+def timing_invocations_for_elapsed_slot(
+        contract: Mapping[str, Any], K: int, slot: int) -> int:
+    """Return the exact fresh-call count for elapsed slot 0 through 7."""
+    if type(slot) is not int or not 0 <= slot < 8:
+        fail("timing elapsed slot must be an integer in [0,7]")
+    invocations = timing_invocations_per_slot(contract, K)
+    return (invocations + 1) // 2 if slot < 4 else invocations // 2
 
 
 def timing_cohort_count(
@@ -1738,8 +1780,11 @@ def timing_cohort_count(
     if not controls.issubset(set(frozen_arms)):
         fail("timing frozen arm roster omits a required control")
     repetitions = domain.get("paired_repetitions")
+    independent_rounds = domain.get("independent_rounds")
     expected_cells = domain.get("expected_cells")
     if (type(repetitions) is not int or repetitions <= 0 or
+            type(independent_rounds) is not int or independent_rounds <= 1 or
+            repetitions != independent_rounds * geometry["jobs_per_wave"] or
             type(expected_cells) is not int or expected_cells <= 0 or
             expected_cells % repetitions != 0):
         fail("timing phase cardinality cannot form exact cohorts")
@@ -1769,8 +1814,9 @@ def timing_worker_slot(
         fail("timing replicate is outside the frozen phase")
     workers = geometry["timing_worker_count"]
     jobs_per_wave = geometry["jobs_per_wave"]
-    wave_index = replicate // jobs_per_wave
-    return (replicate % jobs_per_wave + cohort_index + wave_index) % workers
+    independent_round = replicate // jobs_per_wave
+    lane = replicate % jobs_per_wave
+    return (lane + cohort_index + independent_round) % workers
 
 
 def iter_timing_cells(contract: Mapping[str, Any], phase: str) -> Iterator[Dict[str, Any]]:
@@ -1780,27 +1826,35 @@ def iter_timing_cells(contract: Mapping[str, Any], phase: str) -> Iterator[Dict[
     domain = domains[phase]
     seed_pairs = _seed_pairs(contract, domain["seed_mode"])
     mask = (1 << 64) - 1
-    for block_bytes in domain["block_bytes"]:
-        for replicate in range(domain["paired_repetitions"]):
-            pair = seed_pairs[replicate % len(seed_pairs)]
-            salt = (replicate * 0x9e3779b97f4a7c15) & mask
-            loss_seed = _splitmix64(int(pair["loss_seed"], 16) ^ salt)
+    lanes = contract["timing"]["execution_geometry"]["jobs_per_wave"]
+    rounds = domain["independent_rounds"]
+    if domain["paired_repetitions"] != lanes * rounds:
+        fail("timing domain does not contain eight lanes per round")
+    for independent_round in range(rounds):
+        for block_bytes in domain["block_bytes"]:
             for K in _k_values(contract, domain["k_set"]):
-                yield {
-                    "phase": phase,
-                    "band": _band_for(contract, K),
-                    "K": K,
-                    "block_bytes": block_bytes,
-                    "loss_ppm": contract["timing"]["loss_ppm"],
-                    "schedule": contract["timing"]["schedule"],
-                    "replicate": replicate,
-                    "base_seed_attempt": pair["base_seed_attempt"],
-                    "loss_seed": "0x{:016x}".format(loss_seed),
-                    "fixed_received_overhead":
-                        contract["timing"]["fixed_received_overhead"],
-                    "invocations_per_slot":
-                        timing_invocations_per_slot(contract, K),
-                }
+                for lane in range(lanes):
+                    replicate = independent_round * lanes + lane
+                    pair = seed_pairs[replicate % len(seed_pairs)]
+                    salt = (replicate * 0x9e3779b97f4a7c15) & mask
+                    loss_seed = _splitmix64(
+                        int(pair["loss_seed"], 16) ^ salt)
+                    yield {
+                        "phase": phase,
+                        "band": _band_for(contract, K),
+                        "K": K,
+                        "block_bytes": block_bytes,
+                        "loss_ppm": contract["timing"]["loss_ppm"],
+                        "schedule": contract["timing"]["schedule"],
+                        "replicate": replicate,
+                        "base_seed_attempt": pair["base_seed_attempt"],
+                        "loss_seed": "0x{:016x}".format(loss_seed),
+                        "fixed_received_overhead":
+                            contract["timing"]["fixed_received_overhead"],
+                        "invocations_per_slot":
+                            timing_invocations_per_slot(contract, K),
+                        "interleave_policy": TIMING_INTERLEAVE_POLICY,
+                    }
 
 
 def timing_domain_sha256(contract: Mapping[str, Any], phase: str) -> str:
@@ -1844,6 +1898,21 @@ def timing_order(panel: Mapping[str, str], replicate: int) -> str:
     return "ABBA" if (replicate & 1) == phase_bit else "BAAB"
 
 
+def _timing_four_slot_log_contrast(
+        logs: Sequence[float], start: int, order: str) -> float:
+    """Return one left/right-oriented four-slot paired log contrast."""
+    if len(logs) != 8 or start not in (0, 4):
+        fail("timing log contrast requires one block of an eight-slot job")
+    if order == "ABBA":
+        return ((logs[start] - logs[start + 1]) +
+                (logs[start + 3] - logs[start + 2])) / 2.0
+    if order == "BAAB":
+        return ((logs[start + 1] - logs[start]) +
+                (logs[start + 2] - logs[start + 3])) / 2.0
+    fail("timing log contrast has an unknown order")
+    return 0.0
+
+
 def _timing_cell_indexes(
         contract: Mapping[str, Any], phase: str,
         ) -> Mapping[str, Tuple[int, Mapping[str, Any]]]:
@@ -1864,7 +1933,9 @@ def _timing_cell_ordinal(
         "K", "block_bytes", "loss_ppm", "replicate", "base_seed_attempt",
         "fixed_received_overhead", "invocations_per_slot",
     )
-    string_fields = ("phase", "band", "schedule", "loss_seed")
+    string_fields = (
+        "phase", "band", "schedule", "loss_seed", "interleave_policy",
+    )
     if (any(type(row[field]) is not int for field in integer_fields) or
             any(not isinstance(row[field], str) for field in string_fields)):
         fail("timing cell key uses a noncanonical scalar type")
@@ -2400,7 +2471,7 @@ def _timing_confidence_interval(
         (value - mean) * (value - mean) for value in values) / \
         (expected_count - 1)
     critical = contract["timing"]["statistics"][
-        "t_critical_by_repetitions"].get(str(expected_count))
+        "t_critical_by_independent_rounds"].get(str(expected_count))
     if type(critical) is not float:
         fail("timing contract lacks the exact Student-t critical value")
     half_width = critical * math.sqrt(variance / expected_count)
@@ -2580,24 +2651,26 @@ def validate_timing_receipt(
 
         elapsed = row["elapsed_ns"]
         both_success = all(outcome[0] == "success" for outcome in side_outcomes)
-        if not isinstance(elapsed, list) or len(elapsed) != 4:
-            fail("timing elapsed_ns must contain exactly four slots")
+        if not isinstance(elapsed, list) or len(elapsed) != 8:
+            fail("timing elapsed_ns must contain exactly eight slots")
         if both_success:
             if any(type(value) is not int or not 1 <= value < (1 << 63)
                    for value in elapsed):
                 fail("successful timing slots must be positive int63 nanoseconds")
             logs = [math.log(value) for value in elapsed]
-            if expected_order == "ABBA":
-                log_ratio = ((logs[0] - logs[1]) +
-                             (logs[3] - logs[2])) / 2.0
-            else:
-                log_ratio = ((logs[1] - logs[0]) +
-                             (logs[2] - logs[3])) / 2.0
+            opposite_order = "BAAB" if expected_order == "ABBA" else "ABBA"
+            primary_contrast = _timing_four_slot_log_contrast(
+                logs, 0, expected_order)
+            opposite_contrast = _timing_four_slot_log_contrast(
+                logs, 4, opposite_order)
+            log_ratio = (primary_contrast + opposite_contrast) / 2.0
+            block_phase_difference = primary_contrast - opposite_contrast
             group = (row["band"], row["block_bytes"], row["replicate"])
-            measurements[panel_key][group].append(log_ratio)
+            measurements[panel_key][group].append(
+                (log_ratio, block_phase_difference))
         else:
             if any(value is not None for value in elapsed):
-                fail("failed timing panels must use four null elapsed slots")
+                fail("failed timing panels must use eight null elapsed slots")
             group_scope = (row["band"], row["block_bytes"])
             failed_groups[panel_key].add(group_scope)
             failed_aggregate[panel_key] = True
@@ -2608,6 +2681,11 @@ def validate_timing_receipt(
             sum(seen), expected_rows))
 
     repetitions = domain["paired_repetitions"]
+    independent_rounds = domain["independent_rounds"]
+    lanes_per_round = contract["timing"]["execution_geometry"][
+        "jobs_per_wave"]
+    if repetitions != independent_rounds * lanes_per_round:
+        fail("timing repetitions do not form complete independent rounds")
     K_values = list(_k_values(contract, domain["k_set"]))
     K_count_by_band: Dict[str, int] = defaultdict(int)
     for K in K_values:
@@ -2623,35 +2701,68 @@ def validate_timing_receipt(
                 if (band, width) in failed_groups[panel_key]:
                     by_band_width[label] = {"selectable": False}
                     continue
-                replicate_means = []
-                for replicate in range(repetitions):
-                    values = measurements[panel_key][(band, width, replicate)]
-                    if len(values) != expected_K_count:
-                        fail("timing band/width replicate has an incomplete K cohort")
-                    replicate_means.append(math.fsum(values) / len(values))
+                round_means = []
+                block_phase_round_means = []
+                for independent_round in range(independent_rounds):
+                    lane_means = []
+                    block_phase_lane_means = []
+                    for lane in range(lanes_per_round):
+                        replicate = independent_round * lanes_per_round + lane
+                        values = measurements[panel_key][(
+                            band, width, replicate)]
+                        if len(values) != expected_K_count:
+                            fail("timing band/width lane has an incomplete K "
+                                 "cohort")
+                        lane_means.append(math.fsum(
+                            value[0] for value in values) / len(values))
+                        block_phase_lane_means.append(math.fsum(
+                            value[1] for value in values) / len(values))
+                    round_means.append(
+                        math.fsum(lane_means) / lanes_per_round)
+                    block_phase_round_means.append(
+                        math.fsum(block_phase_lane_means) / lanes_per_round)
                 by_band_width[label] = {
                     "selectable": True,
                     **_timing_confidence_interval(
-                        contract, replicate_means, repetitions),
+                        contract, round_means, independent_rounds),
+                    "block_phase_difference": _timing_confidence_interval(
+                        contract, block_phase_round_means,
+                        independent_rounds),
                 }
         if failed_aggregate[panel_key]:
             aggregate = {"selectable": False}
         else:
-            aggregate_means = []
-            expected_per_replicate = len(K_values) * len(domain["block_bytes"])
-            for replicate in range(repetitions):
-                values = []
-                for band in (value[0] for value in EXPECTED_BANDS):
-                    for width in domain["block_bytes"]:
-                        values.extend(measurements[panel_key][(
-                            band, width, replicate)])
-                if len(values) != expected_per_replicate:
-                    fail("aggregate timing replicate has an incomplete cell cohort")
-                aggregate_means.append(math.fsum(values) / len(values))
+            aggregate_round_means = []
+            block_phase_round_means = []
+            expected_per_lane = len(K_values) * len(domain["block_bytes"])
+            for independent_round in range(independent_rounds):
+                lane_means = []
+                block_phase_lane_means = []
+                for lane in range(lanes_per_round):
+                    replicate = independent_round * lanes_per_round + lane
+                    values = []
+                    for band in (value[0] for value in EXPECTED_BANDS):
+                        for width in domain["block_bytes"]:
+                            values.extend(measurements[panel_key][(
+                                band, width, replicate)])
+                    if len(values) != expected_per_lane:
+                        fail("aggregate timing lane has an incomplete cell "
+                             "cohort")
+                    lane_means.append(math.fsum(
+                        value[0] for value in values) / len(values))
+                    block_phase_lane_means.append(math.fsum(
+                        value[1] for value in values) / len(values))
+                aggregate_round_means.append(
+                    math.fsum(lane_means) / lanes_per_round)
+                block_phase_round_means.append(
+                    math.fsum(block_phase_lane_means) / lanes_per_round)
             aggregate = {
                 "selectable": True,
                 **_timing_confidence_interval(
-                    contract, aggregate_means, repetitions),
+                    contract, aggregate_round_means, independent_rounds),
+                "block_phase_difference": _timing_confidence_interval(
+                    contract, block_phase_round_means,
+                    independent_rounds),
             }
         panel_statistics[panel_key] = {
             "panel": panel,
