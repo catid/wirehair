@@ -173,11 +173,14 @@ struct PrecodeSolveStats
     uint64_t ResidualNanoseconds = 0;
     uint64_t BackSubNanoseconds = 0;
     uint32_t PacketSeedAttempt = 0;
-#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    // Keep these diagnostics layout-unconditional.  Test targets compile the
+    // internal policy library with hooks while linking the production library
+    // without them, so conditional members would give shared codec classes
+    // different layouts across translation units.  Their hot-path writes stay
+    // test-hook-only in WirehairV2Solve.cpp.
     uint64_t SolveValueArenaBytes = 0;
     uint64_t SolveValueArenaEagerZeroBytes = 0;
     uint64_t SolveValueArenaCommitCopyBytes = 0;
-#endif
 };
 
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
