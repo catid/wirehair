@@ -62,6 +62,13 @@ typedef bool (*NativeWh2ExecutionModeSetter)(
     bool enabled,
     void* context);
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+/** Noexcept adapter for the codec's thread-local tiny-direct test hook. */
+bool SetNativeTinyDirectSolveMode(
+    bool enabled,
+    void* context) noexcept;
+#endif
+
 typedef bool (*Wh2EquationTransform)(
     uint32_t block_count,
     uint32_t block_bytes,

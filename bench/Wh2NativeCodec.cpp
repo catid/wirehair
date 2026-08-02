@@ -444,6 +444,15 @@ struct NativeArm::Impl
     bool Initialized = false;
 };
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+bool SetNativeTinyDirectSolveMode(bool enabled, void* context) noexcept
+{
+    (void)context;
+    wirehair_v2::SetTinyDirectSolveForTesting(enabled);
+    return true;
+}
+#endif
+
 NativeArmSpec MakeWirehair1Arm()
 {
     NativeArmSpec spec;
