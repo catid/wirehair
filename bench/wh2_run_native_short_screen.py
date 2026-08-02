@@ -57,6 +57,7 @@ ZERO_SHA256 = "0" * 64
 CPU_TOKEN = re.compile(r"(?:0|[1-9][0-9]*)\Z")
 CACHE_INDEX_TOKEN = re.compile(r"index(?:0|[1-9][0-9]*)\Z")
 POSITIVE_TOKEN = re.compile(r"[1-9][0-9]*\Z")
+CPU_SYSFS_ROOT = Path("/sys/devices/system/cpu")
 
 
 class RunnerError(RuntimeError):
@@ -136,37 +137,77 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
-def _publish_staged(staged: Path, destination: Path) -> None:
-    if destination.exists() or destination.is_symlink():
-        fail("refusing to replace existing artifact {}".format(destination))
+def _open_publication_guard(path: Path) -> Tuple[int, os.stat_result]:
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if nofollow == 0:
+        fail("publication requires O_NOFOLLOW")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | nofollow
+    descriptor = -1
     try:
-        staged_info = os.stat(str(staged), follow_symlinks=False)
+        descriptor = os.open(str(path), flags)
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            fail("staged publication artifact must be regular")
+        return descriptor, info
     except OSError as exc:
-        fail("cannot inspect staged artifact {}: {}".format(staged, exc))
-    linked = False
-    try:
-        os.link(str(staged), str(destination))
-        linked = True
-        _fsync_directory(destination.parent)
-        staged.unlink()
-    except FileExistsError:
-        fail("refusing to replace existing artifact {}".format(destination))
-    except OSError as exc:
-        if linked:
-            _unlink_if_identity(
-                destination, staged_info.st_dev, staged_info.st_ino)
-        fail("cannot publish {}: {}".format(destination, exc))
+        if descriptor >= 0:
+            os.close(descriptor)
+        fail("cannot guard staged artifact {}: {}".format(path, exc))
     except BaseException:
-        # The hard-wall signal can arrive after link(2) but before the
-        # directory fsync.  Do not leave a result that was never durably
-        # published, and never unlink a path another process replaced.
-        if linked:
-            _unlink_if_identity(
-                destination, staged_info.st_dev, staged_info.st_ino)
+        if descriptor >= 0:
+            os.close(descriptor)
         raise
 
 
+def _publish_staged(
+        staged: Path, destination: Path,
+        expected_identity: Optional[Tuple[int, int]] = None) -> None:
+    if destination.exists() or destination.is_symlink():
+        fail("refusing to replace existing artifact {}".format(destination))
+    guard_fd, staged_info = _open_publication_guard(staged)
+    directory_fd = -1
+    try:
+        directory_fd = os.open(
+            str(destination.parent),
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
+            getattr(os, "O_CLOEXEC", 0))
+        if (expected_identity is not None and expected_identity !=
+                (staged_info.st_dev, staged_info.st_ino)):
+            fail("staged publication artifact identity changed")
+        try:
+            os.link(
+                "/proc/self/fd/{}".format(guard_fd), destination.name,
+                dst_dir_fd=directory_fd,
+                follow_symlinks=True)
+            published_info = os.stat(
+                destination.name, dir_fd=directory_fd,
+                follow_symlinks=False)
+            if (published_info.st_dev != staged_info.st_dev or
+                    published_info.st_ino != staged_info.st_ino):
+                fail("published artifact identity changed during link")
+            os.fsync(directory_fd)
+            if not _unlink_if_identity(
+                    staged, staged_info.st_dev, staged_info.st_ino):
+                fail("staged publication artifact changed before cleanup")
+            os.fsync(directory_fd)
+            return
+        except FileExistsError:
+            fail("refusing to replace existing artifact {}".format(destination))
+        except OSError as exc:
+            fail("cannot publish {}: {}".format(destination, exc))
+        except BaseException:
+            # Visible artifacts are immutable dependencies.  A later strict
+            # receipt/run-summary is the only completion marker, so never risk
+            # deleting a concurrently replaced destination on failure.
+            raise
+    finally:
+        if directory_fd >= 0:
+            os.close(directory_fd)
+        os.close(guard_fd)
+
+
 def _unlink_if_identity(path: Path, device: int, inode: int) -> bool:
+    """Best-effort cleanup for staging names in the private output directory."""
     try:
         info = os.lstat(str(path))
     except FileNotFoundError:
@@ -186,17 +227,67 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
     descriptor, raw = tempfile.mkstemp(
         prefix="." + path.name + ".", suffix=".tmp", dir=str(path.parent))
     staged = Path(raw)
+    staged_identity: Optional[Tuple[int, int]] = None
+    publication_identity: Optional[Tuple[int, int]] = None
+    publication_guard = -1
+    committed = False
+    output = None
     try:
-        with os.fdopen(descriptor, "wb") as output:
+        staged_info = os.fstat(descriptor)
+        staged_identity = (staged_info.st_dev, staged_info.st_ino)
+        output = os.fdopen(descriptor, "wb")
+        descriptor = -1
+        with output:
             output.write(data)
             output.flush()
             os.fsync(output.fileno())
-        _publish_staged(staged, path)
-    finally:
+        publication_guard, info = _open_publication_guard(staged)
+        publication_identity = (info.st_dev, info.st_ino)
+        _publish_staged(staged, path, publication_identity)
+        if _hash_file(path) != hashlib.sha256(data).hexdigest():
+            fail("published artifact changed before commit")
+        committed = True
+        guard = publication_guard
         try:
-            staged.unlink()
-        except FileNotFoundError:
-            pass
+            os.close(guard)
+        finally:
+            publication_guard = -1
+        return
+    except BaseException:
+        if output is not None:
+            try:
+                output.close()
+            except BaseException:
+                pass
+            finally:
+                descriptor = -1
+        elif descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+            finally:
+                descriptor = -1
+        if not committed and publication_identity is not None:
+            _unlink_if_identity(
+                staged, publication_identity[0], publication_identity[1])
+        elif not committed and staged_identity is not None:
+            _unlink_if_identity(
+                staged, staged_identity[0], staged_identity[1])
+        elif not committed:
+            try:
+                staged.unlink()
+            except FileNotFoundError:
+                pass
+        if publication_guard >= 0:
+            guard = publication_guard
+            try:
+                os.close(guard)
+            except OSError:
+                pass
+            finally:
+                publication_guard = -1
+        raise
 
 
 def _atomic_write_object(path: Path, value: Mapping[str, Any]) -> None:
@@ -208,35 +299,87 @@ class AtomicLineSink:
     """A result stream that is visible only after every row is complete."""
 
     def __init__(self, destination: Path) -> None:
-        self.destination = destination
+        digest = hashlib.sha256()
         descriptor, raw = tempfile.mkstemp(
             prefix="." + destination.name + ".", suffix=".tmp",
             dir=str(destination.parent))
-        self.staged = Path(raw)
-        self.output = os.fdopen(descriptor, "wb")
-        self.published = False
+        staged = Path(raw)
+        staged_identity: Optional[Tuple[int, int]] = None
+        output = None
+        try:
+            info = os.fstat(descriptor)
+            staged_identity = (info.st_dev, info.st_ino)
+            output = os.fdopen(descriptor, "wb")
+            descriptor = -1
+            self.destination = destination
+            self.staged = staged
+            self.output = output
+            self.staged_identity = staged_identity
+            self.sha256 = digest
+            self.published = False
+        except BaseException:
+            if output is not None:
+                try:
+                    output.close()
+                except BaseException:
+                    pass
+                finally:
+                    descriptor = -1
+            elif descriptor >= 0:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+                finally:
+                    descriptor = -1
+            if staged_identity is not None:
+                _unlink_if_identity(
+                    staged, staged_identity[0], staged_identity[1])
+            else:
+                try:
+                    staged.unlink()
+                except FileNotFoundError:
+                    pass
+            raise
 
     def write(self, line: bytes) -> None:
         if self.output.closed or not line.endswith(b"\n"):
             fail("cannot write an invalid native result line")
         self.output.write(line)
+        self.sha256.update(line)
 
     def publish(self) -> None:
         if self.published:
             fail("native result stream was published twice")
         self.output.flush()
         os.fsync(self.output.fileno())
-        self.output.close()
-        _publish_staged(self.staged, self.destination)
-        self.published = True
+        info = os.fstat(self.output.fileno())
+        if (info.st_dev, info.st_ino) != self.staged_identity:
+            fail("native result staging identity changed")
+        committed = False
+        try:
+            _publish_staged(
+                self.staged, self.destination, self.staged_identity)
+            if _hash_file(self.destination) != self.sha256.hexdigest():
+                fail("published native result stream changed before commit")
+            self.published = True
+            committed = True
+            self.output.close()
+            return
+        except BaseException:
+            if not committed:
+                _unlink_if_identity(
+                    self.staged, info.st_dev, info.st_ino)
+                self.published = False
+            if not self.output.closed:
+                self.output.close()
+            raise
 
     def abort(self) -> None:
         if not self.output.closed:
             self.output.close()
-        try:
-            self.staged.unlink()
-        except FileNotFoundError:
-            pass
+        _unlink_if_identity(
+            self.staged, self.staged_identity[0], self.staged_identity[1])
 
 
 def _parse_canonical_line(data: bytes, context: str) -> Mapping[str, Any]:
@@ -357,7 +500,7 @@ def select_cpu_layout(
         sampler_cpu: int, explicit_workers: Optional[Sequence[int]] = None,
         explicit_controller: Optional[int] = None,
         affinity: Optional[Iterable[int]] = None,
-        sysfs_root: Path = Path("/sys/devices/system/cpu"),
+        sysfs_root: Path = CPU_SYSFS_ROOT,
         ) -> Tuple[List[int], int]:
     """Select eight LLC-spread physical cores plus an isolated controller."""
     if type(sampler_cpu) is not int or sampler_cpu < 0:
@@ -606,6 +749,8 @@ def _emit_and_assemble_trace(
         contract: Mapping[str, Any], kind: str,
         description: Mapping[str, Any], output_dir: Path,
         deadline: float) -> Tuple[Path, str]:
+    if kind != "recovery":
+        fail("timing traces must come from the selected qualification audit")
     worker_path = description["resolved_path"]
     native_path = output_dir / "{}-native-traces.jsonl".format(kind)
     trace_path = output_dir / "{}-traces.jsonl".format(kind)
@@ -622,10 +767,41 @@ def _emit_and_assemble_trace(
     return trace_path, digest
 
 
+def _timing_qualification_controls(
+        contract: Mapping[str, Any], description: Mapping[str, Any],
+        ) -> List[Mapping[str, Any]]:
+    described = {
+        value["arm"]: value for value in description["arms"]
+    }
+    controls = []
+    for policy in contract["timing"]["qualification"]["controls"]:
+        arm = policy["arm"]
+        value = described.get(arm)
+        if value is None:
+            fail("native worker omits a mandatory qualification control")
+        controls.append({
+            "arm": arm,
+            "scope": policy["scope"],
+            "binary_sha256": description["binary_sha256"],
+            "arm_descriptor_sha256": value["arm_descriptor_sha256"],
+            "construction_policy":
+                "not_applicable" if arm == "wirehair1" else "raw_base",
+            "repair_map_sha256": ZERO_SHA256,
+        })
+    try:
+        contract_api._validate_timing_qualification_controls(
+            contract, "development", controls)
+    except contract_api.ContractError as exc:
+        fail(str(exc))
+    return controls
+
+
 def _freeze_manifest(
         contract: Mapping[str, Any], kind: str, trace_sha256: str,
         source_commit: str, description: Mapping[str, Any],
-        cpus: Sequence[int], controller_cpu: int) -> Mapping[str, Any]:
+        cpus: Sequence[int], controller_cpu: int,
+        timing_qualification: Optional[
+            contract_api.TimingQualification] = None) -> Mapping[str, Any]:
     roster = [value[0] for value in EXPECTED_ARMS]
     arms = []
     for value in description["arms"]:
@@ -638,18 +814,24 @@ def _freeze_manifest(
                 if value["codec"] == "wirehair1" else "raw_base",
             "repair_map_sha256": ZERO_SHA256,
         })
-    commands = [
-        [description["resolved_path"], "--emit-traces", kind],
-    ] + [
+    commands = ([] if kind == "timing" else [[
+        description["resolved_path"], "--emit-traces", kind,
+    ]]) + [
         [description["resolved_path"], "--worker", str(cpu)] for cpu in cpus
     ]
+    if kind == "timing":
+        if timing_qualification is None:
+            fail("timing freeze requires a validated qualification")
+        domain_sha256 = timing_qualification.qualified_domain_sha256
+    else:
+        domain_sha256 = contract[kind]["domains"]["development"][
+            "domain_sha256"]
     return {
         "schema": contract_api.FREEZE_SCHEMA,
         "contract_sha256": contract_api.contract_sha256(contract),
         "evidence_kind": kind,
         "phase": "development",
-        "domain_sha256": contract[kind]["domains"]["development"][
-            "domain_sha256"],
+        "domain_sha256": domain_sha256,
         "source_git_commit": source_commit,
         "arm_roster": roster,
         "arm_roster_sha256": contract_api.arm_roster_sha256(roster),
@@ -666,6 +848,7 @@ def write_development_freezes(
         contract: Mapping[str, Any], description: Mapping[str, Any],
         cpus: Sequence[int], controller_cpu: int, source_commit: str,
         trace_sha256s: Mapping[str, str], output_dir: Path,
+        timing_qualification: contract_api.TimingQualification,
         ) -> Mapping[str, Mapping[str, Any]]:
     """Publish and re-open both freezes before a result process may start."""
     loaded: Dict[str, Mapping[str, Any]] = {}
@@ -673,11 +856,13 @@ def write_development_freezes(
         path = output_dir / "{}-freeze.json".format(kind)
         value = _freeze_manifest(
             contract, kind, trace_sha256s[kind], source_commit,
-            description, cpus, controller_cpu)
+            description, cpus, controller_cpu,
+            timing_qualification if kind == "timing" else None)
         _atomic_write_object(path, value)
         try:
             loaded[kind] = contract_api.load_freeze_manifest(
-                contract, "development", path, kind)
+                contract, "development", path, kind,
+                timing_qualification if kind == "timing" else None)
         except contract_api.ContractError as exc:
             fail(str(exc))
     return loaded
@@ -791,19 +976,35 @@ def _preflight_sampler(pid: int, cpu: int, script_path: Path,
 
 
 class Job:
-    def __init__(self, kind: str, cell: int, item: int, ordinal: int) -> None:
-        if (kind not in ("recovery", "timing") or
+    def __init__(self, kind: str, cell: int, item: int, ordinal: int,
+                 retry_offset: int = 0) -> None:
+        if (kind not in ("recovery", "timing", "qualification") or
                 any(type(value) is not int or value < 0
-                    for value in (cell, item, ordinal))):
+                    for value in (cell, item, ordinal, retry_offset)) or
+                retry_offset >= 256):
             fail("cannot construct an invalid native job")
+        if kind == "recovery" and retry_offset != 0:
+            fail("recovery jobs cannot carry a timing retry")
+        if kind == "qualification" and (
+                item != 0 or ordinal != cell * 256 + retry_offset):
+            fail("qualification job identity is inconsistent")
         self.kind = kind
         self.cell = cell
         self.item = item
         self.ordinal = ordinal
+        self.retry_offset = retry_offset
 
     def command(self) -> bytes:
-        prefix = "R" if self.kind == "recovery" else "T"
-        return "{} {} {}\n".format(prefix, self.cell, self.item).encode("ascii")
+        if self.kind == "recovery":
+            prefix = "R"
+            item = self.item
+        elif self.kind == "qualification":
+            prefix = "L"
+            item = self.retry_offset
+        else:
+            prefix = "T"
+            item = self.item * 256 + self.retry_offset
+        return "{} {} {}\n".format(prefix, self.cell, item).encode("ascii")
 
 
 class PersistentWorker:
@@ -863,12 +1064,18 @@ def spawn_workers(description: Mapping[str, Any], cpus: Sequence[int],
             if pending:
                 time.sleep(0.01)
         return workers
-    except BaseException:
-        terminate_workers(workers)
+    except BaseException as primary:
+        try:
+            terminate_workers(workers)
+        except RunnerError as cleanup:
+            raise RunnerError(
+                "{}; worker cleanup also failed: {}".format(
+                    primary, cleanup)) from primary
         raise
 
 
 def terminate_workers(workers: Sequence[PersistentWorker]) -> None:
+    """Exhaust terminate/kill/reap/close and reject every surviving child."""
     for worker in workers:
         if worker.process.poll() is None:
             try:
@@ -898,6 +1105,12 @@ def terminate_workers(workers: Sequence[PersistentWorker]) -> None:
                     stream.close()
                 except OSError:
                     pass
+    survivors = [
+        worker.cpu for worker in workers if worker.process.poll() is None
+    ]
+    if survivors:
+        fail("native worker cleanup left unreaped CPUs {}".format(
+            ",".join(str(cpu) for cpu in survivors)))
 
 
 def _write_worker(worker: PersistentWorker, data: bytes) -> None:
@@ -927,13 +1140,14 @@ def run_job_batch(
     if any(worker.pending is not None or worker.buffer for worker in workers):
         fail("worker state leaked across a job barrier")
     selector = selectors.DefaultSelector()
-    for worker in workers:
-        selector.register(worker.process.stdout, selectors.EVENT_READ, worker)
     next_job = 0
     completed = 0
     maximum_end = 0
     used: Set[int] = set()
     try:
+        for worker in workers:
+            selector.register(
+                worker.process.stdout, selectors.EVENT_READ, worker)
         for offset in range(len(workers)):
             worker = workers[(offset + rotation) % len(workers)]
             worker.pending = jobs[next_job]
@@ -993,6 +1207,192 @@ def run_job_batch(
         selector.close()
 
 
+def _strict_qualification_response(
+        contract: Mapping[str, Any], description: Mapping[str, Any],
+        base_cells: Sequence[Mapping[str, Any]], window_start_ns: int,
+        value: Mapping[str, Any], worker: PersistentWorker, job: Job,
+        ) -> Tuple[int, bool]:
+    payload = value.get("payload")
+    integer_fields = (
+        "ordinal", "cpu", "worker_pid", "worker_process_start_ticks",
+        "started_monotonic_ns", "finished_monotonic_ns",
+    )
+    if (job.kind != "qualification" or
+            set(value) != native_api.NATIVE_RECORD_FIELDS or
+            any(type(value.get(field)) is not int for field in integer_fields) or
+            value.get("schema") !=
+                native_api.TIMING_QUALIFICATION_RECORD_SCHEMA or
+            value.get("ordinal") != job.ordinal or
+            value.get("cpu") != worker.cpu or
+            value.get("worker_pid") != worker.process.pid or
+            value.get("worker_process_start_ticks") != worker.start_ticks or
+            value.get("worker_binary_sha256") !=
+                description["binary_sha256"] or
+            not isinstance(payload, dict) or
+            set(payload) != native_api.TIMING_QUALIFICATION_PAYLOAD_FIELDS):
+        fail("native qualification response does not bind its worker/job")
+    start = value["started_monotonic_ns"]
+    end = value["finished_monotonic_ns"]
+    if not window_start_ns <= start <= end:
+        fail("native qualification response has invalid monotonic provenance")
+    for field in native_api.SHA256_FIELDS:
+        if not _is_sha256(value.get(field)):
+            fail("native qualification response {} is not a SHA-256".format(
+                field))
+    if not 0 <= job.cell < len(base_cells):
+        fail("native qualification job is outside the base domain")
+    base_cell = base_cells[job.cell]
+    base_sha256 = contract_api.sha256_json(base_cell)
+    loss_seed = contract_api._qualified_timing_loss_seed(
+        base_cell["base_loss_seed"], job.retry_offset)
+    qualified_cell = dict(base_cell)
+    qualified_cell["base_cell_sha256"] = base_sha256
+    qualified_cell["loss_retry_offset"] = job.retry_offset
+    qualified_cell["loss_seed"] = loss_seed
+    cell_sha256 = contract_api.sha256_json(qualified_cell)
+    if (payload.get("ordinal") != job.cell or
+            payload.get("loss_retry_offset") != job.retry_offset or
+            payload.get("base_cell_sha256") != base_sha256 or
+            payload.get("loss_seed") != loss_seed or
+            payload.get("cell_sha256") != cell_sha256 or
+            value["message_sha256"] !=
+                native_api._timing_qualification_message_sha256(base_cell) or
+            value["work_sha256"] !=
+                native_api._expected_timing_qualification_work_sha256(
+                    job.ordinal, cell_sha256)):
+        fail("native qualification response substitutes its base/retry identity")
+    packet_count = payload.get("packet_count")
+    candidate_count = payload.get("candidate_count")
+    expected_packets = base_cell["K"] + \
+        contract["timing"]["receive_overhead_cap"]
+    if (not _is_sha256(payload.get("trace_sha256")) or
+            type(packet_count) is not int or
+            packet_count != expected_packets or
+            type(candidate_count) is not int or
+            not packet_count <= candidate_count <=
+                256 * expected_packets + 65536):
+        fail("native qualification response has invalid trace evidence")
+    try:
+        head = contract_api._validate_timing_qualification_outcome(
+            payload, "wirehair2_head",
+            contract["timing"]["receive_overhead_cap"])
+        wh1 = contract_api._validate_timing_qualification_outcome(
+            payload, "wirehair1",
+            contract["timing"]["receive_overhead_cap"])
+    except contract_api.ContractError as exc:
+        fail(str(exc))
+    return end, head == "success" and wh1 == "success"
+
+
+def run_timing_qualification(
+        contract: Mapping[str, Any], description: Mapping[str, Any],
+        workers: Sequence[PersistentWorker], output_path: Path,
+        window_start_ns: int, deadline: float) -> Tuple[Path, int]:
+    """Run lowest, non-speculative retries while keeping base cells parallel."""
+    base_cells = list(contract_api.iter_timing_base_cells(
+        contract, "development"))
+    expected_cells = contract["timing"]["domains"]["development"][
+        "expected_cells"]
+    if (not workers or len(base_cells) != expected_cells or
+            len(workers) > expected_cells):
+        fail("qualification worker/base-cell cardinality is invalid")
+    if any(worker.pending is not None or worker.buffer for worker in workers):
+        fail("worker state leaked into timing qualification")
+    sink: Optional[AtomicLineSink] = None
+    selector: Optional[selectors.BaseSelector] = None
+    next_base = 0
+    selected = 0
+    maximum_end = 0
+    used: Set[int] = set()
+
+    def assign(worker: PersistentWorker, base_ordinal: int,
+               retry_offset: int) -> None:
+        worker.pending = Job(
+            "qualification", base_ordinal, 0,
+            base_ordinal * 256 + retry_offset, retry_offset)
+        _write_worker(worker, worker.pending.command())
+
+    try:
+        sink = AtomicLineSink(output_path)
+        selector = selectors.DefaultSelector()
+        for worker in workers:
+            selector.register(
+                worker.process.stdout, selectors.EVENT_READ, worker)
+        for worker in workers:
+            assign(worker, next_base, 0)
+            next_base += 1
+        while selected < expected_cells:
+            timeout = min(1.0, _remaining(
+                deadline, "native timing qualification"))
+            events = selector.select(timeout)
+            if not events:
+                for worker in workers:
+                    if worker.process.poll() is not None:
+                        fail("qualification worker on CPU {} exited: {}".format(
+                            worker.cpu, _worker_stderr(worker)))
+                continue
+            for key, _ in events:
+                worker = key.data
+                try:
+                    block = os.read(worker.process.stdout.fileno(), 65536)
+                except BlockingIOError:
+                    continue
+                except OSError as exc:
+                    fail("cannot read qualification worker on CPU {}: {}".
+                         format(worker.cpu, exc))
+                if not block:
+                    fail("qualification worker on CPU {} reached EOF: {}".
+                         format(worker.cpu, _worker_stderr(worker)))
+                worker.buffer += block
+                if len(worker.buffer) > MAX_RESPONSE_BYTES:
+                    fail("qualification response exceeds the bounded line size")
+                if b"\n" not in worker.buffer:
+                    continue
+                logical, remainder = worker.buffer.split(b"\n", 1)
+                if remainder:
+                    fail("qualification worker emitted multiple responses")
+                line = logical + b"\n"
+                worker.buffer = b""
+                job = worker.pending
+                if job is None:
+                    fail("qualification worker responded without a job")
+                value = _parse_canonical_line(
+                    line, "native qualification response")
+                end, both_success = _strict_qualification_response(
+                    contract, description, base_cells, window_start_ns,
+                    value, worker, job)
+                maximum_end = max(maximum_end, end)
+                sink.write(line)
+                used.add(worker.cpu)
+                worker.pending = None
+                if both_success:
+                    selected += 1
+                    if next_base < expected_cells:
+                        assign(worker, next_base, 0)
+                        next_base += 1
+                else:
+                    if job.retry_offset == 255:
+                        fail("timing qualification exhausted retry offset 255")
+                    # No later attempt for this base is issued until this
+                    # exact retryable result has arrived and validated.
+                    assign(worker, job.cell, job.retry_offset + 1)
+        if next_base != expected_cells or \
+                any(worker.pending is not None or worker.buffer
+                    for worker in workers):
+            fail("timing qualification ended with incomplete worker state")
+        if used != {worker.cpu for worker in workers}:
+            fail("timing qualification did not use every allowed logical CPU")
+        sink.publish()
+        return output_path, maximum_end
+    finally:
+        try:
+            if selector is not None:
+                selector.close()
+        finally:
+            if sink is not None:
+                sink.abort()
+
+
 def quit_workers(workers: Sequence[PersistentWorker], deadline: float) -> None:
     for worker in workers:
         if worker.pending is not None or worker.buffer:
@@ -1026,10 +1426,12 @@ def quit_workers(workers: Sequence[PersistentWorker], deadline: float) -> None:
 def _strict_response_validator(
         contract: Mapping[str, Any], freeze: Mapping[str, Any], kind: str,
         description: Mapping[str, Any], window_start_ns: int,
+        timing_qualification: Optional[
+            contract_api.TimingQualification] = None,
         ) -> ResponseValidator:
     try:
         ordinal_context = native_api._record_ordinal_context(
-            contract, freeze, kind, "development")
+            contract, freeze, kind, "development", timing_qualification)
     except (native_api.NativeEvidenceError,
             contract_api.ContractError) as exc:
         fail(str(exc))
@@ -1162,13 +1564,14 @@ def _development_timing_shape(
 
 def _timing_job_waves(
         contract: Mapping[str, Any], panel_count: int,
+        timing_qualification: contract_api.TimingQualification,
         ) -> List[Tuple[int, List[Job]]]:
     """Build homogeneous, barrier-delimited eight-job timing waves."""
     repetitions, independent_rounds, expected_cells = _development_timing_shape(
         contract, panel_count)
     try:
         cells = list(contract_api.iter_timing_cells(
-            contract, "development"))
+            contract, "development", timing_qualification))
     except contract_api.ContractError as exc:
         fail(str(exc))
     if len(cells) != expected_cells:
@@ -1183,7 +1586,9 @@ def _timing_job_waves(
         fail("development timing cell identity is invalid")
     stable_fields = [
         field for field in cell_fields
-        if field not in ("replicate", "loss_seed")
+        if field not in (
+            "replicate", "base_loss_seed", "base_cell_sha256",
+            "loss_retry_offset", "loss_seed")
     ]
     by_replicate: List[Dict[str, Tuple[int, Mapping[str, Any]]]] = [
         {} for _ in range(repetitions)
@@ -1235,10 +1640,12 @@ def _timing_job_waves(
             for replicate in range(
                     first_replicate,
                     first_replicate + TIMING_WORKER_COUNT):
-                cell_ordinal, _ = by_replicate[replicate][identity]
+                cell_ordinal, selected_cell = \
+                    by_replicate[replicate][identity]
                 jobs.append(Job(
                     "timing", cell_ordinal, panel,
-                    cell_ordinal * panel_count + panel))
+                    cell_ordinal * panel_count + panel,
+                    selected_cell["loss_retry_offset"]))
             # run_job_batch assigns job position r to worker slot
             # (r + rotation) modulo eight.  Derive that rotation from the
             # bounded contract helper and verify the complete wave before
@@ -1268,12 +1675,13 @@ def _timing_job_waves(
         fail(str(exc))
     expected_waves = expected_cohorts * independent_rounds
     expected_jobs = {
-        (cell, panel, cell * panel_count + panel)
+        (cell, panel, cell * panel_count + panel,
+         cells[cell]["loss_retry_offset"])
         for cell in range(expected_cells)
         for panel in range(panel_count)
     }
     actual_jobs = [
-        (job.cell, job.item, job.ordinal)
+        (job.cell, job.item, job.ordinal, job.retry_offset)
         for _, jobs in waves for job in jobs
     ]
     if (len(cohorts) != expected_cohorts or
@@ -1289,6 +1697,7 @@ def _timing_job_waves(
 
 def _run_native_jobs(
         contract: Mapping[str, Any], freezes: Mapping[str, Mapping[str, Any]],
+        timing_qualification: contract_api.TimingQualification,
         description: Mapping[str, Any], workers: Sequence[PersistentWorker],
         output_dir: Path, window_start_ns: int, deadline: float,
         ) -> Tuple[Mapping[str, Path], int]:
@@ -1299,15 +1708,18 @@ def _run_native_jobs(
             contract, [value[0] for value in EXPECTED_ARMS]))
     except contract_api.ContractError as exc:
         fail(str(exc))
-    timing_waves = _timing_job_waves(contract, panel_count)
+    timing_waves = _timing_job_waves(
+        contract, panel_count, timing_qualification)
     paths = {
         "recovery": output_dir / "recovery-native-results.jsonl",
         "timing": output_dir / "timing-native-results.jsonl",
     }
-    recovery_sink = AtomicLineSink(paths["recovery"])
-    timing_sink = AtomicLineSink(paths["timing"])
+    recovery_sink: Optional[AtomicLineSink] = None
+    timing_sink: Optional[AtomicLineSink] = None
     maximum_end = 0
     try:
+        recovery_sink = AtomicLineSink(paths["recovery"])
+        timing_sink = AtomicLineSink(paths["timing"])
         recovery_end, recovery_cpus = run_job_batch(
             workers, _recovery_jobs(contract, len(EXPECTED_ARMS)), 0,
             recovery_sink, deadline, _strict_response_validator(
@@ -1321,7 +1733,7 @@ def _run_native_jobs(
         expected_timing_cpus = set(worker.cpu for worker in workers)
         timing_validator = _strict_response_validator(
             contract, freezes["timing"], "timing", description,
-            window_start_ns)
+            window_start_ns, timing_qualification)
         for wave_ordinal, (rotation, jobs) in enumerate(timing_waves):
             end, used = run_job_batch(
                 workers, jobs, rotation, timing_sink,
@@ -1333,15 +1745,22 @@ def _run_native_jobs(
         timing_sink.publish()
         return paths, maximum_end
     finally:
-        recovery_sink.abort()
-        timing_sink.abort()
+        try:
+            if timing_sink is not None:
+                timing_sink.abort()
+        finally:
+            if recovery_sink is not None:
+                recovery_sink.abort()
 
 
 def _create_output_dir(path: Path) -> Path:
     try:
-        path.mkdir(parents=True, exist_ok=False)
+        path.mkdir(mode=0o700, parents=True, exist_ok=False)
         resolved = path.resolve(strict=True)
-        if not stat.S_ISDIR(resolved.stat().st_mode):
+        os.chmod(str(resolved), 0o700)
+        info = resolved.stat()
+        if (not stat.S_ISDIR(info.st_mode) or
+                stat.S_IMODE(info.st_mode) != 0o700):
             fail("output path is not a directory")
         _fsync_directory(resolved.parent)
         return resolved
@@ -1363,14 +1782,16 @@ def run_short_screen(args: argparse.Namespace) -> Mapping[str, Any]:
         original_affinity = set(os.sched_getaffinity(0))
     except (AttributeError, OSError) as exc:
         fail("cannot inspect initial controller affinity: {}".format(exc))
-    explicit = parse_cpu_list(args.cpus) if args.cpus is not None else None
-    cpus, controller_cpu = select_cpu_layout(
-        args.sampler_cpu, explicit, args.controller_cpu,
-        affinity=original_affinity)
-    # Recovery remains work-conserving on this same frozen roster.  Timing
-    # uses one exact job per worker and a barrier after every homogeneous wave.
-    if len(cpus) != TIMING_WORKER_COUNT:
-        fail("native short screen requires exactly eight physical worker CPUs")
+    qualification_cpus = sorted(original_affinity)
+    if not qualification_cpus:
+        fail("qualification requires a nonempty logical CPU affinity")
+    sampler_core = _cpu_topology(
+        args.sampler_cpu, CPU_SYSFS_ROOT)
+    if any(_cpu_topology(
+            cpu, CPU_SYSFS_ROOT) == sampler_core
+           for cpu in qualification_cpus):
+        fail("qualification requires every allowed logical CPU and the sampler "
+             "physical core must be outside that affinity")
     _development_timing_shape(
         contract,
         len(contract_api.timing_panels(
@@ -1382,18 +1803,112 @@ def run_short_screen(args: argparse.Namespace) -> Mapping[str, Any]:
     _require_worker_source_commit(description, source_commit)
     output_dir = _create_output_dir(args.output_dir)
 
-    trace_paths: Dict[str, Path] = {}
-    trace_sha256s: Dict[str, str] = {}
-    for kind in ("recovery", "timing"):
-        path, digest = _emit_and_assemble_trace(
-            contract, kind, description, output_dir, deadline)
-        trace_paths[kind] = path
-        trace_sha256s[kind] = digest
+    recovery_trace_path, recovery_trace_sha256 = _emit_and_assemble_trace(
+        contract, "recovery", description, output_dir, deadline)
+    controls = _timing_qualification_controls(contract, description)
+    qualification_native_path = output_dir / \
+        "timing-qualification-native.jsonl"
+    qualification_audit_path = output_dir / \
+        "timing-qualification-audit.jsonl"
+    qualification_map_path = output_dir / "timing-qualification-map.json"
+    qualification_execution_receipt_path = output_dir / \
+        "timing-qualification-execution.json"
+    qualification_window_start_ns = choose_new_sampler_start(
+        args.sampler_csv, deadline)
+
+    qualification_workers: List[PersistentWorker] = []
+    qualification_clean_shutdown = False
+    qualification_maximum_end = 0
+    try:
+        # Qualification intentionally saturates the complete logical affinity,
+        # including SMT siblings.  Timing topology isolation is selected only
+        # after this entire pool has exited and been reaped.
+        qualification_workers = spawn_workers(
+            description, qualification_cpus, deadline)
+        _, qualification_maximum_end = run_timing_qualification(
+            contract, description, qualification_workers,
+            qualification_native_path, qualification_window_start_ns,
+            deadline)
+        try:
+            (timing_qualification, qualification_metadata,
+             qualification_execution_receipt_sha256) = \
+                native_api.assemble_timing_qualification(
+                    contract, "development", qualification_native_path,
+                    qualification_audit_path, qualification_map_path,
+                    qualification_execution_receipt_path, source_commit,
+                    controls, qualification_cpus,
+                    verify_live_workers=True)
+        except (native_api.NativeEvidenceError,
+                contract_api.ContractError) as exc:
+            fail(str(exc))
+        quit_workers(qualification_workers, deadline)
+        qualification_clean_shutdown = True
+    finally:
+        if qualification_workers and not qualification_clean_shutdown:
+            primary = sys.exc_info()[1]
+            try:
+                terminate_workers(qualification_workers)
+            except RunnerError as cleanup:
+                if primary is not None:
+                    raise RunnerError(
+                        "{}; qualification worker cleanup also failed: {}".
+                        format(primary, cleanup)) from primary
+                raise
+    if any(worker.process.poll() is None for worker in qualification_workers):
+        fail("a qualification worker survived the mandatory reap boundary")
+    qualification_window_end_ns = _wait_for_sampler_sample(
+        args.sampler_csv, deadline,
+        at_or_after_ns=qualification_maximum_end)
+    qualification_sampler_path = output_dir / \
+        "qualification-sampler-attestation.json"
+    try:
+        native_api.write_sampler_attestation(
+            args.sampler_pid, args.sampler_cpu,
+            args.sampler_script, args.sampler_csv,
+            qualification_window_start_ns, qualification_window_end_ns,
+            qualification_sampler_path)
+    except native_api.NativeEvidenceError as exc:
+        fail(str(exc))
+
+    qualification_map_sha256 = timing_qualification.map_sha256
+    try:
+        timing_qualification = contract_api.load_timing_qualification_map(
+            contract, "development", qualification_map_path,
+            qualification_audit_path, qualification_map_sha256)
+    except contract_api.ContractError as exc:
+        fail(str(exc))
+    if _git_head(deadline) != source_commit:
+        fail("codec source commit changed during timing qualification")
+
+    # Exact-eight topology selection is deliberately after the qualification
+    # process boundary.  No qualification worker/cache can survive into T.
+    explicit = parse_cpu_list(args.cpus) if args.cpus is not None else None
+    cpus, controller_cpu = select_cpu_layout(
+        args.sampler_cpu, explicit, args.controller_cpu,
+        affinity=original_affinity)
+    if len(cpus) != TIMING_WORKER_COUNT:
+        fail("native short screen requires exactly eight physical worker CPUs")
+    timing_trace_path = output_dir / "timing-traces.jsonl"
+    try:
+        timing_trace_sha256 = native_api.publish_timing_trace_manifest(
+            contract, "development", timing_qualification,
+            timing_trace_path)
+    except (native_api.NativeEvidenceError,
+            contract_api.ContractError) as exc:
+        fail(str(exc))
+    trace_paths = {
+        "recovery": recovery_trace_path,
+        "timing": timing_trace_path,
+    }
+    trace_sha256s = {
+        "recovery": recovery_trace_sha256,
+        "timing": timing_trace_sha256,
+    }
     if _git_head(deadline) != source_commit:
         fail("codec source commit changed before the result freeze")
     freezes = write_development_freezes(
         contract, description, cpus, controller_cpu, source_commit,
-        trace_sha256s, output_dir)
+        trace_sha256s, output_dir, timing_qualification)
     freeze_paths = {
         kind: output_dir / "{}-freeze.json".format(kind)
         for kind in ("recovery", "timing")
@@ -1407,10 +1922,12 @@ def run_short_screen(args: argparse.Namespace) -> Mapping[str, Any]:
         workers = spawn_workers(description, cpus, deadline)
         controller_pinned = True
         _pin_controller(controller_cpu)
-        window_start_ns = choose_new_sampler_start(args.sampler_csv, deadline)
+        timing_window_start_ns = choose_new_sampler_start(
+            args.sampler_csv, deadline)
         native_paths, maximum_worker_end = _run_native_jobs(
-            contract, freezes, description, workers, output_dir,
-            window_start_ns, deadline)
+            contract, freezes, timing_qualification, description, workers,
+            output_dir,
+            timing_window_start_ns, deadline)
         window_end_ns = _wait_for_sampler_sample(
             args.sampler_csv, deadline,
             at_or_after_ns=maximum_worker_end)
@@ -1421,7 +1938,7 @@ def run_short_screen(args: argparse.Namespace) -> Mapping[str, Any]:
             native_api.write_sampler_attestation(
                 args.sampler_pid, args.sampler_cpu,
                 args.sampler_script, args.sampler_csv,
-                window_start_ns, window_end_ns, sampler_path)
+                timing_window_start_ns, window_end_ns, sampler_path)
         except native_api.NativeEvidenceError as exc:
             fail(str(exc))
 
@@ -1433,22 +1950,61 @@ def run_short_screen(args: argparse.Namespace) -> Mapping[str, Any]:
                 assembled[kind] = native_api.assemble_results(
                     contract, kind, "development", freeze_paths[kind],
                     trace_paths[kind], native_paths[kind], sampler_path,
-                    result_path, receipt_path, verify_live_sampler=True)
+                    result_path, receipt_path, verify_live_sampler=True,
+                    timing_qualification_map_path=
+                        qualification_map_path if kind == "timing" else None,
+                    timing_qualification_audit_path=
+                        qualification_audit_path if kind == "timing" else None,
+                    timing_qualification_map_sha256=
+                        qualification_map_sha256 if kind == "timing" else None,
+                    timing_qualification_native_path=
+                        qualification_native_path if kind == "timing" else None,
+                    timing_qualification_sampler_path=
+                        qualification_sampler_path if kind == "timing" else None,
+                    timing_qualification_execution_receipt_path=
+                        qualification_execution_receipt_path
+                        if kind == "timing" else None,
+                    timing_qualification_execution_receipt_sha256=
+                        qualification_execution_receipt_sha256
+                        if kind == "timing" else None)
                 _remaining(deadline, "assembling {} results".format(kind))
                 native_api.validate_execution_receipt(
                     contract, kind, "development", freeze_paths[kind],
                     trace_paths[kind], native_paths[kind], result_path,
-                    receipt_path, verify_live_sampler=True)
+                    receipt_path, verify_live_sampler=True,
+                    sampler_path=sampler_path,
+                    timing_qualification_map_path=
+                        qualification_map_path if kind == "timing" else None,
+                    timing_qualification_audit_path=
+                        qualification_audit_path if kind == "timing" else None,
+                    timing_qualification_map_sha256=
+                        qualification_map_sha256 if kind == "timing" else None,
+                    timing_qualification_native_path=
+                        qualification_native_path if kind == "timing" else None,
+                    timing_qualification_sampler_path=
+                        qualification_sampler_path if kind == "timing" else None,
+                    timing_qualification_execution_receipt_path=
+                        qualification_execution_receipt_path
+                        if kind == "timing" else None,
+                    timing_qualification_execution_receipt_sha256=
+                        qualification_execution_receipt_sha256
+                        if kind == "timing" else None)
                 _remaining(deadline, "validating {} execution".format(kind))
             except (native_api.NativeEvidenceError,
                     contract_api.ContractError) as exc:
                 fail(str(exc))
         quit_workers(workers, deadline)
         clean_shutdown = True
+        if controller_pinned:
+            _restore_controller_affinity(original_affinity)
+            controller_pinned = False
 
         recovery_receipt = assembled["recovery"]["execution_receipt"]
         timing_receipt = assembled["timing"]["execution_receipt"]
         thermal = timing_receipt["thermal"]
+        qualification_thermal = timing_receipt["qualification_thermal"]
+        qualification_retry_offsets = list(
+            timing_qualification.retry_offsets)
         summary = {
             "schema": SUMMARY_SCHEMA,
             "status": "complete",
@@ -1458,6 +2014,20 @@ def run_short_screen(args: argparse.Namespace) -> Mapping[str, Any]:
             "worker_binary_sha256": description["binary_sha256"],
             "controller_cpu": controller_cpu,
             "worker_cpus": list(cpus),
+            "qualification_worker_cpus": qualification_cpus,
+            "timing_qualification_map_sha256": qualification_map_sha256,
+            "timing_qualification_execution_receipt_sha256":
+                qualification_execution_receipt_sha256,
+            "timing_qualified_domain_sha256":
+                timing_qualification.qualified_domain_sha256,
+            "qualification_attempt_count":
+                qualification_metadata["qualification_attempt_count"],
+            "qualification_retried_cell_count": sum(
+                1 for retry in qualification_retry_offsets if retry > 0),
+            "qualification_max_retry_offset": max(
+                qualification_retry_offsets, default=0),
+            "qualification_sum_retry_offsets": sum(
+                qualification_retry_offsets),
             "recovery_records": recovery_receipt["record_count"],
             "timing_records": timing_receipt["record_count"],
             "recovery_freeze_sha256":
@@ -1469,14 +2039,46 @@ def run_short_screen(args: argparse.Namespace) -> Mapping[str, Any]:
             "thermal_samples": thermal["sample_count"],
             "cpu_tctl_max_millic": thermal["cpu_tctl_max_millic"],
             "dimm_max_millic": thermal["dimm_max_millic"],
+            "timing_thermal_samples": thermal["sample_count"],
+            "timing_cpu_tctl_max_millic":
+                thermal["cpu_tctl_max_millic"],
+            "timing_dimm_max_millic": thermal["dimm_max_millic"],
+            "qualification_thermal_samples":
+                qualification_thermal["sample_count"],
+            "qualification_cpu_tctl_max_millic":
+                qualification_thermal["cpu_tctl_max_millic"],
+            "qualification_dimm_max_millic":
+                qualification_thermal["dimm_max_millic"],
+            "overall_cpu_tctl_max_millic": max(
+                thermal["cpu_tctl_max_millic"],
+                qualification_thermal["cpu_tctl_max_millic"]),
+            "overall_dimm_max_millic": max(
+                thermal["dimm_max_millic"],
+                qualification_thermal["dimm_max_millic"]),
         }
         _atomic_write_object(output_dir / "run-summary.json", summary)
         return summary
     finally:
+        primary = sys.exc_info()[1]
+        cleanup_failures: List[str] = []
         if workers and not clean_shutdown:
-            terminate_workers(workers)
+            try:
+                terminate_workers(workers)
+            except RunnerError as cleanup:
+                cleanup_failures.append(
+                    "timing worker cleanup failed: {}".format(cleanup))
         if controller_pinned:
-            _restore_controller_affinity(original_affinity)
+            try:
+                _restore_controller_affinity(original_affinity)
+            except RunnerError as cleanup:
+                cleanup_failures.append(
+                    "controller affinity cleanup failed: {}".format(cleanup))
+        if cleanup_failures:
+            cleanup_message = "; ".join(cleanup_failures)
+            if primary is not None:
+                raise RunnerError("{}; {}".format(
+                    primary, cleanup_message)) from primary
+            fail(cleanup_message)
 
 
 def main(argv: Sequence[str] = ()) -> int:

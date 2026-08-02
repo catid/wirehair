@@ -18,6 +18,9 @@ using wirehair_wh2_bench::NativeEncoderFixture;
 using wirehair_wh2_bench::NativeReceiveFixture;
 using wirehair_wh2_bench::NativeRecoveryFixture;
 using wirehair_wh2_bench::NativeSolveFixture;
+using wirehair_wh2_bench::NativeTimingControlProbe;
+using wirehair_wh2_bench::NativeTimingControlQualification;
+using wirehair_wh2_bench::NativeTimingControlQualificationResult;
 using wirehair_wh2_bench::NativeWh2BaseKind;
 using wirehair_wh2_bench::RecoveryCellResult;
 using wirehair_wh2_bench::RecoveryOutcome;
@@ -34,11 +37,55 @@ bool Check(bool condition, const char* message)
     return condition;
 }
 
-std::vector<uint32_t> ConsecutiveIds(uint32_t K, uint32_t first = 0u)
+std::vector<uint32_t> ConsecutiveIds(
+    uint32_t K,
+    uint32_t first = 0u,
+    uint32_t overhead = 4u)
 {
-    std::vector<uint32_t> ids((size_t)K + 4u);
+    std::vector<uint32_t> ids((size_t)K + overhead);
     std::iota(ids.begin(), ids.end(), first);
     return ids;
+}
+
+struct IidTrace
+{
+    std::vector<uint32_t> Ids;
+    uint64_t AttemptedCandidates = 0u;
+};
+
+uint64_t NextSplitMix64(uint64_t& state)
+{
+    state += UINT64_C(0x9e3779b97f4a7c15);
+    uint64_t value = state;
+    value = (value ^ (value >> 30)) * UINT64_C(0xbf58476d1ce4e5b9);
+    value = (value ^ (value >> 27)) * UINT64_C(0x94d049bb133111eb);
+    return value ^ (value >> 31);
+}
+
+IidTrace FrozenIidIds(
+    uint32_t K,
+    uint32_t block_bytes,
+    uint64_t loss_seed,
+    uint32_t delivered_overhead)
+{
+    IidTrace trace;
+    trace.Ids.reserve(static_cast<size_t>(K) + delivered_overhead);
+    uint64_t state = loss_seed ^
+        (static_cast<uint64_t>(K) * UINT64_C(0x9e3779b97f4a7c15)) ^
+        (static_cast<uint64_t>(block_bytes) *
+            UINT64_C(0xbf58476d1ce4e5b9));
+    while (trace.Ids.size() <
+        static_cast<size_t>(K) + delivered_overhead)
+    {
+        const uint32_t id =
+            static_cast<uint32_t>(trace.AttemptedCandidates++);
+        const double unit = static_cast<double>(NextSplitMix64(state) >> 11) /
+            9007199254740992.0;
+        if (unit >= 0.1) {
+            trace.Ids.push_back(id);
+        }
+    }
+    return trace;
 }
 
 bool EncodePublicWh2(
@@ -685,7 +732,7 @@ void CheckIsolatedSolveFixture()
     Check(wirehair_wh2_bench::MakeDeterministicSource(
               K, block_bytes, UINT64_C(0x24c7e91b65ad803f), source),
         "isolated solve source generation failed");
-    const std::vector<uint32_t> ids = ConsecutiveIds(K);
+    const std::vector<uint32_t> ids = ConsecutiveIds(K, 0u, 64u);
 
     NativeArm arm;
     Check(arm.Initialize(
@@ -707,6 +754,23 @@ void CheckIsolatedSolveFixture()
             "isolated solve invocation was not timed and byte-verified");
     }
 
+    // A solve fixture consumes only the frozen K+4 prefix of the shared K+64
+    // timing trace.  Deliberately corrupting the unused tail must not change
+    // the isolated-solve preparation or row count.
+    std::vector<uint32_t> ignored_tail = ids;
+    std::fill(
+        ignored_tail.begin() + K + 4u,
+        ignored_tail.end(),
+        ignored_tail.front());
+    NativeSolveFixture prefix_only;
+    Check(prefix_only.Initialize(arm, ignored_tail, 4u) == Wirehair_Success,
+        "isolated solve inspected the receive-only trace tail");
+    const IsolatedSolveResult prefix_only_result = prefix_only.Run();
+    Check(prefix_only_result.Result == Wirehair_Success &&
+              prefix_only_result.BytesVerified &&
+              prefix_only_result.Stats.PacketRows == K + 4u,
+        "isolated solve did not retain exactly the K+4 trace prefix");
+
     NativeArm wh1;
     Check(wh1.Initialize(
               wirehair_wh2_bench::MakeWirehair1Arm(),
@@ -719,6 +783,8 @@ void CheckIsolatedSolveFixture()
         "isolated solve incorrectly accepted Wirehair1");
     Check(rejected.Initialize(arm, ids, 5u) == Wirehair_InvalidInput,
         "isolated solve accepted overhead above the frozen cap");
+    Check(rejected.Initialize(arm, ids, 3u) == Wirehair_InvalidInput,
+        "isolated solve accepted a prefix other than exactly K+4");
 }
 
 void CheckOtherTimingScopes()
@@ -729,7 +795,10 @@ void CheckOtherTimingScopes()
     Check(wirehair_wh2_bench::MakeDeterministicSource(
               K, block_bytes, UINT64_C(0x943a0f6de5b728c1), source),
         "other timing-scope source generation failed");
-    const std::vector<uint32_t> ids = ConsecutiveIds(K);
+    const std::vector<uint32_t> ids = ConsecutiveIds(K, 0u, 64u);
+    const std::vector<uint32_t> short_ids = ConsecutiveIds(K);
+    std::vector<uint32_t> duplicate_ids = ids;
+    duplicate_ids.back() = duplicate_ids.front();
 
     TransformState transform_state;
     const NativeArmSpec specs[] = {
@@ -764,8 +833,24 @@ void CheckOtherTimingScopes()
         Check(arm.Initialize(spec, K, block_bytes, source) == Wirehair_Success,
             "receive timing arm construction failed");
         NativeReceiveFixture receive_fixture;
-        Check(receive_fixture.Initialize(arm, ids) == Wirehair_Success,
+        Check(receive_fixture.Initialize(arm, ids, 64u) == Wirehair_Success,
             "receive timing fixture preparation failed");
+        Check(receive_fixture.Initialize(arm, short_ids, 64u) ==
+                  Wirehair_InvalidInput &&
+                  receive_fixture.IsInitialized(),
+            "receive timing accepted a short trace or lost prior state");
+        Check(receive_fixture.Initialize(arm, ids, 63u) ==
+                  Wirehair_InvalidInput &&
+                  receive_fixture.IsInitialized(),
+            "receive timing accepted a trace longer than its exact cap");
+        Check(receive_fixture.Initialize(arm, duplicate_ids, 64u) ==
+                  Wirehair_InvalidInput &&
+                  receive_fixture.IsInitialized(),
+            "receive timing accepted duplicate IDs in its extended trace");
+        Check(receive_fixture.Initialize(arm, ids, UINT32_MAX) ==
+                  Wirehair_InvalidInput &&
+                  receive_fixture.IsInitialized(),
+            "receive timing accepted an overflowing K+cap domain");
         const wirehair_wh2_bench::TimedArmResult receive_result =
             receive_fixture.Run();
         Check(receive_result.Result == Wirehair_Success &&
@@ -774,6 +859,209 @@ void CheckOtherTimingScopes()
                   receive_result.DecodedOverhead == 0u,
             "fresh receive-to-success timing scope failed");
     }
+}
+
+void CheckTimingControlProbe()
+{
+    struct Shape
+    {
+        uint32_t K;
+        uint32_t BlockBytes;
+        uint64_t SourceSeed;
+    };
+    const Shape shapes[] = {
+        { 8u, 64u, UINT64_C(0x3c79ac492ba7d113) },
+        { 32u, 1280u, UINT64_C(0x79d8e31b5a40c6f2) },
+        { 101u, 4096u, UINT64_C(0xa44e91b0367fc825) }
+    };
+
+    NativeTimingControlProbe uninitialized;
+    const NativeTimingControlQualificationResult uninitialized_result =
+        uninitialized.Run(ConsecutiveIds(8u, 1u, 256u));
+    Check(uninitialized_result.Qualification ==
+              NativeTimingControlQualification::Fatal &&
+              uninitialized_result.Wirehair1Result ==
+                  Wirehair_InvalidInput &&
+              uninitialized_result.Wirehair2HeadResult ==
+                  Wirehair_InvalidInput,
+        "uninitialized timing-control probe did not fail closed");
+
+    for (const Shape& shape : shapes)
+    {
+        const NativeArmSpec head_spec =
+            wirehair_wh2_bench::MakeCertifiedWh2Arm(0u);
+        wirehair_wh2_bench::ResolvedNativeWh2Configuration actual_width;
+        wirehair_wh2_bench::ResolvedNativeWh2Configuration unit_width;
+        Check(wirehair_wh2_bench::ResolveNativeWh2Configuration(
+                  head_spec, shape.K, shape.BlockBytes, actual_width) &&
+              wirehair_wh2_bench::ResolveNativeWh2Configuration(
+                  head_spec, shape.K, 1u, unit_width) &&
+              (actual_width.Params.Seed != unit_width.Params.Seed ||
+               actual_width.PacketConfig.PeelSeed !=
+                   unit_width.PacketConfig.PeelSeed),
+            "representative WH2 width did not affect resolved equations");
+
+        std::vector<uint8_t> source;
+        Check(wirehair_wh2_bench::MakeDeterministicSource(
+                  shape.K, shape.BlockBytes, shape.SourceSeed, source),
+            "timing-control differential source generation failed");
+        const std::vector<uint32_t> ids =
+            ConsecutiveIds(shape.K, 1u, 256u);
+
+        NativeTimingControlProbe probe;
+        Check(probe.Initialize(
+                  head_spec, shape.K, shape.BlockBytes) == Wirehair_Success &&
+              probe.IsInitialized(),
+            "timing-control probe initialization failed");
+        const NativeTimingControlQualificationResult structural =
+            probe.Run(ids);
+
+        NativeArm wh1;
+        Check(wh1.Initialize(
+                  wirehair_wh2_bench::MakeWirehair1Arm(),
+                  shape.K, shape.BlockBytes, source) == Wirehair_Success,
+            "full-data Wirehair1 differential construction failed");
+        NativeReceiveFixture receive;
+        Check(receive.Initialize(wh1, ids, 256u) == Wirehair_Success,
+            "full-data Wirehair1 differential fixture failed");
+        const wirehair_wh2_bench::TimedArmResult full_receive = receive.Run();
+
+        NativeArm wh2;
+        Check(wh2.Initialize(
+                  head_spec, shape.K, shape.BlockBytes, source) ==
+                  Wirehair_Success,
+            "full-data WH2-head differential construction failed");
+        NativeSolveFixture solve;
+        Check(solve.Initialize(wh2, ids, 4u) == Wirehair_Success,
+            "full-data WH2-head differential fixture failed");
+        const IsolatedSolveResult full_solve = solve.Run();
+
+        Check(structural.Wirehair1Result == full_receive.Result &&
+                  structural.Wirehair2HeadResult == full_solve.Result,
+            "minimal-payload timing-control outcome differs from full data");
+        if (full_receive.Result == Wirehair_Success)
+        {
+            Check(full_receive.BytesVerified &&
+                      structural.Wirehair1DecodedOverhead ==
+                          full_receive.DecodedOverhead,
+                "minimal-payload Wirehair1 overhead differs from full data");
+        }
+        if (full_solve.Result == Wirehair_Success) {
+            Check(full_solve.BytesVerified,
+                "full-data WH2-head differential did not recover bytes");
+        }
+
+        const bool both_success =
+            full_receive.Result == Wirehair_Success &&
+            full_solve.Result == Wirehair_Success;
+        const bool both_retryable =
+            (full_receive.Result == Wirehair_Success ||
+             full_receive.Result == Wirehair_NeedMore) &&
+            (full_solve.Result == Wirehair_Success ||
+             full_solve.Result == Wirehair_NeedMore);
+        const NativeTimingControlQualification expected = both_success ?
+            NativeTimingControlQualification::Success :
+            (both_retryable ? NativeTimingControlQualification::NeedMore :
+                NativeTimingControlQualification::Fatal);
+        Check(structural.Qualification == expected,
+            "timing-control qualification misclassified exact outcomes");
+
+        std::vector<uint32_t> short_ids(ids.begin(), ids.end() - 1u);
+        const NativeTimingControlQualificationResult short_result =
+            probe.Run(short_ids);
+        Check(short_result.Qualification ==
+                  NativeTimingControlQualification::Fatal &&
+                  short_result.Wirehair1Result == Wirehair_InvalidInput &&
+                  short_result.Wirehair2HeadResult == Wirehair_InvalidInput &&
+                  probe.IsInitialized(),
+            "timing-control probe accepted a short K+256 trace");
+        std::vector<uint32_t> duplicate_ids(ids);
+        duplicate_ids.back() = duplicate_ids.front();
+        const NativeTimingControlQualificationResult duplicate_result =
+            probe.Run(duplicate_ids);
+        Check(duplicate_result.Qualification ==
+                  NativeTimingControlQualification::Fatal &&
+                  duplicate_result.Wirehair1Result == Wirehair_InvalidInput &&
+                  duplicate_result.Wirehair2HeadResult ==
+                      Wirehair_InvalidInput &&
+                  probe.IsInitialized(),
+            "timing-control probe accepted duplicate IDs");
+
+        Check(probe.Initialize(
+                  wirehair_wh2_bench::MakeWirehair1Arm(),
+                  shape.K, shape.BlockBytes) == Wirehair_InvalidInput &&
+                  probe.IsInitialized(),
+            "timing-control probe accepted WH1 as its head or lost state");
+        const NativeTimingControlQualificationResult repeated = probe.Run(ids);
+        Check(repeated.Qualification == structural.Qualification &&
+                  repeated.Wirehair1Result == structural.Wirehair1Result &&
+                  repeated.Wirehair1DecodedOverhead ==
+                      structural.Wirehair1DecodedOverhead &&
+                  repeated.Wirehair2HeadResult ==
+                      structural.Wirehair2HeadResult,
+            "reused timing-control probe changed deterministic outcome");
+    }
+
+    // This is the frozen K=64000, width=64, replicate=84 loss stream.  It is
+    // the known LegacyCurrent identity that remains NeedMore through +256;
+    // the WH2-head K+4 system succeeds.  Pin the retryable classification and
+    // compare both minimal-payload outcomes with the real-width full-data
+    // fixtures so a future probe cannot silently treat rank as byte recovery.
+    const uint32_t K = 64000u;
+    const uint32_t block_bytes = 64u;
+    const IidTrace retry_trace = FrozenIidIds(
+        K,
+        block_bytes,
+        UINT64_C(0x1b52cf340f1a5879),
+        256u);
+    Check(retry_trace.Ids.size() == static_cast<size_t>(K) + 256u &&
+              retry_trace.AttemptedCandidates == UINT64_C(71472),
+        "known retryable timing trace changed");
+    const NativeArmSpec head_spec =
+        wirehair_wh2_bench::MakeCertifiedWh2Arm(0u);
+    NativeTimingControlProbe retry_probe;
+    Check(retry_probe.Initialize(head_spec, K, block_bytes) ==
+              Wirehair_Success,
+        "known retryable timing-control probe initialization failed");
+    const NativeTimingControlQualificationResult retry_result =
+        retry_probe.Run(retry_trace.Ids);
+    Check(retry_result.Qualification ==
+              NativeTimingControlQualification::NeedMore &&
+              retry_result.Wirehair1Result == Wirehair_NeedMore &&
+              retry_result.Wirehair1DecodedOverhead == UINT32_MAX &&
+              retry_result.Wirehair2HeadResult == Wirehair_Success,
+        "known cap-256 timing trace was not classified retryable");
+
+    std::vector<uint8_t> source;
+    Check(wirehair_wh2_bench::MakeDeterministicSource(
+              K, block_bytes, UINT64_C(0x68e29714c35ba0df), source),
+        "known retryable differential source generation failed");
+    NativeArm wh1;
+    Check(wh1.Initialize(
+              wirehair_wh2_bench::MakeWirehair1Arm(),
+              K, block_bytes, source) == Wirehair_Success,
+        "known retryable full-data WH1 construction failed");
+    NativeReceiveFixture receive;
+    Check(receive.Initialize(wh1, retry_trace.Ids, 256u) ==
+              Wirehair_Success,
+        "known retryable full-data WH1 fixture failed");
+    const wirehair_wh2_bench::TimedArmResult full_receive = receive.Run();
+    Check(full_receive.Result == retry_result.Wirehair1Result &&
+              !full_receive.BytesVerified &&
+              full_receive.DecodedOverhead == UINT32_MAX,
+        "known retryable WH1 minimal/full-data outcomes differ");
+
+    NativeArm wh2;
+    Check(wh2.Initialize(head_spec, K, block_bytes, source) ==
+              Wirehair_Success,
+        "known retryable full-data WH2 construction failed");
+    NativeSolveFixture solve;
+    Check(solve.Initialize(wh2, retry_trace.Ids, 4u) == Wirehair_Success,
+        "known retryable full-data WH2 solve fixture failed");
+    const IsolatedSolveResult full_solve = solve.Run();
+    Check(full_solve.Result == retry_result.Wirehair2HeadResult &&
+              full_solve.BytesVerified,
+        "known retryable WH2 minimal/full-data outcomes differ");
 }
 
 } // namespace
@@ -790,6 +1078,7 @@ int main()
     CheckTransactionalArmAndValidation();
     CheckIsolatedSolveFixture();
     CheckOtherTimingScopes();
+    CheckTimingControlProbe();
     if (Failures != 0)
     {
         std::fprintf(stderr, "%d native codec test(s) failed\n", Failures);

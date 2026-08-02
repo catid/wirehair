@@ -7,7 +7,7 @@ ledger/timing schemas, runs the authoritative contract validator, and only
 then publishes the result stream and its terminal execution receipt.
 
 It is intentionally not a campaign scheduler.  Recovery work may be
-distributed over the frozen workers, but v4 timing evidence must also prove
+distributed over the frozen workers, but v6 timing evidence must also prove
 the frozen round-major homogeneous-wave CPU placement and non-overlapping
 wave barriers.
 """
@@ -33,10 +33,16 @@ import wh2_benchmark_contract as contract_api
 TRACE_RECORD_SCHEMA = "wirehair.wh2.native-trace-record.v1"
 RECOVERY_RECORD_SCHEMA = "wirehair.wh2.native-recovery-record.v1"
 RAW_RECOVERY_RECORD_SCHEMA = "wirehair.wh2.native-recovery-record.v2"
-TIMING_RECORD_SCHEMA = "wirehair.wh2.native-timing-record.v3"
+TIMING_RECORD_SCHEMA = "wirehair.wh2.native-timing-record.v4"
+TIMING_QUALIFICATION_RECORD_SCHEMA = \
+    "wirehair.wh2.native-timing-qualification-record.v1"
+TIMING_QUALIFICATION_EXECUTION_SCHEMA = \
+    "wirehair.wh2.native-timing-qualification-execution-receipt.v1"
 SAMPLER_SCHEMA = "wirehair.wh2.sampler-attestation.v1"
 EXECUTION_SCHEMA = "wirehair.wh2.native-execution-receipt.v1"
 RAW_EXECUTION_SCHEMA = "wirehair.wh2.native-execution-receipt.v2"
+TIMING_EXECUTION_SCHEMA = \
+    "wirehair.wh2.native-timing-execution-receipt.v1"
 
 SHA256_FIELDS = frozenset((
     "worker_binary_sha256", "message_sha256", "work_sha256",
@@ -64,6 +70,10 @@ THERMAL_RECEIPT_FIELDS = frozenset((
     "cpu_tctl_max_millic", "dimm_max_millic", "dimm_read_errors",
     "edac_ce_max", "edac_ue_max", "terminal_status",
 ))
+SAMPLER_IDENTITY_FIELDS = (
+    "pid", "cpu", "process_start_ticks", "script_path", "script_sha256",
+    "csv_path", "csv_device", "csv_inode", "terminal_status",
+)
 EXECUTION_FIELDS = frozenset((
     "schema", "contract_sha256", "evidence_kind", "phase",
     "freeze_manifest_sha256", "trace_manifest_sha256",
@@ -73,6 +83,42 @@ EXECUTION_FIELDS = frozenset((
     "native_stream_sha256", "arm_descriptor_sha256s", "thermal",
     "validator_summary_sha256", "receipt_sha256",
 ))
+TIMING_EXECUTION_FIELDS = EXECUTION_FIELDS | frozenset((
+    "timing_base_domain_sha256", "timing_qualified_domain_sha256",
+    "timing_qualification_map_sha256",
+    "timing_qualification_audit_sha256",
+    "timing_qualification_native_stream_sha256",
+    "qualification_worker_start_monotonic_ns",
+    "qualification_worker_end_monotonic_ns", "qualification_worker_cpus",
+    "qualification_workers", "qualification_thermal",
+    "timing_qualification_execution_receipt_sha256",
+))
+TIMING_QUALIFICATION_EXECUTION_FIELDS = frozenset((
+    "schema", "contract_sha256", "phase", "source_git_commit",
+    "timing_base_domain_sha256", "timing_qualified_domain_sha256",
+    "timing_qualification_map_sha256",
+    "timing_qualification_audit_sha256",
+    "timing_qualification_native_stream_sha256",
+    "qualification_attempt_count", "qualification_allowed_cpus",
+    "qualification_worker_start_monotonic_ns",
+    "qualification_worker_end_monotonic_ns", "qualification_worker_cpus",
+    "qualification_workers", "qualification_worker_binary_sha256s",
+    "receipt_sha256",
+))
+TIMING_QUALIFICATION_EMBEDDED_FIELDS = (
+    "timing_qualification_native_stream_sha256",
+    "qualification_worker_start_monotonic_ns",
+    "qualification_worker_end_monotonic_ns", "qualification_worker_cpus",
+    "qualification_workers",
+)
+TIMING_QUALIFICATION_PAYLOAD_FIELDS = frozenset((
+    "ordinal", "base_cell_sha256", "loss_retry_offset", "loss_seed",
+    "cell_sha256", "trace_sha256", "packet_count", "candidate_count",
+    "wirehair2_head_outcome", "wirehair2_head_decoded_extra",
+    "wirehair1_outcome", "wirehair1_decoded_extra",
+))
+TIMING_QUALIFICATION_MESSAGE_DOMAIN = \
+    b"wirehair.wh2.timing-qualification-message.v1\0"
 THERMAL_HEADER = (
     "utc", "monotonic_s", "cpu_busy_pct", "cpu_avg_mhz", "cpu_tctl_c",
     "dimm_i2c1_50_c", "dimm_i2c1_51_c", "dimm_i2c1_52_c",
@@ -123,17 +169,20 @@ def _open_regular_nofollow(path: Path, context: str) -> Tuple[int, os.stat_resul
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     if nofollow == 0:
         fail("{} cannot be opened fail-closed without O_NOFOLLOW".format(context))
+    descriptor = -1
     try:
         descriptor = os.open(str(path), flags | nofollow)
-    except OSError as exc:
-        fail("cannot open {} {}: {}".format(context, path, exc))
-    try:
         info = os.fstat(descriptor)
         if not stat.S_ISREG(info.st_mode):
             fail("{} must be a regular non-symlink file".format(context))
         return descriptor, info
+    except OSError as exc:
+        if descriptor >= 0:
+            os.close(descriptor)
+        fail("cannot open {} {}: {}".format(context, path, exc))
     except BaseException:
-        os.close(descriptor)
+        if descriptor >= 0:
+            os.close(descriptor)
         raise
 
 
@@ -215,29 +264,54 @@ def _temporary_path(destination: Path, suffix: str) -> Path:
     return Path(raw)
 
 
-def _publish_new(staged: Path, destination: Path) -> None:
+def _publish_new(
+        staged: Path, destination: Path,
+        expected_identity: Optional[Tuple[int, int]] = None) -> None:
+    guard_fd, staged_info = _open_regular_nofollow(
+        staged, "staged publication artifact")
+    directory_fd = -1
     try:
-        staged_info = os.stat(str(staged), follow_symlinks=False)
-    except OSError as exc:
-        fail("cannot inspect staged artifact {}: {}".format(staged, exc))
-    try:
-        os.link(str(staged), str(destination))
-    except FileExistsError:
-        fail("refusing to replace existing artifact {}".format(destination))
-    except OSError as exc:
-        fail("cannot publish {}: {}".format(destination, exc))
-    try:
-        staged.unlink()
-    except FileNotFoundError:
-        pass
-    except BaseException:
-        _unlink_if_identity(
-            destination, staged_info.st_dev, staged_info.st_ino)
-        raise
+        directory_fd = os.open(
+            str(destination.parent),
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
+            getattr(os, "O_CLOEXEC", 0))
+        if (expected_identity is not None and
+                expected_identity != (staged_info.st_dev, staged_info.st_ino)):
+            fail("staged publication artifact identity changed")
+        try:
+            os.link(
+                "/proc/self/fd/{}".format(guard_fd), destination.name,
+                dst_dir_fd=directory_fd,
+                follow_symlinks=True)
+            published_info = os.stat(
+                destination.name, dir_fd=directory_fd,
+                follow_symlinks=False)
+            if (published_info.st_dev != staged_info.st_dev or
+                    published_info.st_ino != staged_info.st_ino):
+                fail("published artifact identity changed during link")
+            os.fsync(directory_fd)
+            if not _unlink_if_identity(
+                    staged, staged_info.st_dev, staged_info.st_ino):
+                fail("staged publication artifact changed before cleanup")
+            os.fsync(directory_fd)
+            return
+        except FileExistsError:
+            fail("refusing to replace existing artifact {}".format(destination))
+        except OSError as exc:
+            fail("cannot publish {}: {}".format(destination, exc))
+        except BaseException:
+            # A successfully linked destination is already a valid immutable
+            # dependency.  Never risk deleting a concurrent path replacement;
+            # terminal receipts and run-summary are published last as markers.
+            raise
+    finally:
+        if directory_fd >= 0:
+            os.close(directory_fd)
+        os.close(guard_fd)
 
 
 def _unlink_if_identity(path: Path, device: int, inode: int) -> bool:
-    """Remove only our own published hard link, never an EEXIST winner."""
+    """Best-effort cleanup for staging names in the private output directory."""
     try:
         info = os.lstat(str(path))
     except FileNotFoundError:
@@ -268,14 +342,19 @@ def _parse_physical_csv_line(data: bytes, context: str) -> Sequence[str]:
     return rows[0]
 
 
-def _trace_cells(contract: Mapping[str, Any], evidence_kind: str,
-                 phase: str) -> Tuple[List[Mapping[str, Any]], int]:
+def _trace_cells(
+        contract: Mapping[str, Any], evidence_kind: str, phase: str,
+        timing_qualification: Optional[contract_api.TimingQualification] = None,
+        ) -> Tuple[List[Mapping[str, Any]], int]:
     if evidence_kind == "recovery":
         cells = list(contract_api.iter_recovery_cells(contract, phase))
         count = contract["recovery"]["domains"][phase][
             "expected_cells_per_arm"]
     elif evidence_kind == "timing":
-        cells = list(contract_api.iter_timing_cells(contract, phase))
+        if timing_qualification is None:
+            fail("timing traces require a validated qualification map")
+        cells = list(contract_api.iter_timing_cells(
+            contract, phase, timing_qualification))
         count = contract["timing"]["domains"][phase]["expected_cells"]
     else:
         fail("evidence kind must be recovery or timing")
@@ -287,9 +366,12 @@ def _trace_cells(contract: Mapping[str, Any], evidence_kind: str,
 def assemble_trace_manifest(
         contract: Mapping[str, Any], evidence_kind: str, phase: str,
         native_path: Path, output_path: Path,
-        frozen_sha256: Optional[str] = None) -> str:
+        frozen_sha256: Optional[str] = None,
+        timing_qualification: Optional[
+            contract_api.TimingQualification] = None) -> str:
     """Validate native trace records and atomically publish a trace manifest."""
-    cells, count = _trace_cells(contract, evidence_kind, phase)
+    cells, count = _trace_cells(
+        contract, evidence_kind, phase, timing_qualification)
     records = _load_canonical_jsonl(native_path, "native trace stream")
     ordered: List[Optional[Mapping[str, Any]]] = [None] * count
     for raw in records:
@@ -310,9 +392,11 @@ def assemble_trace_manifest(
         packet_count = row["packet_count"]
         candidate_count = row["candidate_count"]
         K = cells[ordinal]["K"]
-        if type(packet_count) is not int or packet_count != K + 4:
-            fail("native trace packet count must be exactly K+4")
-        candidate_limit = 256 * (K + 4) + 65536
+        overhead = 4 if evidence_kind == "recovery" else \
+            contract["timing"]["receive_overhead_cap"]
+        if type(packet_count) is not int or packet_count != K + overhead:
+            fail("native trace packet count differs from its frozen cap")
+        candidate_limit = 256 * (K + overhead) + 65536
         if (type(candidate_count) is not int or
                 not packet_count <= candidate_count <= candidate_limit):
             fail("native trace candidate count is outside its frozen bound")
@@ -326,19 +410,51 @@ def assemble_trace_manifest(
             len(records), count))
     manifest = [value for value in ordered if value is not None]
     staged = _temporary_path(output_path, ".jsonl")
+    publication_identity: Optional[Tuple[int, int]] = None
+    publication_guard = -1
+    committed = False
     try:
         _write_logical_jsonl(staged, manifest)
         digest = contract_api.trace_manifest_sha256(
-            contract, evidence_kind, phase, staged)
+            contract, evidence_kind, phase, staged, timing_qualification)
         if frozen_sha256 is not None and digest != frozen_sha256:
             fail("native trace manifest differs from the frozen hash")
-        _publish_new(staged, output_path)
-        return digest
-    finally:
+        publication_guard, info = _open_regular_nofollow(
+            staged, "staged trace manifest")
+        publication_identity = (info.st_dev, info.st_ino)
+        _publish_new(staged, output_path, publication_identity)
+        published_manifest = _load_canonical_jsonl(
+            output_path, "published trace manifest")
+        published_digest = contract_api.trace_manifest_sha256(
+            contract, evidence_kind, phase, output_path,
+            timing_qualification)
+        if published_manifest != manifest or published_digest != digest:
+            fail("published trace manifest changed before commit")
+        committed = True
+        guard = publication_guard
         try:
-            staged.unlink()
-        except FileNotFoundError:
-            pass
+            os.close(guard)
+        finally:
+            publication_guard = -1
+        return digest
+    except BaseException:
+        if not committed and publication_identity is not None:
+            _unlink_if_identity(
+                staged, publication_identity[0], publication_identity[1])
+        elif not committed:
+            try:
+                staged.unlink()
+            except FileNotFoundError:
+                pass
+        if publication_guard >= 0:
+            guard = publication_guard
+            try:
+                os.close(guard)
+            except OSError:
+                pass
+            finally:
+                publication_guard = -1
+        raise
 
 
 def _parse_proc_start_ticks(pid: int) -> int:
@@ -544,6 +660,7 @@ def _thermal_window(
     csv_path = Path(sampler["csv_path"])
     script_fd = -1
     csv_fd = -1
+    csv_read_fd = -1
     samples = []
     window_rows: List[Sequence[str]] = []
     try:
@@ -560,7 +677,10 @@ def _thermal_window(
                 sampler["pid"], sampler["cpu"],
                 sampler["process_start_ticks"], script_path, csv_path)
 
-        with os.fdopen(os.dup(csv_fd), "rb") as source:
+        csv_read_fd = os.dup(csv_fd)
+        source = os.fdopen(csv_read_fd, "rb")
+        csv_read_fd = -1
+        with source:
             header_bytes = source.readline(MAX_THERMAL_LINE_BYTES + 1)
             if not header_bytes.endswith(b"\n"):
                 fail("sampler CSV header is not newline-terminated")
@@ -653,6 +773,8 @@ def _thermal_window(
     except (OSError, UnicodeError, csv.Error) as exc:
         fail("cannot parse sampler CSV: {}".format(exc))
     finally:
+        if csv_read_fd >= 0:
+            os.close(csv_read_fd)
         if csv_fd >= 0:
             os.close(csv_fd)
         if script_fd >= 0:
@@ -691,6 +813,16 @@ def _thermal_window(
         "edac_ue_max": 0,
         "terminal_status": "ok",
     }
+
+
+def _require_one_continuous_sampler(
+        qualification: Mapping[str, Any], timing: Mapping[str, Any]) -> None:
+    if any(qualification.get(field) != timing.get(field)
+           for field in SAMPLER_IDENTITY_FIELDS):
+        fail("qualification and timing thermal evidence splice samplers")
+    if qualification.get("window_end_monotonic_ns") >= \
+            timing.get("window_start_monotonic_ns"):
+        fail("qualification and timing thermal windows are not sequential")
 
 
 def write_sampler_attestation(
@@ -741,20 +873,55 @@ def write_sampler_attestation(
     _verify_live_sampler_process(
         pid, cpu, process_start_ticks, script_path, csv_path)
     staged = _temporary_path(output_path, ".json")
+    publication_identity: Optional[Tuple[int, int]] = None
+    publication_guard = -1
+    committed = False
     try:
         _write_canonical_object(staged, value)
-        _publish_new(staged, output_path)
-    finally:
+        publication_guard, info = _open_regular_nofollow(
+            staged, "staged sampler attestation")
+        publication_identity = (info.st_dev, info.st_ino)
+        _publish_new(staged, output_path, publication_identity)
+        published_value = _exact_keys(
+            _load_canonical_object(
+                output_path, "published sampler attestation"),
+            SAMPLER_FIELDS, "published sampler attestation")
+        if published_value != value:
+            fail("published sampler attestation changed before commit")
+        _verify_live_sampler_process(
+            pid, cpu, process_start_ticks, script_path, csv_path)
+        committed = True
+        guard = publication_guard
         try:
-            staged.unlink()
-        except FileNotFoundError:
-            pass
-    return value
+            os.close(guard)
+        finally:
+            publication_guard = -1
+        return value
+    except BaseException:
+        if not committed and publication_identity is not None:
+            _unlink_if_identity(
+                staged, publication_identity[0], publication_identity[1])
+        elif not committed:
+            try:
+                staged.unlink()
+            except FileNotFoundError:
+                pass
+        if publication_guard >= 0:
+            guard = publication_guard
+            try:
+                os.close(guard)
+            except OSError:
+                pass
+            finally:
+                publication_guard = -1
+        raise
 
 
 def _record_ordinal_context(
         contract: Mapping[str, Any], freeze: Mapping[str, Any],
         evidence_kind: str, phase: str,
+        timing_qualification: Optional[
+            contract_api.TimingQualification] = None,
         ) -> Tuple[Any, Mapping[str, int]]:
     """Precompute immutable indexes shared by every row in one receipt."""
     if evidence_kind == "recovery":
@@ -763,9 +930,12 @@ def _record_ordinal_context(
             {arm: index for index, arm in enumerate(freeze["arm_roster"])},
         )
     if evidence_kind == "timing":
+        if timing_qualification is None:
+            fail("timing result indexing requires a validated qualification")
         panels = contract_api.timing_panels(contract, freeze["arm_roster"])
         return (
-            contract_api._timing_cell_indexes(contract, phase),
+            contract_api._timing_cell_indexes(
+                contract, phase, timing_qualification),
             {
                 contract_api.canonical_json(panel): index
                 for index, panel in enumerate(panels)
@@ -846,6 +1016,623 @@ def _reverify_native_workers(workers: Sequence[Mapping[str, Any]]) -> None:
             worker["binary_sha256"])
 
 
+def _timing_qualification_message_sha256(
+        base_cell: Mapping[str, Any]) -> str:
+    digest = hashlib.sha256()
+    digest.update(TIMING_QUALIFICATION_MESSAGE_DOMAIN)
+    digest.update(contract_api.canonical_json(base_cell).encode("utf-8"))
+    return digest.hexdigest()
+
+
+def _expected_timing_qualification_work_sha256(
+        ordinal: int, cell_sha256: str) -> str:
+    return contract_api.sha256_json({
+        "schema": "wirehair.wh2.native-work.v1",
+        "evidence_kind": "timing_qualification",
+        "phase": "development",
+        "ordinal": ordinal,
+        "cell_sha256": cell_sha256,
+    })
+
+
+def _qualification_controls_as_dicts(
+        controls: Sequence[Any]) -> List[Mapping[str, Any]]:
+    result: List[Mapping[str, Any]] = []
+    for value in controls:
+        if isinstance(value, Mapping):
+            result.append(dict(value))
+        elif (isinstance(value, tuple) and
+              len(value) == len(
+                  contract_api.TIMING_QUALIFICATION_CONTROL_ORDER)):
+            result.append(dict(zip(
+                contract_api.TIMING_QUALIFICATION_CONTROL_ORDER, value)))
+        else:
+            fail("timing qualification control roster is malformed")
+    return result
+
+
+def _validate_timing_qualification_records(
+        contract: Mapping[str, Any], phase: str,
+        records: Sequence[Mapping[str, Any]], source_git_commit: str,
+        controls: Sequence[Any], expected_cpus: Optional[Sequence[int]] = None,
+        expected_retry_offsets: Optional[Sequence[int]] = None,
+        verify_live_workers: bool = False,
+        ) -> Tuple[List[Mapping[str, Any]], List[int], Mapping[str, Any]]:
+    """Validate an out-of-order native qualification stream and order it."""
+    if phase != "development":
+        fail("native qualification currently supports development only")
+    if (not isinstance(source_git_commit, str) or
+            contract_api.GIT_COMMIT.fullmatch(source_git_commit) is None):
+        fail("timing qualification source commit is malformed")
+    control_values = _qualification_controls_as_dicts(controls)
+    try:
+        validated_controls = contract_api._validate_timing_qualification_controls(
+            contract, phase, control_values)
+    except contract_api.ContractError as exc:
+        fail(str(exc))
+    control_binaries = {value["binary_sha256"] for value in validated_controls}
+    if len(control_binaries) != 1:
+        fail("native qualification controls must use one worker binary")
+    worker_binary_sha256 = next(iter(control_binaries))
+
+    base_cells = list(contract_api.iter_timing_base_cells(contract, phase))
+    expected_count = contract["timing"]["domains"][phase]["expected_cells"]
+    if len(base_cells) != expected_count:
+        fail("timing base-cell iterator/cardinality mismatch")
+    by_attempt: Dict[Tuple[int, int], Mapping[str, Any]] = {}
+    attempts_by_base: List[set] = [set() for _ in range(expected_count)]
+    cpu_to_pid: Dict[int, int] = {}
+    pid_to_cpu: Dict[int, int] = {}
+    pid_to_start_ticks: Dict[int, int] = {}
+    worker_start: Optional[int] = None
+    worker_end: Optional[int] = None
+    runtime_workers: Dict[int, Mapping[str, Any]] = {}
+
+    for raw in records:
+        row = _exact_keys(
+            raw, NATIVE_RECORD_FIELDS, "native timing qualification record")
+        if row["schema"] != TIMING_QUALIFICATION_RECORD_SCHEMA:
+            fail("native timing qualification record has an unknown schema")
+        payload = _exact_keys(
+            row["payload"], TIMING_QUALIFICATION_PAYLOAD_FIELDS,
+            "native timing qualification payload")
+        integer_fields = (
+            "ordinal", "cpu", "worker_pid", "worker_process_start_ticks",
+            "started_monotonic_ns", "finished_monotonic_ns",
+        )
+        if any(type(row[field]) is not int for field in integer_fields):
+            fail("native timing qualification provenance is noncanonical")
+        outer_ordinal = row["ordinal"]
+        if not 0 <= outer_ordinal < expected_count * 256:
+            fail("native timing qualification ordinal is outside the domain")
+        base_ordinal, retry_offset = divmod(outer_ordinal, 256)
+        if (type(payload["ordinal"]) is not int or
+                payload["ordinal"] != base_ordinal or
+                type(payload["loss_retry_offset"]) is not int or
+                payload["loss_retry_offset"] != retry_offset):
+            fail("native timing qualification ordinal/retry is inconsistent")
+        key = (base_ordinal, retry_offset)
+        if key in by_attempt:
+            fail("duplicate native timing qualification attempt")
+
+        base_cell = base_cells[base_ordinal]
+        base_cell_sha256 = contract_api.sha256_json(base_cell)
+        loss_seed = contract_api._qualified_timing_loss_seed(
+            base_cell["base_loss_seed"], retry_offset)
+        qualified_cell = dict(base_cell)
+        qualified_cell["base_cell_sha256"] = base_cell_sha256
+        qualified_cell["loss_retry_offset"] = retry_offset
+        qualified_cell["loss_seed"] = loss_seed
+        cell_sha256 = contract_api.sha256_json(qualified_cell)
+        if (payload["base_cell_sha256"] != base_cell_sha256 or
+                payload["loss_seed"] != loss_seed or
+                payload["cell_sha256"] != cell_sha256):
+            fail("native timing qualification substitutes its frozen cell")
+        for field in ("base_cell_sha256", "cell_sha256", "trace_sha256"):
+            if not _is_sha256(payload[field]):
+                fail("native timing qualification {} is not a SHA-256".format(
+                    field))
+        packet_count = payload["packet_count"]
+        candidate_count = payload["candidate_count"]
+        expected_packets = base_cell["K"] + \
+            contract["timing"]["receive_overhead_cap"]
+        candidate_limit = 256 * expected_packets + 65536
+        if (type(packet_count) is not int or
+                packet_count != expected_packets or
+                type(candidate_count) is not int or
+                not packet_count <= candidate_count <= candidate_limit):
+            fail("native timing qualification trace cardinality is invalid")
+        try:
+            outcomes = (
+                contract_api._validate_timing_qualification_outcome(
+                    payload, "wirehair2_head",
+                    contract["timing"]["receive_overhead_cap"]),
+                contract_api._validate_timing_qualification_outcome(
+                    payload, "wirehair1",
+                    contract["timing"]["receive_overhead_cap"]),
+            )
+        except contract_api.ContractError as exc:
+            fail(str(exc))
+        if outcomes not in (
+                ("success", "success"),
+                ("success", "need_more_at_bound"),
+                ("need_more_at_bound", "success"),
+                ("need_more_at_bound", "need_more_at_bound")):
+            fail("native timing qualification has an invalid disposition")
+
+        cpu = row["cpu"]
+        pid = row["worker_pid"]
+        start_ticks = row["worker_process_start_ticks"]
+        started = row["started_monotonic_ns"]
+        finished = row["finished_monotonic_ns"]
+        if (cpu < 0 or pid <= 0 or start_ticks <= 0 or started < 0 or
+                finished < started):
+            fail("native timing qualification provenance is invalid")
+        _require_process_predates_window(
+            start_ticks, started, "native qualification worker")
+        if cpu in cpu_to_pid and cpu_to_pid[cpu] != pid:
+            fail("multiple qualification PIDs claim one CPU")
+        if pid in pid_to_cpu and pid_to_cpu[pid] != cpu:
+            fail("one qualification PID claims multiple CPUs")
+        cpu_to_pid[cpu] = pid
+        pid_to_cpu[pid] = cpu
+        prior_ticks = pid_to_start_ticks.setdefault(pid, start_ticks)
+        if prior_ticks != start_ticks:
+            fail("qualification worker process start changed")
+        if row["worker_binary_sha256"] != worker_binary_sha256:
+            fail("qualification worker binary differs from both controls")
+        for field in SHA256_FIELDS:
+            if not _is_sha256(row[field]):
+                fail("native timing qualification {} is not a SHA-256".format(
+                    field))
+        if row["message_sha256"] != \
+                _timing_qualification_message_sha256(base_cell):
+            fail("qualification message identity is not the canonical base cell")
+        if row["work_sha256"] != \
+                _expected_timing_qualification_work_sha256(
+                    outer_ordinal, cell_sha256):
+            fail("qualification work hash does not bind its exact attempt")
+        worker_start = started if worker_start is None else min(
+            worker_start, started)
+        worker_end = finished if worker_end is None else max(
+            worker_end, finished)
+        runtime_workers[pid] = {
+            "cpu": cpu, "pid": pid, "process_start_ticks": start_ticks,
+            "binary_sha256": worker_binary_sha256,
+        }
+        by_attempt[key] = payload
+        attempts_by_base[base_ordinal].add(retry_offset)
+
+    if not records or worker_start is None or worker_end is None:
+        fail("native timing qualification stream is empty")
+    observed_cpus = sorted(cpu_to_pid)
+    allowed_cpus = observed_cpus
+    if expected_cpus is not None:
+        requested = list(expected_cpus)
+        if (requested != sorted(set(requested)) or
+                any(type(cpu) is not int or cpu < 0 for cpu in requested)):
+            fail("qualification CPU roster is malformed")
+        if observed_cpus != requested:
+            fail("qualification did not exercise every allowed logical CPU")
+        allowed_cpus = requested
+
+    audit: List[Mapping[str, Any]] = []
+    retry_offsets: List[int] = []
+    for base_ordinal in range(expected_count):
+        selected: Optional[int] = None
+        for retry_offset in range(256):
+            payload = by_attempt.get((base_ordinal, retry_offset))
+            if payload is None:
+                break
+            both_success = (
+                payload["wirehair2_head_outcome"] == "success" and
+                payload["wirehair1_outcome"] == "success")
+            audit.append({
+                field: payload[field]
+                for field in contract_api.TIMING_QUALIFICATION_AUDIT_FIELDS
+            })
+            if both_success:
+                selected = retry_offset
+                break
+        if selected is None:
+            if (base_ordinal, 255) in by_attempt:
+                fail("timing qualification exhausted retry offset 255")
+            fail("timing qualification has a missing or unterminated base cell")
+        if any(retry > selected for retry in attempts_by_base[base_ordinal]):
+            fail("timing qualification speculatively ran a later retry")
+        retry_offsets.append(selected)
+    if len(by_attempt) != len(audit):
+        fail("timing qualification contains an out-of-domain attempt")
+    if expected_retry_offsets is not None and \
+            tuple(retry_offsets) != tuple(expected_retry_offsets):
+        fail("native timing qualification differs from the frozen retry map")
+
+    workers = [runtime_workers[pid] for pid in sorted(
+        runtime_workers, key=lambda value: runtime_workers[value]["cpu"])]
+    if verify_live_workers:
+        _reverify_native_workers(workers)
+    metadata = {
+        "qualification_attempt_count": len(records),
+        "qualification_allowed_cpus": allowed_cpus,
+        "qualification_worker_start_monotonic_ns": worker_start,
+        "qualification_worker_end_monotonic_ns": worker_end,
+        "qualification_worker_cpus": observed_cpus,
+        "qualification_workers": [
+            {key: worker[key] for key in WORKER_FIELDS}
+            for worker in workers
+        ],
+        "qualification_worker_binary_sha256s": sorted({
+            worker["binary_sha256"] for worker in workers
+        }),
+        "timing_qualification_native_stream_sha256":
+            _sha256_jsonl(records),
+        "_runtime_workers": workers,
+    }
+    return audit, retry_offsets, metadata
+
+
+def load_timing_qualification_execution_receipt(
+        contract: Mapping[str, Any], phase: str,
+        qualification: contract_api.TimingQualification,
+        native_path: Path, receipt_path: Path,
+        expected_receipt_sha256: Optional[str] = None,
+        expected_cpus: Optional[Sequence[int]] = None,
+        verify_live_workers: bool = False,
+        ) -> Tuple[Mapping[str, Any], Mapping[str, Any]]:
+    """Strictly reopen qualification provenance committed while workers lived."""
+    receipt = _exact_keys(
+        _load_canonical_object(
+            receipt_path, "timing qualification execution receipt"),
+        TIMING_QUALIFICATION_EXECUTION_FIELDS,
+        "timing qualification execution receipt")
+    if receipt["schema"] != TIMING_QUALIFICATION_EXECUTION_SCHEMA:
+        fail("timing qualification execution receipt has an unknown schema")
+    unsigned = {
+        key: value for key, value in receipt.items()
+        if key != "receipt_sha256"
+    }
+    receipt_sha256 = receipt["receipt_sha256"]
+    if (not _is_sha256(receipt_sha256) or
+            receipt_sha256 != contract_api.sha256_json(unsigned)):
+        fail("timing qualification execution receipt self-hash is invalid")
+    if (expected_receipt_sha256 is not None and
+            receipt_sha256 != expected_receipt_sha256):
+        fail("timing qualification execution receipt differs from its identity")
+    if (receipt["contract_sha256"] != contract_api.contract_sha256(contract) or
+            receipt["phase"] != phase or
+            receipt["source_git_commit"] != qualification.source_git_commit or
+            receipt["timing_base_domain_sha256"] !=
+                qualification.base_domain_sha256 or
+            receipt["timing_qualified_domain_sha256"] !=
+                qualification.qualified_domain_sha256 or
+            receipt["timing_qualification_map_sha256"] !=
+                qualification.map_sha256 or
+            receipt["timing_qualification_audit_sha256"] !=
+                qualification.qualification_audit_sha256):
+        fail("timing qualification execution receipt binding is invalid")
+
+    allowed_cpus = receipt["qualification_allowed_cpus"]
+    worker_cpus = receipt["qualification_worker_cpus"]
+    if (not isinstance(allowed_cpus, list) or not allowed_cpus or
+            allowed_cpus != sorted(set(allowed_cpus)) or
+            any(type(cpu) is not int or cpu < 0 for cpu in allowed_cpus) or
+            worker_cpus != allowed_cpus):
+        fail("timing qualification execution receipt CPU roster is invalid")
+    if expected_cpus is not None and list(expected_cpus) != allowed_cpus:
+        fail("timing qualification execution receipt changes allowed affinity")
+    records = _load_canonical_jsonl(
+        native_path, "native timing qualification stream")
+    _, _, metadata_with_runtime = _validate_timing_qualification_records(
+        contract, phase, records, qualification.source_git_commit,
+        qualification.controls, expected_cpus=allowed_cpus,
+        expected_retry_offsets=qualification.retry_offsets,
+        verify_live_workers=verify_live_workers)
+    metadata = {
+        key: value for key, value in metadata_with_runtime.items()
+        if key != "_runtime_workers"
+    }
+    for field in (
+            "timing_qualification_native_stream_sha256",
+            "qualification_attempt_count", "qualification_allowed_cpus",
+            "qualification_worker_start_monotonic_ns",
+            "qualification_worker_end_monotonic_ns",
+            "qualification_worker_cpus", "qualification_workers",
+            "qualification_worker_binary_sha256s"):
+        if receipt[field] != metadata[field]:
+            fail("timing qualification execution receipt {} differs from "
+                 "native evidence".format(field))
+    if (type(receipt["qualification_attempt_count"]) is not int or
+            receipt["qualification_attempt_count"] <= 0 or
+            type(receipt["qualification_worker_start_monotonic_ns"]) is not int or
+            type(receipt["qualification_worker_end_monotonic_ns"]) is not int or
+            receipt["qualification_worker_end_monotonic_ns"] <
+                receipt["qualification_worker_start_monotonic_ns"] or
+            not isinstance(receipt["qualification_workers"], list) or
+            len(receipt["qualification_workers"]) != len(allowed_cpus) or
+            any(not isinstance(worker, dict) or set(worker) != WORKER_FIELDS
+                for worker in receipt["qualification_workers"]) or
+            not isinstance(receipt["qualification_worker_binary_sha256s"], list) or
+            not receipt["qualification_worker_binary_sha256s"] or
+            receipt["qualification_worker_binary_sha256s"] != sorted(set(
+                receipt["qualification_worker_binary_sha256s"])) or
+            any(not _is_sha256(value) for value in
+                receipt["qualification_worker_binary_sha256s"])):
+        fail("timing qualification execution receipt provenance is malformed")
+    return receipt, metadata
+
+
+def _require_same_timing_qualification(
+        expected: contract_api.TimingQualification,
+        actual: contract_api.TimingQualification, context: str) -> None:
+    if any(getattr(actual, field) != getattr(expected, field)
+           for field in contract_api.TIMING_QUALIFICATION_FIELDS):
+        fail("timing qualification changed {}".format(context))
+
+
+def assemble_timing_qualification(
+        contract: Mapping[str, Any], phase: str, native_path: Path,
+        audit_path: Path, map_path: Path, execution_receipt_path: Path,
+        source_git_commit: str,
+        controls: Sequence[Mapping[str, Any]], expected_cpus: Sequence[int],
+        verify_live_workers: bool = True,
+        ) -> Tuple[contract_api.TimingQualification, Mapping[str, Any], str]:
+    """Publish the canonical qualification triple while workers remain live."""
+    if (audit_path.exists() or map_path.exists() or
+            execution_receipt_path.exists()):
+        fail("refusing to replace a timing qualification artifact")
+    control_values = _qualification_controls_as_dicts(controls)
+    records = _load_canonical_jsonl(
+        native_path, "native timing qualification stream")
+    audit, retry_offsets, metadata = _validate_timing_qualification_records(
+        contract, phase, records, source_git_commit, control_values,
+        expected_cpus, verify_live_workers=verify_live_workers)
+    selected_traces: List[str] = []
+    cursor = 0
+    for retry_offset in retry_offsets:
+        cursor += retry_offset
+        selected_traces.append(audit[cursor]["trace_sha256"])
+        cursor += 1
+    qualified_domain_sha256 = contract_api._timing_domain_sha256_from_offsets(
+        contract, phase, retry_offsets)
+
+    staged_audit = _temporary_path(audit_path, ".jsonl")
+    staged_map = _temporary_path(map_path, ".json")
+    staged_receipt = _temporary_path(execution_receipt_path, ".json")
+    published: List[Tuple[Path, int, int]] = []
+    publication_guards: List[int] = []
+    committed = False
+    try:
+        _write_logical_jsonl(staged_audit, audit)
+        audit_sha256 = contract_api.timing_qualification_audit_sha256(
+            contract, phase, staged_audit)
+        map_value = {
+            "schema": contract_api.TIMING_QUALIFICATION_MAP_SCHEMA,
+            "contract_sha256": contract_api.contract_sha256(contract),
+            "phase": phase,
+            "source_git_commit": source_git_commit,
+            "base_domain_sha256": contract["timing"]["domains"][phase][
+                "base_domain_sha256"],
+            "qualified_domain_sha256": qualified_domain_sha256,
+            "entry_kind": contract_api.TIMING_QUALIFICATION_ENTRY_KIND,
+            "controls": control_values,
+            "qualification_audit_sha256": audit_sha256,
+            "selected_trace_roster_sha256":
+                contract_api.timing_selected_trace_roster_sha256(
+                    selected_traces),
+            "retry_offsets": retry_offsets,
+        }
+        _write_canonical_object(staged_map, map_value)
+        map_sha256 = contract_api.timing_qualification_map_sha256(map_value)
+        # Validate the staged triple before making any name visible.
+        qualification = contract_api.load_timing_qualification_map(
+            contract, phase, staged_map, staged_audit, map_sha256)
+        clean_metadata = {
+            key: value for key, value in metadata.items()
+            if key != "_runtime_workers"
+        }
+        receipt: Dict[str, Any] = {
+            "schema": TIMING_QUALIFICATION_EXECUTION_SCHEMA,
+            "contract_sha256": contract_api.contract_sha256(contract),
+            "phase": phase,
+            "source_git_commit": source_git_commit,
+            "timing_base_domain_sha256": qualification.base_domain_sha256,
+            "timing_qualified_domain_sha256":
+                qualification.qualified_domain_sha256,
+            "timing_qualification_map_sha256": map_sha256,
+            "timing_qualification_audit_sha256": audit_sha256,
+            **clean_metadata,
+        }
+        receipt["receipt_sha256"] = contract_api.sha256_json(receipt)
+        receipt_sha256 = receipt["receipt_sha256"]
+        _write_canonical_object(staged_receipt, receipt)
+        load_timing_qualification_execution_receipt(
+            contract, phase, qualification, native_path, staged_receipt,
+            expected_receipt_sha256=receipt_sha256,
+            expected_cpus=expected_cpus,
+            verify_live_workers=verify_live_workers)
+        artifacts = (
+            (staged_audit, audit_path), (staged_map, map_path),
+            (staged_receipt, execution_receipt_path),
+        )
+        # Keep every staged inode guarded through the receipt-last commit.
+        # Dependencies may remain after a failed run, but without the strict
+        # receipt they never constitute terminal qualification evidence.
+        published = []
+        for staged, destination in artifacts:
+            guard, info = _open_regular_nofollow(
+                staged, "staged timing qualification artifact")
+            publication_guards.append(guard)
+            published.append((destination, info.st_dev, info.st_ino))
+        for index in (0, 1):
+            staged, destination = artifacts[index]
+            _, device, inode = published[index]
+            _publish_new(staged, destination, (device, inode))
+        qualification = contract_api.load_timing_qualification_map(
+            contract, phase, map_path, audit_path, map_sha256)
+        precommit_receipt, precommit_metadata = \
+            load_timing_qualification_execution_receipt(
+                contract, phase, qualification, native_path, staged_receipt,
+                expected_receipt_sha256=receipt_sha256,
+                expected_cpus=expected_cpus,
+                verify_live_workers=verify_live_workers)
+        if (precommit_receipt != receipt or
+                precommit_metadata != clean_metadata):
+            fail("timing qualification changed before receipt commit")
+        precommit_qualification = contract_api.load_timing_qualification_map(
+            contract, phase, map_path, audit_path, map_sha256)
+        _require_same_timing_qualification(
+            qualification, precommit_qualification,
+            "immediately before receipt commit")
+        precommit_receipt, precommit_metadata = \
+            load_timing_qualification_execution_receipt(
+                contract, phase, precommit_qualification, native_path,
+                staged_receipt, expected_receipt_sha256=receipt_sha256,
+                expected_cpus=expected_cpus,
+                verify_live_workers=verify_live_workers)
+        if (precommit_receipt != receipt or
+                precommit_metadata != clean_metadata):
+            fail("timing qualification changed immediately before receipt "
+                 "commit")
+        _, receipt_device, receipt_inode = published[2]
+        _publish_new(
+            staged_receipt, execution_receipt_path,
+            (receipt_device, receipt_inode))
+        committed = True
+        final_qualification = contract_api.load_timing_qualification_map(
+            contract, phase, map_path, audit_path, map_sha256)
+        _require_same_timing_qualification(
+            precommit_qualification, final_qualification,
+            "during receipt commit")
+        final_receipt, final_metadata = \
+            load_timing_qualification_execution_receipt(
+                contract, phase, final_qualification, native_path,
+                execution_receipt_path,
+                expected_receipt_sha256=receipt_sha256,
+                expected_cpus=expected_cpus,
+                verify_live_workers=verify_live_workers)
+        if final_receipt != receipt or final_metadata != clean_metadata:
+            fail("timing qualification changed across triple publication")
+        terminal_qualification = contract_api.load_timing_qualification_map(
+            contract, phase, map_path, audit_path, map_sha256)
+        _require_same_timing_qualification(
+            final_qualification, terminal_qualification,
+            "during terminal qualification reopen")
+        terminal_receipt, terminal_metadata = \
+            load_timing_qualification_execution_receipt(
+                contract, phase, terminal_qualification, native_path,
+                execution_receipt_path,
+                expected_receipt_sha256=receipt_sha256,
+                expected_cpus=expected_cpus,
+                verify_live_workers=verify_live_workers)
+        if (terminal_receipt != receipt or
+                terminal_metadata != clean_metadata):
+            fail("timing qualification changed during terminal reopen")
+        while publication_guards:
+            guard = publication_guards[-1]
+            try:
+                os.close(guard)
+            finally:
+                publication_guards.pop()
+        return terminal_qualification, terminal_metadata, receipt_sha256
+    except BaseException:
+        if not committed:
+            staged_identities = {
+                staged: (device, inode)
+                for staged, (_, device, inode) in zip(
+                    (staged_audit, staged_map, staged_receipt), published)
+            }
+            for path in (staged_audit, staged_map, staged_receipt):
+                identity = staged_identities.get(path)
+                if identity is not None:
+                    _unlink_if_identity(path, identity[0], identity[1])
+                else:
+                    try:
+                        path.unlink()
+                    except FileNotFoundError:
+                        pass
+        while publication_guards:
+            guard = publication_guards[-1]
+            try:
+                os.close(guard)
+            except OSError:
+                pass
+            finally:
+                publication_guards.pop()
+        raise
+
+
+def publish_timing_trace_manifest(
+        contract: Mapping[str, Any], phase: str,
+        qualification: contract_api.TimingQualification,
+        output_path: Path) -> str:
+    """Publish the selected qualification traces as trace-manifest v2."""
+    cells = list(contract_api.iter_timing_cells(
+        contract, phase, qualification))
+    if len(cells) != len(qualification.selected_trace_sha256s):
+        fail("timing qualification trace roster has the wrong cardinality")
+    rows = [
+        {
+            "ordinal": ordinal,
+            "cell_sha256": contract_api.sha256_json(cell),
+            "trace_sha256": qualification.selected_trace_sha256s[ordinal],
+        }
+        for ordinal, cell in enumerate(cells)
+    ]
+    staged = _temporary_path(output_path, ".jsonl")
+    publication_identity: Optional[Tuple[int, int]] = None
+    publication_guard = -1
+    committed = False
+    try:
+        _write_logical_jsonl(staged, rows)
+        try:
+            digest = contract_api.trace_manifest_sha256(
+                contract, "timing", phase, staged, qualification)
+            contract_api.load_timing_trace_manifest(
+                contract, phase, staged, digest, qualification)
+        except contract_api.ContractError as exc:
+            fail(str(exc))
+        publication_guard, info = _open_regular_nofollow(
+            staged, "staged timing trace manifest")
+        publication_identity = (info.st_dev, info.st_ino)
+        _publish_new(staged, output_path, publication_identity)
+        published_rows = _load_canonical_jsonl(
+            output_path, "published timing trace manifest")
+        try:
+            published_digest = contract_api.trace_manifest_sha256(
+                contract, "timing", phase, output_path, qualification)
+            contract_api.load_timing_trace_manifest(
+                contract, phase, output_path, published_digest, qualification)
+        except contract_api.ContractError as exc:
+            fail(str(exc))
+        if published_rows != rows or published_digest != digest:
+            fail("published timing trace manifest changed before commit")
+        committed = True
+        guard = publication_guard
+        try:
+            os.close(guard)
+        finally:
+            publication_guard = -1
+        return digest
+    except BaseException:
+        if not committed and publication_identity is not None:
+            _unlink_if_identity(
+                staged, publication_identity[0], publication_identity[1])
+        elif not committed:
+            try:
+                staged.unlink()
+            except FileNotFoundError:
+                pass
+        if publication_guard >= 0:
+            guard = publication_guard
+            try:
+                os.close(guard)
+            except OSError:
+                pass
+            finally:
+                publication_guard = -1
+        raise
+
+
 def _timing_worker_roster(
         contract: Mapping[str, Any], freeze: Mapping[str, Any]) -> List[int]:
     timing = contract.get("timing") if isinstance(contract, Mapping) else None
@@ -868,8 +1655,9 @@ def _timing_worker_roster(
 def _validate_timing_execution_geometry(
         contract: Mapping[str, Any], freeze: Mapping[str, Any], phase: str,
         envelopes: Sequence[Mapping[str, Any]],
+        timing_qualification: contract_api.TimingQualification,
         sysfs_root: Optional[Path] = None) -> None:
-    """Verify exact v4 round-major placement and every inter-wave barrier."""
+    """Verify exact v5 round-major placement and every inter-wave barrier."""
     worker_cpus = _timing_worker_roster(contract, freeze)
     worker_cores = [
         _cpu_physical_core(cpu, sysfs_root) for cpu in worker_cpus
@@ -900,7 +1688,8 @@ def _validate_timing_execution_geometry(
             type(expected_cells) is not int or expected_cells <= 0):
         fail("timing wave domain has invalid cardinality")
     try:
-        cells = list(contract_api.iter_timing_cells(contract, phase))
+        cells = list(contract_api.iter_timing_cells(
+            contract, phase, timing_qualification))
         panels = contract_api.timing_panels(contract, freeze["arm_roster"])
     except (KeyError, contract_api.ContractError) as exc:
         fail(str(exc))
@@ -913,7 +1702,9 @@ def _validate_timing_execution_geometry(
         fail("timing cohort identity fields are invalid")
     stable_fields = [
         field for field in cell_fields
-        if field not in ("replicate", "loss_seed")
+        if field not in (
+            "replicate", "base_loss_seed", "base_cell_sha256",
+            "loss_retry_offset", "loss_seed")
     ]
     identity_order: List[str] = []
     cell_identities: List[str] = []
@@ -1002,6 +1793,8 @@ def _validate_native_records(
         contract: Mapping[str, Any], freeze: Mapping[str, Any],
         evidence_kind: str, phase: str,
         records: Sequence[Mapping[str, Any]],
+        timing_qualification: Optional[
+            contract_api.TimingQualification] = None,
         verify_live_workers: bool = False,
         sysfs_root: Optional[Path] = None) \
         -> Tuple[List[Mapping[str, Any]], Mapping[str, Any]]:
@@ -1010,6 +1803,8 @@ def _validate_native_records(
             "expected_cells_per_arm"]
         expected_count = cell_count * len(freeze["arm_roster"])
     elif evidence_kind == "timing":
+        if timing_qualification is None:
+            fail("timing native records require a validated qualification")
         _timing_worker_roster(contract, freeze)
         payload_fields = contract_api.TIMING_RECEIPT_FIELDS
         record_schema = TIMING_RECORD_SCHEMA
@@ -1020,7 +1815,7 @@ def _validate_native_records(
         fail("evidence kind must be recovery or timing")
     try:
         ordinal_context = _record_ordinal_context(
-            contract, freeze, evidence_kind, phase)
+            contract, freeze, evidence_kind, phase, timing_qualification)
     except contract_api.ContractError as exc:
         fail(str(exc))
     ordered: List[Optional[Mapping[str, Any]]] = [None] * expected_count
@@ -1125,6 +1920,7 @@ def _validate_native_records(
         _validate_timing_execution_geometry(
             contract, freeze, phase,
             [value for value in envelope_ordered if value is not None],
+            timing_qualification,
             sysfs_root)
     runtime_workers = [
         {
@@ -1155,44 +1951,123 @@ def _validate_native_records(
         "worker_binary_sha256s": sorted(worker_binaries),
         "message_set_sha256": contract_api.sha256_json(message_by_cell),
         "work_set_sha256": contract_api.sha256_json(work_by_ordinal),
-        "native_stream_sha256": _sha256_jsonl(envelopes),
+        "native_stream_sha256": _sha256_jsonl(records),
         "_runtime_workers": runtime_workers,
     }
     return payloads, metadata
+
+
+def _load_required_timing_qualification(
+        contract: Mapping[str, Any], phase: str,
+        map_path: Optional[Path], audit_path: Optional[Path],
+        map_sha256: Optional[str]) -> contract_api.TimingQualification:
+    if map_path is None or audit_path is None or map_sha256 is None:
+        fail("timing evidence requires qualification map/audit/hash arguments")
+    try:
+        return contract_api.load_timing_qualification_map(
+            contract, phase, map_path, audit_path, map_sha256)
+    except contract_api.ContractError as exc:
+        fail(str(exc))
+    raise AssertionError("unreachable")
 
 
 def assemble_results(
         contract: Mapping[str, Any], evidence_kind: str, phase: str,
         freeze_path: Path, trace_path: Path, native_path: Path,
         sampler_path: Path, output_path: Path, execution_receipt_path: Path,
-        verify_live_sampler: bool = True) -> Mapping[str, Any]:
+        verify_live_sampler: bool = True,
+        timing_qualification_map_path: Optional[Path] = None,
+        timing_qualification_audit_path: Optional[Path] = None,
+        timing_qualification_map_sha256: Optional[str] = None,
+        timing_qualification_native_path: Optional[Path] = None,
+        timing_qualification_sampler_path: Optional[Path] = None,
+        timing_qualification_execution_receipt_path: Optional[Path] = None,
+        timing_qualification_execution_receipt_sha256: Optional[str] = None,
+        ) -> Mapping[str, Any]:
     """Validate and publish one complete recovery ledger or timing receipt."""
     if output_path.exists() or execution_receipt_path.exists():
         fail("refusing to replace an existing result or execution receipt")
+    timing_qualification: Optional[contract_api.TimingQualification] = None
+    qualification_metadata: Optional[Mapping[str, Any]] = None
+    qualification_sampler: Optional[Mapping[str, Any]] = None
+    qualification_execution_receipt: Optional[Mapping[str, Any]] = None
+    if evidence_kind == "timing":
+        timing_qualification = _load_required_timing_qualification(
+            contract, phase, timing_qualification_map_path,
+            timing_qualification_audit_path,
+            timing_qualification_map_sha256)
+        if timing_qualification_native_path is None:
+            fail("timing evidence requires the native qualification stream")
+        if timing_qualification_sampler_path is None:
+            fail("timing evidence requires a qualification thermal attestation")
+        if (timing_qualification_execution_receipt_path is None or
+                timing_qualification_execution_receipt_sha256 is None):
+            fail("timing evidence requires the qualification execution receipt")
+        qualification_sampler = _load_canonical_object(
+            timing_qualification_sampler_path,
+            "qualification sampler attestation")
+        qualification_execution_receipt, qualification_metadata = \
+            load_timing_qualification_execution_receipt(
+                contract, phase, timing_qualification,
+                timing_qualification_native_path,
+                timing_qualification_execution_receipt_path,
+                expected_receipt_sha256=
+                    timing_qualification_execution_receipt_sha256)
     try:
         freeze = contract_api.load_freeze_manifest(
-            contract, phase, freeze_path, evidence_kind)
+            contract, phase, freeze_path, evidence_kind,
+            timing_qualification)
     except contract_api.ContractError as exc:
         fail(str(exc))
     records = _load_canonical_jsonl(native_path, "native result stream")
     payloads, metadata_with_runtime = _validate_native_records(
         contract, freeze, evidence_kind, phase, records,
+        timing_qualification,
         verify_live_workers=verify_live_sampler)
     runtime_workers = metadata_with_runtime["_runtime_workers"]
     metadata = {
         key: value for key, value in metadata_with_runtime.items()
         if key != "_runtime_workers"
     }
+    if qualification_metadata is not None:
+        if qualification_metadata[
+                "qualification_worker_end_monotonic_ns"] > \
+                metadata["worker_start_monotonic_ns"]:
+            fail("qualification workers overlap the exact-eight timing interval")
+        qualification_identities = {
+            (value["pid"], value["process_start_ticks"])
+            for value in qualification_metadata["qualification_workers"]
+        }
+        timing_identities = {
+            (value["pid"], value["process_start_ticks"])
+            for value in metadata["workers"]
+        }
+        if qualification_identities & timing_identities:
+            fail("a qualification worker identity survived into timing")
     sampler = _load_canonical_object(sampler_path, "sampler attestation")
     thermal = _thermal_window(
         sampler, metadata["worker_start_monotonic_ns"],
         metadata["worker_end_monotonic_ns"], metadata["worker_cpus"],
         verify_live_sampler,
         controller_cpu=freeze.get("host_identity", {}).get("controller_cpu"))
+    qualification_thermal: Optional[Mapping[str, Any]] = None
+    if qualification_metadata is not None and \
+            qualification_sampler is not None:
+        qualification_thermal = _thermal_window(
+            qualification_sampler,
+            qualification_metadata[
+                "qualification_worker_start_monotonic_ns"],
+            qualification_metadata[
+                "qualification_worker_end_monotonic_ns"],
+            qualification_metadata["qualification_worker_cpus"],
+            verify_live_sampler)
+        _require_one_continuous_sampler(qualification_thermal, thermal)
 
     staged_result = _temporary_path(output_path, ".jsonl")
     staged_receipt = _temporary_path(execution_receipt_path, ".json")
     publication_identities: List[Tuple[Path, int, int]] = []
+    publication_guards: List[int] = []
+    committed = False
     try:
         _write_logical_jsonl(staged_result, payloads)
         try:
@@ -1201,7 +2076,10 @@ def assemble_results(
                     contract, phase, staged_result, freeze_path, trace_path)
             elif evidence_kind == "timing":
                 summary = contract_api.validate_timing_receipt(
-                    contract, phase, staged_result, freeze_path, trace_path)
+                    contract, phase, staged_result, freeze_path, trace_path,
+                    timing_qualification_map_path,
+                    timing_qualification_audit_path,
+                    timing_qualification_map_sha256)
             else:
                 fail("evidence kind must be recovery or timing")
         except contract_api.ContractError as exc:
@@ -1213,10 +2091,81 @@ def assemble_results(
             fail("freeze manifest changed during authoritative validation")
         if verify_live_sampler:
             _reverify_native_workers(runtime_workers)
+        if timing_qualification is not None:
+            final_qualification = _load_required_timing_qualification(
+                contract, phase, timing_qualification_map_path,
+                timing_qualification_audit_path,
+                timing_qualification_map_sha256)
+            if (final_qualification.map_sha256 !=
+                    timing_qualification.map_sha256 or
+                    final_qualification.qualification_audit_sha256 !=
+                    timing_qualification.qualification_audit_sha256):
+                fail("timing qualification changed during validation")
+            final_qualification_receipt, final_qualification_metadata = \
+                load_timing_qualification_execution_receipt(
+                    contract, phase, final_qualification,
+                    timing_qualification_native_path,
+                    timing_qualification_execution_receipt_path,
+                    expected_receipt_sha256=
+                        timing_qualification_execution_receipt_sha256)
+            if (final_qualification_receipt !=
+                    qualification_execution_receipt or
+                    final_qualification_metadata != qualification_metadata):
+                fail("timing qualification changed during validation")
+        try:
+            final_freeze = contract_api.load_freeze_manifest(
+                contract, phase, freeze_path, evidence_kind,
+                timing_qualification)
+            final_trace_sha256 = contract_api.trace_manifest_sha256(
+                contract, evidence_kind, phase, trace_path,
+                timing_qualification)
+        except contract_api.ContractError as exc:
+            fail(str(exc))
+        if (final_freeze != freeze or
+                contract_api.freeze_manifest_sha256(final_freeze) !=
+                    initial_freeze_sha256 or
+                final_trace_sha256 != freeze["trace_manifest_sha256"]):
+            fail("freeze or trace manifest changed during validation")
+        final_records = _load_canonical_jsonl(
+            native_path, "native result stream after validation")
+        if (final_records != records or
+                _sha256_jsonl(final_records) != metadata["native_stream_sha256"]):
+            fail("native result stream changed during validation")
+        final_sampler = _load_canonical_object(
+            sampler_path, "sampler attestation after validation")
+        final_thermal = _thermal_window(
+            final_sampler, metadata["worker_start_monotonic_ns"],
+            metadata["worker_end_monotonic_ns"], metadata["worker_cpus"],
+            verify_live_sampler,
+            controller_cpu=freeze.get("host_identity", {}).get(
+                "controller_cpu"))
+        if final_sampler != sampler or final_thermal != thermal:
+            fail("timing sampler evidence changed during validation")
+        if qualification_metadata is not None and \
+                qualification_sampler is not None:
+            final_qualification_sampler = _load_canonical_object(
+                timing_qualification_sampler_path,
+                "qualification sampler attestation after validation")
+            final_qualification_thermal = _thermal_window(
+                final_qualification_sampler,
+                qualification_metadata[
+                    "qualification_worker_start_monotonic_ns"],
+                qualification_metadata[
+                    "qualification_worker_end_monotonic_ns"],
+                qualification_metadata["qualification_worker_cpus"],
+                verify_live_sampler)
+            if (final_qualification_sampler != qualification_sampler or
+                    final_qualification_thermal != qualification_thermal):
+                fail("qualification sampler evidence changed during validation")
+            _require_one_continuous_sampler(
+                final_qualification_thermal, final_thermal)
         result_sha256 = _sha256_jsonl(payloads)
-        receipt_schema = RAW_EXECUTION_SCHEMA \
-            if freeze.get("schema") == contract_api.RAW_FREEZE_SCHEMA \
-            else EXECUTION_SCHEMA
+        if evidence_kind == "timing":
+            receipt_schema = TIMING_EXECUTION_SCHEMA
+        else:
+            receipt_schema = RAW_EXECUTION_SCHEMA \
+                if freeze.get("schema") == contract_api.RAW_FREEZE_SCHEMA \
+                else EXECUTION_SCHEMA
         receipt: Dict[str, Any] = {
             "schema": receipt_schema,
             "contract_sha256": contract_api.contract_sha256(contract),
@@ -1232,46 +2181,176 @@ def assemble_results(
             "thermal": thermal,
             "validator_summary_sha256": contract_api.sha256_json(summary),
         }
+        if timing_qualification is not None and \
+                qualification_metadata is not None:
+            receipt.update({
+                "timing_base_domain_sha256":
+                    timing_qualification.base_domain_sha256,
+                "timing_qualified_domain_sha256":
+                    timing_qualification.qualified_domain_sha256,
+                "timing_qualification_map_sha256":
+                    timing_qualification.map_sha256,
+                "timing_qualification_audit_sha256":
+                    timing_qualification.qualification_audit_sha256,
+                "timing_qualification_execution_receipt_sha256":
+                    timing_qualification_execution_receipt_sha256,
+                **{
+                    field: qualification_metadata[field]
+                    for field in TIMING_QUALIFICATION_EMBEDDED_FIELDS
+                },
+                "qualification_thermal": qualification_thermal,
+            })
         receipt["receipt_sha256"] = contract_api.sha256_json(receipt)
         _write_canonical_object(staged_receipt, receipt)
-        result_info = os.stat(str(staged_result), follow_symlinks=False)
-        receipt_info = os.stat(str(staged_receipt), follow_symlinks=False)
+        result_guard, result_info = _open_regular_nofollow(
+            staged_result, "staged result stream")
+        publication_guards.append(result_guard)
+        receipt_guard, receipt_info = _open_regular_nofollow(
+            staged_receipt, "staged execution receipt")
+        publication_guards.append(receipt_guard)
         publication_identities = [
             (output_path, result_info.st_dev, result_info.st_ino),
             (execution_receipt_path, receipt_info.st_dev, receipt_info.st_ino),
         ]
-        _publish_new(staged_result, output_path)
-        _publish_new(staged_receipt, execution_receipt_path)
+        _publish_new(
+            staged_result, output_path,
+            (result_info.st_dev, result_info.st_ino))
+        published_payloads = _load_canonical_jsonl(
+            output_path, "published result dependency")
+        if (published_payloads != payloads or
+                _sha256_jsonl(published_payloads) != result_sha256):
+            fail("published result dependency changed before receipt commit")
+        try:
+            if evidence_kind == "recovery":
+                published_summary = contract_api.validate_ledger(
+                    contract, phase, output_path, freeze_path, trace_path)
+            else:
+                published_summary = contract_api.validate_timing_receipt(
+                    contract, phase, output_path, freeze_path, trace_path,
+                    timing_qualification_map_path,
+                    timing_qualification_audit_path,
+                    timing_qualification_map_sha256)
+        except contract_api.ContractError as exc:
+            fail(str(exc))
+        if published_summary != summary:
+            fail("published result dependency changed validator semantics")
+        _publish_new(
+            staged_receipt, execution_receipt_path,
+            (receipt_info.st_dev, receipt_info.st_ino))
+        committed = True
+        validated = validate_execution_receipt(
+            contract, evidence_kind, phase, freeze_path, trace_path,
+            native_path, output_path, execution_receipt_path,
+            verify_live_sampler=verify_live_sampler,
+            sampler_path=sampler_path,
+            timing_qualification_map_path=timing_qualification_map_path,
+            timing_qualification_audit_path=timing_qualification_audit_path,
+            timing_qualification_map_sha256=
+                timing_qualification_map_sha256,
+            timing_qualification_native_path=timing_qualification_native_path,
+            timing_qualification_sampler_path=
+                timing_qualification_sampler_path,
+            timing_qualification_execution_receipt_path=
+                timing_qualification_execution_receipt_path,
+            timing_qualification_execution_receipt_sha256=
+                timing_qualification_execution_receipt_sha256)
+        if (validated["summary"] != summary or
+                validated["execution_receipt"] != receipt):
+            fail("published result pair differs after terminal validation")
+        while publication_guards:
+            guard = publication_guards[-1]
+            try:
+                os.close(guard)
+            finally:
+                publication_guards.pop()
         return {"summary": summary, "execution_receipt": receipt}
     except BaseException:
-        for path, device, inode in publication_identities:
-            _unlink_if_identity(path, device, inode)
-        raise
-    finally:
-        for path in (staged_result, staged_receipt):
+        if not committed:
+            staged_identities = {
+                staged: (device, inode)
+                for staged, (_, device, inode) in zip(
+                    (staged_result, staged_receipt), publication_identities)
+            }
+            for path in (staged_result, staged_receipt):
+                identity = staged_identities.get(path)
+                if identity is not None:
+                    _unlink_if_identity(path, identity[0], identity[1])
+                else:
+                    try:
+                        path.unlink()
+                    except FileNotFoundError:
+                        pass
+        while publication_guards:
+            guard = publication_guards[-1]
             try:
-                path.unlink()
-            except FileNotFoundError:
+                os.close(guard)
+            except OSError:
                 pass
+            finally:
+                publication_guards.pop()
+        raise
 
 
 def validate_execution_receipt(
         contract: Mapping[str, Any], evidence_kind: str, phase: str,
         freeze_path: Path, trace_path: Path, native_path: Path,
         result_path: Path, execution_receipt_path: Path,
-        verify_live_sampler: bool = True) -> Mapping[str, Any]:
+        verify_live_sampler: bool = True,
+        sampler_path: Optional[Path] = None,
+        timing_qualification_map_path: Optional[Path] = None,
+        timing_qualification_audit_path: Optional[Path] = None,
+        timing_qualification_map_sha256: Optional[str] = None,
+        timing_qualification_native_path: Optional[Path] = None,
+        timing_qualification_sampler_path: Optional[Path] = None,
+        timing_qualification_execution_receipt_path: Optional[Path] = None,
+        timing_qualification_execution_receipt_sha256: Optional[str] = None,
+        ) -> Mapping[str, Any]:
     """Revalidate a terminal receipt against every bound source artifact."""
+    if sampler_path is None:
+        fail("execution validation requires the sampler attestation")
+    receipt_fields = TIMING_EXECUTION_FIELDS \
+        if evidence_kind == "timing" else EXECUTION_FIELDS
     receipt = _exact_keys(
         _load_canonical_object(execution_receipt_path, "execution receipt"),
-        EXECUTION_FIELDS, "execution receipt")
+        receipt_fields, "execution receipt")
+    timing_qualification: Optional[contract_api.TimingQualification] = None
+    qualification_metadata: Optional[Mapping[str, Any]] = None
+    qualification_sampler: Optional[Mapping[str, Any]] = None
+    qualification_execution_receipt: Optional[Mapping[str, Any]] = None
+    if evidence_kind == "timing":
+        timing_qualification = _load_required_timing_qualification(
+            contract, phase, timing_qualification_map_path,
+            timing_qualification_audit_path,
+            timing_qualification_map_sha256)
+        if timing_qualification_native_path is None:
+            fail("timing evidence requires the native qualification stream")
+        if timing_qualification_sampler_path is None:
+            fail("timing evidence requires a qualification thermal attestation")
+        if (timing_qualification_execution_receipt_path is None or
+                timing_qualification_execution_receipt_sha256 is None):
+            fail("timing evidence requires the qualification execution receipt")
+        qualification_sampler = _load_canonical_object(
+            timing_qualification_sampler_path,
+            "qualification sampler attestation")
+        qualification_execution_receipt, qualification_metadata = \
+            load_timing_qualification_execution_receipt(
+                contract, phase, timing_qualification,
+                timing_qualification_native_path,
+                timing_qualification_execution_receipt_path,
+                expected_receipt_sha256=
+                    timing_qualification_execution_receipt_sha256)
     try:
         freeze = contract_api.load_freeze_manifest(
-            contract, phase, freeze_path, evidence_kind)
+            contract, phase, freeze_path, evidence_kind,
+            timing_qualification)
     except contract_api.ContractError as exc:
         fail(str(exc))
-    expected_receipt_schema = RAW_EXECUTION_SCHEMA \
-        if freeze.get("schema") == contract_api.RAW_FREEZE_SCHEMA \
-        else EXECUTION_SCHEMA
+    if evidence_kind == "timing":
+        expected_receipt_schema = TIMING_EXECUTION_SCHEMA
+    else:
+        expected_receipt_schema = RAW_EXECUTION_SCHEMA \
+            if freeze.get("schema") == contract_api.RAW_FREEZE_SCHEMA \
+            else EXECUTION_SCHEMA
     if receipt["schema"] != expected_receipt_schema:
         fail("execution receipt has an unknown schema")
     unsigned = {key: value for key, value in receipt.items()
@@ -1297,6 +2376,7 @@ def validate_execution_receipt(
     native_records = _load_canonical_jsonl(native_path, "native result stream")
     payloads, metadata_with_runtime = _validate_native_records(
         contract, freeze, evidence_kind, phase, native_records,
+        timing_qualification,
         verify_live_workers=verify_live_sampler)
     runtime_workers = metadata_with_runtime["_runtime_workers"]
     metadata = {
@@ -1311,6 +2391,53 @@ def validate_execution_receipt(
         if receipt[field] != metadata[field]:
             fail("execution receipt {} differs from native evidence".format(
                 field))
+    if timing_qualification is not None and \
+            qualification_metadata is not None:
+        qualification_bindings = {
+            "timing_base_domain_sha256":
+                timing_qualification.base_domain_sha256,
+            "timing_qualified_domain_sha256":
+                timing_qualification.qualified_domain_sha256,
+            "timing_qualification_map_sha256":
+                timing_qualification.map_sha256,
+            "timing_qualification_audit_sha256":
+                timing_qualification.qualification_audit_sha256,
+            "timing_qualification_execution_receipt_sha256":
+                timing_qualification_execution_receipt_sha256,
+            **{
+                field: qualification_metadata[field]
+                for field in TIMING_QUALIFICATION_EMBEDDED_FIELDS
+            },
+        }
+        for field, expected in qualification_bindings.items():
+            if receipt[field] != expected:
+                fail("execution receipt {} differs from qualification evidence".
+                     format(field))
+        if receipt["qualification_worker_end_monotonic_ns"] > \
+                receipt["worker_start_monotonic_ns"]:
+            fail("qualification workers overlap the exact-eight timing interval")
+        qualification_identities = {
+            (value["pid"], value["process_start_ticks"])
+            for value in receipt["qualification_workers"]
+        }
+        timing_identities = {
+            (value["pid"], value["process_start_ticks"])
+            for value in receipt["workers"]
+        }
+        if qualification_identities & timing_identities:
+            fail("a qualification worker identity survived into timing")
+        qualification_thermal = _exact_keys(
+            receipt["qualification_thermal"], THERMAL_RECEIPT_FIELDS,
+            "execution receipt qualification thermal record")
+        if qualification_sampler is None:
+            fail("qualification sampler attestation is missing")
+        actual_qualification_thermal = _thermal_window(
+            qualification_sampler,
+            receipt["qualification_worker_start_monotonic_ns"],
+            receipt["qualification_worker_end_monotonic_ns"],
+            receipt["qualification_worker_cpus"], verify_live_sampler)
+        if actual_qualification_thermal != qualification_thermal:
+            fail("qualification thermal summary differs from sampler bytes")
     if receipt["result_stream_sha256"] != _sha256_jsonl(payloads):
         fail("execution receipt result hash differs from native payloads")
     result_rows = _load_canonical_jsonl(result_path, "published result stream")
@@ -1349,13 +2476,21 @@ def validate_execution_receipt(
         "window_end_monotonic_ns": thermal["window_end_monotonic_ns"],
         "terminal_status": thermal["terminal_status"],
     }
+    sampler_attestation = _exact_keys(
+        _load_canonical_object(sampler_path, "sampler attestation"),
+        SAMPLER_FIELDS, "sampler attestation")
+    if sampler_attestation != sampler:
+        fail("execution receipt sampler binding differs from its attestation")
     actual_thermal = _thermal_window(
-        sampler, receipt["worker_start_monotonic_ns"],
+        sampler_attestation, receipt["worker_start_monotonic_ns"],
         receipt["worker_end_monotonic_ns"], receipt["worker_cpus"],
         verify_live_sampler,
         controller_cpu=freeze.get("host_identity", {}).get("controller_cpu"))
     if actual_thermal != thermal:
         fail("execution receipt thermal summary differs from sampler bytes")
+    if evidence_kind == "timing":
+        _require_one_continuous_sampler(
+            receipt["qualification_thermal"], thermal)
 
     try:
         if evidence_kind == "recovery":
@@ -1363,7 +2498,10 @@ def validate_execution_receipt(
                 contract, phase, result_path, freeze_path, trace_path)
         else:
             summary = contract_api.validate_timing_receipt(
-                contract, phase, result_path, freeze_path, trace_path)
+                contract, phase, result_path, freeze_path, trace_path,
+                timing_qualification_map_path,
+                timing_qualification_audit_path,
+                timing_qualification_map_sha256)
     except contract_api.ContractError as exc:
         fail(str(exc))
     final_result_rows = _load_canonical_jsonl(
@@ -1374,6 +2512,85 @@ def validate_execution_receipt(
         fail("published result stream changed during authoritative validation")
     if contract_api.sha256_json(summary) != receipt["validator_summary_sha256"]:
         fail("execution receipt validator-summary binding is invalid")
+    if timing_qualification is not None and \
+            qualification_metadata is not None:
+        final_qualification = _load_required_timing_qualification(
+            contract, phase, timing_qualification_map_path,
+            timing_qualification_audit_path,
+            timing_qualification_map_sha256)
+        if (final_qualification.map_sha256 !=
+                timing_qualification.map_sha256 or
+                final_qualification.qualification_audit_sha256 !=
+                timing_qualification.qualification_audit_sha256):
+            fail("timing qualification changed during receipt validation")
+        final_qualification_receipt, final_qualification_metadata = \
+            load_timing_qualification_execution_receipt(
+                contract, phase, final_qualification,
+                timing_qualification_native_path,
+                timing_qualification_execution_receipt_path,
+                expected_receipt_sha256=
+                    timing_qualification_execution_receipt_sha256)
+        if (final_qualification_receipt != qualification_execution_receipt or
+                final_qualification_metadata != qualification_metadata):
+            fail("timing qualification changed during receipt validation")
+    final_receipt = _exact_keys(
+        _load_canonical_object(
+            execution_receipt_path, "execution receipt after validation"),
+        receipt_fields, "execution receipt after validation")
+    if final_receipt != receipt:
+        fail("execution receipt changed during authoritative validation")
+    try:
+        final_freeze = contract_api.load_freeze_manifest(
+            contract, phase, freeze_path, evidence_kind,
+            timing_qualification)
+        final_trace_sha256 = contract_api.trace_manifest_sha256(
+            contract, evidence_kind, phase, trace_path,
+            timing_qualification)
+    except contract_api.ContractError as exc:
+        fail(str(exc))
+    if (final_freeze != freeze or
+            contract_api.freeze_manifest_sha256(final_freeze) !=
+                receipt["freeze_manifest_sha256"] or
+            final_trace_sha256 != receipt["trace_manifest_sha256"]):
+        fail("freeze or trace manifest changed during receipt validation")
+    final_native_records = _load_canonical_jsonl(
+        native_path, "native result stream after receipt validation")
+    if (final_native_records != native_records or
+            _sha256_jsonl(final_native_records) !=
+                receipt["native_stream_sha256"]):
+        fail("native result stream changed during receipt validation")
+    final_sampler_attestation = _exact_keys(
+        _load_canonical_object(
+            sampler_path, "sampler attestation after receipt validation"),
+        SAMPLER_FIELDS, "sampler attestation after receipt validation")
+    final_thermal = _thermal_window(
+        final_sampler_attestation, receipt["worker_start_monotonic_ns"],
+        receipt["worker_end_monotonic_ns"], receipt["worker_cpus"],
+        verify_live_sampler,
+        controller_cpu=freeze.get("host_identity", {}).get("controller_cpu"))
+    if (final_sampler_attestation != sampler_attestation or
+            final_thermal != thermal):
+        fail("timing sampler evidence changed during receipt validation")
+    if timing_qualification is not None and \
+            qualification_metadata is not None and \
+            qualification_sampler is not None:
+        final_qualification_sampler = _load_canonical_object(
+            timing_qualification_sampler_path,
+            "qualification sampler attestation after receipt validation")
+        final_qualification_thermal = _thermal_window(
+            final_qualification_sampler,
+            qualification_metadata[
+                "qualification_worker_start_monotonic_ns"],
+            qualification_metadata[
+                "qualification_worker_end_monotonic_ns"],
+            qualification_metadata["qualification_worker_cpus"],
+            verify_live_sampler)
+        if (final_qualification_sampler != qualification_sampler or
+                final_qualification_thermal != qualification_thermal):
+            fail("qualification sampler evidence changed during receipt "
+                 "validation")
+        _require_one_continuous_sampler(
+            final_qualification_thermal, final_thermal)
     if verify_live_sampler:
         _reverify_native_workers(runtime_workers)
     return {"summary": summary, "execution_receipt": receipt}
@@ -1381,13 +2598,21 @@ def validate_execution_receipt(
 
 def _command_trace(args: argparse.Namespace) -> int:
     contract = contract_api.load_contract(args.contract)
+    qualification = None
+    if args.kind == "timing":
+        qualification = _load_required_timing_qualification(
+            contract, args.phase, args.timing_qualification_map,
+            args.timing_qualification_audit,
+            args.timing_qualification_map_sha256)
     frozen_hash = None
     if args.freeze_manifest is not None:
         freeze = contract_api.load_freeze_manifest(
-            contract, args.phase, args.freeze_manifest, args.kind)
+            contract, args.phase, args.freeze_manifest, args.kind,
+            qualification)
         frozen_hash = freeze["trace_manifest_sha256"]
     digest = assemble_trace_manifest(
-        contract, args.kind, args.phase, args.native, args.output, frozen_hash)
+        contract, args.kind, args.phase, args.native, args.output, frozen_hash,
+        qualification)
     print(json.dumps({"trace_manifest_sha256": digest}, sort_keys=True))
     return 0
 
@@ -1397,7 +2622,17 @@ def _command_results(args: argparse.Namespace) -> int:
     result = assemble_results(
         contract, args.kind, args.phase, args.freeze_manifest,
         args.trace_manifest, args.native, args.sampler_attestation,
-        args.output, args.execution_receipt, verify_live_sampler=True)
+        args.output, args.execution_receipt, verify_live_sampler=True,
+        timing_qualification_map_path=args.timing_qualification_map,
+        timing_qualification_audit_path=args.timing_qualification_audit,
+        timing_qualification_map_sha256=
+            args.timing_qualification_map_sha256,
+        timing_qualification_native_path=args.timing_qualification_native,
+        timing_qualification_sampler_path=args.timing_qualification_sampler,
+        timing_qualification_execution_receipt_path=
+            args.timing_qualification_execution_receipt,
+        timing_qualification_execution_receipt_sha256=
+            args.timing_qualification_execution_receipt_sha256)
     print(json.dumps(result["summary"], sort_keys=True, indent=2))
     return 0
 
@@ -1416,7 +2651,18 @@ def _command_validate_execution(args: argparse.Namespace) -> int:
     result = validate_execution_receipt(
         contract, args.kind, args.phase, args.freeze_manifest,
         args.trace_manifest, args.native, args.result,
-        args.execution_receipt, verify_live_sampler=True)
+        args.execution_receipt, verify_live_sampler=True,
+        sampler_path=args.sampler_attestation,
+        timing_qualification_map_path=args.timing_qualification_map,
+        timing_qualification_audit_path=args.timing_qualification_audit,
+        timing_qualification_map_sha256=
+            args.timing_qualification_map_sha256,
+        timing_qualification_native_path=args.timing_qualification_native,
+        timing_qualification_sampler_path=args.timing_qualification_sampler,
+        timing_qualification_execution_receipt_path=
+            args.timing_qualification_execution_receipt,
+        timing_qualification_execution_receipt_sha256=
+            args.timing_qualification_execution_receipt_sha256)
     print(json.dumps(result["summary"], sort_keys=True, indent=2))
     return 0
 
@@ -1445,6 +2691,9 @@ def main(argv: Sequence[str] = ()) -> int:
     trace.add_argument("--native", required=True, type=Path)
     trace.add_argument("--output", required=True, type=Path)
     trace.add_argument("--freeze-manifest", type=Path)
+    trace.add_argument("--timing-qualification-map", type=Path)
+    trace.add_argument("--timing-qualification-audit", type=Path)
+    trace.add_argument("--timing-qualification-map-sha256")
     trace.set_defaults(function=_command_trace)
     result = commands.add_parser(
         "assemble-results", help="validate and publish native result bytes")
@@ -1456,6 +2705,15 @@ def main(argv: Sequence[str] = ()) -> int:
     result.add_argument("--sampler-attestation", required=True, type=Path)
     result.add_argument("--output", required=True, type=Path)
     result.add_argument("--execution-receipt", required=True, type=Path)
+    result.add_argument("--timing-qualification-map", type=Path)
+    result.add_argument("--timing-qualification-audit", type=Path)
+    result.add_argument("--timing-qualification-map-sha256")
+    result.add_argument("--timing-qualification-native", type=Path)
+    result.add_argument("--timing-qualification-sampler", type=Path)
+    result.add_argument(
+        "--timing-qualification-execution-receipt", type=Path)
+    result.add_argument(
+        "--timing-qualification-execution-receipt-sha256")
     result.set_defaults(function=_command_results)
     validate = commands.add_parser(
         "validate-execution", help="revalidate a native execution receipt")
@@ -1467,6 +2725,16 @@ def main(argv: Sequence[str] = ()) -> int:
     validate.add_argument("--native", required=True, type=Path)
     validate.add_argument("--result", required=True, type=Path)
     validate.add_argument("--execution-receipt", required=True, type=Path)
+    validate.add_argument("--sampler-attestation", required=True, type=Path)
+    validate.add_argument("--timing-qualification-map", type=Path)
+    validate.add_argument("--timing-qualification-audit", type=Path)
+    validate.add_argument("--timing-qualification-map-sha256")
+    validate.add_argument("--timing-qualification-native", type=Path)
+    validate.add_argument("--timing-qualification-sampler", type=Path)
+    validate.add_argument(
+        "--timing-qualification-execution-receipt", type=Path)
+    validate.add_argument(
+        "--timing-qualification-execution-receipt-sha256")
     validate.set_defaults(function=_command_validate_execution)
     args = parser.parse_args(argv if argv else None)
     try:

@@ -25,12 +25,12 @@ EXPECTED_RECOVERY_HASHES = {
     "final_validation": "a63611ad300396a1b8977281fcd387fde4bd207a3ca82043c5e234e8fc39d4de",
     "cross_width_validation": "80fb4c19b31f88101ef4b3c480e6d5ff4a3bba7d45c96f02dc3518cd7c1c0399",
 }
-EXPECTED_TIMING_HASHES = {
-    "development": "ca82f8774f0cb1b865a0bbc01b8de79d2239df13ab3ef17ef5eb4e3e39ab6913",
-    "final": "3b1aa0274f690769111ffa239eba3797e8893757ab8bab1db1c224eba043f246",
+EXPECTED_TIMING_BASE_HASHES = {
+    "development": "eab25fe96642d8dd12d4b64e91fe00b533d464f1bd7487c84e670ce888e2d164",
+    "final": "5b53ef3780f9b5b3cab83b411da0c8d0d06abaa3c76a9dc51d96425cd9de6c94",
 }
 EXPECTED_CONTRACT_SHA256 = \
-    "0702ca7f3bea7b0e06b1bd0dde1f49e788b5d7904fbf28fdc2cf1cc4a2662ffc"
+    "64aa60eea7a13b143420349d878b1ad334d314eb6f996ed6018833a73ef89e3e"
 
 
 def digest(label: str) -> str:
@@ -271,19 +271,102 @@ def write_raw_freeze_manifest(
     return path
 
 
-def timing_trace_hashes(contract: Mapping[str, Any]) -> List[str]:
-    return [
-        digest("timing-trace:" + subject.sha256_json(cell))
-        for cell in subject.iter_timing_cells(contract, "development")
-    ]
+def write_timing_qualification(
+        root: Path, contract: Mapping[str, Any], phase: str = "development",
+        retry_offsets: Optional[Sequence[int]] = None,
+        ) -> Tuple[subject.TimingQualification, Path, Path, str, List[str]]:
+    base_cells = list(subject.iter_timing_base_cells(contract, phase))
+    if retry_offsets is None:
+        retry_offsets = [0] * len(base_cells)
+    offsets = list(retry_offsets)
+    if len(offsets) != len(base_cells):
+        raise AssertionError("test qualification offset count")
+    audit_rows = []
+    selected_traces = []
+    for ordinal, (base_cell, selected) in enumerate(zip(base_cells, offsets)):
+        for retry in range(selected + 1):
+            terminal = retry == selected
+            trace = digest(
+                "timing-qualified-trace:{}:{}:{}".format(
+                    phase, ordinal, retry))
+            audit_rows.append({
+                "ordinal": ordinal,
+                "base_cell_sha256": subject.sha256_json(base_cell),
+                "loss_retry_offset": retry,
+                "loss_seed": subject._qualified_timing_loss_seed(
+                    base_cell["base_loss_seed"], retry),
+                "trace_sha256": trace,
+                "wirehair2_head_outcome":
+                    "success" if terminal else "need_more_at_bound",
+                "wirehair2_head_decoded_extra": 4 if terminal else None,
+                "wirehair1_outcome": "success",
+                "wirehair1_decoded_extra": 0,
+            })
+            if terminal:
+                selected_traces.append(trace)
+    audit_path = root / ("timing-qualification-" + phase + ".jsonl")
+    audit_path.write_bytes("".join(
+        subject.canonical_json(row) + "\n" for row in audit_rows
+    ).encode("utf-8"))
+    controls = []
+    for arm, scope in (
+            ("wirehair2_head", "decoder_solve"),
+            ("wirehair1", "receive_to_success")):
+        mapped = phase == "final" and arm == "wirehair2_head"
+        controls.append({
+            "arm": arm,
+            "scope": scope,
+            "binary_sha256": digest("binary:" + arm),
+            "arm_descriptor_sha256": digest("descriptor:" + arm),
+            "construction_policy":
+                "not_applicable" if arm == "wirehair1" else
+                "repair_map" if mapped else "raw_base",
+            "repair_map_sha256":
+                digest("production map:" + arm) if mapped else "0" * 64,
+        })
+    value = {
+        "schema": subject.TIMING_QUALIFICATION_MAP_SCHEMA,
+        "contract_sha256": subject.contract_sha256(contract),
+        "phase": phase,
+        "source_git_commit": "1" * 40,
+        "base_domain_sha256": contract["timing"]["domains"][phase][
+            "base_domain_sha256"],
+        "qualified_domain_sha256":
+            subject._timing_domain_sha256_from_offsets(
+                contract, phase, offsets),
+        "entry_kind": subject.TIMING_QUALIFICATION_ENTRY_KIND,
+        "controls": controls,
+        "qualification_audit_sha256":
+            subject.timing_qualification_audit_sha256(
+                contract, phase, audit_path),
+        "selected_trace_roster_sha256":
+            subject.timing_selected_trace_roster_sha256(selected_traces),
+        "retry_offsets": offsets,
+    }
+    map_path = root / ("timing-qualification-" + phase + ".json")
+    map_path.write_bytes(
+        (subject.canonical_json(value) + "\n").encode("utf-8"))
+    map_sha256 = subject.timing_qualification_map_sha256(value)
+    qualification = subject.load_timing_qualification_map(
+        contract, phase, map_path, audit_path, map_sha256)
+    return qualification, map_path, audit_path, map_sha256, selected_traces
+
+
+def timing_trace_hashes(
+        contract: Mapping[str, Any],
+        qualification: subject.TimingQualification) -> List[str]:
+    if qualification.phase != "development":
+        raise AssertionError("test helper expects development qualification")
+    return list(qualification.selected_trace_sha256s)
 
 
 def write_timing_trace_manifest(
         root: Path, contract: Mapping[str, Any],
-        hashes: Sequence[str]) -> Path:
+        hashes: Sequence[str],
+        qualification: subject.TimingQualification) -> Path:
     rows = []
     for ordinal, cell in enumerate(subject.iter_timing_cells(
-            contract, "development")):
+            contract, qualification.phase, qualification)):
         rows.append({
             "ordinal": ordinal,
             "cell_sha256": subject.sha256_json(cell),
@@ -305,7 +388,8 @@ def arm_codec(arm: str) -> str:
 
 def write_timing_freeze_manifest(
         root: Path, contract: Mapping[str, Any], trace_path: Path,
-        arms: Sequence[str]) -> Path:
+        arms: Sequence[str],
+        qualification: subject.TimingQualification) -> Path:
     arm_records = []
     for arm in arms:
         codec = arm_codec(arm)
@@ -323,13 +407,12 @@ def write_timing_freeze_manifest(
         "contract_sha256": subject.contract_sha256(contract),
         "evidence_kind": "timing",
         "phase": "development",
-        "domain_sha256": contract["timing"]["domains"]["development"][
-            "domain_sha256"],
+        "domain_sha256": qualification.qualified_domain_sha256,
         "source_git_commit": "1" * 40,
         "arm_roster": list(arms),
         "arm_roster_sha256": subject.arm_roster_sha256(arms),
         "trace_manifest_sha256": subject.trace_manifest_sha256(
-            contract, "timing", "development", trace_path),
+            contract, "timing", "development", trace_path, qualification),
         "repair_training_trace_manifest_sha256": "0" * 64,
         "commands": [["wirehair_v2_bench", "timing-cell", "--frozen"]],
         "cpu_affinity": [0, 1],
@@ -343,6 +426,7 @@ def write_timing_freeze_manifest(
 
 def write_final_freeze_manifests(
         root: Path, contract: Mapping[str, Any],
+        timing_qualification: subject.TimingQualification,
         arms: Sequence[str] = ("wirehair2_head", "wirehair1", "candidate"),
         ) -> Dict[Tuple[str, str], Path]:
     training_trace = digest("final repaired training traces")
@@ -350,6 +434,12 @@ def write_final_freeze_manifests(
         arm: digest("production map:" + arm)
         for arm in arms if arm != "wirehair1"
     }
+    timing_trace_path = write_timing_trace_manifest(
+        root, contract, timing_qualification.selected_trace_sha256s,
+        timing_qualification)
+    timing_trace_sha256 = subject.trace_manifest_sha256(
+        contract, "timing", "final", timing_trace_path,
+        timing_qualification)
     paths: Dict[Tuple[str, str], Path] = {}
     keys = (
         ("recovery", "final_raw"),
@@ -375,15 +465,18 @@ def write_final_freeze_manifests(
                     "0" * 64 if raw or codec == "wirehair1" else
                     map_hashes[arm],
             })
-        trace_sha256 = training_trace if phase == "final_repaired" else \
+        trace_sha256 = timing_trace_sha256 if evidence_kind == "timing" else \
+            training_trace if phase == "final_repaired" else \
             digest("trace:{}:{}".format(evidence_kind, phase))
         manifest = {
             "schema": subject.FREEZE_SCHEMA,
             "contract_sha256": subject.contract_sha256(contract),
             "evidence_kind": evidence_kind,
             "phase": phase,
-            "domain_sha256": contract[evidence_kind]["domains"][phase][
-                "domain_sha256"],
+            "domain_sha256":
+                timing_qualification.qualified_domain_sha256
+                if evidence_kind == "timing" else
+                contract[evidence_kind]["domains"][phase]["domain_sha256"],
             "source_git_commit": "1" * 40,
             "arm_roster": list(arms),
             "arm_roster_sha256": subject.arm_roster_sha256(arms),
@@ -403,7 +496,9 @@ def write_final_freeze_manifests(
 
 
 def architecture_selection_receipt(
-        contract: Mapping[str, Any], selected: str = "candidate",
+        contract: Mapping[str, Any],
+        timing_qualification: subject.TimingQualification,
+        selected: str = "candidate",
         ) -> Dict[str, Any]:
     selected_artifact = {
         "codec": "wirehair2_experiment",
@@ -414,8 +509,11 @@ def architecture_selection_receipt(
         "contract_sha256": subject.contract_sha256(contract),
         "recovery_domain_sha256": contract["recovery"]["domains"]
             ["development"]["domain_sha256"],
-        "timing_domain_sha256": contract["timing"]["domains"]
-            ["development"]["domain_sha256"],
+        "timing_base_domain_sha256": contract["timing"]["domains"]
+            ["development"]["base_domain_sha256"],
+        "timing_domain_sha256":
+            timing_qualification.qualified_domain_sha256,
+        "timing_qualification_map_sha256": timing_qualification.map_sha256,
         "recovery_freeze_manifest_sha256": digest("recovery freeze"),
         "timing_freeze_manifest_sha256": digest("timing freeze"),
         "architecture_artifact_sha256": digest("architecture artifacts"),
@@ -448,12 +546,13 @@ def architecture_selection_receipt(
 
 def timing_receipt_rows(
         contract: Mapping[str, Any], hashes: Sequence[str],
+        qualification: subject.TimingQualification,
         arms: Sequence[str] = ("wirehair2_head", "wirehair1", "candidate"),
         candidate_scale: float = 0.8) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     panels = subject.timing_panels(contract, arms)
     for ordinal, cell in enumerate(subject.iter_timing_cells(
-            contract, "development")):
+            contract, "development", qualification)):
         for panel in panels:
             left = panel["left_arm"]
             right = panel["right_arm"]
@@ -477,9 +576,13 @@ def timing_receipt_rows(
                 "left_outcome": "success",
                 "right_outcome": "success",
                 "left_decoded_extra": None if panel["scope"] ==
-                    "encoder_init_plus_first_K_symbols" else 4,
+                    "encoder_init_plus_first_K_symbols" else
+                    cell["receive_overhead_cap"] if panel["scope"] ==
+                    "receive_to_success" else cell["fixed_received_overhead"],
                 "right_decoded_extra": None if panel["scope"] ==
-                    "encoder_init_plus_first_K_symbols" else 4,
+                    "encoder_init_plus_first_K_symbols" else
+                    cell["receive_overhead_cap"] if panel["scope"] ==
+                    "receive_to_success" else cell["fixed_received_overhead"],
                 "elapsed_ns": elapsed,
                 "cell_sha256": subject.sha256_json(cell),
                 "trace_sha256": hashes[ordinal],
@@ -545,15 +648,25 @@ class ContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.contract = subject.load_contract()
+        cls.qualification_temp = tempfile.TemporaryDirectory()
+        root = Path(cls.qualification_temp.name)
+        cls.development_qualification = write_timing_qualification(
+            root, cls.contract, "development")[0]
+        cls.final_qualification = write_timing_qualification(
+            root, cls.contract, "final")[0]
 
-    def test_v4_timing_identity_and_default_contract_path_are_exact(self) -> None:
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.qualification_temp.cleanup()
+
+    def test_v6_timing_identity_and_default_contract_path_are_exact(self) -> None:
         self.assertEqual(subject.SCHEMA,
                          "wirehair.wh2.benchmark-contract.v3")
         self.assertEqual(subject.DEFAULT_CONTRACT.name,
                          "wh2_benchmark_contract_v3.json")
         self.assertEqual(self.contract["schema"], subject.SCHEMA)
         self.assertEqual(self.contract["contract_id"],
-                         "wh2-pure-gf256-1pct-v4")
+                         "wh2-pure-gf256-1pct-v6")
         self.assertEqual(subject.contract_sha256(self.contract),
                          EXPECTED_CONTRACT_SHA256)
 
@@ -574,12 +687,17 @@ class ContractTests(unittest.TestCase):
                     self.contract, phase), expected_hash)
 
     def test_exact_timing_domains_and_hashes(self) -> None:
-        for phase, expected_hash in EXPECTED_TIMING_HASHES.items():
+        for phase, expected_hash in EXPECTED_TIMING_BASE_HASHES.items():
             with self.subTest(phase=phase):
                 domain = self.contract["timing"]["domains"][phase]
-                self.assertEqual(subject.timing_domain_sha256(
+                self.assertEqual(subject.timing_base_domain_sha256(
                     self.contract, phase), expected_hash)
-                self.assertEqual(domain["domain_sha256"], expected_hash)
+                self.assertEqual(domain["base_domain_sha256"], expected_hash)
+                qualification = self.development_qualification \
+                    if phase == "development" else self.final_qualification
+                self.assertEqual(subject.timing_domain_sha256(
+                    self.contract, phase, qualification),
+                    qualification.qualified_domain_sha256)
         self.assertEqual(
             self.contract["timing"]["domains"]["development"]["expected_cells"],
             2304,
@@ -588,6 +706,208 @@ class ContractTests(unittest.TestCase):
             self.contract["timing"]["domains"]["final"]["expected_cells"],
             14400,
         )
+
+    def test_timing_qualification_selects_lowest_retry_and_preserves_source(
+            self) -> None:
+        offsets = [0] * 2304
+        offsets[0] = 2
+        with tempfile.TemporaryDirectory() as temporary:
+            qualification, _map_path, _audit_path, _map_sha, _traces = \
+                write_timing_qualification(
+                    Path(temporary), self.contract, "development", offsets)
+            cells = list(subject.iter_timing_cells(
+                self.contract, "development", qualification))
+        base = next(subject.iter_timing_base_cells(
+            self.contract, "development"))
+        self.assertEqual(cells[0]["loss_retry_offset"], 2)
+        self.assertEqual(
+            cells[0]["loss_seed"],
+            subject._qualified_timing_loss_seed(base["base_loss_seed"], 2))
+        self.assertEqual(
+            cells[0]["base_cell_sha256"], subject.sha256_json(base))
+        self.assertEqual(
+            {key: cells[0][key]
+             for key in self.contract["timing"]["base_cell_key"]}, base)
+        self.assertNotEqual(
+            subject._qualified_timing_loss_seed(base["base_loss_seed"], 1),
+            cells[0]["loss_seed"])
+
+    def test_timing_qualification_map_and_audit_mutants_fail_closed(
+            self) -> None:
+        offsets = [0] * 2304
+        offsets[0] = 1
+        mutations = (
+            "nonlowest", "terminal", "seed", "candidate_audit",
+            "candidate_map", "candidate_control", "qualified_domain",
+            "selected_trace_roster", "base_cell", "gap", "offset_type",
+            "source_commit",
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation), \
+                    tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                _qualification, map_path, audit_path, _map_sha, _traces = \
+                    write_timing_qualification(
+                        root, self.contract, "development", offsets)
+                value = json.loads(map_path.read_text(encoding="utf-8"))
+                rows = [json.loads(line) for line in
+                        audit_path.read_text(encoding="utf-8").splitlines()]
+                if mutation == "nonlowest":
+                    rows[0]["wirehair2_head_outcome"] = "success"
+                    rows[0]["wirehair2_head_decoded_extra"] = 4
+                elif mutation == "terminal":
+                    rows[1]["wirehair1_outcome"] = "need_more_at_bound"
+                    rows[1]["wirehair1_decoded_extra"] = None
+                elif mutation == "seed":
+                    rows[0]["loss_seed"] = "0x0000000000000000"
+                elif mutation == "candidate_audit":
+                    rows[0]["candidate_outcome"] = "success"
+                elif mutation == "candidate_map":
+                    value["candidate_timing_ns"] = 1
+                elif mutation == "candidate_control":
+                    candidate = copy.deepcopy(value["controls"][0])
+                    candidate["arm"] = "candidate"
+                    value["controls"].append(candidate)
+                elif mutation == "qualified_domain":
+                    value["qualified_domain_sha256"] = digest(
+                        "forged qualified domain")
+                elif mutation == "selected_trace_roster":
+                    value["selected_trace_roster_sha256"] = digest(
+                        "forged selected trace roster")
+                elif mutation == "base_cell":
+                    rows[0]["base_cell_sha256"] = digest(
+                        "substituted source cell")
+                elif mutation == "gap":
+                    del rows[0]
+                elif mutation == "offset_type":
+                    value["retry_offsets"][0] = True
+                else:
+                    value["source_git_commit"] = "candidate"
+                audit_path.write_bytes("".join(
+                    subject.canonical_json(row) + "\n" for row in rows
+                ).encode("utf-8"))
+                value["qualification_audit_sha256"] = \
+                    subject.timing_qualification_audit_sha256(
+                        self.contract, "development", audit_path)
+                map_path.write_bytes(
+                    (subject.canonical_json(value) + "\n").encode("utf-8"))
+                expected = subject.timing_qualification_map_sha256(value)
+                with self.assertRaises(subject.ContractError):
+                    subject.load_timing_qualification_map(
+                        self.contract, "development", map_path, audit_path,
+                        expected)
+
+    def test_direct_timing_qualification_forgery_is_rejected(self) -> None:
+        with self.assertRaises(subject.ContractError):
+            subject.TimingQualification(
+                subject.contract_sha256(self.contract), "development",
+                digest("map"), EXPECTED_TIMING_BASE_HASHES["development"],
+                digest("domain"), "1" * 40, (), digest("audit"),
+                tuple([0] * 2304), digest("trace roster"),
+                tuple([digest("trace")] * 2304))
+
+        forged = object.__new__(subject.TimingQualification)
+        original = self.development_qualification
+        for key in subject.TIMING_QUALIFICATION_FIELDS:
+            object.__setattr__(forged, key, getattr(original, key))
+        forged_offsets = list(original.retry_offsets)
+        forged_offsets[0] = 1
+        values = {
+            "map_sha256": digest("syntactically valid forged map"),
+            "qualified_domain_sha256":
+                subject._timing_domain_sha256_from_offsets(
+                    self.contract, "development", forged_offsets),
+            "retry_offsets": tuple(forged_offsets),
+        }
+        for key, value in values.items():
+            object.__setattr__(forged, key, value)
+        with self.assertRaises(subject.ContractError):
+            list(subject.iter_timing_cells(
+                self.contract, "development", forged))
+
+        trace_forgery = object.__new__(subject.TimingQualification)
+        for key in subject.TIMING_QUALIFICATION_FIELDS:
+            object.__setattr__(trace_forgery, key, getattr(original, key))
+        substituted_traces = list(original.selected_trace_sha256s)
+        substituted_traces[0] = digest("substituted selected trace")
+        object.__setattr__(
+            trace_forgery, "selected_trace_sha256s",
+            tuple(substituted_traces))
+        with self.assertRaises(subject.ContractError):
+            list(subject.iter_timing_cells(
+                self.contract, "development", trace_forgery))
+
+        # Reproduce the stronger attack: every public field and digest is
+        # self-consistent, but no strict audit loader created this identity.
+        self_consistent = object.__new__(subject.TimingQualification)
+        forged_offsets = tuple([1] * 2304)
+        forged_traces = tuple([digest("forged terminal trace")] * 2304)
+        forged_domain = subject._timing_domain_sha256_from_offsets(
+            self.contract, "development", forged_offsets)
+        forged_roster = subject.timing_selected_trace_roster_sha256(
+            forged_traces)
+        control_records = [dict(zip(
+            subject.TIMING_QUALIFICATION_CONTROL_ORDER, control))
+            for control in original.controls]
+        forged_map = {
+            "schema": subject.TIMING_QUALIFICATION_MAP_SCHEMA,
+            "contract_sha256": subject.contract_sha256(self.contract),
+            "phase": "development",
+            "source_git_commit": original.source_git_commit,
+            "base_domain_sha256": original.base_domain_sha256,
+            "qualified_domain_sha256": forged_domain,
+            "entry_kind": subject.TIMING_QUALIFICATION_ENTRY_KIND,
+            "controls": control_records,
+            "qualification_audit_sha256": "a" * 64,
+            "selected_trace_roster_sha256": forged_roster,
+            "retry_offsets": list(forged_offsets),
+        }
+        forged_values = {
+            "contract_sha256": subject.contract_sha256(self.contract),
+            "phase": "development",
+            "map_sha256": subject.timing_qualification_map_sha256(
+                forged_map),
+            "base_domain_sha256": original.base_domain_sha256,
+            "qualified_domain_sha256": forged_domain,
+            "source_git_commit": original.source_git_commit,
+            "controls": original.controls,
+            "qualification_audit_sha256": "a" * 64,
+            "retry_offsets": forged_offsets,
+            "selected_trace_roster_sha256": forged_roster,
+            "selected_trace_sha256s": forged_traces,
+        }
+        for key in subject.TIMING_QUALIFICATION_FIELDS:
+            object.__setattr__(self_consistent, key, forged_values[key])
+        with self.assertRaises(subject.ContractError):
+            next(subject.iter_timing_cells(
+                self.contract, "development", self_consistent))
+
+        # Even object.__setattr__ cannot mutate an identity after the loader
+        # placed its complete immutable snapshot in the provenance registry.
+        with tempfile.TemporaryDirectory() as temporary:
+            loaded = write_timing_qualification(
+                Path(temporary), self.contract, "development")[0]
+            object.__setattr__(loaded, "map_sha256", digest("mutated map"))
+            with self.assertRaises(subject.ContractError):
+                next(subject.iter_timing_cells(
+                    self.contract, "development", loaded))
+
+    def test_timing_trace_manifest_must_replay_terminal_audit_rows(
+            self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            qualification, _map, _audit, _map_sha, traces = \
+                write_timing_qualification(root, self.contract)
+            traces[0] = digest("substituted terminal timing trace")
+            path = write_timing_trace_manifest(
+                root, self.contract, traces, qualification)
+            manifest_sha256 = subject.trace_manifest_sha256(
+                self.contract, "timing", "development", path,
+                qualification)
+            with self.assertRaises(subject.ContractError):
+                subject.load_timing_trace_manifest(
+                    self.contract, "development", path, manifest_sha256,
+                    qualification)
 
     def test_timing_batch_formula_and_production_training_seed_are_exact(
             self) -> None:
@@ -602,6 +922,10 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(protocol["slots_per_panel"], 8)
         self.assertEqual(
             geometry, subject.EXPECTED_TIMING_EXECUTION_GEOMETRY)
+        self.assertEqual(
+            geometry["cohort_identity"],
+            "all timing cell fields except replicate, base_loss_seed, "
+            "base_cell_sha256, loss_retry_offset, and loss_seed, plus panel")
         self.assertEqual(geometry["timing_worker_count"], 8)
         self.assertEqual(geometry["jobs_per_wave"], 8)
         for domain in self.contract["timing"]["domains"].values():
@@ -705,13 +1029,21 @@ class ContractTests(unittest.TestCase):
                     self.contract, 8, slot)
 
         development = list(subject.iter_timing_cells(
-            self.contract, "development"))
+            self.contract, "development", self.development_qualification))
         self.assertEqual(self.contract["timing"]["domains"]["development"]
                          ["seed_mode"], "production_training")
         self.assertEqual({cell["base_seed_attempt"] for cell in development},
                          {self.contract["seeds"]
                           ["production_base_seed_attempt"]})
         for cell in development:
+            self.assertEqual(cell["fixed_received_overhead"], 4)
+            self.assertEqual(cell["receive_overhead_cap"], 256)
+            base_cell = {
+                key: cell[key]
+                for key in self.contract["timing"]["base_cell_key"]
+            }
+            self.assertEqual(
+                cell["base_cell_sha256"], subject.sha256_json(base_cell))
             self.assertEqual(
                 cell["invocations_per_slot"],
                 max(2, (65536 + cell["K"] - 1) // cell["K"]))
@@ -726,8 +1058,9 @@ class ContractTests(unittest.TestCase):
             salt = (replicate * 0x9e3779b97f4a7c15) & mask
             expected_seed = subject._splitmix64(
                 int(roots[replicate % len(roots)], 16) ^ salt)
-            self.assertEqual(cell["loss_seed"],
+            self.assertEqual(cell["base_loss_seed"],
                              "0x{:016x}".format(expected_seed))
+            self.assertEqual(cell["loss_seed"], cell["base_loss_seed"])
         cells_per_round = len(self.contract["k_sets"]["timing_short"]) * 2 * 8
         self.assertEqual(
             [cell["replicate"] for cell in development[:16]],
@@ -757,6 +1090,14 @@ class ContractTests(unittest.TestCase):
         missing_key = copy.deepcopy(self.contract)
         missing_key["timing"]["cell_key"].remove("invocations_per_slot")
         mutations.append(("cell_key", missing_key))
+        wrong_receive_cap = copy.deepcopy(self.contract)
+        wrong_receive_cap["timing"]["receive_overhead_cap"] = 255
+        mutations.append(("receive_overhead_cap", wrong_receive_cap))
+        missing_receive_cap_key = copy.deepcopy(self.contract)
+        missing_receive_cap_key["timing"]["cell_key"].remove(
+            "receive_overhead_cap")
+        mutations.append(("receive_overhead_cap_cell_key",
+                          missing_receive_cap_key))
         missing_interleave_key = copy.deepcopy(self.contract)
         missing_interleave_key["timing"]["cell_key"].remove(
             "interleave_policy")
@@ -857,8 +1198,10 @@ class ContractTests(unittest.TestCase):
     def test_mutated_domain_hash_rejects(self) -> None:
         for evidence_kind in ("recovery", "timing"):
             changed = copy.deepcopy(self.contract)
-            changed[evidence_kind]["domains"]["development"][
-                "domain_sha256"] = "0" * 64
+            field = "domain_sha256" if evidence_kind == "recovery" else \
+                "base_domain_sha256"
+            changed[evidence_kind]["domains"]["development"][field] = \
+                "0" * 64
             with self.subTest(evidence_kind=evidence_kind), \
                     self.assertRaises(subject.ContractError):
                 subject._validate_structure(changed, check_domain_hashes=True)
@@ -1084,16 +1427,19 @@ class ContractTests(unittest.TestCase):
     def test_raw_v2_is_recovery_only_not_development_timing(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            hashes = timing_trace_hashes(self.contract)
+            hashes = timing_trace_hashes(
+                self.contract, self.development_qualification)
             trace_path = write_timing_trace_manifest(
-                root, self.contract, hashes)
+                root, self.contract, hashes, self.development_qualification)
             timing_path = write_timing_freeze_manifest(
                 root, self.contract, trace_path,
-                ("wirehair2_head", "wirehair1", "candidate"))
+                ("wirehair2_head", "wirehair1", "candidate"),
+                self.development_qualification)
             # The existing timing-development v1 receipt remains valid, but
             # relabeling it as raw v2 is rejected before any result is scored.
             subject.load_freeze_manifest(
-                self.contract, "development", timing_path, "timing")
+                self.contract, "development", timing_path, "timing",
+                self.development_qualification)
             value = json.loads(timing_path.read_text(encoding="utf-8"))
             value["schema"] = subject.RAW_FREEZE_SCHEMA
             for arm in value["arms"]:
@@ -1104,7 +1450,8 @@ class ContractTests(unittest.TestCase):
                 (subject.canonical_json(value) + "\n").encode("utf-8"))
             with self.assertRaises(subject.ContractError):
                 subject.load_freeze_manifest(
-                    self.contract, "development", timing_path, "timing")
+                    self.contract, "development", timing_path, "timing",
+                    self.development_qualification)
 
     def test_final_freezes_bind_one_architecture_and_production_map(self) -> None:
         mutations = ("binary", "map", "training_trace")
@@ -1112,10 +1459,13 @@ class ContractTests(unittest.TestCase):
             with self.subTest(mutation=mutation), \
                     tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
-                paths = write_final_freeze_manifests(root, self.contract)
+                paths = write_final_freeze_manifests(
+                    root, self.contract, self.final_qualification)
                 summary = subject.validate_final_freeze_continuity(
                     self.contract, paths,
-                    architecture_selection_receipt(self.contract))
+                    architecture_selection_receipt(
+                        self.contract, self.development_qualification),
+                    self.final_qualification, root / "timing-traces.jsonl")
                 self.assertEqual(summary["selected_candidate"], "candidate")
                 path = paths[("recovery", "final_validation")]
                 value = json.loads(path.read_text(encoding="utf-8"))
@@ -1134,15 +1484,24 @@ class ContractTests(unittest.TestCase):
                 with self.assertRaises(subject.ContractError):
                     subject.validate_final_freeze_continuity(
                         self.contract, paths,
-                        architecture_selection_receipt(self.contract))
+                        architecture_selection_receipt(
+                            self.contract, self.development_qualification),
+                        self.final_qualification,
+                        root / "timing-traces.jsonl")
 
         with tempfile.TemporaryDirectory() as temporary:
-            paths = write_final_freeze_manifests(Path(temporary), self.contract)
+            root = Path(temporary)
+            paths = write_final_freeze_manifests(
+                root, self.contract, self.final_qualification)
             with self.assertRaises(subject.ContractError):
                 subject.validate_final_freeze_continuity(
                     self.contract, paths,
-                    architecture_selection_receipt(self.contract, "substitute"))
-            substituted = architecture_selection_receipt(self.contract)
+                    architecture_selection_receipt(
+                        self.contract, self.development_qualification,
+                        "substitute"), self.final_qualification,
+                    root / "timing-traces.jsonl")
+            substituted = architecture_selection_receipt(
+                self.contract, self.development_qualification)
             substituted["selected_arm_descriptor_sha256"] = \
                 digest("different selected equations")
             substituted["selected_architecture_sha256"] = \
@@ -1156,7 +1515,52 @@ class ContractTests(unittest.TestCase):
             substituted["selection_sha256"] = subject.sha256_json(unsigned)
             with self.assertRaises(subject.ContractError):
                 subject.validate_final_freeze_continuity(
-                    self.contract, paths, substituted)
+                    self.contract, paths, substituted,
+                    self.final_qualification, root / "timing-traces.jsonl")
+
+    def test_final_continuity_rejects_valid_qualification_map_substitution(
+            self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            original, map_path, audit_path, _map_sha, _traces = \
+                write_timing_qualification(root, self.contract, "final")
+            paths = write_final_freeze_manifests(
+                root, self.contract, original)
+            selection = architecture_selection_receipt(
+                self.contract, self.development_qualification)
+            trace_path = root / "timing-traces.jsonl"
+            subject.validate_final_freeze_continuity(
+                self.contract, paths, selection, original, trace_path)
+
+            # Create a second strictly valid map with the same source,
+            # controls, offsets, and qualified domain but a different terminal
+            # trace roster.  The final timing freeze was made with the first
+            # map and must not accept this substitution.
+            rows = [json.loads(line) for line in
+                    audit_path.read_text(encoding="utf-8").splitlines()]
+            rows[0]["trace_sha256"] = digest("substituted final trace")
+            audit_path.write_bytes("".join(
+                subject.canonical_json(row) + "\n" for row in rows
+            ).encode("utf-8"))
+            map_value = json.loads(map_path.read_text(encoding="utf-8"))
+            map_value["qualification_audit_sha256"] = \
+                subject.timing_qualification_audit_sha256(
+                    self.contract, "final", audit_path)
+            map_value["selected_trace_roster_sha256"] = \
+                subject.timing_selected_trace_roster_sha256(
+                    [row["trace_sha256"] for row in rows])
+            map_path.write_bytes(
+                (subject.canonical_json(map_value) + "\n").encode("utf-8"))
+            substitute = subject.load_timing_qualification_map(
+                self.contract, "final", map_path, audit_path,
+                subject.timing_qualification_map_sha256(map_value))
+            self.assertEqual(
+                substitute.qualified_domain_sha256,
+                original.qualified_domain_sha256)
+            self.assertNotEqual(substitute.map_sha256, original.map_sha256)
+            with self.assertRaises(subject.ContractError):
+                subject.validate_final_freeze_continuity(
+                    self.contract, paths, selection, substitute, trace_path)
 
     def test_reserved_codec_kinds_are_bijective_in_final_freezes(self) -> None:
         for codec, policy, map_hash in (
@@ -1166,7 +1570,8 @@ class ContractTests(unittest.TestCase):
             with self.subTest(codec=codec), \
                     tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
-                paths = write_final_freeze_manifests(root, self.contract)
+                paths = write_final_freeze_manifests(
+                    root, self.contract, self.final_qualification)
                 path = paths[("timing", "final")]
                 value = json.loads(path.read_text(encoding="utf-8"))
                 candidate = next(
@@ -1179,7 +1584,8 @@ class ContractTests(unittest.TestCase):
                     (subject.canonical_json(value) + "\n").encode("utf-8"))
                 with self.assertRaises(subject.ContractError):
                     subject.load_freeze_manifest(
-                        self.contract, "final", path, "timing")
+                        self.contract, "final", path, "timing",
+                        self.final_qualification)
 
 
 class LedgerTests(unittest.TestCase):
@@ -1677,20 +2083,33 @@ class TimingReceiptTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.contract = subject.load_contract()
         cls.arms = ("wirehair2_head", "wirehair1", "candidate")
-        cls.hashes = timing_trace_hashes(cls.contract)
-        cls.valid_rows = timing_receipt_rows(cls.contract, cls.hashes)
+        cls.qualification_temp = tempfile.TemporaryDirectory()
+        (cls.qualification, cls.qualification_map_path,
+         cls.qualification_audit_path, cls.qualification_map_sha256,
+         _selected_traces) = write_timing_qualification(
+             Path(cls.qualification_temp.name), cls.contract)
+        cls.hashes = timing_trace_hashes(cls.contract, cls.qualification)
+        cls.valid_rows = timing_receipt_rows(
+            cls.contract, cls.hashes, cls.qualification)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.qualification_temp.cleanup()
 
     def validate(self, rows: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             trace_path = write_timing_trace_manifest(
-                root, self.contract, self.hashes)
+                root, self.contract, self.hashes, self.qualification)
             freeze_path = write_timing_freeze_manifest(
-                root, self.contract, trace_path, self.arms)
+                root, self.contract, trace_path, self.arms,
+                self.qualification)
             receipt_path = write_timing_receipt(root, rows)
             return subject.validate_timing_receipt(
                 self.contract, "development", receipt_path,
-                freeze_path, trace_path)
+                freeze_path, trace_path, self.qualification_map_path,
+                self.qualification_audit_path,
+                self.qualification_map_sha256)
 
     def assert_rejects(self, rows: Sequence[Mapping[str, Any]]) -> None:
         with self.assertRaises(subject.ContractError):
@@ -1821,7 +2240,8 @@ class TimingReceiptTests(unittest.TestCase):
 
     def test_resolved_slowdown_fails_development_gate(self) -> None:
         rows = timing_receipt_rows(
-            self.contract, self.hashes, candidate_scale=1.2)
+            self.contract, self.hashes, self.qualification,
+            candidate_scale=1.2)
         summary = self.validate(rows)
         self.assertFalse(summary["candidates"]["candidate"][
             "phase_speed_gate_pass"])
@@ -1834,7 +2254,8 @@ class TimingReceiptTests(unittest.TestCase):
 
     def test_aa_noise_cannot_expand_the_allowed_regression(self) -> None:
         rows = timing_receipt_rows(
-            self.contract, self.hashes, candidate_scale=1.2)
+            self.contract, self.hashes, self.qualification,
+            candidate_scale=1.2)
         for row in rows:
             if row["panel_kind"] != "AA":
                 continue
@@ -1921,6 +2342,15 @@ class TimingReceiptTests(unittest.TestCase):
         }
         wrong_batch[0]["cell_sha256"] = subject.sha256_json(wrong_batch_cell)
         cases.append(("batch", wrong_batch))
+        wrong_receive_cap = copy.deepcopy(self.valid_rows)
+        wrong_receive_cap[0]["receive_overhead_cap"] = 255
+        wrong_receive_cap_cell = {
+            key: wrong_receive_cap[0][key]
+            for key in self.contract["timing"]["cell_key"]
+        }
+        wrong_receive_cap[0]["cell_sha256"] = subject.sha256_json(
+            wrong_receive_cap_cell)
+        cases.append(("receive cap", wrong_receive_cap))
         bool_batch = copy.deepcopy(self.valid_rows)
         bool_batch[0]["invocations_per_slot"] = True
         cases.append(("batch type", bool_batch))
@@ -1934,6 +2364,40 @@ class TimingReceiptTests(unittest.TestCase):
         for name, rows in cases:
             with self.subTest(name=name):
                 self.assert_rejects(rows)
+
+    def test_receive_decoded_extra_uses_256_cap_while_solve_stays_at_4(
+            self) -> None:
+        receive_rows = [
+            row for row in self.valid_rows
+            if row["scope"] == "receive_to_success"
+        ]
+        solve_rows = [
+            row for row in self.valid_rows if row["scope"] == "decoder_solve"
+        ]
+        self.assertTrue(receive_rows)
+        self.assertTrue(solve_rows)
+        self.assertEqual(
+            {row[side + "_decoded_extra"]
+             for row in receive_rows for side in ("left", "right")},
+            {256})
+        self.assertEqual(
+            {row[side + "_decoded_extra"]
+             for row in solve_rows for side in ("left", "right")},
+            {4})
+
+        above_receive_cap = copy.deepcopy(self.valid_rows)
+        receive = next(
+            row for row in above_receive_cap
+            if row["scope"] == "receive_to_success")
+        receive["left_decoded_extra"] = 257
+        self.assert_rejects(above_receive_cap)
+
+        solve_at_receive_cap = copy.deepcopy(self.valid_rows)
+        solve = next(
+            row for row in solve_at_receive_cap
+            if row["scope"] == "decoder_solve")
+        solve["left_decoded_extra"] = 256
+        self.assert_rejects(solve_at_receive_cap)
 
     def test_explicit_failure_is_not_dropped_and_makes_panel_nonselectable(
             self) -> None:
@@ -1963,6 +2427,13 @@ class SelectionTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.contract = subject.load_contract()
+        cls.qualification_temp = tempfile.TemporaryDirectory()
+        cls.qualification = write_timing_qualification(
+            Path(cls.qualification_temp.name), cls.contract)[0]
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.qualification_temp.cleanup()
 
     def test_recovery_equivalent_set_precedes_speed_ranking(self) -> None:
         artifact = digest("one development architecture roster")
@@ -2018,8 +2489,10 @@ class SelectionTests(unittest.TestCase):
             "schema": subject.SCHEMA + ".timing-summary.v1",
             "phase": "development",
             "contract_sha256": subject.contract_sha256(self.contract),
-            "domain_sha256": self.contract["timing"]["domains"]
-                ["development"]["domain_sha256"],
+            "base_domain_sha256": self.contract["timing"]["domains"]
+                ["development"]["base_domain_sha256"],
+            "domain_sha256": self.qualification.qualified_domain_sha256,
+            "timing_qualification_map_sha256": self.qualification.map_sha256,
             "freeze_manifest_sha256": digest("timing freeze"),
             "architecture_artifact_sha256": artifact,
             "arm_artifacts": copy.deepcopy(arm_artifacts),
@@ -2041,7 +2514,7 @@ class SelectionTests(unittest.TestCase):
             },
         }
         result = subject.select_development_architecture(
-            self.contract, recovery, timing)
+            self.contract, recovery, timing, self.qualification)
         subject.validate_selection_receipt(self.contract, result)
         self.assertEqual(result["recovery_equivalence_allowance"], 1)
         self.assertEqual(
@@ -2066,7 +2539,8 @@ class SelectionTests(unittest.TestCase):
         with self.assertRaises(subject.ContractError):
             subject.validate_selection_receipt(
                 self.contract,
-                architecture_selection_receipt(self.contract, "wirehair1"))
+                architecture_selection_receipt(
+                    self.contract, self.qualification, "wirehair1"))
 
         mutations = []
         changed = copy.deepcopy(recovery)
@@ -2101,7 +2575,8 @@ class SelectionTests(unittest.TestCase):
             with self.subTest(mutation=name), \
                     self.assertRaises(subject.ContractError):
                 subject.select_development_architecture(
-                    self.contract, recovery_value, timing_value)
+                    self.contract, recovery_value, timing_value,
+                    self.qualification)
 
 
 if __name__ == "__main__":

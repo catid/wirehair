@@ -42,6 +42,7 @@ using wirehair::wh2_benchmark::FrozenPacketTrace;
 using wirehair::wh2_benchmark::FrozenPanelKind;
 using wirehair::wh2_benchmark::FrozenRecoveryCell;
 using wirehair::wh2_benchmark::FrozenScheduleName;
+using wirehair::wh2_benchmark::FrozenTimingBaseCell;
 using wirehair::wh2_benchmark::FrozenTimingCell;
 using wirehair::wh2_benchmark::FrozenTimingOrder;
 using wirehair::wh2_benchmark::FrozenTimingPanel;
@@ -60,6 +61,9 @@ using wirehair_wh2_bench::NativePanelSide;
 using wirehair_wh2_bench::NativePanelStatus;
 using wirehair_wh2_bench::NativeReceiveFixture;
 using wirehair_wh2_bench::NativeSolveFixture;
+using wirehair_wh2_bench::NativeTimingControlProbe;
+using wirehair_wh2_bench::NativeTimingControlQualification;
+using wirehair_wh2_bench::NativeTimingControlQualificationResult;
 using wirehair_wh2_bench::RecoveryCellResult;
 using wirehair_wh2_bench::RecoveryOutcome;
 
@@ -70,7 +74,9 @@ static const char kRecoverySchema[] =
 static const char kRawRecoverySchema[] =
     "wirehair.wh2.native-recovery-record.v2";
 static const char kTimingSchema[] =
-    "wirehair.wh2.native-timing-record.v3";
+    "wirehair.wh2.native-timing-record.v4";
+static const char kTimingQualificationSchema[] =
+    "wirehair.wh2.native-timing-qualification-record.v1";
 static const char kDescriptionSchema[] =
     "wirehair.wh2.native-worker-description.v1";
 static const char kRawDescriptionSchema[] =
@@ -85,11 +91,14 @@ static const char kRawRealizedSchema[] =
 static const char kRealizedDomain[] =
     "wirehair.wh2.realized-construction.v1\0";
 static const char kSourceDomain[] = "wirehair.wh2.source.v1\0";
+static const char kTimingQualificationMessageDomain[] =
+    "wirehair.wh2.timing-qualification-message.v1\0";
 static const char kZeroSha256[] =
     "0000000000000000000000000000000000000000000000000000000000000000";
 static const uint64_t kWh2ProfileId = UINT64_C(0x4b295bbb47f4f9c9);
 static const uint16_t kWh2ProfileEncodingVersion = 1u;
 static const uint32_t kRecoveryOverheadCap = 4u;
+static const uint32_t kTimingReceiveOverheadCap = 256u;
 static const char kRawControlArm[] =
     "wirehair2_raw_d12_h12_periodic";
 static const char kRawControlDescriptorSha256[] =
@@ -152,6 +161,15 @@ struct WorkerContext
     std::string BinarySha256;
     std::vector<ArmDescriptor> Arms;
     const CandidateDefinition* Candidate;
+};
+
+struct TimingQualificationProbeCache
+{
+    NativeTimingControlProbe Probe;
+    uint32_t K = 0u;
+    uint32_t BlockBytes = 0u;
+    uint32_t ConstructionAttempt = 0u;
+    bool Initialized = false;
 };
 
 bool IsLowerSha256(const std::string& value)
@@ -282,6 +300,19 @@ bool SourceSeedFromCellJson(const std::string& cell_json, uint64_t& seed)
     }
     seed = result;
     return true;
+}
+
+std::string TimingQualificationMessageSha256(
+    const std::string& base_cell_json)
+{
+    if (base_cell_json.empty()) {
+        return std::string();
+    }
+    const std::string input = std::string(
+        kTimingQualificationMessageDomain,
+        sizeof(kTimingQualificationMessageDomain) - 1u) + base_cell_json;
+    const std::string digest = wirehair::wh2_benchmark::Sha256Hex(input);
+    return IsLowerSha256(digest) ? digest : std::string();
 }
 
 bool ReadSelfBinary(std::string& bytes)
@@ -1147,7 +1178,8 @@ bool ParseJobLine(
     std::size_t& cell_ordinal,
     std::size_t& item_index)
 {
-    if (line.size() < 5u || (line[0] != 'R' && line[0] != 'T') ||
+    if (line.size() < 5u ||
+        (line[0] != 'R' && line[0] != 'L' && line[0] != 'T') ||
         line[1] != ' ')
     {
         return false;
@@ -1244,37 +1276,6 @@ bool EmitRecoveryTraces()
     return true;
 }
 
-bool EmitTimingTraces()
-{
-    const std::vector<FrozenTimingCell> cells =
-        wirehair::wh2_benchmark::EnumerateDevelopmentTimingCells();
-    if (cells.size() != 2304u) {
-        return false;
-    }
-    for (std::size_t i = 0u; i < cells.size(); ++i)
-    {
-        FrozenPacketTrace trace;
-        wirehair::wh2_benchmark::FrozenTimingTraceReceipt receipt;
-        if (cells[i].ordinal != i ||
-            wirehair::wh2_benchmark::GenerateDevelopmentTimingTrace(
-                cells[i], trace, receipt) != FrozenTraceStatus::Complete ||
-            receipt.ordinal != i ||
-            trace.delivered_ids.size() !=
-                static_cast<std::size_t>(cells[i].K) + 4u)
-        {
-            return false;
-        }
-        if (!IsLowerSha256(receipt.cell_sha256) ||
-            !IsLowerSha256(trace.trace_sha256) ||
-            receipt.trace_sha256 != trace.trace_sha256 ||
-            !EmitLine(TraceRecord(i, receipt.cell_sha256, trace)))
-        {
-            return false;
-        }
-    }
-    return true;
-}
-
 std::string WorkerDescription(
     const std::string& binary_sha256,
     const std::string& source_git_commit,
@@ -1319,7 +1320,7 @@ std::string RawWorkerDescription(
         return std::string();
     }
     std::string json;
-    json.reserve(1900u);
+    json.reserve(1940u);
     json += "{\"arms\":[";
     for (std::size_t i = 0u; i < arms.size(); ++i)
     {
@@ -1376,6 +1377,22 @@ std::string TimingWorkSha256(
     json += "{\"cell_sha256\":\"";
     json += cell_sha256;
     json += "\",\"evidence_kind\":\"timing\",\"ordinal\":";
+    json += std::to_string(ordinal);
+    json += ",\"phase\":\"development\",\"schema\":\"";
+    json += kWorkSchema;
+    json += "\"}";
+    return wirehair::wh2_benchmark::Sha256Hex(json);
+}
+
+std::string TimingQualificationWorkSha256(
+    const std::string& cell_sha256,
+    std::size_t ordinal)
+{
+    std::string json;
+    json += "{\"cell_sha256\":\"";
+    json += cell_sha256;
+    json +=
+        "\",\"evidence_kind\":\"timing_qualification\",\"ordinal\":";
     json += std::to_string(ordinal);
     json += ",\"phase\":\"development\",\"schema\":\"";
     json += kWorkSchema;
@@ -1820,9 +1837,12 @@ public:
         uint32_t block_bytes,
         const std::vector<uint8_t>& source,
         const std::vector<uint32_t>& packet_ids,
-        uint32_t fixed_received_overhead)
+        uint32_t fixed_received_overhead,
+        uint32_t receive_overhead_cap)
         : IdentityValue(identity)
         , Scope(scope)
+        , FixedReceivedOverhead(fixed_received_overhead)
+        , ReceiveOverheadCap(receive_overhead_cap)
         , PreparationResult(Wirehair_Error)
     {
         if (scope == FrozenTimingScope::EncoderInitPlusFirstKSymbols)
@@ -1841,7 +1861,8 @@ public:
         if (scope == FrozenTimingScope::ReceiveToSuccess)
         {
             Receive.reset(new NativeReceiveFixture);
-            PreparationResult = Receive->Initialize(arm, packet_ids);
+            PreparationResult = Receive->Initialize(
+                arm, packet_ids, receive_overhead_cap);
             return;
         }
         if (scope == FrozenTimingScope::DecoderSolve)
@@ -1875,7 +1896,8 @@ public:
         {
             const wirehair_wh2_bench::TimedArmResult result = Receive->Run();
             const bool has_extra = result.Result == Wirehair_Success &&
-                result.BytesVerified && result.DecodedOverhead <= 4u;
+                result.BytesVerified &&
+                result.DecodedOverhead <= ReceiveOverheadCap;
             if (result.Result == Wirehair_Success && !has_extra) {
                 return ClassifyTimedResult(
                     Wirehair_Error, 0u, false, 0u, false);
@@ -1894,7 +1916,8 @@ public:
             }
             return ClassifyTimedResult(
                 result.Result, result.ElapsedNanoseconds,
-                result.Result == Wirehair_Success, 4u, true);
+                result.Result == Wirehair_Success,
+                FixedReceivedOverhead, true);
         }
         return ClassifyTimedResult(
             Wirehair_InvalidInput, 0u, false, 0u, false);
@@ -1903,6 +1926,8 @@ public:
 private:
     std::string IdentityValue;
     FrozenTimingScope Scope;
+    uint32_t FixedReceivedOverhead;
+    uint32_t ReceiveOverheadCap;
     WirehairResult PreparationResult;
     std::unique_ptr<NativeEncoderFixture> Encoder;
     std::unique_ptr<NativeReceiveFixture> Receive;
@@ -1975,6 +2000,249 @@ std::string TimingInvocationIdentity(
     return identity;
 }
 
+bool TimingQualificationOutcomeJson(
+    WirehairResult result,
+    bool wirehair1,
+    uint32_t decoded_overhead,
+    const char*& outcome,
+    bool& has_decoded_extra,
+    uint32_t& decoded_extra)
+{
+    has_decoded_extra = false;
+    decoded_extra = 0u;
+    if (result == Wirehair_NeedMore)
+    {
+        if (wirehair1 && decoded_overhead != UINT32_MAX) {
+            return false;
+        }
+        outcome = "need_more_at_bound";
+        return true;
+    }
+    if (result != Wirehair_Success) {
+        return false;
+    }
+    if (wirehair1)
+    {
+        if (decoded_overhead > kTimingReceiveOverheadCap) {
+            return false;
+        }
+        decoded_extra = decoded_overhead;
+    }
+    else {
+        decoded_extra = kRecoveryOverheadCap;
+    }
+    has_decoded_extra = true;
+    outcome = "success";
+    return true;
+}
+
+std::string TimingQualificationPayload(
+    const FrozenTimingCell& cell,
+    const FrozenPacketTrace& trace,
+    const std::string& cell_sha256,
+    const char* wirehair1_outcome,
+    bool wirehair1_has_extra,
+    uint32_t wirehair1_extra,
+    const char* wirehair2_outcome,
+    bool wirehair2_has_extra,
+    uint32_t wirehair2_extra)
+{
+    std::string json;
+    json.reserve(1024u);
+    json += "{\"base_cell_sha256\":\"";
+    json += cell.base_cell_sha256;
+    json += "\",\"candidate_count\":";
+    json += std::to_string(trace.attempted_candidates);
+    json += ",\"cell_sha256\":\"";
+    json += cell_sha256;
+    json += "\",\"loss_retry_offset\":";
+    json += std::to_string(cell.loss_retry_offset);
+    json += ",\"loss_seed\":\"";
+    json += HexSeed(cell.loss_seed);
+    json += "\",\"ordinal\":";
+    json += std::to_string(cell.ordinal);
+    json += ",\"packet_count\":";
+    json += std::to_string(trace.delivered_ids.size());
+    json += ",\"trace_sha256\":\"";
+    json += trace.trace_sha256;
+    json += "\",\"wirehair1_decoded_extra\":";
+    if (wirehair1_has_extra) json += std::to_string(wirehair1_extra);
+    else json += "null";
+    json += ",\"wirehair1_outcome\":\"";
+    json += wirehair1_outcome;
+    json += "\",\"wirehair2_head_decoded_extra\":";
+    if (wirehair2_has_extra) json += std::to_string(wirehair2_extra);
+    else json += "null";
+    json += ",\"wirehair2_head_outcome\":\"";
+    json += wirehair2_outcome;
+    json += "\"}";
+    return json;
+}
+
+bool RunTimingQualificationJob(
+    const WorkerContext& context,
+    TimingQualificationProbeCache& cache,
+    std::size_t cell_ordinal,
+    std::size_t retry_offset,
+    std::string& envelope,
+    std::string& error)
+{
+    static const std::vector<FrozenTimingBaseCell> cells =
+        wirehair::wh2_benchmark::EnumerateDevelopmentTimingBaseCells();
+    if (context.Candidate || cells.size() != 2304u ||
+        cell_ordinal >= cells.size() || retry_offset >= 256u)
+    {
+        error = "timing qualification index is outside the frozen domain";
+        return false;
+    }
+    const FrozenTimingBaseCell& base = cells[cell_ordinal];
+    FrozenTimingCell cell;
+    if (base.ordinal != cell_ordinal ||
+        !wirehair::wh2_benchmark::QualifyDevelopmentTimingCell(
+            base, static_cast<uint32_t>(retry_offset), cell) ||
+        cell.ordinal != cell_ordinal ||
+        cell.fixed_received_overhead != kRecoveryOverheadCap ||
+        cell.receive_overhead_cap != kTimingReceiveOverheadCap)
+    {
+        error = "timing qualification cell differs from the frozen domain";
+        return false;
+    }
+
+    int actual_cpu = -1;
+    if (!VerifySingletonCpu(context.Cpu, actual_cpu, error)) {
+        return false;
+    }
+    uint64_t started_ns = 0u;
+    if (!MonotonicNanoseconds(started_ns)) {
+        error = "cannot read CLOCK_MONOTONIC before timing qualification";
+        return false;
+    }
+
+    FrozenPacketTrace trace;
+    wirehair::wh2_benchmark::FrozenTimingTraceReceipt trace_receipt;
+    if (wirehair::wh2_benchmark::GenerateDevelopmentTimingTrace(
+            cell, trace, trace_receipt) != FrozenTraceStatus::Complete ||
+        trace.delivered_ids.size() !=
+            static_cast<std::size_t>(cell.K) + cell.receive_overhead_cap)
+    {
+        error = "cannot generate complete timing qualification trace";
+        return false;
+    }
+    const std::string base_json =
+        wirehair::wh2_benchmark::CanonicalTimingBaseCellJson(base);
+    const std::string base_sha256 =
+        wirehair::wh2_benchmark::TimingBaseCellSha256(base);
+    const std::string cell_sha256 =
+        wirehair::wh2_benchmark::TimingCellSha256(cell);
+    if (base_json.empty() || !IsLowerSha256(base_sha256) ||
+        !IsLowerSha256(cell_sha256) || !IsLowerSha256(trace.trace_sha256) ||
+        cell.base_cell_sha256 != base_sha256 ||
+        wirehair::wh2_benchmark::CanonicalTimingSourceJson(cell) != base_json ||
+        wirehair::wh2_benchmark::TimingSourceIdentitySha256(cell) !=
+            base_sha256 ||
+        trace_receipt.cell_sha256 != cell_sha256 ||
+        trace_receipt.trace_sha256 != trace.trace_sha256)
+    {
+        error = "timing qualification identity is inconsistent";
+        return false;
+    }
+
+    std::size_t head_index = 0u;
+    NativeArmSpec head_spec;
+    const uint32_t construction_attempt =
+        ConstructionAttemptFor(0u, cell.base_seed_attempt);
+    if (!ArmIndexForName(context.Arms, "wirehair2_head", head_index) ||
+        head_index != 0u ||
+        !ArmSpecFor(head_index, construction_attempt, nullptr, head_spec))
+    {
+        error = "cannot construct timing qualification control";
+        return false;
+    }
+    if (!cache.Initialized || cache.K != cell.K ||
+        cache.BlockBytes != cell.block_bytes ||
+        cache.ConstructionAttempt != construction_attempt)
+    {
+        NativeTimingControlProbe next;
+        const WirehairResult init = next.Initialize(
+            head_spec, cell.K, cell.block_bytes);
+        if (init != Wirehair_Success || !next.IsInitialized())
+        {
+            error = "fatal timing qualification control initialization";
+            return false;
+        }
+        cache.Probe = std::move(next);
+        cache.K = cell.K;
+        cache.BlockBytes = cell.block_bytes;
+        cache.ConstructionAttempt = construction_attempt;
+        cache.Initialized = true;
+    }
+
+    const NativeTimingControlQualificationResult result =
+        cache.Probe.Run(trace.delivered_ids);
+    if (result.Qualification == NativeTimingControlQualification::Fatal)
+    {
+        error = "fatal timing qualification control result";
+        return false;
+    }
+    const char* wirehair1_outcome = nullptr;
+    const char* wirehair2_outcome = nullptr;
+    bool wirehair1_has_extra = false;
+    bool wirehair2_has_extra = false;
+    uint32_t wirehair1_extra = 0u;
+    uint32_t wirehair2_extra = 0u;
+    if (!TimingQualificationOutcomeJson(
+            result.Wirehair1Result, true,
+            result.Wirehair1DecodedOverhead,
+            wirehair1_outcome, wirehair1_has_extra, wirehair1_extra) ||
+        !TimingQualificationOutcomeJson(
+            result.Wirehair2HeadResult, false, UINT32_MAX,
+            wirehair2_outcome, wirehair2_has_extra, wirehair2_extra))
+    {
+        error = "timing qualification result is internally inconsistent";
+        return false;
+    }
+    const bool both_success =
+        result.Wirehair1Result == Wirehair_Success &&
+        result.Wirehair2HeadResult == Wirehair_Success;
+    if ((result.Qualification == NativeTimingControlQualification::Success) !=
+            both_success ||
+        (result.Qualification == NativeTimingControlQualification::NeedMore) ==
+            both_success)
+    {
+        error = "timing qualification disposition disagrees with controls";
+        return false;
+    }
+    if (!VerifySingletonCpu(context.Cpu, actual_cpu, error)) {
+        return false;
+    }
+    uint64_t finished_ns = 0u;
+    if (!MonotonicNanoseconds(finished_ns) || finished_ns < started_ns) {
+        error = "cannot read CLOCK_MONOTONIC after timing qualification";
+        return false;
+    }
+
+    const std::size_t ordinal = cell_ordinal * 256u + retry_offset;
+    const std::string message_sha256 =
+        TimingQualificationMessageSha256(base_json);
+    const std::string work_sha256 =
+        TimingQualificationWorkSha256(cell_sha256, ordinal);
+    const std::string payload = TimingQualificationPayload(
+        cell, trace, cell_sha256,
+        wirehair1_outcome, wirehair1_has_extra, wirehair1_extra,
+        wirehair2_outcome, wirehair2_has_extra, wirehair2_extra);
+    if (!IsLowerSha256(message_sha256) || !IsLowerSha256(work_sha256) ||
+        payload.empty())
+    {
+        error = "cannot bind timing qualification evidence";
+        return false;
+    }
+    envelope = Envelope(
+        kTimingQualificationSchema, ordinal, actual_cpu, context.Pid,
+        started_ns, finished_ns, context.ProcessStartTicks,
+        context.BinarySha256, message_sha256, work_sha256, payload);
+    return true;
+}
+
 std::string TimingPayload(
     const FrozenTimingCell& cell,
     const FrozenTimingPanel& panel,
@@ -2004,6 +2272,10 @@ std::string TimingPayload(
     json += std::to_string(cell.K);
     json += ",\"band\":\"";
     json += cell.band;
+    json += "\",\"base_cell_sha256\":\"";
+    json += cell.base_cell_sha256;
+    json += "\",\"base_loss_seed\":\"";
+    json += HexSeed(cell.base_loss_seed);
     json += "\",\"base_seed_attempt\":";
     json += std::to_string(cell.base_seed_attempt);
     json += ",\"block_bytes\":";
@@ -2047,6 +2319,8 @@ std::string TimingPayload(
     json += kZeroSha256;
     json += "\",\"loss_ppm\":";
     json += std::to_string(cell.loss_ppm);
+    json += ",\"loss_retry_offset\":";
+    json += std::to_string(cell.loss_retry_offset);
     json += ",\"loss_seed\":\"";
     json += HexSeed(cell.loss_seed);
     json += "\",\"order\":\"";
@@ -2055,7 +2329,9 @@ std::string TimingPayload(
     json += wirehair::wh2_benchmark::FrozenPanelKindName(panel.panel_kind);
     json += "\",\"phase\":\"";
     json += cell.phase;
-    json += "\",\"replicate\":";
+    json += "\",\"receive_overhead_cap\":";
+    json += std::to_string(cell.receive_overhead_cap);
+    json += ",\"replicate\":";
     json += std::to_string(cell.replicate);
     json += ",\"right_arm\":\"";
     json += right.Arm;
@@ -2088,24 +2364,30 @@ bool RunTimingJob(
     const WorkerContext& context,
     std::size_t cell_ordinal,
     std::size_t panel_index,
+    std::size_t retry_offset,
     std::string& envelope,
     std::string& error)
 {
-    const std::vector<FrozenTimingCell> cells =
-        wirehair::wh2_benchmark::EnumerateDevelopmentTimingCells();
-    const std::vector<FrozenTimingPanel> panels =
+    static const std::vector<FrozenTimingBaseCell> cells =
+        wirehair::wh2_benchmark::EnumerateDevelopmentTimingBaseCells();
+    static const std::vector<FrozenTimingPanel> panels =
         wirehair::wh2_benchmark::EnumerateOneCandidateTimingPanels(
             "wirehair2_identity");
     if (cells.size() != 2304u || panels.size() != 11u ||
-        cell_ordinal >= cells.size() || panel_index >= panels.size())
+        cell_ordinal >= cells.size() || panel_index >= panels.size() ||
+        retry_offset >= 256u)
     {
         error = "timing job index is outside the frozen domain";
         return false;
     }
-    const FrozenTimingCell& cell = cells[cell_ordinal];
+    const FrozenTimingBaseCell& base = cells[cell_ordinal];
+    FrozenTimingCell cell;
     const FrozenTimingPanel& panel = panels[panel_index];
-    if (cell.ordinal != cell_ordinal || panel.ordinal != panel_index ||
-        cell.fixed_received_overhead != 4u ||
+    if (!wirehair::wh2_benchmark::QualifyDevelopmentTimingCell(
+            base, static_cast<uint32_t>(retry_offset), cell) ||
+        cell.ordinal != cell_ordinal || panel.ordinal != panel_index ||
+        cell.fixed_received_overhead != kRecoveryOverheadCap ||
+        cell.receive_overhead_cap != kTimingReceiveOverheadCap ||
         cell.interleave_policy !=
             "self-counterbalanced-repeat-major-v1" ||
         cell.invocations_per_slot < 2u ||
@@ -2130,21 +2412,28 @@ bool RunTimingJob(
     wirehair::wh2_benchmark::FrozenTimingTraceReceipt trace_receipt;
     if (wirehair::wh2_benchmark::GenerateDevelopmentTimingTrace(
             cell, trace, trace_receipt) != FrozenTraceStatus::Complete ||
-        trace.delivered_ids.size() != static_cast<std::size_t>(cell.K) + 4u)
+        trace.delivered_ids.size() !=
+            static_cast<std::size_t>(cell.K) + cell.receive_overhead_cap)
     {
         error = "cannot regenerate complete frozen timing trace";
         return false;
     }
-    const std::string cell_json =
-        wirehair::wh2_benchmark::CanonicalTimingCellJson(cell);
+    const std::string source_json =
+        wirehair::wh2_benchmark::CanonicalTimingSourceJson(cell);
+    const std::string source_identity_sha256 =
+        wirehair::wh2_benchmark::TimingSourceIdentitySha256(cell);
     const std::string cell_sha256 =
         wirehair::wh2_benchmark::TimingCellSha256(cell);
     uint64_t source_seed = 0u;
     std::vector<uint8_t> source;
-    if (cell_json.empty() || trace_receipt.cell_sha256 != cell_sha256 ||
+    if (source_json.empty() || source_json !=
+            wirehair::wh2_benchmark::CanonicalTimingBaseCellJson(base) ||
+        source_identity_sha256 != cell.base_cell_sha256 ||
+        trace_receipt.cell_sha256 != cell_sha256 ||
         trace_receipt.trace_sha256 != trace.trace_sha256 ||
         !IsLowerSha256(cell_sha256) || !IsLowerSha256(trace.trace_sha256) ||
-        !SourceSeedFromCellJson(cell_json, source_seed) ||
+        !IsLowerSha256(cell.base_cell_sha256) ||
+        !SourceSeedFromCellJson(source_json, source_seed) ||
         !wirehair_wh2_bench::MakeDeterministicSource(
             cell.K, cell.block_bytes, source_seed, source))
     {
@@ -2204,7 +2493,8 @@ bool RunTimingJob(
                 new CodecTimingInvocation(
                     left_identity, panel.scope, left_spec, cell.K,
                     cell.block_bytes, source, trace.delivered_ids,
-                    cell.fixed_received_overhead));
+                    cell.fixed_received_overhead,
+                    cell.receive_overhead_cap));
         });
     const NativePanelArm right_arm(
         right_identity,
@@ -2213,7 +2503,8 @@ bool RunTimingJob(
                 new CodecTimingInvocation(
                     right_identity, panel.scope, right_spec, cell.K,
                     cell.block_bytes, source, trace.delivered_ids,
-                    cell.fixed_received_overhead));
+                    cell.fixed_received_overhead,
+                    cell.receive_overhead_cap));
         });
     const FrozenTimingOrder frozen_order =
         wirehair::wh2_benchmark::TimingPanelOrder(panel, cell.replicate);
@@ -2258,7 +2549,7 @@ bool RunTimingJob(
     }
     const bool left_success = std::string(left_outcome) == "success";
     const bool right_success = std::string(right_outcome) == "success";
-    const auto valid_extra = [panel](
+    const auto valid_extra = [panel, &cell](
         bool success, bool has_extra, uint32_t extra) -> bool
     {
         if (!success) return !has_extra;
@@ -2268,10 +2559,10 @@ bool RunTimingJob(
             return !has_extra;
         }
         if (panel.scope == FrozenTimingScope::DecoderSolve) {
-            return has_extra && extra == 4u;
+            return has_extra && extra == cell.fixed_received_overhead;
         }
         return panel.scope == FrozenTimingScope::ReceiveToSuccess &&
-            has_extra && extra <= 4u;
+            has_extra && extra <= cell.receive_overhead_cap;
     };
     if (!valid_extra(left_success, left_has_extra, left_extra) ||
         !valid_extra(right_success, right_has_extra, right_extra))
@@ -2388,6 +2679,7 @@ bool RunWorker(
     context.BinarySha256 = binary_sha256;
     context.Arms = arms;
     context.Candidate = candidate;
+    TimingQualificationProbeCache qualification_cache;
 
     std::string line;
     while (std::getline(std::cin, line))
@@ -2406,7 +2698,7 @@ bool RunWorker(
         if (candidate && kind != 'R')
         {
             std::cerr << "wirehair_wh2_contract_worker: recovery candidate "
-                "worker rejects timing jobs\n";
+                "worker rejects qualification/timing jobs\n";
             return false;
         }
         std::string output;
@@ -2415,9 +2707,21 @@ bool RunWorker(
             ok = RunRecoveryJob(
                 context, cell_ordinal, item_index, output, error);
         }
-        else {
+        else if (kind == 'L') {
+            ok = RunTimingQualificationJob(
+                context, qualification_cache,
+                cell_ordinal, item_index, output, error);
+        }
+        else if (kind == 'T') {
+            const std::size_t retry_offset = item_index & 255u;
+            const std::size_t panel_index = item_index >> 8u;
             ok = RunTimingJob(
-                context, cell_ordinal, item_index, output, error);
+                context, cell_ordinal, panel_index, retry_offset,
+                output, error);
+        }
+        else {
+            error = "native command kind is unsupported";
+            ok = false;
         }
         if (!ok)
         {
@@ -2442,7 +2746,7 @@ bool RunWorker(
 int Usage()
 {
     std::cerr << "usage: wirehair_wh2_contract_worker --describe | "
-        "--emit-traces recovery|timing | --worker CPU | "
+        "--emit-traces recovery | --worker CPU | "
         "--describe-recovery-candidate ID | "
         "--recovery-candidate-worker ID CPU\n";
     return 2;
@@ -2474,7 +2778,6 @@ int main(int argc, char** argv)
     {
         const std::string kind(argv[2]);
         if (kind == "recovery") return EmitRecoveryTraces() ? 0 : 1;
-        if (kind == "timing") return EmitTimingTraces() ? 0 : 1;
         return Usage();
     }
     if (argc == 3 &&

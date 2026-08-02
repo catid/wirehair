@@ -1,6 +1,6 @@
 {
   "schema": "wirehair.wh2.benchmark-contract.v3",
-  "contract_id": "wh2-pure-gf256-1pct-v4",
+  "contract_id": "wh2-pure-gf256-1pct-v6",
   "field": "GF(256)",
   "goal": {
     "primary_failure_threshold_ppm": 10000,
@@ -145,12 +145,34 @@
     "loss_ppm": 100000,
     "schedule": "iid",
     "fixed_received_overhead": 4,
+    "receive_overhead_cap": 256,
+    "base_cell_key": [
+      "phase", "band", "K", "block_bytes", "loss_ppm", "schedule",
+      "replicate", "base_seed_attempt", "base_loss_seed", "fixed_received_overhead",
+      "receive_overhead_cap", "invocations_per_slot", "interleave_policy"
+    ],
     "cell_key": [
       "phase", "band", "K", "block_bytes", "loss_ppm", "schedule",
-      "replicate", "base_seed_attempt", "loss_seed", "fixed_received_overhead",
-      "invocations_per_slot", "interleave_policy"
+      "replicate", "base_seed_attempt", "base_loss_seed", "base_cell_sha256",
+      "loss_retry_offset", "loss_seed", "fixed_received_overhead",
+      "receive_overhead_cap", "invocations_per_slot", "interleave_policy"
     ],
-    "seed_derivation": "construction seed is selected by seed_mode and unchanged; loss seed=SplitMix64(base_loss_seed xor (replicate * 0x9e3779b97f4a7c15 mod 2^64))",
+    "seed_derivation": "construction seed is selected by seed_mode and unchanged; base_loss_seed=SplitMix64(loss root xor (replicate * 0x9e3779b97f4a7c15 mod 2^64)); realized loss_seed is selected only by the frozen timing qualification map",
+    "source_derivation": "source bytes are derived only from canonical base_cell_key JSON under wirehair.wh2.source.v1; base_cell_sha256 authenticates that JSON and loss retry fields never enter the source identity",
+    "qualification": {
+      "map_schema": "wirehair.wh2.timing-qualification-map.v1",
+      "audit_schema": "wirehair.wh2.timing-qualification-audit.v1",
+      "entry_kind": "loss_retry_offset_indexed_by_base_timing_cell_ordinal",
+      "max_attempts": 256,
+      "retry_seed_derivation": "loss retry offset r in [0,255] selects loss_seed=(base_loss_seed+r*0x9e3779b97f4a7c15) modulo 2^64; r=0 preserves the base trace",
+      "selection_rule": "for each base timing cell choose the lowest retry offset where wirehair2_head byte-recovers from the exact first K+4 delivered IDs and wirehair1 byte-recovers by K+256; no cell may be omitted",
+      "retryable_outcome": "only need_more_at_bound is retryable; construction, unsupported, fatal, internal, allocation, terminal, and byte-mismatch outcomes abort qualification",
+      "candidate_policy": "qualification runs exactly the two mandatory controls before any candidate timing; candidate arms, outcomes, and timings are forbidden and can never select or retry a loss trace",
+      "controls": [
+        {"arm": "wirehair2_head", "scope": "decoder_solve", "success": "byte-exact recovery at decoded_extra=4"},
+        {"arm": "wirehair1", "scope": "receive_to_success", "success": "byte-exact recovery at decoded_extra in [0,256]"}
+      ]
+    },
     "domains": {
       "development": {
         "k_set": "timing_short",
@@ -159,7 +181,7 @@
         "paired_repetitions": 96,
         "independent_rounds": 12,
         "expected_cells": 2304,
-        "domain_sha256": "ca82f8774f0cb1b865a0bbc01b8de79d2239df13ab3ef17ef5eb4e3e39ab6913"
+        "base_domain_sha256": "eab25fe96642d8dd12d4b64e91fe00b533d464f1bd7487c84e670ce888e2d164"
       },
       "final": {
         "k_set": "short",
@@ -168,7 +190,7 @@
         "paired_repetitions": 96,
         "independent_rounds": 12,
         "expected_cells": 14400,
-        "domain_sha256": "3b1aa0274f690769111ffa239eba3797e8893757ab8bab1db1c224eba043f246"
+        "base_domain_sha256": "5b53ef3780f9b5b3cab83b411da0c8d0d06abaa3c76a9dc51d96425cd9de6c94"
       }
     },
     "confidence": "two-sided Student-t 95% interval over independent-round mean paired log seconds",
@@ -177,9 +199,9 @@
     "aa_repeatability_rule": "each A/A 95% interval must lie strictly inside [-log1p(0.02),+log1p(0.02)]; otherwise the comparison is non-selectable",
     "order": "self-counterbalanced primary ABBA/BAAB plus opposite order",
     "cache_state": "warm",
-    "production_policy": "final timing replays the frozen production repair map; each Wirehair2 timing receipt binds its map SHA-256 and realized attempt",
-    "eligibility": "a timing cell is eligible only when every compared arm byte-recovers successfully on the predeclared prefix; any arm failure invalidates the timing panel and remains a recovery failure; observed common-success intersection is forbidden",
-    "scope_protocol": "decoder_solve uses a fresh decoder and the identical fixed K+4 received prefix; encoder_init_plus_first_K_symbols encodes exactly IDs 0..K-1; receive_to_success replays the nested trace and includes all feed and final recovery work through each arm's first success",
+    "production_policy": "final timing replays the frozen production repair map; each Wirehair2 timing receipt binds its construction map SHA-256 and realized attempt; every timing arm binds the phase qualification map",
+    "eligibility": "the frozen candidate-blind qualification map guarantees mandatory control success; any candidate failure invalidates its timing panel without changing the trace, retrying, dropping a row, or forming an observed common-success intersection",
+    "scope_protocol": "one qualified arm-free K+256 delivered-ID trace is frozen per cell; decoder_solve uses a fresh decoder and its identical first K+4 received prefix; encoder_init_plus_first_K_symbols encodes exactly IDs 0..K-1; receive_to_success replays the trace and includes all feed and final recovery work through each arm's first success, with need_more_at_cap after K+256",
     "required_panels": [
       "each_arm_AA",
       "candidate_vs_wirehair2_head_decoder_solve",
@@ -219,7 +241,7 @@
     "execution_geometry": {
       "timing_worker_count": 8,
       "jobs_per_wave": 8,
-      "cohort_identity": "all timing cell fields except replicate and loss_seed, plus panel",
+      "cohort_identity": "all timing cell fields except replicate, base_loss_seed, base_cell_sha256, loss_retry_offset, and loss_seed, plus panel",
       "cohort_order": "block_bytes order, then K-set order, then frozen panel ordinal",
       "round_partition": "independent_round=floor(replicate/8); lane=replicate%8",
       "round_traversal": "independent round outermost; traverse the complete frozen cohort domain in cohort order; execute one eight-lane wave per cohort",
@@ -275,14 +297,18 @@
       "host_identity"
     ],
     "freeze_manifest_schema": "wirehair.wh2.benchmark-freeze.v1 canonical JSON object; it is the sole arm-roster and artifact authority",
-    "trace_manifest_schema": "wirehair.wh2.trace-manifest.v1 ordered canonical JSONL rows of ordinal,cell_sha256,trace_sha256; duplicate trace hashes are valid",
+    "trace_manifest_schema": "recovery uses wirehair.wh2.trace-manifest.v1; timing uses v2 with a hash header binding the base domain, qualified domain, and qualification-map SHA-256; both use ordered canonical JSONL rows of ordinal,cell_sha256,trace_sha256 and permit duplicate trace hashes",
     "repair_map_schema": "wirehair.wh2.repair-map.v1 canonical JSON object with 63999 retry offsets indexed by K-2 and bound to training traces",
+    "timing_qualification_schema": "one phase-scoped wirehair.wh2.timing-qualification-map.v1 canonical JSON object binds an ordered candidate-blind audit and one lowest uint8 loss retry offset per base timing-cell ordinal",
+    "timing_qualification_binding": "the timing freeze directly binds the qualified timing domain and timing trace-manifest v2 SHA-256; that v2 hash header transitively binds the base domain, qualified domain, and validated qualification-map SHA-256, whose canonical object binds the complete audit SHA-256",
     "canonical_hashing": "parse with duplicate-key rejection; accept LF or CRLF input; hash sorted compact logical JSON with LF and explicit schema domain separation",
-    "common_cell_policy": "every arm has exactly one result for every predeclared arm-free key",
+    "common_cell_policy": "every arm has exactly one result for every qualified arm-free key; source identity is derived only from its authenticated base cell",
     "invalid_domain_mutations": [
       "missing", "duplicate", "extra", "seed_swapped", "partial",
       "wrong_band", "wrong_loss", "incomplete_roster", "domain_hash_drift",
       "trace_drift", "repair_map_drift", "construction_attempt_drift",
+      "qualification_map_drift", "qualification_audit_drift",
+      "loss_retry_drift", "source_identity_drift",
       "timing_panel_drift", "timing_order_drift", "timing_batch_drift",
       "timing_geometry_drift"
     ],

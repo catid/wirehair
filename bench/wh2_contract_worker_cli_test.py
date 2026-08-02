@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Focused CLI goldens for the native WH2 recovery-candidate worker."""
+"""Focused CLI goldens for native WH2 recovery and qualified timing work."""
 
 import hashlib
 import json
@@ -16,11 +16,21 @@ RAW_DESCRIPTION_SCHEMA = "wirehair.wh2.native-worker-description.v2"
 DESCRIPTOR_SCHEMA = "wirehair.wh2.native-arm-descriptor.v1"
 RECOVERY_SCHEMA = "wirehair.wh2.native-recovery-record.v1"
 RAW_RECOVERY_SCHEMA = "wirehair.wh2.native-recovery-record.v2"
-TIMING_SCHEMA = "wirehair.wh2.native-timing-record.v3"
+TIMING_SCHEMA = "wirehair.wh2.native-timing-record.v4"
+TIMING_QUALIFICATION_SCHEMA = (
+    "wirehair.wh2.native-timing-qualification-record.v1"
+)
+NATIVE_WORK_SCHEMA = "wirehair.wh2.native-work.v1"
+TIMING_QUALIFICATION_MESSAGE_DOMAIN = (
+    b"wirehair.wh2.timing-qualification-message.v1\0"
+)
+SOURCE_DOMAIN = b"wirehair.wh2.source.v1\0"
 RAW_REALIZED_SCHEMA = "wirehair.wh2.raw-realized-construction.v1"
 ZERO_SHA256 = "0" * 64
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 GIT_COMMIT = re.compile(r"^[0-9a-f]{40}$")
+UINT64_MASK = (1 << 64) - 1
+LOSS_RETRY_STRIDE = 0x9E3779B97F4A7C15
 RAW_SEED_BASIS = "uniform-raw-v1"
 RAW_SEED_SCHEDULE_CANONICAL = (
     '{"excluded_inputs":["K","block_bytes","production_peel_seed",'
@@ -139,6 +149,115 @@ IDENTITY = {
         "87271a16c290b8e3e14ff76fae52ca07e94ec9c31d4188b9ceee3740c299c4ac",
     "codec": "wirehair2_experiment",
 }
+
+NATIVE_RECORD_FIELDS = frozenset((
+    "schema", "ordinal", "cpu", "worker_pid", "started_monotonic_ns",
+    "finished_monotonic_ns", "worker_process_start_ticks",
+    "worker_binary_sha256", "message_sha256", "work_sha256", "payload",
+))
+TIMING_QUALIFICATION_PAYLOAD_FIELDS = frozenset((
+    "base_cell_sha256", "candidate_count", "cell_sha256",
+    "loss_retry_offset", "loss_seed", "ordinal", "packet_count",
+    "trace_sha256", "wirehair1_decoded_extra", "wirehair1_outcome",
+    "wirehair2_head_decoded_extra", "wirehair2_head_outcome",
+))
+TIMING_PAYLOAD_FIELDS = frozenset((
+    "phase", "band", "K", "block_bytes", "loss_ppm", "schedule",
+    "replicate", "base_seed_attempt", "base_loss_seed", "base_cell_sha256",
+    "loss_retry_offset", "loss_seed", "fixed_received_overhead",
+    "receive_overhead_cap", "invocations_per_slot", "interleave_policy",
+    "panel_kind", "scope", "left_arm", "right_arm", "order",
+    "left_outcome", "right_outcome", "left_decoded_extra",
+    "right_decoded_extra", "elapsed_ns", "cell_sha256", "trace_sha256",
+    "left_binary_sha256", "right_binary_sha256",
+    "left_arm_descriptor_sha256", "right_arm_descriptor_sha256",
+    "left_construction_attempt", "right_construction_attempt",
+    "left_realized_construction_sha256",
+    "right_realized_construction_sha256", "left_repair_map_sha256",
+    "right_repair_map_sha256",
+))
+
+TIMING_BASE_CELL_ZERO = {
+    "K": 8,
+    "band": "2-100",
+    "base_loss_seed": "0x2d0f28c7e7e786b2",
+    "base_seed_attempt": 0,
+    "block_bytes": 64,
+    "fixed_received_overhead": 4,
+    "interleave_policy": "self-counterbalanced-repeat-major-v1",
+    "invocations_per_slot": 8192,
+    "loss_ppm": 100000,
+    "phase": "development",
+    "receive_overhead_cap": 256,
+    "replicate": 0,
+    "schedule": "iid",
+}
+TIMING_BASE_CELL_ZERO_JSON = (
+    '{"K":8,"band":"2-100","base_loss_seed":"0x2d0f28c7e7e786b2",'
+    '"base_seed_attempt":0,"block_bytes":64,"fixed_received_overhead":4,'
+    '"interleave_policy":"self-counterbalanced-repeat-major-v1",'
+    '"invocations_per_slot":8192,"loss_ppm":100000,'
+    '"phase":"development","receive_overhead_cap":256,"replicate":0,'
+    '"schedule":"iid"}'
+)
+TIMING_BASE_CELL_ZERO_SHA256 = (
+    "158931044b779851eca21bd3112bce79877e6e59f5896aebf698466789c47814"
+)
+TIMING_SOURCE_MESSAGE_SHA256 = (
+    "359d10cd28719881523fd74723b803ac067830be9233c2f75325a6bd0a8324f3"
+)
+
+
+def canonical_json(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def sha256_json(value):
+    return hashlib.sha256(canonical_json(value).encode("ascii")).hexdigest()
+
+
+def qualified_timing_cell(retry_offset):
+    cell = dict(TIMING_BASE_CELL_ZERO)
+    cell["base_cell_sha256"] = TIMING_BASE_CELL_ZERO_SHA256
+    cell["loss_retry_offset"] = retry_offset
+    base_seed = int(TIMING_BASE_CELL_ZERO["base_loss_seed"], 16)
+    cell["loss_seed"] = "0x{:016x}".format(
+        (base_seed + retry_offset * LOSS_RETRY_STRIDE) & UINT64_MASK)
+    return cell
+
+
+def native_work_sha256(evidence_kind, ordinal, cell_sha256):
+    return sha256_json({
+        "cell_sha256": cell_sha256,
+        "evidence_kind": evidence_kind,
+        "ordinal": ordinal,
+        "phase": "development",
+        "schema": NATIVE_WORK_SCHEMA,
+    })
+
+
+def splitmix64_next(state):
+    state = (state + LOSS_RETRY_STRIDE) & UINT64_MASK
+    value = state
+    value = ((value ^ (value >> 30)) * 0xBF58476D1CE4E5B9) & UINT64_MASK
+    value = ((value ^ (value >> 27)) * 0x94D049BB133111EB) & UINT64_MASK
+    return state, value ^ (value >> 31)
+
+
+def deterministic_timing_message_sha256(base_cell):
+    """Independently reproduce SourceSeedFromCellJson plus source bytes."""
+    base_json = canonical_json(base_cell).encode("ascii")
+    source_digest = hashlib.sha256(SOURCE_DOMAIN + base_json).digest()
+    source_seed = int.from_bytes(source_digest[:8], "big")
+    K = base_cell["K"]
+    block_bytes = base_cell["block_bytes"]
+    state = source_seed ^ ((K * 0xD6E8FEB86659FD93) & UINT64_MASK) ^ \
+        ((block_bytes * 0xA0761D6478BD642F) & UINT64_MASK)
+    source = bytearray()
+    while len(source) < K * block_bytes:
+        state, word = splitmix64_next(state)
+        source.extend(word.to_bytes(8, "little"))
+    return hashlib.sha256(source[:K * block_bytes]).hexdigest()
 
 
 def canonical_descriptor(arm, codec, transform):
@@ -335,16 +454,21 @@ class ContractWorkerCliTest(unittest.TestCase):
         self.assertEqual(clean.stdout, "")
         self.assertEqual(clean.stderr, "")
 
-        timing = self.run_worker(
-            "--recovery-candidate-worker",
-            "d12-h11-periodic",
-            cpu,
-            stdin="T 0 0\n",
-        )
-        self.assertEqual(timing.returncode, 1)
-        self.assertEqual(timing.stdout, "")
-        self.assertIn("recovery candidate worker rejects timing jobs",
-                      timing.stderr)
+        for command in ("L 0 0\n", "T 0 0\n"):
+            with self.subTest(rejected_command=command.strip()):
+                rejected = self.run_worker(
+                    "--recovery-candidate-worker",
+                    "d12-h11-periodic",
+                    cpu,
+                    stdin=command,
+                )
+                self.assertEqual(rejected.returncode, 1)
+                self.assertEqual(rejected.stdout, "")
+                self.assertIn(
+                    "recovery candidate worker rejects qualification/timing "
+                    "jobs",
+                    rejected.stderr,
+                )
 
         baseline = self.run_worker(
             "--worker",
@@ -595,41 +719,252 @@ class ContractWorkerCliTest(unittest.TestCase):
 
     @unittest.skipUnless(
         hasattr(os, "sched_getaffinity"), "Linux CPU affinity is required")
-    def test_timing_v3_binds_self_counterbalanced_eight_slot_payload(self):
+    def test_timing_qualification_records_bind_exact_retry_evidence(self):
         affinity = os.sched_getaffinity(0)
         self.assertTrue(affinity)
         cpu = str(min(affinity))
         result = self.run_worker(
-            "--worker", cpu, stdin="T 0 0\nQ\n")
+            "--worker", cpu, stdin="L 0 0\nL 0 1\nQ\n")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stderr, "")
         lines = result.stdout.splitlines()
-        self.assertEqual(len(lines), 1)
-        record = json.loads(lines[0])
+        self.assertEqual(len(lines), 2)
+        records = [json.loads(line) for line in lines]
         self.assertEqual(
-            lines[0], json.dumps(record, sort_keys=True, separators=(",", ":")))
-        self.assertEqual(record["schema"], TIMING_SCHEMA)
-        self.assertEqual(record["ordinal"], 0)
-        payload = record["payload"]
-        self.assertEqual(payload["K"], 8)
-        self.assertEqual(payload["block_bytes"], 64)
-        self.assertEqual(payload["replicate"], 0)
-        self.assertEqual(payload["interleave_policy"],
-                         "self-counterbalanced-repeat-major-v1")
-        self.assertEqual(payload["invocations_per_slot"], 8192)
-        self.assertEqual(payload["order"], "BAAB")
-        self.assertEqual(payload["scope"], "decoder_solve")
+            lines, [canonical_json(record) for record in records])
+
+        expected_message = hashlib.sha256(
+            TIMING_QUALIFICATION_MESSAGE_DOMAIN +
+            TIMING_BASE_CELL_ZERO_JSON.encode("ascii")
+        ).hexdigest()
         self.assertEqual(
-            payload["cell_sha256"],
-            "cf076b108f93f8268db4bc33a4415549"
-            "bddeb8d57b6c156dab48e5b56f5e6011")
+            canonical_json(TIMING_BASE_CELL_ZERO), TIMING_BASE_CELL_ZERO_JSON)
         self.assertEqual(
-            payload["trace_sha256"],
-            "0e773013a48e8a4aaa2858ca7eedec25"
-            "4bbef05c82c93d6e0e75bcf482e36e94")
-        self.assertEqual(len(payload["elapsed_ns"]), 8)
-        self.assertTrue(all(type(value) is int and value > 0
-                            for value in payload["elapsed_ns"]))
+            sha256_json(TIMING_BASE_CELL_ZERO),
+            TIMING_BASE_CELL_ZERO_SHA256)
+        self.assertEqual(
+            expected_message,
+            "ed140dcfb6a14da3adc461a7717d68318aacbdca29acdc1fe1464fa36a59509c")
+
+        expected_payloads = [
+            {
+                "base_cell_sha256": TIMING_BASE_CELL_ZERO_SHA256,
+                "candidate_count": 305,
+                "cell_sha256":
+                    "e85871b9c09ac946f6c8f6e0e077bd758d4862bfb5dddd73f6ee05e3ba35f2d7",
+                "loss_retry_offset": 0,
+                "loss_seed": "0x2d0f28c7e7e786b2",
+                "ordinal": 0,
+                "packet_count": 264,
+                "trace_sha256":
+                    "768c7e52d3bfc315b9d9eb44287766f9401904062a5595be439f8ba6b20c90aa",
+                "wirehair1_decoded_extra": 0,
+                "wirehair1_outcome": "success",
+                "wirehair2_head_decoded_extra": 4,
+                "wirehair2_head_outcome": "success",
+            },
+            {
+                "base_cell_sha256": TIMING_BASE_CELL_ZERO_SHA256,
+                "candidate_count": 302,
+                "cell_sha256":
+                    "4c216d6ca9416585f777980fc1ffd0a9f162644606d5f0468accec353470cf37",
+                "loss_retry_offset": 1,
+                "loss_seed": "0xcb46a281673202c7",
+                "ordinal": 0,
+                "packet_count": 264,
+                "trace_sha256":
+                    "3b1b36be4d0f88d0da4dd6ca02b1fecf43c7909ee63d1b80df40443422a2fdc9",
+                "wirehair1_decoded_extra": 0,
+                "wirehair1_outcome": "success",
+                "wirehair2_head_decoded_extra": 4,
+                "wirehair2_head_outcome": "success",
+            },
+        ]
+        expected_work = (
+            "27ac11c0f5dddb46078f3f467684cd69a1cec7802c758a8449a2c2793f330adc",
+            "864e59732fc73fbb61e241aa04a31d24f971bdd26516760c4beaea4bdd289d16",
+        )
+        executable_hash = hashlib.sha256(self.worker.read_bytes()).hexdigest()
+        for retry, (record, payload, work_sha256) in enumerate(zip(
+                records, expected_payloads, expected_work)):
+            with self.subTest(retry=retry):
+                self.assertEqual(set(record), NATIVE_RECORD_FIELDS)
+                self.assertEqual(record["schema"], TIMING_QUALIFICATION_SCHEMA)
+                self.assertEqual(record["ordinal"], retry)
+                self.assertEqual(record["cpu"], int(cpu))
+                self.assertEqual(record["worker_binary_sha256"], executable_hash)
+                self.assertEqual(record["message_sha256"], expected_message)
+                self.assertEqual(record["payload"], payload)
+                self.assertEqual(
+                    set(record["payload"]),
+                    TIMING_QUALIFICATION_PAYLOAD_FIELDS)
+                self.assertEqual(
+                    record["payload"]["cell_sha256"],
+                    sha256_json(qualified_timing_cell(retry)))
+                self.assertEqual(
+                    native_work_sha256(
+                        "timing_qualification", retry,
+                        record["payload"]["cell_sha256"]),
+                    work_sha256)
+                self.assertEqual(record["work_sha256"], work_sha256)
+                self.assertGreater(record["worker_pid"], 0)
+                self.assertGreater(record["worker_process_start_ticks"], 0)
+                self.assertLessEqual(
+                    record["started_monotonic_ns"],
+                    record["finished_monotonic_ns"])
+        self.assertEqual(records[0]["worker_pid"], records[1]["worker_pid"])
+        self.assertEqual(
+            records[0]["message_sha256"], records[1]["message_sha256"])
+        self.assertNotEqual(
+            records[0]["payload"]["cell_sha256"],
+            records[1]["payload"]["cell_sha256"])
+        self.assertNotEqual(
+            records[0]["payload"]["trace_sha256"],
+            records[1]["payload"]["trace_sha256"])
+        self.assertNotEqual(records[0]["work_sha256"], records[1]["work_sha256"])
+
+    @unittest.skipUnless(
+        hasattr(os, "sched_getaffinity"), "Linux CPU affinity is required")
+    def test_timing_v4_retry_changes_trace_but_not_base_source(self):
+        affinity = os.sched_getaffinity(0)
+        self.assertTrue(affinity)
+        cpu = str(min(affinity))
+        # Packed T item is panel_index * 256 + retry_offset.  Both commands
+        # therefore select panel zero while changing only retry zero to one.
+        result = self.run_worker(
+            "--worker", cpu, stdin="T 0 0\nT 0 1\nQ\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        lines = result.stdout.splitlines()
+        self.assertEqual(len(lines), 2)
+        records = [json.loads(line) for line in lines]
+        self.assertEqual(lines, [canonical_json(record) for record in records])
+
+        expected_source_message = deterministic_timing_message_sha256(
+            TIMING_BASE_CELL_ZERO)
+        self.assertEqual(expected_source_message, TIMING_SOURCE_MESSAGE_SHA256)
+        expected_cells = (
+            "e85871b9c09ac946f6c8f6e0e077bd758d4862bfb5dddd73f6ee05e3ba35f2d7",
+            "4c216d6ca9416585f777980fc1ffd0a9f162644606d5f0468accec353470cf37",
+        )
+        expected_traces = (
+            "768c7e52d3bfc315b9d9eb44287766f9401904062a5595be439f8ba6b20c90aa",
+            "3b1b36be4d0f88d0da4dd6ca02b1fecf43c7909ee63d1b80df40443422a2fdc9",
+        )
+        expected_loss_seeds = (
+            "0x2d0f28c7e7e786b2", "0xcb46a281673202c7")
+        expected_work = (
+            "69efde6d79ea571b5b8e4dea365fb71609fcba4908b800aaf1496b5a1aef41f8",
+            "f1a4cf9c23c158a28508e09b37d4a6dd28cb718470391bf5b904f61edf4acf46",
+        )
+        executable_hash = hashlib.sha256(self.worker.read_bytes()).hexdigest()
+        for retry, record in enumerate(records):
+            with self.subTest(retry=retry):
+                payload = record["payload"]
+                self.assertEqual(set(record), NATIVE_RECORD_FIELDS)
+                self.assertEqual(set(payload), TIMING_PAYLOAD_FIELDS)
+                self.assertEqual(record["schema"], TIMING_SCHEMA)
+                # The result ordinal is cell * 11 + panel, independent of retry.
+                self.assertEqual(record["ordinal"], 0)
+                self.assertEqual(record["cpu"], int(cpu))
+                self.assertEqual(record["worker_binary_sha256"], executable_hash)
+                self.assertEqual(record["message_sha256"], expected_source_message)
+                self.assertEqual(payload["K"], 8)
+                self.assertEqual(payload["phase"], "development")
+                self.assertEqual(payload["band"], "2-100")
+                self.assertEqual(payload["block_bytes"], 64)
+                self.assertEqual(payload["loss_ppm"], 100000)
+                self.assertEqual(payload["schedule"], "iid")
+                self.assertEqual(payload["replicate"], 0)
+                self.assertEqual(payload["base_seed_attempt"], 0)
+                self.assertEqual(
+                    payload["base_cell_sha256"], TIMING_BASE_CELL_ZERO_SHA256)
+                self.assertEqual(
+                    payload["base_loss_seed"],
+                    TIMING_BASE_CELL_ZERO["base_loss_seed"])
+                self.assertEqual(payload["loss_retry_offset"], retry)
+                self.assertEqual(payload["loss_seed"], expected_loss_seeds[retry])
+                self.assertEqual(payload["cell_sha256"], expected_cells[retry])
+                self.assertEqual(
+                    payload["cell_sha256"],
+                    sha256_json(qualified_timing_cell(retry)))
+                self.assertEqual(payload["trace_sha256"], expected_traces[retry])
+                self.assertEqual(payload["fixed_received_overhead"], 4)
+                self.assertEqual(payload["receive_overhead_cap"], 256)
+                self.assertEqual(
+                    payload["interleave_policy"],
+                    "self-counterbalanced-repeat-major-v1")
+                self.assertEqual(payload["invocations_per_slot"], 8192)
+                self.assertEqual(payload["order"], "BAAB")
+                self.assertEqual(payload["panel_kind"], "AA")
+                self.assertEqual(payload["scope"], "decoder_solve")
+                self.assertEqual(payload["left_arm"], "wirehair2_head")
+                self.assertEqual(payload["right_arm"], "wirehair2_head")
+                self.assertEqual(
+                    payload["left_arm_descriptor_sha256"],
+                    CONTROLS[0]["arm_descriptor_sha256"])
+                self.assertEqual(
+                    payload["right_arm_descriptor_sha256"],
+                    CONTROLS[0]["arm_descriptor_sha256"])
+                self.assertEqual(payload["left_construction_attempt"], 0)
+                self.assertEqual(payload["right_construction_attempt"], 0)
+                self.assertEqual(
+                    payload["left_realized_construction_sha256"],
+                    "ca6c4a450d9d0abfa024d354fe436590829bce1d0235a0ec97fb2faf3e3faf32")
+                self.assertEqual(
+                    payload["right_realized_construction_sha256"],
+                    payload["left_realized_construction_sha256"])
+                self.assertEqual(payload["left_repair_map_sha256"], ZERO_SHA256)
+                self.assertEqual(payload["right_repair_map_sha256"], ZERO_SHA256)
+                self.assertEqual(payload["left_outcome"], "success")
+                self.assertEqual(payload["right_outcome"], "success")
+                self.assertEqual(payload["left_decoded_extra"], 4)
+                self.assertEqual(payload["right_decoded_extra"], 4)
+                self.assertEqual(payload["left_binary_sha256"], executable_hash)
+                self.assertEqual(payload["right_binary_sha256"], executable_hash)
+                self.assertEqual(len(payload["elapsed_ns"]), 8)
+                self.assertTrue(all(
+                    type(value) is int and value > 0
+                    for value in payload["elapsed_ns"]))
+                self.assertEqual(
+                    native_work_sha256("timing", 0, expected_cells[retry]),
+                    expected_work[retry])
+                self.assertEqual(record["work_sha256"], expected_work[retry])
+        self.assertEqual(records[0]["message_sha256"],
+                         records[1]["message_sha256"])
+        self.assertNotEqual(records[0]["payload"]["loss_seed"],
+                            records[1]["payload"]["loss_seed"])
+        self.assertNotEqual(records[0]["payload"]["trace_sha256"],
+                            records[1]["payload"]["trace_sha256"])
+        self.assertNotEqual(records[0]["payload"]["cell_sha256"],
+                            records[1]["payload"]["cell_sha256"])
+        self.assertNotEqual(records[0]["work_sha256"],
+                            records[1]["work_sha256"])
+
+    @unittest.skipUnless(
+        hasattr(os, "sched_getaffinity"), "Linux CPU affinity is required")
+    def test_timing_commands_reject_malformed_and_out_of_range_indexes(self):
+        affinity = os.sched_getaffinity(0)
+        self.assertTrue(affinity)
+        cpu = str(min(affinity))
+        cases = (
+            ("L 0 00\n", "malformed command"),
+            ("L 0 -1\n", "malformed command"),
+            ("L 0 0 extra\n", "malformed command"),
+            ("X 0 0\n", "malformed command"),
+            ("L 2304 0\n", "qualification index is outside"),
+            ("L 0 256\n", "qualification index is outside"),
+            ("T 2304 0\n", "timing job index is outside"),
+            # panel 11 is out of range: packed item = 11 * 256 + retry 0.
+            ("T 0 2816\n", "timing job index is outside"),
+        )
+        for command, diagnostic in cases:
+            with self.subTest(command=command.strip()):
+                result = self.run_worker(
+                    "--worker", cpu, stdin=command)
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(result.stdout, "")
+                self.assertIn(diagnostic, result.stderr)
 
 
 def main():

@@ -1,4 +1,4 @@
-# Wirehair2 benchmark contract v3, timing protocol v4
+# Wirehair2 benchmark contract v3, timing protocol v6
 
 The machine-readable source of truth is
 [`wh2_benchmark_contract_v3.json`](wh2_benchmark_contract_v3.json).  The
@@ -8,9 +8,14 @@ cell.  This is intentionally a small contract and checker, not another
 campaign framework.
 
 The top-level JSON schema remains `wirehair.wh2.benchmark-contract.v3` because
-the recovery protocol and every recovery cell/domain hash are byte-identical.
-The contract identity is `wh2-pure-gf256-1pct-v4`; v4 denotes the revised
-timing protocol and timing-domain hashes only.
+the recovery enumeration, packet-trace algorithm, cells, and all five recovery
+domain hashes are byte-identical.  The contract identity is
+`wh2-pure-gf256-1pct-v6`; v6 changes only timing identity and qualification.
+Recovery trace-manifest v1 includes the top-level contract SHA-256 in its hash
+header, so its enclosing manifest digest necessarily changes with the v6
+contract SHA even though every recovery row, cell hash, packet trace, and
+recovery-domain hash is unchanged.  Do not describe that envelope digest as a
+preserved recovery hash.
 
 ## Target
 
@@ -147,10 +152,13 @@ per-phase passes.  `final_raw`, `final_repaired`, `final_validation`,
 same one selected candidate and reuse the exact source commit, host, codec
 kinds, binaries, descriptors, repair-training trace, and production map
 hashes.  `validate-final-continuity` also requires the exact development
-selection receipt and rejects a different sole candidate.  It checks this
-semantic descriptor identity—not merely the arm name—before the phase
-summaries may be combined.  Every individual phase still freezes its exact
-source commit and binary.
+selection receipt and the final ordered timing trace manifest.  It replays the
+manifest against the supplied final qualification map, so another valid map
+with the same offsets and qualified domain but different terminal traces is
+rejected.  It also rejects a different sole candidate and checks semantic
+descriptor identity—not merely the arm name—before the phase summaries may be
+combined.  Every individual phase still freezes its exact source commit and
+binary.
 
 The public attempt has its existing codec meaning: it adds
 `attempt*0x9e3779b97f4a7c15` modulo 2^64 to the certified precode seed and
@@ -260,25 +268,48 @@ declared scope is not added to the sum.  The count and exact interleave policy
 are arm-independent, fixed before results, part of the timing cell key and
 domain hash, and may not be calibrated or shortened from observed timings.  A
 sum that cannot fit in a positive signed 63-bit nanosecond value is fatal
-rather than wrapped.  The arm-free timing cell key is:
+rather than wrapped.  Timing identity has two layers.  The arm-, outcome-, and
+retry-free base key is:
 
 ```text
 (phase, band, K, block_bytes, loss_ppm, schedule, replicate,
- base_seed_attempt, loss_seed, fixed_received_overhead,
- invocations_per_slot, interleave_policy)
+ base_seed_attempt, base_loss_seed, fixed_received_overhead,
+ receive_overhead_cap, invocations_per_slot, interleave_policy)
 ```
+
+The qualified arm-free key consumed by every timing arm adds
+`base_cell_sha256`, `loss_retry_offset`, and the realized `loss_seed`:
+
+```text
+(phase, band, K, block_bytes, loss_ppm, schedule, replicate,
+ base_seed_attempt, base_loss_seed, base_cell_sha256,
+ loss_retry_offset, loss_seed, fixed_received_overhead,
+ receive_overhead_cap, invocations_per_slot, interleave_policy)
+```
+
+`base_cell_sha256` is SHA-256 of the canonical base key.  Deterministic source
+bytes are derived under `wirehair.wh2.source.v1` from that base JSON only.
+Neither retry offset nor realized loss seed may enter source derivation.  Thus
+qualification changes only the delivered-ID loss trace and cannot silently
+give a control or candidate a different payload.  The checked-in base-domain
+hashes are `eab25fe9...e2d164` for development and
+`5b53ef37...de6c94` for final; qualified-domain identities live in the frozen
+phase maps rather than being guessed by the static contract.
 
 `interleave_policy` must equal
 `self-counterbalanced-repeat-major-v1`.  Changing the batch count or omitting,
 forging, or relabeling that token therefore cannot preserve either the cell
 identity or its frozen trace/domain binding.
 
-Timing protocol v4 freezes the execution geometry that removed the
+Timing protocol v6 retains the execution geometry that removed the
 heterogeneous-load artifact.  Timing uses exactly eight singleton-pinned
 workers on distinct physical cores.  For one candidate, the 12 K values, two
 widths, and eleven frozen panels form 264 homogeneous cohorts ordered by width,
-K-set position, then panel ordinal.  A cohort contains only one K, width, and
-panel.  Both development and final timing use 96 technical lane repetitions:
+K-set position, then panel ordinal.  Cohort identity excludes exactly the five
+replicate-varying fields `replicate`, `base_loss_seed`, `base_cell_sha256`,
+`loss_retry_offset`, and `loss_seed`; it otherwise contains the complete timing
+cell plus its panel.  A cohort therefore contains only one K, width, and panel.
+Both development and final timing use 96 technical lane repetitions:
 twelve independent rounds with eight lanes each.  The independent round is
 the outer traversal.  Within a round, visit the complete frozen cohort domain
 in order, executing one eight-job lane wave for each cohort; the next cohort
@@ -326,19 +357,107 @@ degrees of freedom.  Aggregate encoder results give every frozen K × width cell
 equal weight within each lane before the eight-lane round average.  No rounding
 occurs before a decision.
 
-Timing may not form an observed common-success intersection: every compared
-arm must succeed on every predeclared cell.  A non-success row carries eight
-null durations, remains explicit, and makes the affected panel non-selectable;
-it is never dropped.  Successful timings require the exact derived
-`invocations_per_slot`, the exact interleave token, and eight integer aggregate
-durations in `[1,2^63-1]`.
+Timing may not form an observed common-success intersection.  Before candidate
+timing, a phase-scoped `wirehair.wh2.timing-qualification-map.v1` selects one
+common loss trace for every base-cell ordinal using exactly two mandatory
+controls: Wirehair2-head must byte-recover from the exact first K+4 IDs in the
+isolated-solve scope, and Wirehair1 must byte-recover by K+256 in the
+receive-to-success scope.  Candidate code, outcomes, and timings are forbidden
+from qualification.
+
+The native qualifier uses the linear rank equivalence only within a precisely
+bounded role.  It first resolves the Wirehair2-head coefficients with the
+cell's real K, block width, and construction attempt; it does not substitute a
+one-byte width while selecting that matrix.  Once those coefficients and the
+packet IDs are fixed, rank is independent of right-hand-side values and of the
+number of byte columns, so qualification solves one all-zero byte column.
+Wirehair1's equation selection depends on K rather than payload width and its
+qualification probe likewise uses a fresh public decoder/recovery path with
+one-byte zero blocks.  This reduced payload is permitted only for choosing the
+candidate-blind loss retry; it is not timing evidence.
+
+Every subsequent timing job derives the real-width deterministic payload from
+the canonical base cell and runs the production solve or receive fixture before
+recording the panel.  A reported successful preflight is accepted only after
+exact recovered-byte verification; success with a byte mismatch is fatal and
+emits no timing record.  A genuine need-more remains explicit and makes the
+affected timing comparison non-selectable.  Thus the reduced qualification
+probe cannot turn an unverified full-payload success into promotable evidence.
+
+For base loss seed `s` and retry offset `r` in `[0,255]`, the only permitted
+derivation is
+
+```text
+loss_seed = (s + r * 0x9e3779b97f4a7c15) modulo 2^64
+```
+
+Offset zero preserves the original trace.  Qualification chooses the lowest
+successful offset.  Only `need_more_at_bound` is retryable.  Construction,
+unsupported, fatal/internal, allocation, terminal decoder, or byte-mismatch
+results abort the phase rather than being hidden by another loss seed.  If no
+offset through 255 succeeds, qualification fails; the cell is not omitted.
+
+The compact map contains one uint8 offset per base ordinal and binds the
+contract, phase, source commit, base and qualified domains, exact control
+artifacts, ordered qualification-audit SHA-256, and selected-trace-roster
+SHA-256.  Its canonical JSONL audit contains exactly offsets zero through the
+selected offset for every ordinal.  Every rejected row has at least one
+need-more control; the terminal row has both controls successful.  There may be
+no gaps, later attempts, candidate fields, or candidate controls.
+
+There is one independent map for development and one for final.  Its exact
+top-level key set is:
+
+```text
+(schema, contract_sha256, phase, source_git_commit,
+ base_domain_sha256, qualified_domain_sha256, entry_kind, controls,
+ qualification_audit_sha256, selected_trace_roster_sha256, retry_offsets)
+```
+
+Each of the exactly two control records contains only `(arm, scope,
+binary_sha256, arm_descriptor_sha256, construction_policy,
+repair_map_sha256)`.  Each audit row contains only:
+
+```text
+(ordinal, base_cell_sha256, loss_retry_offset, loss_seed, trace_sha256,
+ wirehair2_head_outcome, wirehair2_head_decoded_extra,
+ wirehair1_outcome, wirehair1_decoded_extra)
+```
+
+A native map is promotable only with a self-hashed
+`wirehair.wh2.native-timing-qualification-execution-receipt.v1` published while
+every qualification worker is still live.  That receipt binds the exact native
+attempt stream, map and audit identities, source commit, base and qualified
+domains, complete allowed/observed CPU roster, worker PID/start-time roster,
+worker-binary hash set, attempt count, and the enclosing receipt hash.  The
+controller must exercise every allowed logical CPU, then send `Q` to and reap
+the complete qualification pool before selecting or spawning the separate
+eight-worker timing topology.  Timing evidence embeds this qualification
+receipt's SHA-256 and rejects a surviving or overlapping worker identity.
+
+The timing trace-manifest v2 hash header binds the qualification-map SHA-256
+plus the base and qualified domain hashes.  Its selected trace at each ordinal
+must equal the terminal audit row.  The unchanged freeze v1 directly binds the
+qualified domain and this v2 manifest hash, thereby transitively binding the
+map, audit, offsets, and selected trace roster without adding recovery-freeze
+fields or depending on a future candidate.
+
+After qualification, a candidate non-success carries eight null durations,
+remains explicit, and makes the affected panel non-selectable.  It never
+changes the loss offset or retries.  Successful timings require the exact
+derived `invocations_per_slot`, the exact interleave token, and eight integer
+aggregate durations in `[1,2^63-1]`.
 Final WH2 timing replays and receipts the same frozen repair map and
 construction attempt used by recovery validation.
 
-Isolated solve uses a fresh decoder after the identical K+4 received prefix is
-loaded.  Encoder timing covers initialization and exactly IDs 0 through K-1.
-Receive-to-success replays the nested trace and includes all feed and final
-recovery work through each arm's first successful byte recovery.
+Each timing cell freezes one qualified arm-free K+256 delivered-ID trace.  Isolated solve
+uses a fresh decoder after the identical first K+4 received IDs are loaded, so
+its fixed solve scope is unchanged.  Encoder timing covers initialization and
+exactly IDs 0 through K-1.  Receive-to-success replays the longer common trace
+and includes all feed and final recovery work through each arm's first
+successful byte recovery; an arm that has not recovered after K+256 reports
+`need_more_at_cap`.  This timing-only suffix does not change the recovery
+K+0..K+4 prefixes, cells, or domain hashes.
 
 The fixed effective timing floor is `log1p(0.02)`.  Before an A/B decision,
 both corresponding A/A 95% intervals must lie strictly inside the symmetric
@@ -385,7 +504,10 @@ Validate the complete paired timing receipt:
 PYTHONWARNINGS=error python3 bench/wh2_benchmark_contract.py \
   validate-timing --phase development \
   --freeze-manifest timing-freeze.json \
-  --trace-manifest timing-traces.jsonl timing.jsonl
+  --trace-manifest timing-traces.jsonl \
+  --timing-qualification-map timing-qualification.json \
+  --timing-qualification-audit timing-qualification.jsonl \
+  --timing-qualification-map-sha256 MAP_SHA256 timing.jsonl
 ```
 
 Repaired recovery and final timing additionally repeat
@@ -402,6 +524,10 @@ required freeze:
 PYTHONWARNINGS=error python3 bench/wh2_benchmark_contract.py \
   validate-final-continuity \
   --selection-receipt development-selection.json \
+  --timing-qualification-map final-timing-qualification.json \
+  --timing-qualification-audit final-timing-qualification.jsonl \
+  --timing-qualification-map-sha256 MAP_SHA256 \
+  --timing-trace-manifest final-timing-traces.jsonl \
   --freeze recovery:final_raw=final-raw-freeze.json \
   --freeze recovery:final_repaired=final-repaired-freeze.json \
   --freeze recovery:final_validation=final-validation-freeze.json \
@@ -409,10 +535,13 @@ PYTHONWARNINGS=error python3 bench/wh2_benchmark_contract.py \
   --freeze timing:final=final-timing-freeze.json
 ```
 
-The checker authenticates and replays a frozen retry vector; proving that its
-entries came from the lowest-success search, validating generated packet IDs
-against the specified SplitMix64 algorithm, and binding worker-affinity plus
-thermal/EDAC terminal receipts are responsibilities of the narrow native
-emitters.  Their raw derivation/trace evidence is required before any campaign
-is promotable; a hand-authored map or trace manifest is only a checker fixture,
-not benchmark evidence.
+The Python checker authenticates the map and audit, recomputes every exact
+retry seed and qualified-domain hash, proves contiguous attempts and the
+lowest declared successful offset, and binds each selected trace to its
+terminal audit row.  It cannot independently prove that a trace hash names the
+specified packet IDs or that a declared control success actually decoded the
+bytes.  Native regeneration and byte-exact control replay are the authoritative
+proof of those facts and must reject any mismatch before publication.
+Worker-affinity and thermal/EDAC terminal receipts likewise remain native
+responsibilities.  A hand-authored map, audit, or trace manifest is only a
+checker fixture, not promotable benchmark evidence.

@@ -15,6 +15,7 @@ static const uint64_t kSplitMixMultiplier2 = UINT64_C(0x94d049bb133111eb);
 static const uint64_t kHardScheduleSalt = UINT64_C(0x10fade);
 static const uint32_t kMaximumFrozenK = 64000u;
 static const uint32_t kOverheadCap = 4u;
+static const uint32_t kMaximumDeliveredOverhead = 65536u;
 
 static_assert(CHAR_BIT == 8, "frozen trace requires eight-bit bytes");
 static_assert(std::numeric_limits<double>::radix == 2 &&
@@ -595,6 +596,7 @@ FrozenTraceStatus GenerateFrozenPacketTrace(
     uint32_t loss_ppm,
     uint64_t loss_seed,
     FrozenSchedule schedule,
+    uint32_t delivered_overhead,
     FrozenPacketTrace& trace)
 {
     trace = FrozenPacketTrace();
@@ -605,12 +607,14 @@ FrozenTraceStatus GenerateFrozenPacketTrace(
     trace.loss_seed = loss_seed;
 
     if (K < 2u || K > kMaximumFrozenK || block_bytes == 0u ||
-        loss_ppm > 1000000u || !IsFrozenSchedule(schedule))
+        loss_ppm > 1000000u || !IsFrozenSchedule(schedule) ||
+        delivered_overhead > kMaximumDeliveredOverhead)
     {
         return trace.status;
     }
 
-    const uint64_t delivered_count = static_cast<uint64_t>(K) + kOverheadCap;
+    const uint64_t delivered_count =
+        static_cast<uint64_t>(K) + delivered_overhead;
     if (!FrozenCandidateLimit(delivered_count, trace.candidate_limit) ||
         delivered_count >
             static_cast<uint64_t>(trace.delivered_ids.max_size()) ||
@@ -672,6 +676,24 @@ FrozenTraceStatus GenerateFrozenPacketTrace(
         trace.status = FrozenTraceStatus::CandidateLimitReached;
     }
     return trace.status;
+}
+
+FrozenTraceStatus GenerateFrozenPacketTrace(
+    uint32_t K,
+    uint32_t block_bytes,
+    uint32_t loss_ppm,
+    uint64_t loss_seed,
+    FrozenSchedule schedule,
+    FrozenPacketTrace& trace)
+{
+    return GenerateFrozenPacketTrace(
+        K,
+        block_bytes,
+        loss_ppm,
+        loss_seed,
+        schedule,
+        kOverheadCap,
+        trace);
 }
 
 FrozenTraceStatus GenerateFrozenPacketTrace(

@@ -867,7 +867,7 @@ if(BUILD_TESTS)
     set_tests_properties(wh2_native_short_screen_test PROPERTIES
         WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
         ENVIRONMENT "PYTHONWARNINGS=error"
-        TIMEOUT 180
+        TIMEOUT 360
         LABELS "wh2;benchmark;contract;native")
     add_test(
         NAME wh2_run_native_short_screen_test

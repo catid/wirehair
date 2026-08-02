@@ -178,12 +178,24 @@ struct LegacyCodecOwner
 
 bool UniquePacketPrefix(
     uint32_t block_count,
-    const std::vector<uint32_t>& packet_ids)
+    uint32_t overhead,
+    const std::vector<uint32_t>& packet_ids,
+    bool require_exact_size)
 {
-    if (packet_ids.size() != (size_t)block_count + kRecoveryOverheadCap) {
+    const uint64_t required_u64 = (uint64_t)block_count + overhead;
+    if (required_u64 > UINT32_MAX ||
+        required_u64 > (uint64_t)std::numeric_limits<size_t>::max())
+    {
         return false;
     }
-    std::vector<uint32_t> sorted(packet_ids);
+    const size_t required = (size_t)required_u64;
+    if (packet_ids.size() < required ||
+        (require_exact_size && packet_ids.size() != required))
+    {
+        return false;
+    }
+    std::vector<uint32_t> sorted(
+        packet_ids.begin(), packet_ids.begin() + required);
     std::sort(sorted.begin(), sorted.end());
     return std::adjacent_find(sorted.begin(), sorted.end()) == sorted.end();
 }
@@ -744,7 +756,12 @@ WirehairResult NativeRecoveryFixture::Initialize(
     }
     try
     {
-        if (!UniquePacketPrefix(arm.ImplValue->K, packet_ids)) {
+        if (!UniquePacketPrefix(
+                arm.ImplValue->K,
+                kRecoveryOverheadCap,
+                packet_ids,
+                true))
+        {
             return Wirehair_InvalidInput;
         }
         std::unique_ptr<Impl> next(new Impl);
@@ -927,6 +944,300 @@ RecoveryCellResult RunRecoveryCell(
     return fixture.RunNested();
 }
 
+struct NativeTimingControlProbe::Impl
+{
+    uint32_t K = 0u;
+    wirehair_v2::PrecodeSystem HeadSystem;
+    wirehair_v2::PacketRowConfig HeadPacketConfig = {};
+    wirehair_v2::PacketRowRuntime HeadPacketRuntime = {};
+    bool Initialized = false;
+};
+
+NativeTimingControlProbe::NativeTimingControlProbe()
+{
+}
+
+NativeTimingControlProbe::~NativeTimingControlProbe()
+{
+}
+
+NativeTimingControlProbe::NativeTimingControlProbe(
+    NativeTimingControlProbe&& other) noexcept = default;
+NativeTimingControlProbe& NativeTimingControlProbe::operator=(
+    NativeTimingControlProbe&& other) noexcept = default;
+
+WirehairResult NativeTimingControlProbe::Initialize(
+    const NativeArmSpec& wirehair2_head_spec,
+    uint32_t block_count,
+    uint32_t block_bytes)
+{
+    if (wirehair2_head_spec.Kind != NativeArmKind::Wirehair2Certified ||
+        !ValidArmSpec(wirehair2_head_spec) ||
+        block_count < 2u || block_count > 64000u ||
+        block_bytes == 0u || block_bytes > UINT32_C(0x7fffffff))
+    {
+        return Wirehair_InvalidInput;
+    }
+
+    const WirehairResult init_result = wirehair_init();
+    if (init_result != Wirehair_Success) {
+        return init_result;
+    }
+
+    try
+    {
+        ResolvedNativeWh2Configuration resolved;
+        if (!ResolveNativeWh2Configuration(
+                wirehair2_head_spec,
+                block_count,
+                block_bytes,
+                resolved))
+        {
+            return Wirehair_InvalidInput;
+        }
+
+        std::unique_ptr<Impl> next(new Impl);
+        next->K = block_count;
+        if (!wirehair_v2::BuildPrecodeSystem(
+                resolved.Params, next->HeadSystem))
+        {
+            return Wirehair_BadPeelSeed;
+        }
+        next->HeadPacketConfig = resolved.PacketConfig;
+        const uint64_t precode_count_wide =
+            static_cast<uint64_t>(resolved.Params.Staircase) +
+            resolved.Params.DenseRows + resolved.Params.HeavyRows;
+        if (precode_count_wide > UINT32_MAX ||
+            !next->HeadPacketRuntime.Initialize(
+                block_count,
+                static_cast<uint32_t>(precode_count_wide),
+                resolved.PacketConfig.MixCount))
+        {
+            return Wirehair_InvalidInput;
+        }
+
+        // NativeArm construction must solve this exact systematic system
+        // before a timing solve fixture can exist.  Prove that once per
+        // reusable (K, width, attempt) probe with a consistent one-byte RHS.
+        const uint8_t zero = 0u;
+        std::vector<wirehair_v2::SolvePacket> systematic(block_count);
+        for (uint32_t block_id = 0u; block_id < block_count; ++block_id)
+        {
+            systematic[block_id].BlockId = block_id;
+            systematic[block_id].Data = &zero;
+        }
+        std::vector<uint8_t> intermediate;
+        const WirehairResult construction_result =
+            wirehair_v2::SolvePrecodeSystemForValidatedSystemWithRuntime(
+                next->HeadSystem,
+                next->HeadPacketConfig,
+                next->HeadPacketRuntime,
+                systematic,
+                1u,
+                intermediate);
+        if (construction_result != Wirehair_Success)
+        {
+            return construction_result == Wirehair_NeedMore ?
+                Wirehair_BadPeelSeed : construction_result;
+        }
+        const uint64_t intermediate_blocks =
+            static_cast<uint64_t>(block_count) + precode_count_wide;
+        if (intermediate.size() != intermediate_blocks ||
+            std::find_if(
+                intermediate.begin(), intermediate.end(),
+                [](uint8_t value) { return value != 0u; }) !=
+                    intermediate.end())
+        {
+            return Wirehair_Error;
+        }
+
+        next->Initialized = true;
+        ImplValue.swap(next);
+        return Wirehair_Success;
+    }
+    catch (const std::bad_alloc&) {
+        return Wirehair_OOM;
+    }
+    catch (const std::length_error&) {
+        return Wirehair_OOM;
+    }
+    catch (...) {
+        return Wirehair_Error;
+    }
+}
+
+bool NativeTimingControlProbe::IsInitialized() const
+{
+    return ImplValue && ImplValue->Initialized;
+}
+
+NativeTimingControlQualificationResult NativeTimingControlProbe::Run(
+    const std::vector<uint32_t>& packet_ids)
+{
+    NativeTimingControlQualificationResult result;
+    static const uint32_t kReceiveOverheadCap = 256u;
+    if (!IsInitialized())
+    {
+        result.Wirehair1Result = Wirehair_InvalidInput;
+        result.Wirehair2HeadResult = Wirehair_InvalidInput;
+        return result;
+    }
+
+    try
+    {
+        if (!UniquePacketPrefix(
+                ImplValue->K, kReceiveOverheadCap, packet_ids, true))
+        {
+            result.Wirehair1Result = Wirehair_InvalidInput;
+            result.Wirehair2HeadResult = Wirehair_InvalidInput;
+            return result;
+        }
+
+        const uint8_t zero = 0u;
+        const size_t solve_packet_count =
+            static_cast<size_t>(ImplValue->K) + kRecoveryOverheadCap;
+        std::vector<wirehair_v2::SolvePacket> solve_packets(
+            solve_packet_count);
+        for (size_t i = 0u; i < solve_packet_count; ++i)
+        {
+            solve_packets[i].BlockId = packet_ids[i];
+            solve_packets[i].Data = &zero;
+        }
+        std::vector<uint8_t> intermediate;
+        result.Wirehair2HeadResult =
+            wirehair_v2::SolvePrecodeSystemForValidatedSystemWithRuntime(
+                ImplValue->HeadSystem,
+                ImplValue->HeadPacketConfig,
+                ImplValue->HeadPacketRuntime,
+                solve_packets,
+                1u,
+                intermediate);
+        const uint64_t precode_count_wide =
+            static_cast<uint64_t>(ImplValue->HeadSystem.Params.Staircase) +
+            ImplValue->HeadSystem.Params.DenseRows +
+            ImplValue->HeadSystem.Params.HeavyRows;
+        const uint64_t expected_intermediate =
+            static_cast<uint64_t>(ImplValue->K) + precode_count_wide;
+        if (result.Wirehair2HeadResult == Wirehair_Success &&
+            (intermediate.size() != expected_intermediate ||
+             std::find_if(
+                 intermediate.begin(), intermediate.end(),
+                 [](uint8_t value) { return value != 0u; }) !=
+                 intermediate.end()))
+        {
+            result.Wirehair2HeadResult = Wirehair_Error;
+        }
+
+        // LegacyCurrent's equation selection depends on K, not payload width.
+        // K one-byte blocks therefore select the exact timing-cell matrix
+        // while retaining the real public decode, identity, recovery-value,
+        // and ReconstructOutput paths at minimum payload cost.  A fresh owner
+        // on every call prevents a retry from retaining prior decoder state.
+        LegacyCodecOwner legacy;
+        const WirehairResult create_result = wirehair_decoder_create_ex(
+            nullptr,
+            ImplValue->K,
+            1u,
+            &legacy.Codec);
+        result.Wirehair1Result = create_result;
+        if (create_result != Wirehair_Success) {
+            return result;
+        }
+        if (!legacy.Codec) {
+            result.Wirehair1Result = Wirehair_Error;
+            return result;
+        }
+
+        result.Wirehair1Result = Wirehair_NeedMore;
+        for (size_t i = 0u; i < packet_ids.size(); ++i)
+        {
+            result.Wirehair1Result = wirehair_decode(
+                legacy.Codec,
+                packet_ids[i],
+                &zero,
+                1u);
+            if (result.Wirehair1Result == Wirehair_Success)
+            {
+                const uint64_t received = static_cast<uint64_t>(i) + 1u;
+                if (received < ImplValue->K ||
+                    received >
+                        static_cast<uint64_t>(ImplValue->K) +
+                            kReceiveOverheadCap)
+                {
+                    result.Wirehair1Result = Wirehair_Error;
+                }
+                else {
+                    result.Wirehair1DecodedOverhead =
+                        static_cast<uint32_t>(received - ImplValue->K);
+                    std::vector<uint8_t> recovered(ImplValue->K, 0xffu);
+                    const WirehairResult recover_result = wirehair_recover(
+                        legacy.Codec,
+                        recovered.data(),
+                        recovered.size());
+                    if (recover_result != Wirehair_Success ||
+                        std::find_if(
+                            recovered.begin(), recovered.end(),
+                            [](uint8_t value) { return value != 0u; }) !=
+                            recovered.end())
+                    {
+                        result.Wirehair1Result =
+                            recover_result == Wirehair_Success ?
+                                Wirehair_Error : recover_result;
+                        result.Wirehair1DecodedOverhead = UINT32_MAX;
+                    }
+                }
+                break;
+            }
+            if (result.Wirehair1Result != Wirehair_NeedMore) {
+                break;
+            }
+        }
+
+        const bool wh1_known =
+            result.Wirehair1Result == Wirehair_Success ||
+            result.Wirehair1Result == Wirehair_NeedMore;
+        const bool wh2_known =
+            result.Wirehair2HeadResult == Wirehair_Success ||
+            result.Wirehair2HeadResult == Wirehair_NeedMore;
+        if (result.Wirehair1Result == Wirehair_Success &&
+            result.Wirehair2HeadResult == Wirehair_Success)
+        {
+            result.Qualification =
+                NativeTimingControlQualification::Success;
+        }
+        else if (wh1_known && wh2_known)
+        {
+            result.Qualification =
+                NativeTimingControlQualification::NeedMore;
+        }
+        return result;
+    }
+    catch (const std::bad_alloc&)
+    {
+        result.Qualification = NativeTimingControlQualification::Fatal;
+        result.Wirehair1Result = Wirehair_OOM;
+        result.Wirehair1DecodedOverhead = UINT32_MAX;
+        result.Wirehair2HeadResult = Wirehair_OOM;
+        return result;
+    }
+    catch (const std::length_error&)
+    {
+        result.Qualification = NativeTimingControlQualification::Fatal;
+        result.Wirehair1Result = Wirehair_OOM;
+        result.Wirehair1DecodedOverhead = UINT32_MAX;
+        result.Wirehair2HeadResult = Wirehair_OOM;
+        return result;
+    }
+    catch (...)
+    {
+        result.Qualification = NativeTimingControlQualification::Fatal;
+        result.Wirehair1Result = Wirehair_Error;
+        result.Wirehair1DecodedOverhead = UINT32_MAX;
+        result.Wirehair2HeadResult = Wirehair_Error;
+        return result;
+    }
+}
+
 struct NativeEncoderFixture::Impl
 {
     NativeArmSpec Spec = {};
@@ -1067,6 +1378,7 @@ struct NativeReceiveFixture::Impl
     std::shared_ptr<const NativeArm::Impl> ArmState;
     std::vector<uint32_t> PacketIds;
     std::vector<uint8_t> PacketStorage;
+    uint32_t ReceiveOverheadCap = 0u;
     bool Initialized = false;
 };
 
@@ -1085,19 +1397,26 @@ NativeReceiveFixture& NativeReceiveFixture::operator=(
 
 WirehairResult NativeReceiveFixture::Initialize(
     const NativeArm& arm,
-    const std::vector<uint32_t>& packet_ids)
+    const std::vector<uint32_t>& packet_ids,
+    uint32_t receive_overhead_cap)
 {
     if (!arm.IsInitialized()) {
         return Wirehair_InvalidInput;
     }
     try
     {
-        if (!UniquePacketPrefix(arm.ImplValue->K, packet_ids)) {
+        if (!UniquePacketPrefix(
+                arm.ImplValue->K,
+                receive_overhead_cap,
+                packet_ids,
+                true))
+        {
             return Wirehair_InvalidInput;
         }
         std::unique_ptr<Impl> next(new Impl);
         next->ArmState = arm.ImplValue;
         next->PacketIds = packet_ids;
+        next->ReceiveOverheadCap = receive_overhead_cap;
         const WirehairResult encode_result =
             EncodePrefix(arm, packet_ids, next->PacketStorage);
         if (encode_result != Wirehair_Success) {
@@ -1130,6 +1449,8 @@ TimedArmResult NativeReceiveFixture::Run() const
     try
     {
         const NativeArm::Impl& arm = *ImplValue->ArmState;
+        const size_t receive_packet_count =
+            (size_t)arm.K + ImplValue->ReceiveOverheadCap;
         std::vector<uint8_t> recovered(arm.Source.size(), 0u);
         WirehairResult receive_result = Wirehair_NeedMore;
         uint32_t success_packet_count = 0u;
@@ -1150,8 +1471,8 @@ TimedArmResult NativeReceiveFixture::Run() const
 
             const std::chrono::steady_clock::time_point start =
                 std::chrono::steady_clock::now();
-            for (uint32_t packet_index = 0u;
-                 packet_index < arm.K + kRecoveryOverheadCap;
+            for (size_t packet_index = 0u;
+                 packet_index < receive_packet_count;
                  ++packet_index)
             {
                 receive_result = wirehair_decode(
@@ -1162,7 +1483,7 @@ TimedArmResult NativeReceiveFixture::Run() const
                     arm.BlockBytes);
                 if (receive_result == Wirehair_Success)
                 {
-                    success_packet_count = packet_index + 1u;
+                    success_packet_count = (uint32_t)packet_index + 1u;
                     receive_result = wirehair_recover(
                         decoder.Codec,
                         recovered.data(),
@@ -1187,15 +1508,15 @@ TimedArmResult NativeReceiveFixture::Run() const
             // reservation and the recovery destination are prepared before the
             // clock; solver/resume allocations remain decoder work.
             std::vector<wirehair_v2::SolvePacket> received_packets;
-            received_packets.reserve((size_t)arm.K + kRecoveryOverheadCap);
+            received_packets.reserve(receive_packet_count);
             wirehair_v2::PrecodeSolveResumeState resume_state;
             wirehair_v2::PrecodeSolveResumeState cold_resume;
             std::vector<uint8_t> intermediate;
 
             const std::chrono::steady_clock::time_point start =
                 std::chrono::steady_clock::now();
-            for (uint32_t packet_index = 0u;
-                 packet_index < arm.K + kRecoveryOverheadCap;
+            for (size_t packet_index = 0u;
+                 packet_index < receive_packet_count;
                  ++packet_index)
             {
                 wirehair_v2::SolvePacket packet;
@@ -1240,7 +1561,7 @@ TimedArmResult NativeReceiveFixture::Run() const
 
                 if (receive_result == Wirehair_Success)
                 {
-                    success_packet_count = packet_index + 1u;
+                    success_packet_count = (uint32_t)packet_index + 1u;
                     if (!RecoverWh2DecodedBytesInto(
                             arm.System,
                             arm.PacketConfig,
@@ -1271,7 +1592,8 @@ TimedArmResult NativeReceiveFixture::Run() const
         if (receive_result == Wirehair_Success)
         {
             if (success_packet_count < arm.K ||
-                success_packet_count > arm.K + kRecoveryOverheadCap)
+                success_packet_count >
+                    (uint64_t)arm.K + ImplValue->ReceiveOverheadCap)
             {
                 result.Result = Wirehair_Error;
                 result.ElapsedNanoseconds = 0u;
@@ -1334,28 +1656,34 @@ WirehairResult NativeSolveFixture::Initialize(
 {
     if (!arm.IsInitialized() ||
         arm.Kind() == NativeArmKind::Wirehair1 ||
-        fixed_received_overhead > kRecoveryOverheadCap)
+        fixed_received_overhead != kRecoveryOverheadCap)
     {
         return Wirehair_InvalidInput;
     }
     try
     {
-        if (!UniquePacketPrefix(arm.ImplValue->K, packet_ids)) {
+        if (!UniquePacketPrefix(
+                arm.ImplValue->K,
+                fixed_received_overhead,
+                packet_ids,
+                false))
+        {
             return Wirehair_InvalidInput;
         }
         std::unique_ptr<Impl> next(new Impl);
         next->ArmState = arm.ImplValue;
-        next->PacketIds = packet_ids;
+        const size_t received =
+            (size_t)next->ArmState->K + fixed_received_overhead;
+        next->PacketIds.assign(
+            packet_ids.begin(), packet_ids.begin() + received);
         const WirehairResult encode_result =
-            EncodePrefix(arm, packet_ids, next->PacketStorage);
+            EncodePrefix(arm, next->PacketIds, next->PacketStorage);
         if (encode_result != Wirehair_Success) {
             return encode_result;
         }
 
-        const uint32_t received = next->ArmState->K +
-            fixed_received_overhead;
         next->Packets.reserve(received);
-        for (uint32_t packet_index = 0u;
+        for (size_t packet_index = 0u;
              packet_index < received;
              ++packet_index)
         {

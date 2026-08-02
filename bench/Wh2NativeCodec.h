@@ -256,6 +256,73 @@ struct TimedArmResult
 };
 
 /**
+    Candidate-blind structural outcome for the two mandatory timing controls.
+
+    Success means that a fresh public Wirehair1 decoder both decoded and
+    recovered the zero payload within the exact K+256 trace, and that the
+    certified WH2 head ranked at the exact K+4 prefix.  NeedMore is retryable
+    with another arm-free timing trace.  Fatal covers malformed input,
+    construction failure, allocation failure, and any terminal codec result
+    other than Success or NeedMore.
+*/
+enum class NativeTimingControlQualification : uint32_t
+{
+    Success = 0,
+    NeedMore,
+    Fatal
+};
+
+struct NativeTimingControlQualificationResult
+{
+    NativeTimingControlQualification Qualification =
+        NativeTimingControlQualification::Fatal;
+    WirehairResult Wirehair1Result = Wirehair_Error;
+    uint32_t Wirehair1DecodedOverhead = UINT32_MAX;
+    WirehairResult Wirehair2HeadResult = Wirehair_Error;
+};
+
+/**
+    Reusable untimed rank probe for mandatory timing controls.
+
+    Initialize() resolves and validates the certified WH2 head with the real
+    timing-cell block width.  Run() then uses one-byte all-zero right-hand
+    sides while retaining those exact coefficients.  Wirehair1 uses a fresh
+    real LegacyCurrent decoder, feeds the complete unique K+256 ID trace, and
+    requires public recovery to return exactly K zero bytes.  WH2 is
+    cold-solved on exactly the first K+4 IDs and its intermediate output must
+    be exactly the expected all-zero vector.  No payload encoding, clock read,
+    timing panel, or candidate arm participates.  The object may be reused for
+    traces sharing (head spec, K, block width), which amortizes WH2
+    construction validation while retaining fresh per-run decoder state.
+*/
+class NativeTimingControlProbe
+{
+public:
+    NativeTimingControlProbe();
+    ~NativeTimingControlProbe();
+    NativeTimingControlProbe(NativeTimingControlProbe&& other) noexcept;
+    NativeTimingControlProbe& operator=(
+        NativeTimingControlProbe&& other) noexcept;
+
+    NativeTimingControlProbe(const NativeTimingControlProbe&) = delete;
+    NativeTimingControlProbe& operator=(
+        const NativeTimingControlProbe&) = delete;
+
+    WirehairResult Initialize(
+        const NativeArmSpec& wirehair2_head_spec,
+        uint32_t block_count,
+        uint32_t block_bytes);
+
+    bool IsInitialized() const;
+    NativeTimingControlQualificationResult Run(
+        const std::vector<uint32_t>& packet_ids);
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> ImplValue;
+};
+
+/**
     Timing-ready fresh encoder fixture.  Global library initialization,
     fixture ownership of the source bytes, and output-buffer allocation are
     outside the measured interval.  Each Run() constructs a new exact arm and
@@ -289,7 +356,8 @@ private:
 };
 
 /**
-    Timing-ready receive-to-success fixture over the exact prepared K+4 trace.
+    Timing-ready receive-to-success fixture over an exact prepared
+    K+receive_overhead_cap trace.
     Each Run() creates fresh decoder bookkeeping before the clock, then times
     all feeds through first success plus full Recover.  WH2 uses the same
     pure-GF(256) cold/resume solver path for certified and runtime candidates;
@@ -309,7 +377,8 @@ public:
 
     WirehairResult Initialize(
         const NativeArm& arm,
-        const std::vector<uint32_t>& packet_ids);
+        const std::vector<uint32_t>& packet_ids,
+        uint32_t receive_overhead_cap);
 
     bool IsInitialized() const;
     TimedArmResult Run() const;
@@ -320,12 +389,15 @@ private:
 };
 
 /**
-    Timing-ready WH2 cold-solve fixture.  Construction, packet evaluation,
-    packet-pointer assembly, and expected bytes are prepared once outside the
-    measured interval.  Each Run() creates fresh decoder output and times only
-    SolvePrecodeSystemForValidatedSystemWithRuntime(); byte recovery is checked
-    after the clock stops.  Wirehair1 is intentionally rejected because its
-    fair cross-codec metric is receive-to-success, not isolated solve.
+    Timing-ready WH2 cold-solve fixture.  The supplied trace may contain a
+    longer receive-to-success tail, but this fixture validates, encodes, and
+    retains exactly its K+fixed_received_overhead prefix.  Construction, packet
+    evaluation, packet-pointer assembly, and expected bytes are prepared once
+    outside the measured interval.  Each Run() creates fresh decoder output and
+    times only SolvePrecodeSystemForValidatedSystemWithRuntime(); byte recovery
+    is checked after the clock stops.  Wirehair1 is intentionally rejected
+    because its fair cross-codec metric is receive-to-success, not isolated
+    solve.
 */
 class NativeSolveFixture
 {

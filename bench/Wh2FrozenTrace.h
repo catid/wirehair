@@ -94,9 +94,23 @@ struct FrozenPacketTrace
     FrozenPacketTrace();
 };
 
-// Generate exactly K+4 delivered packet IDs or stop at the frozen candidate
-// cap.  Contract K values are 2..64000.  loss_ppm=1000000 is accepted so the
+// Generate exactly K+delivered_overhead packet IDs or stop at the derived
+// candidate cap.  The explicit overhead is limited to 65536 so malformed
+// benchmark input cannot request an effectively unbounded allocation.
+// Contract K values are 2..64000.  loss_ppm=1000000 is accepted so the
 // cap-failure path can be tested and reported deterministically.
+FrozenTraceStatus GenerateFrozenPacketTrace(
+    uint32_t K,
+    uint32_t block_bytes,
+    uint32_t loss_ppm,
+    uint64_t loss_seed,
+    FrozenSchedule schedule,
+    uint32_t delivered_overhead,
+    FrozenPacketTrace& trace);
+
+// Recovery-compatible entry point.  This remains exactly K+4 and is kept as
+// a separate overload so existing recovery domains, receipts, and hashes do
+// not change when timing requests a longer arm-free prefix.
 FrozenTraceStatus GenerateFrozenPacketTrace(
     uint32_t K,
     uint32_t block_bytes,

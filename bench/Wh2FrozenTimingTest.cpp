@@ -101,8 +101,8 @@ void TestExecutionGeometry()
     Check(DevelopmentTimingWorkerCount() == 8u &&
             DevelopmentTimingCohortCount() == 264u,
         "frozen timing worker/cohort cardinality changed");
-    const std::vector<FrozenTimingCell> cells =
-        EnumerateDevelopmentTimingCells();
+    const std::vector<FrozenTimingBaseCell> cells =
+        EnumerateDevelopmentTimingBaseCells();
     const std::vector<FrozenTimingPanel> panels =
         EnumerateOneCandidateTimingPanels("candidate");
     Check(cells.size() == 2304u && panels.size() == 11u &&
@@ -164,8 +164,15 @@ void TestExecutionGeometry()
 
 void TestDefaultTimingValuesAreSafelyInvalid()
 {
+    const FrozenTimingBaseCell base_cell;
+    Check(CanonicalTimingBaseCellJson(base_cell).empty() &&
+            TimingBaseCellSha256(base_cell).empty(),
+        "default timing base cell was not safely rejected");
     const FrozenTimingCell cell;
-    Check(CanonicalTimingCellJson(cell).empty() && TimingCellSha256(cell).empty(),
+    Check(CanonicalTimingCellJson(cell).empty() &&
+            TimingCellSha256(cell).empty() &&
+            CanonicalTimingSourceJson(cell).empty() &&
+            TimingSourceIdentitySha256(cell).empty(),
         "default timing cell was not safely rejected");
     const FrozenTimingPanel panel;
     Check(CanonicalTimingPanelJson(panel).empty() &&
@@ -174,7 +181,7 @@ void TestDefaultTimingValuesAreSafelyInvalid()
         "default timing panel was not safely rejected");
 }
 
-void TestTimingCellEnumeration()
+void TestTimingBaseCellEnumeration()
 {
     static const uint32_t K_values[] = {
         8u, 32u, 100u, 128u, 512u, 1000u,
@@ -182,13 +189,16 @@ void TestTimingCellEnumeration()
     };
     static const uint32_t widths[] = { 64u, 1280u };
 
-    const std::vector<FrozenTimingCell> cells =
-        EnumerateDevelopmentTimingCells();
-    Check(cells.size() == 2304u,
-        "development timing cell cardinality is not 2304");
+    const std::vector<FrozenTimingBaseCell> cells =
+        EnumerateDevelopmentTimingBaseCells();
+    if (!Check(cells.size() == 2304u,
+            "development timing base-cell cardinality is not 2304"))
+    {
+        return;
+    }
     for (std::size_t ordinal = 0u; ordinal < cells.size(); ++ordinal)
     {
-        const FrozenTimingCell& cell = cells[ordinal];
+        const FrozenTimingBaseCell& cell = cells[ordinal];
         const uint32_t round = static_cast<uint32_t>(ordinal / 192u);
         const std::size_t round_ordinal = ordinal % 192u;
         const std::size_t width_index = round_ordinal / 96u;
@@ -201,7 +211,7 @@ void TestTimingCellEnumeration()
                 replicate, expected_attempt, expected_seed),
             "enumerated timing replicate has no paired seed");
         Check(cell.ordinal == ordinal,
-            "development timing ordinal changed");
+            "development timing base ordinal changed");
         Check(cell.block_bytes == widths[width_index],
             "development timing width ordering changed");
         Check(cell.replicate == replicate,
@@ -209,12 +219,13 @@ void TestTimingCellEnumeration()
         Check(cell.K == K_values[k_index],
             "development timing K ordering changed");
         Check(cell.base_seed_attempt == expected_attempt &&
-                cell.loss_seed == expected_seed,
-            "development timing seed pairing changed");
+                cell.base_loss_seed == expected_seed,
+            "development timing base-seed pairing changed");
         Check(cell.phase == "development" &&
                 cell.loss_ppm == 100000u &&
                 cell.schedule == FrozenSchedule::Iid &&
                 cell.fixed_received_overhead == 4u &&
+                cell.receive_overhead_cap == 256u &&
                 cell.interleave_policy ==
                     "self-counterbalanced-repeat-major-v1" &&
                 cell.invocations_per_slot ==
@@ -227,79 +238,244 @@ void TestTimingCellEnumeration()
             cells[191].K == 64000u && cells[191].replicate == 7u &&
             cells[192].block_bytes == 64u &&
             cells[192].K == 8u && cells[192].replicate == 8u,
-        "development timing cells are not frozen in round-major order");
+        "development timing bases are not frozen in round-major order");
 
     const std::string first_json =
-        "{\"K\":8,\"band\":\"2-100\",\"base_seed_attempt\":0,"
-        "\"block_bytes\":64,\"fixed_received_overhead\":4,"
+        "{\"K\":8,\"band\":\"2-100\","
+        "\"base_loss_seed\":\"0x2d0f28c7e7e786b2\","
+        "\"base_seed_attempt\":0,\"block_bytes\":64,"
+        "\"fixed_received_overhead\":4,"
         "\"interleave_policy\":\"self-counterbalanced-repeat-major-v1\","
-        "\"invocations_per_slot\":8192,"
-        "\"loss_ppm\":100000,\"loss_seed\":\"0x2d0f28c7e7e786b2\","
-        "\"phase\":\"development\",\"replicate\":0,"
-        "\"schedule\":\"iid\"}";
-    Check(CanonicalTimingCellJson(cells[0]) == first_json,
-        "first canonical timing cell changed");
+        "\"invocations_per_slot\":8192,\"loss_ppm\":100000,"
+        "\"phase\":\"development\",\"receive_overhead_cap\":256,"
+        "\"replicate\":0,\"schedule\":\"iid\"}";
+    Check(CanonicalTimingBaseCellJson(cells[0]) == first_json,
+        "first canonical timing base cell changed");
     Check(
-        TimingCellSha256(cells[0]) ==
-            "cf076b108f93f8268db4bc33a4415549"
-            "bddeb8d57b6c156dab48e5b56f5e6011",
-        "first timing cell SHA-256 changed");
+        TimingBaseCellSha256(cells[0]) ==
+            "158931044b779851eca21bd3112bce798"
+            "77e6e59f5896aebf698466789c47814",
+        "first timing base-cell SHA-256 changed");
     Check(
-        TimingCellSha256(cells[96]) ==
-            "5ece3300979ec6dd2e50b6bef43ce5ff"
-            "d257235319201df79f814434e8696635",
-        "first wide timing cell SHA-256 changed");
+        TimingBaseCellSha256(cells[96]) ==
+            "014c217757d7fbc7d0f41826edde37627"
+            "ec2f915050e21b483d7d21695e99a29",
+        "first wide timing base-cell SHA-256 changed");
     Check(
-        TimingCellSha256(cells[2303]) ==
-            "53c99b22d01ac7c2911d6441b9623e5e"
-            "ca1d285862746c828970aa4864294589",
-        "last timing cell SHA-256 changed");
+        TimingBaseCellSha256(cells[2303]) ==
+            "430f5f12c551c5eddbbc6364e7586d56"
+            "8334a858cfab5f6169fd1fd037bd7b4b",
+        "last timing base-cell SHA-256 changed");
     Check(
-        DevelopmentTimingDomainSha256() ==
-            "ca82f8774f0cb1b865a0bbc01b8de79d"
-            "2239df13ab3ef17ef5eb4e3e39ab6913",
-        "development timing domain SHA-256 changed");
+        DevelopmentTimingBaseDomainSha256() ==
+            "eab25fe96642d8dd12d4b64e91fe00b5"
+            "33d464f1bd7487c84e670ce888e2d164",
+        "development timing base-domain SHA-256 changed");
 
-    const std::vector<FrozenTimingCell> repeat =
-        EnumerateDevelopmentTimingCells();
+    const std::vector<FrozenTimingBaseCell> repeat =
+        EnumerateDevelopmentTimingBaseCells();
     Check(repeat.size() == cells.size(),
-        "repeated timing enumeration changed cardinality");
+        "repeated timing base enumeration changed cardinality");
     for (std::size_t i = 0u; i < cells.size() && i < repeat.size(); ++i) {
-        Check(CanonicalTimingCellJson(cells[i]) ==
-                CanonicalTimingCellJson(repeat[i]),
-            "repeated timing enumeration changed canonical bytes");
+        Check(CanonicalTimingBaseCellJson(cells[i]) ==
+                CanonicalTimingBaseCellJson(repeat[i]),
+            "repeated timing base enumeration changed canonical bytes");
     }
 
-    FrozenTimingCell mutant = cells[0];
+    FrozenTimingBaseCell mutant = cells[0];
     mutant.ordinal = 1u;
-    Check(CanonicalTimingCellJson(mutant).empty(),
-        "wrong timing-cell ordinal was accepted");
+    Check(CanonicalTimingBaseCellJson(mutant).empty(),
+        "wrong timing-base ordinal was accepted");
     mutant = cells[0];
     mutant.schedule = FrozenSchedule::Burst;
-    Check(CanonicalTimingCellJson(mutant).empty(),
-        "non-IID development timing cell was accepted");
+    Check(CanonicalTimingBaseCellJson(mutant).empty(),
+        "non-IID development timing base was accepted");
     mutant = cells[0];
-    mutant.loss_seed ^= 1u;
-    Check(CanonicalTimingCellJson(mutant).empty(),
-        "wrong paired timing loss seed was accepted");
+    mutant.base_loss_seed ^= 1u;
+    Check(CanonicalTimingBaseCellJson(mutant).empty(),
+        "wrong paired timing base loss seed was accepted");
     mutant = cells[0];
     --mutant.invocations_per_slot;
-    Check(CanonicalTimingCellJson(mutant).empty(),
+    Check(CanonicalTimingBaseCellJson(mutant).empty(),
         "wrong timing invocation batch was accepted");
     mutant = cells[0];
     mutant.interleave_policy = "self-counterbalanced-slot-major-v1";
-    Check(CanonicalTimingCellJson(mutant).empty(),
+    Check(CanonicalTimingBaseCellJson(mutant).empty(),
         "wrong timing interleave policy was accepted");
     mutant = cells[0];
+    mutant.receive_overhead_cap = 255u;
+    Check(CanonicalTimingBaseCellJson(mutant).empty(),
+        "wrong timing receive-overhead cap was accepted");
+    mutant = cells[0];
     mutant.base_seed_attempt = 1u;
-    Check(CanonicalTimingCellJson(mutant).empty(),
+    Check(CanonicalTimingBaseCellJson(mutant).empty(),
         "non-production development timing attempt was accepted");
+}
+
+void TestTimingQualificationAndSourceIdentity()
+{
+    const std::vector<FrozenTimingBaseCell> bases =
+        EnumerateDevelopmentTimingBaseCells();
+    if (!Check(bases.size() == 2304u,
+            "cannot test qualification without the frozen base domain"))
+    {
+        return;
+    }
+
+    std::vector<uint32_t> retry_offsets(2304u, 0u);
+    const std::vector<FrozenTimingCell> cells =
+        EnumerateDevelopmentTimingCells(retry_offsets);
+    if (!Check(cells.size() == bases.size(),
+            "explicit retry-zero map did not qualify every timing cell"))
+    {
+        return;
+    }
+    Check(EnumerateDevelopmentTimingCells(
+            std::vector<uint32_t>()).empty() &&
+            EnumerateDevelopmentTimingCells(
+                std::vector<uint32_t>(2303u, 0u)).empty() &&
+            EnumerateDevelopmentTimingCells(
+                std::vector<uint32_t>(2305u, 0u)).empty() &&
+            DevelopmentTimingDomainSha256(
+                std::vector<uint32_t>()).empty() &&
+            DevelopmentTimingDomainSha256(
+                std::vector<uint32_t>(2303u, 0u)).empty() &&
+            DevelopmentTimingDomainSha256(
+                std::vector<uint32_t>(2305u, 0u)).empty(),
+        "missing or oversized timing qualification map was accepted");
+    std::vector<uint32_t> invalid_offsets(2304u, 0u);
+    invalid_offsets[137u] = 256u;
+    Check(EnumerateDevelopmentTimingCells(invalid_offsets).empty() &&
+            DevelopmentTimingDomainSha256(invalid_offsets).empty(),
+        "non-uint8 timing retry offset was accepted");
+
+    const std::string first_json =
+        "{\"K\":8,\"band\":\"2-100\","
+        "\"base_cell_sha256\":\"158931044b779851eca21bd3112bce798"
+        "77e6e59f5896aebf698466789c47814\","
+        "\"base_loss_seed\":\"0x2d0f28c7e7e786b2\","
+        "\"base_seed_attempt\":0,\"block_bytes\":64,"
+        "\"fixed_received_overhead\":4,"
+        "\"interleave_policy\":\"self-counterbalanced-repeat-major-v1\","
+        "\"invocations_per_slot\":8192,\"loss_ppm\":100000,"
+        "\"loss_retry_offset\":0,"
+        "\"loss_seed\":\"0x2d0f28c7e7e786b2\","
+        "\"phase\":\"development\",\"receive_overhead_cap\":256,"
+        "\"replicate\":0,\"schedule\":\"iid\"}";
+    Check(CanonicalTimingCellJson(cells[0]) == first_json,
+        "first canonical qualified timing cell changed");
+    Check(TimingCellSha256(cells[0]) ==
+            "e85871b9c09ac946f6c8f6e0e077bd75"
+            "8d4862bfb5dddd73f6ee05e3ba35f2d7",
+        "retry-zero timing cell SHA-256 changed");
+    Check(cells[0].base_cell_sha256 == TimingBaseCellSha256(bases[0]) &&
+            cells[0].loss_retry_offset == 0u &&
+            cells[0].loss_seed == cells[0].base_loss_seed,
+        "retry-zero timing qualification fields are inconsistent");
+
+    FrozenTimingCell retry_one;
+    FrozenTimingCell retry_two;
+    FrozenTimingCell retry_255;
+    Check(QualifyDevelopmentTimingCell(bases[0], 1u, retry_one) &&
+            QualifyDevelopmentTimingCell(bases[0], 2u, retry_two) &&
+            QualifyDevelopmentTimingCell(bases[0], 255u, retry_255),
+        "valid timing retry offsets were rejected");
+    Check(retry_one.loss_seed == UINT64_C(0xcb46a281673202c7) &&
+            retry_two.loss_seed == UINT64_C(0x697e1c3ae67c7edc) &&
+            retry_255.loss_seed == UINT64_C(0xc651688db3191f9d),
+        "timing retry seed stride or uint64 wrap changed");
+    Check(TimingCellSha256(retry_one) ==
+            "4c216d6ca9416585f777980fc1ffd0a9f"
+            "162644606d5f0468accec353470cf37" &&
+            TimingCellSha256(retry_two) ==
+            "3e3aaf22b4854b9395c43aec5d50ca16"
+            "524fe6259245c4ced377b0b12e2cd9be" &&
+            TimingCellSha256(retry_255) ==
+            "22968aeb7c50a96c6eab4ce75b7653cd"
+            "82b2a2df0ac8d93182d6d06f47b46ae1",
+        "qualified timing retry identity golden changed");
+
+    uint64_t wrapped_seed = UINT64_MAX;
+    Check(DevelopmentTimingLossSeed(
+            UINT64_MAX, 1u, wrapped_seed) &&
+            wrapped_seed == UINT64_C(0x9e3779b97f4a7c14),
+        "explicit timing retry did not wrap modulo 2^64");
+    wrapped_seed = UINT64_MAX;
+    Check(!DevelopmentTimingLossSeed(
+            bases[0].base_loss_seed, 256u, wrapped_seed) &&
+            wrapped_seed == 0u,
+        "out-of-domain timing retry retained an output seed");
+    FrozenTimingCell rejected = retry_255;
+    Check(!QualifyDevelopmentTimingCell(bases[0], 256u, rejected) &&
+            CanonicalTimingCellJson(rejected).empty() &&
+            rejected.base_cell_sha256.empty() && rejected.loss_seed == 0u,
+        "out-of-domain timing retry retained a qualified cell");
+    FrozenTimingBaseCell invalid_base = bases[0];
+    invalid_base.ordinal = 1u;
+    rejected = retry_255;
+    Check(!QualifyDevelopmentTimingCell(invalid_base, 0u, rejected) &&
+            rejected.base_cell_sha256.empty(),
+        "invalid timing base retained a qualified cell");
+
+    const std::string source_json = CanonicalTimingBaseCellJson(bases[0]);
+    const std::string source_sha256 = TimingBaseCellSha256(bases[0]);
+    Check(CanonicalTimingSourceJson(cells[0]) == source_json &&
+            CanonicalTimingSourceJson(retry_255) == source_json &&
+            TimingSourceIdentitySha256(cells[0]) == source_sha256 &&
+            TimingSourceIdentitySha256(retry_255) == source_sha256,
+        "loss retry changed the deterministic timing source identity");
+    Check(CanonicalTimingCellJson(cells[0]) !=
+            CanonicalTimingCellJson(retry_255) &&
+            TimingCellSha256(cells[0]) != TimingCellSha256(retry_255),
+        "loss retry did not change the qualified timing identity");
+
+    Check(DevelopmentTimingDomainSha256(retry_offsets) ==
+            "4d0a2423b4fe54783e034860c0044c27"
+            "1ae26cc0157300e208984032a3773726",
+        "retry-zero qualified timing-domain SHA-256 changed");
+    retry_offsets[0] = 2u;
+    Check(DevelopmentTimingDomainSha256(retry_offsets) ==
+            "7e622a31d82ccd80b93b2ed4118ef019"
+            "3af10742d6c8bcaa98508b6ca4e509e7",
+        "single-retry qualified timing-domain SHA-256 changed");
+    retry_offsets.assign(2304u, 0u);
+    retry_offsets[0] = 255u;
+    retry_offsets[2303] = 1u;
+    Check(DevelopmentTimingDomainSha256(retry_offsets) ==
+            "cdfe34f7626c997567ea14c28b76c324"
+            "a99068337096c0d223d1e5c28294e1bb",
+        "wrapped-retry qualified timing-domain SHA-256 changed");
+
+    FrozenTimingCell mutant = cells[0];
+    mutant.base_cell_sha256[0] = '0';
+    Check(CanonicalTimingCellJson(mutant).empty() &&
+            CanonicalTimingSourceJson(mutant).empty(),
+        "forged timing base-cell identity was accepted");
+    mutant = cells[0];
+    mutant.loss_retry_offset = 1u;
+    Check(CanonicalTimingCellJson(mutant).empty(),
+        "retry offset inconsistent with its loss seed was accepted");
+    mutant = cells[0];
+    mutant.loss_seed ^= 1u;
+    Check(CanonicalTimingCellJson(mutant).empty(),
+        "wrong realized timing loss seed was accepted");
+    mutant = cells[0];
+    mutant.base_loss_seed ^= 1u;
+    Check(CanonicalTimingCellJson(mutant).empty() &&
+            TimingSourceIdentitySha256(mutant).empty(),
+        "qualified cell with a forged base loss seed was accepted");
 }
 
 void TestAllTimingTracesAndReceipts()
 {
+    const std::vector<uint32_t> retry_offsets(2304u, 0u);
     const std::vector<FrozenTimingCell> cells =
-        EnumerateDevelopmentTimingCells();
+        EnumerateDevelopmentTimingCells(retry_offsets);
+    if (!Check(cells.size() == 2304u,
+            "cannot test traces without a qualified timing domain"))
+    {
+        return;
+    }
     std::string trace_aggregate;
     std::string pair_aggregate;
     trace_aggregate.reserve(170000u);
@@ -316,8 +492,8 @@ void TestAllTimingTracesAndReceipts()
             "frozen development timing trace did not complete");
         Check(trace.schedule == FrozenSchedule::Iid &&
                 trace.delivered_ids.size() ==
-                    static_cast<std::size_t>(cells[i].K) + 4u,
-            "timing trace did not use one IID K+4 prefix");
+                    static_cast<std::size_t>(cells[i].K) + 256u,
+            "timing trace did not use one IID K+256 prefix");
         Check(receipt.ordinal == i && receipt.K == cells[i].K &&
                 receipt.cell_sha256 == TimingCellSha256(cells[i]) &&
                 receipt.trace_sha256 == trace.trace_sha256 &&
@@ -325,7 +501,7 @@ void TestAllTimingTracesAndReceipts()
                     trace.attempted_candidates &&
                 receipt.candidate_limit == trace.candidate_limit,
             "timing trace receipt does not bind native trace fields");
-        Check(!CanonicalTimingTraceManifestRow(receipt).empty(),
+        Check(!CanonicalTimingTraceManifestRow(cells[i], receipt).empty(),
             "valid timing trace manifest row was rejected");
 
         trace_aggregate += trace.trace_sha256;
@@ -342,47 +518,50 @@ void TestAllTimingTracesAndReceipts()
 
         if (i == 0u)
         {
-            const std::vector<uint32_t> expected_ids = {
+            const std::vector<uint32_t> expected_prefix = {
                 0u, 1u, 3u, 4u, 5u, 7u,
                 9u, 10u, 11u, 12u, 13u, 14u
             };
             Check(trace.trace_seed == UINT64_C(0x0aa53e4b248d085a) &&
-                    trace.delivered_ids == expected_ids &&
-                    trace.attempted_candidates == 15u &&
+                    trace.delivered_ids.size() == 264u &&
+                    std::equal(
+                        expected_prefix.begin(), expected_prefix.end(),
+                        trace.delivered_ids.begin()) &&
+                    trace.attempted_candidates == 305u &&
                     trace.trace_sha256 ==
-                        "0e773013a48e8a4aaa2858ca7eedec25"
-                        "4bbef05c82c93d6e0e75bcf482e36e94",
+                        "768c7e52d3bfc315b9d9eb44287766f9"
+                        "401904062a5595be439f8ba6b20c90aa",
                 "first native timing trace golden changed");
             Check(
-                CanonicalTimingTraceManifestRow(receipt) ==
-                    "{\"cell_sha256\":\"cf076b108f93f8268db4bc33a4415549"
-                    "bddeb8d57b6c156dab48e5b56f5e6011\",\"ordinal\":0,"
-                    "\"trace_sha256\":\"0e773013a48e8a4aaa2858ca7eedec25"
-                    "4bbef05c82c93d6e0e75bcf482e36e94\"}",
+                CanonicalTimingTraceManifestRow(cells[i], receipt) ==
+                    "{\"cell_sha256\":\"e85871b9c09ac946f6c8f6e0e077bd75"
+                    "8d4862bfb5dddd73f6ee05e3ba35f2d7\",\"ordinal\":0,"
+                    "\"trace_sha256\":\"768c7e52d3bfc315b9d9eb44287766f9"
+                    "401904062a5595be439f8ba6b20c90aa\"}",
                 "first canonical timing trace manifest row changed");
         }
         if (i == 2303u) {
             Check(trace.trace_sha256 ==
-                    "174e33e405604a2e5cb2397619c1bea38"
-                    "5cb138a2fba0d90682987291d6ac4eb" &&
-                    trace.attempted_candidates == 70966u,
+                    "78aa1d6d24567b3d8787a1de516842c8"
+                    "baa8a482a8606934892bd9d711763516" &&
+                    trace.attempted_candidates == 71235u,
                 "last native timing trace golden changed");
         }
     }
 
-    Check(total_attempts == UINT64_C(28552276),
+    Check(total_attempts == UINT64_C(29197317),
         "all-timing-trace candidate total changed");
-    Check(maximum_attempts == UINT64_C(71360),
+    Check(maximum_attempts == UINT64_C(71646),
         "all-timing-trace maximum candidate count changed");
     Check(
         Sha256Hex(trace_aggregate) ==
-            "4d4e6aa9811fe8ef44fd2e6ebf28fd23"
-            "1de53ec285ffa04aba439c7380c7db90",
+            "ee77fce6265c7610865ebe2b3a6e2812"
+            "461216cf98ab7ddea077022bfc284be4",
         "all 2304 timing trace hashes disagree with Python reference");
     Check(
         Sha256Hex(pair_aggregate) ==
-            "d01040e774a69a6bde09686ce2a9fa0e"
-            "488b327e8c62478adaaf3866d1ed4944",
+            "f863671a31aa63ca3b6123d8d1f1f08b"
+            "9f864e0db328baa288c61d52d23a7a46",
         "timing cell-to-trace mapping disagrees with Python reference");
 
     FrozenPacketTrace first_trace;
@@ -396,9 +575,58 @@ void TestAllTimingTracesAndReceipts()
                 cells[0], repeated_trace, repeated_receipt) ==
                 FrozenTraceStatus::Complete &&
             first_trace.delivered_ids == repeated_trace.delivered_ids &&
-            CanonicalTimingTraceManifestRow(first_receipt) ==
-                CanonicalTimingTraceManifestRow(repeated_receipt),
+            CanonicalTimingTraceManifestRow(cells[0], first_receipt) ==
+                CanonicalTimingTraceManifestRow(
+                    cells[0], repeated_receipt),
         "repeated timing trace/receipt generation was not deterministic");
+
+    const std::vector<FrozenTimingBaseCell> bases =
+        EnumerateDevelopmentTimingBaseCells();
+    FrozenTimingCell retry_two;
+    FrozenPacketTrace retry_trace;
+    FrozenTimingTraceReceipt retry_receipt;
+    Check(bases.size() == 2304u &&
+            QualifyDevelopmentTimingCell(bases[0], 2u, retry_two) &&
+            GenerateDevelopmentTimingTrace(
+                retry_two, retry_trace, retry_receipt) ==
+                    FrozenTraceStatus::Complete &&
+            retry_trace.delivered_ids != first_trace.delivered_ids &&
+            retry_trace.trace_sha256 != first_trace.trace_sha256 &&
+            retry_trace.trace_seed == UINT64_C(0x4ed40ab62516f034) &&
+            retry_trace.attempted_candidates == 292u &&
+            retry_trace.trace_sha256 ==
+                "55c8e148ab0140d568efd6a64df3fb59"
+                "157163420c089f5853d3acccaf02ee49" &&
+            !CanonicalTimingTraceManifestRow(
+                retry_two, retry_receipt).empty() &&
+            TimingSourceIdentitySha256(retry_two) ==
+                TimingSourceIdentitySha256(cells[0]),
+        "retry-qualified trace did not vary independently of source bytes");
+
+    FrozenPacketTrace recovery_compatible;
+    FrozenPacketTrace explicit_four;
+    Check(GenerateFrozenPacketTrace(
+            cells[0].K, cells[0].block_bytes, cells[0].loss_ppm,
+            cells[0].loss_seed, FrozenSchedule::Iid,
+            recovery_compatible) == FrozenTraceStatus::Complete &&
+            GenerateFrozenPacketTrace(
+                cells[0].K, cells[0].block_bytes, cells[0].loss_ppm,
+                cells[0].loss_seed, FrozenSchedule::Iid, 4u,
+                explicit_four) == FrozenTraceStatus::Complete &&
+            recovery_compatible.delivered_ids ==
+                explicit_four.delivered_ids &&
+            recovery_compatible.trace_sha256 == explicit_four.trace_sha256,
+        "recovery-compatible K+4 trace overload changed bytes");
+    FrozenPacketTrace excessive;
+    Check(GenerateFrozenPacketTrace(
+            cells[0].K, cells[0].block_bytes, cells[0].loss_ppm,
+            cells[0].loss_seed, FrozenSchedule::Iid, 65537u,
+            excessive) == FrozenTraceStatus::InvalidInput &&
+            excessive.delivered_ids.empty(),
+        "excessive explicit trace overhead was accepted");
+    std::vector<uint32_t> nested;
+    Check(!CopyNestedPrefix(first_trace, 4u, nested) && nested.empty(),
+        "long timing trace was accepted as a K+4 recovery trace");
 
     FrozenTimingCell invalid = cells[0];
     invalid.replicate = 96u;
@@ -411,21 +639,25 @@ void TestAllTimingTracesAndReceipts()
 
     FrozenTimingTraceReceipt forged = first_receipt;
     forged.candidate_limit += 1u;
-    Check(CanonicalTimingTraceManifestRow(forged).empty(),
+    Check(CanonicalTimingTraceManifestRow(cells[0], forged).empty(),
         "wrong timing trace candidate cap was accepted");
     forged = first_receipt;
     forged.trace_sha256[0] = 'A';
-    Check(CanonicalTimingTraceManifestRow(forged).empty(),
+    Check(CanonicalTimingTraceManifestRow(cells[0], forged).empty(),
         "noncanonical timing trace SHA-256 was accepted");
     forged = first_receipt;
     forged.K = 32u;
-    FrozenCandidateLimit(36u, forged.candidate_limit);
-    Check(CanonicalTimingTraceManifestRow(forged).empty(),
+    FrozenCandidateLimit(288u, forged.candidate_limit);
+    Check(CanonicalTimingTraceManifestRow(cells[0], forged).empty(),
         "timing trace K inconsistent with its ordinal was accepted");
     forged = first_receipt;
     forged.attempted_candidates = 1u;
-    Check(CanonicalTimingTraceManifestRow(forged).empty(),
+    Check(CanonicalTimingTraceManifestRow(cells[0], forged).empty(),
         "forged timing trace candidate count was accepted");
+
+    FrozenTimingCell wrong_cell = cells[1];
+    Check(CanonicalTimingTraceManifestRow(wrong_cell, first_receipt).empty(),
+        "timing trace receipt was accepted for a different qualified cell");
 }
 
 void TestOneCandidatePanelsAndOrders()
@@ -525,8 +757,8 @@ void TestOneCandidatePanelsAndOrders()
             "\"right_arm\":\"candidate\",\"scope\":\"decoder_solve\"}",
         "first canonical candidate panel changed");
 
-    const std::vector<FrozenTimingCell> cells =
-        EnumerateDevelopmentTimingCells();
+    const std::vector<FrozenTimingBaseCell> cells =
+        EnumerateDevelopmentTimingBaseCells();
     uint32_t abba = 0u;
     uint32_t baab = 0u;
     for (std::size_t cell = 0u; cell < cells.size(); ++cell) {
@@ -612,7 +844,8 @@ int main()
     TestInvocationsPerSlotFormula();
     TestExecutionGeometry();
     TestDefaultTimingValuesAreSafelyInvalid();
-    TestTimingCellEnumeration();
+    TestTimingBaseCellEnumeration();
+    TestTimingQualificationAndSourceIdentity();
     TestAllTimingTracesAndReceipts();
     TestOneCandidatePanelsAndOrders();
 

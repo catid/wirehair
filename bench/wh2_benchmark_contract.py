@@ -17,12 +17,17 @@ from pathlib import Path
 import re
 import sys
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
+import weakref
 
 
 SCHEMA = "wirehair.wh2.benchmark-contract.v3"
 FREEZE_SCHEMA = "wirehair.wh2.benchmark-freeze.v1"
 RAW_FREEZE_SCHEMA = "wirehair.wh2.benchmark-freeze.v2"
 REPAIR_MAP_SCHEMA = "wirehair.wh2.repair-map.v1"
+TIMING_QUALIFICATION_MAP_SCHEMA = \
+    "wirehair.wh2.timing-qualification-map.v1"
+TIMING_QUALIFICATION_AUDIT_SCHEMA = \
+    "wirehair.wh2.timing-qualification-audit.v1"
 DEFAULT_CONTRACT = Path(__file__).with_name("wh2_benchmark_contract_v3.json")
 MAX_JSON_LINE_BYTES = 64 * 1024
 HEX64 = re.compile(r"0x[0-9a-f]{16}\Z")
@@ -83,6 +88,10 @@ INVOCATIONS_PER_SLOT_FORMULA = (
     "max(2,ceil(measured_batch_block_target/K))"
 )
 TIMING_INTERLEAVE_POLICY = "self-counterbalanced-repeat-major-v1"
+TIMING_LOSS_RETRY_STRIDE = 0x9e3779b97f4a7c15
+TIMING_LOSS_RETRY_ATTEMPTS = 256
+TIMING_QUALIFICATION_ENTRY_KIND = \
+    "loss_retry_offset_indexed_by_base_timing_cell_ordinal"
 SCORED_OUTCOMES = ("success", "need_more_at_cap", "construct_failed", "unsupported")
 EXPECTED_OUTCOMES = {
     "success": "decoded_extra is an integer in [0,overhead_cap]",
@@ -261,15 +270,60 @@ EXPECTED_ATTEMPT_DERIVATION = (
     "GF(256) precode seed and attempt*0x9e3779b9 modulo 2^32 to the packet "
     "peel seed; raw phases use r=0 exactly"
 )
+EXPECTED_TIMING_QUALIFICATION = {
+    "map_schema": TIMING_QUALIFICATION_MAP_SCHEMA,
+    "audit_schema": TIMING_QUALIFICATION_AUDIT_SCHEMA,
+    "entry_kind": TIMING_QUALIFICATION_ENTRY_KIND,
+    "max_attempts": TIMING_LOSS_RETRY_ATTEMPTS,
+    "retry_seed_derivation": (
+        "loss retry offset r in [0,255] selects loss_seed="
+        "(base_loss_seed+r*0x9e3779b97f4a7c15) modulo 2^64; r=0 "
+        "preserves the base trace"
+    ),
+    "selection_rule": (
+        "for each base timing cell choose the lowest retry offset where "
+        "wirehair2_head byte-recovers from the exact first K+4 delivered "
+        "IDs and wirehair1 byte-recovers by K+256; no cell may be omitted"
+    ),
+    "retryable_outcome": (
+        "only need_more_at_bound is retryable; construction, unsupported, "
+        "fatal, internal, allocation, terminal, and byte-mismatch outcomes "
+        "abort qualification"
+    ),
+    "candidate_policy": (
+        "qualification runs exactly the two mandatory controls before any "
+        "candidate timing; candidate arms, outcomes, and timings are "
+        "forbidden and can never select or retry a loss trace"
+    ),
+    "controls": [
+        {
+            "arm": "wirehair2_head",
+            "scope": "decoder_solve",
+            "success": "byte-exact recovery at decoded_extra=4",
+        },
+        {
+            "arm": "wirehair1",
+            "scope": "receive_to_success",
+            "success": "byte-exact recovery at decoded_extra in [0,256]",
+        },
+    ],
+}
 EXPECTED_TIMING_POLICY = {
     "development_wall_time_seconds_per_candidate": 7200,
     "loss_ppm": 100000,
     "schedule": "iid",
     "fixed_received_overhead": 4,
+    "receive_overhead_cap": 256,
     "seed_derivation": (
         "construction seed is selected by seed_mode and unchanged; "
-        "loss seed=SplitMix64(base_loss_seed xor (replicate * "
-        "0x9e3779b97f4a7c15 mod 2^64))"
+        "base_loss_seed=SplitMix64(loss root xor (replicate * "
+        "0x9e3779b97f4a7c15 mod 2^64)); realized loss_seed is selected "
+        "only by the frozen timing qualification map"
+    ),
+    "source_derivation": (
+        "source bytes are derived only from canonical base_cell_key JSON "
+        "under wirehair.wh2.source.v1; base_cell_sha256 authenticates that "
+        "JSON and loss retry fields never enter the source identity"
     ),
     "confidence": (
         "two-sided Student-t 95% interval over independent-round mean paired "
@@ -286,19 +340,22 @@ EXPECTED_TIMING_POLICY = {
     "cache_state": "warm",
     "production_policy": (
         "final timing replays the frozen production repair map; each "
-        "Wirehair2 timing receipt binds its map SHA-256 and realized attempt"
+        "Wirehair2 timing receipt binds its construction map SHA-256 and "
+        "realized attempt; every timing arm binds the phase qualification map"
     ),
     "eligibility": (
-        "a timing cell is eligible only when every compared arm byte-recovers "
-        "successfully on the predeclared prefix; any arm failure invalidates "
-        "the timing panel and remains a recovery failure; observed "
-        "common-success intersection is forbidden"
+        "the frozen candidate-blind qualification map guarantees mandatory "
+        "control success; any candidate failure invalidates its timing panel "
+        "without changing the trace, retrying, dropping a row, or forming an "
+        "observed common-success intersection"
     ),
     "scope_protocol": (
-        "decoder_solve uses a fresh decoder and the identical fixed K+4 "
+        "one qualified arm-free K+256 delivered-ID trace is frozen per cell; "
+        "decoder_solve uses a fresh decoder and its identical first K+4 "
         "received prefix; encoder_init_plus_first_K_symbols encodes exactly "
-        "IDs 0..K-1; receive_to_success replays the nested trace and includes "
-        "all feed and final recovery work through each arm's first success"
+        "IDs 0..K-1; receive_to_success replays the trace and includes all "
+        "feed and final recovery work through each arm's first success, with "
+        "need_more_at_cap after K+256"
     ),
 }
 EXPECTED_PANEL_PROTOCOL = {
@@ -343,7 +400,8 @@ EXPECTED_TIMING_EXECUTION_GEOMETRY = {
     "timing_worker_count": 8,
     "jobs_per_wave": 8,
     "cohort_identity": (
-        "all timing cell fields except replicate and loss_seed, plus panel"
+        "all timing cell fields except replicate, base_loss_seed, "
+        "base_cell_sha256, loss_retry_offset, and loss_seed, plus panel"
     ),
     "cohort_order": (
         "block_bytes order, then K-set order, then frozen panel ordinal"
@@ -459,24 +517,40 @@ EXPECTED_EVIDENCE_POLICY = {
         "sole arm-roster and artifact authority"
     ),
     "trace_manifest_schema": (
-        "wirehair.wh2.trace-manifest.v1 ordered canonical JSONL rows of "
-        "ordinal,cell_sha256,trace_sha256; duplicate trace hashes are valid"
+        "recovery uses wirehair.wh2.trace-manifest.v1; timing uses v2 with "
+        "a hash header binding the base domain, qualified domain, and "
+        "qualification-map SHA-256; both use ordered canonical JSONL rows of "
+        "ordinal,cell_sha256,trace_sha256 and permit duplicate trace hashes"
     ),
     "repair_map_schema": (
         "wirehair.wh2.repair-map.v1 canonical JSON object with 63999 retry "
         "offsets indexed by K-2 and bound to training traces"
+    ),
+    "timing_qualification_schema": (
+        "one phase-scoped wirehair.wh2.timing-qualification-map.v1 canonical "
+        "JSON object binds an ordered candidate-blind audit and one lowest "
+        "uint8 loss retry offset per base timing-cell ordinal"
+    ),
+    "timing_qualification_binding": (
+        "the timing freeze directly binds the qualified timing domain and "
+        "timing trace-manifest v2 SHA-256; that v2 hash header transitively "
+        "binds the base domain, qualified domain, and validated qualification-"
+        "map SHA-256, whose canonical object binds the complete audit SHA-256"
     ),
     "canonical_hashing": (
         "parse with duplicate-key rejection; accept LF or CRLF input; hash "
         "sorted compact logical JSON with LF and explicit schema domain separation"
     ),
     "common_cell_policy": (
-        "every arm has exactly one result for every predeclared arm-free key"
+        "every arm has exactly one result for every qualified arm-free key; "
+        "source identity is derived only from its authenticated base cell"
     ),
     "invalid_domain_mutations": [
         "missing", "duplicate", "extra", "seed_swapped", "partial",
         "wrong_band", "wrong_loss", "incomplete_roster", "domain_hash_drift",
         "trace_drift", "repair_map_drift", "construction_attempt_drift",
+        "qualification_map_drift", "qualification_audit_drift",
+        "loss_retry_drift", "source_identity_drift",
         "timing_panel_drift", "timing_order_drift", "timing_batch_drift",
         "timing_geometry_drift",
     ],
@@ -514,7 +588,8 @@ RAW_RECOVERY_RECORD_FIELDS = LEDGER_FIELDS | frozenset(
     RAW_CONSTRUCTION_FIELDS)
 TIMING_RECEIPT_FIELDS = frozenset((
     "phase", "band", "K", "block_bytes", "loss_ppm", "schedule",
-    "replicate", "base_seed_attempt", "loss_seed", "fixed_received_overhead",
+    "replicate", "base_seed_attempt", "base_loss_seed", "base_cell_sha256",
+    "loss_retry_offset", "loss_seed", "fixed_received_overhead", "receive_overhead_cap",
     "invocations_per_slot", "interleave_policy",
     "panel_kind", "scope", "left_arm", "right_arm", "order",
     "left_outcome", "right_outcome", "left_decoded_extra",
@@ -549,6 +624,26 @@ REPAIR_MAP_FIELDS = frozenset((
     "production_base_seed_attempt", "entry_kind", "attempt_derivation",
     "repair_rule", "training_trace_manifest_sha256", "retry_offsets",
 ))
+TIMING_QUALIFICATION_MAP_FIELDS = frozenset((
+    "schema", "contract_sha256", "phase", "source_git_commit",
+    "base_domain_sha256", "qualified_domain_sha256", "entry_kind",
+    "controls", "qualification_audit_sha256",
+    "selected_trace_roster_sha256", "retry_offsets",
+))
+TIMING_QUALIFICATION_CONTROL_FIELDS = frozenset((
+    "arm", "scope", "binary_sha256", "arm_descriptor_sha256",
+    "construction_policy", "repair_map_sha256",
+))
+TIMING_QUALIFICATION_CONTROL_ORDER = (
+    "arm", "scope", "binary_sha256", "arm_descriptor_sha256",
+    "construction_policy", "repair_map_sha256",
+)
+TIMING_QUALIFICATION_AUDIT_FIELDS = frozenset((
+    "ordinal", "base_cell_sha256", "loss_retry_offset", "loss_seed",
+    "trace_sha256", "wirehair2_head_outcome",
+    "wirehair2_head_decoded_extra", "wirehair1_outcome",
+    "wirehair1_decoded_extra",
+))
 FINAL_FREEZE_KEYS = frozenset((
     ("recovery", "final_raw"),
     ("recovery", "final_repaired"),
@@ -558,7 +653,8 @@ FINAL_FREEZE_KEYS = frozenset((
 ))
 SELECTION_FIELDS = frozenset((
     "schema", "contract_sha256", "recovery_domain_sha256",
-    "timing_domain_sha256", "recovery_freeze_manifest_sha256",
+    "timing_base_domain_sha256", "timing_domain_sha256",
+    "timing_qualification_map_sha256", "recovery_freeze_manifest_sha256",
     "timing_freeze_manifest_sha256", "architecture_artifact_sha256",
     "recovery_cells_per_arm", "timing_rows", "candidate_roster",
     "eligible_candidates", "eligible_overhead0_failures",
@@ -571,6 +667,61 @@ SELECTION_FIELDS = frozenset((
 
 class ContractError(RuntimeError):
     """The frozen benchmark contract or a result ledger is invalid."""
+
+
+TIMING_QUALIFICATION_FIELDS = (
+    "contract_sha256", "phase", "map_sha256", "base_domain_sha256",
+    "qualified_domain_sha256", "source_git_commit", "controls",
+    "qualification_audit_sha256", "retry_offsets",
+    "selected_trace_roster_sha256", "selected_trace_sha256s",
+)
+
+
+class TimingQualification:
+    """Opaque handle for a strictly loaded phase timing qualification."""
+
+    __slots__ = TIMING_QUALIFICATION_FIELDS + ("__weakref__",)
+
+    def __new__(cls, *_args: Any, **_kwargs: Any) -> "TimingQualification":
+        fail("TimingQualification objects must come from the strict loader")
+        raise AssertionError("unreachable")
+
+    def __setattr__(self, _name: str, _value: Any) -> None:
+        raise AttributeError("TimingQualification is immutable")
+
+
+def _timing_qualification_registry() -> Tuple[Any, Any]:
+    """Return a loader-only sealer and an out-of-band provenance verifier."""
+    snapshots: Any = weakref.WeakKeyDictionary()
+    fields = TIMING_QUALIFICATION_FIELDS
+
+    def snapshot(value: TimingQualification) -> Tuple[Any, ...]:
+        return tuple(getattr(value, field)
+                     for field in fields)
+
+    def seal(values: Mapping[str, Any]) -> TimingQualification:
+        if set(values) != set(fields):
+            fail("internal timing qualification seal has the wrong schema")
+        value = object.__new__(TimingQualification)
+        for field in fields:
+            object.__setattr__(value, field, values[field])
+        snapshots[value] = snapshot(value)
+        return value
+
+    def verify(value: Any) -> bool:
+        if type(value) is not TimingQualification:
+            return False
+        try:
+            expected = snapshots.get(value)
+            return expected is not None and expected == snapshot(value)
+        except (AttributeError, TypeError):
+            return False
+
+    return seal, verify
+
+
+_seal_timing_qualification, _timing_qualification_is_registered = \
+    _timing_qualification_registry()
 
 
 def fail(message: str) -> None:
@@ -600,6 +751,54 @@ def repair_map_sha256(value: Mapping[str, Any]) -> str:
     digest = hashlib.sha256()
     digest.update(b"wirehair.wh2.repair-map.v1\0")
     digest.update(canonical_json(value).encode("utf-8"))
+    return digest.hexdigest()
+
+
+def timing_qualification_map_sha256(value: Mapping[str, Any]) -> str:
+    digest = hashlib.sha256()
+    digest.update(TIMING_QUALIFICATION_MAP_SCHEMA.encode("ascii") + b"\0")
+    digest.update(canonical_json(value).encode("utf-8"))
+    return digest.hexdigest()
+
+
+def timing_selected_trace_roster_sha256(values: Sequence[str]) -> str:
+    if (not isinstance(values, Sequence) or
+            isinstance(values, (str, bytes)) or
+            any(not isinstance(value, str) or SHA256.fullmatch(value) is None
+                for value in values)):
+        fail("selected timing traces must be lowercase SHA-256 values")
+    digest = hashlib.sha256()
+    digest.update(b"wirehair.wh2.timing-selected-trace-roster.v1\0")
+    digest.update(canonical_json(list(values)).encode("utf-8"))
+    return digest.hexdigest()
+
+
+def _timing_qualification_audit_hasher(
+        contract: Mapping[str, Any], phase: str) -> Any:
+    domains = contract.get("timing", {}).get("domains", {}) \
+        if isinstance(contract, Mapping) else {}
+    domain = domains.get(phase) if isinstance(domains, Mapping) else None
+    if not isinstance(domain, Mapping):
+        fail("unknown timing qualification phase: " + str(phase))
+    base_domain_sha256 = domain.get("base_domain_sha256")
+    if (not isinstance(base_domain_sha256, str) or
+            SHA256.fullmatch(base_domain_sha256) is None):
+        fail("timing qualification phase lacks a base-domain SHA-256")
+    digest = hashlib.sha256()
+    digest.update(TIMING_QUALIFICATION_AUDIT_SCHEMA.encode("ascii") + b"\0")
+    digest.update(bytes.fromhex(contract_sha256(contract)))
+    digest.update(bytes.fromhex(base_domain_sha256))
+    digest.update(phase.encode("utf-8"))
+    digest.update(b"\0")
+    return digest
+
+
+def timing_qualification_audit_sha256(
+        contract: Mapping[str, Any], phase: str, path: Path) -> str:
+    digest = _timing_qualification_audit_hasher(contract, phase)
+    for value in _parse_canonical_jsonl(path, "timing qualification audit"):
+        digest.update(canonical_json(value).encode("utf-8"))
+        digest.update(b"\n")
     return digest.hexdigest()
 
 
@@ -918,7 +1117,7 @@ def _validate_structure(contract: Any, check_domain_hashes: bool) -> Mapping[str
     ), "contract")
     if top["schema"] != SCHEMA:
         fail("unexpected contract schema")
-    if (top["contract_id"] != "wh2-pure-gf256-1pct-v4" or
+    if (top["contract_id"] != "wh2-pure-gf256-1pct-v6" or
             top["field"] != "GF(256)"):
         fail("v3 is pure GF(256) only")
 
@@ -1116,32 +1315,36 @@ def _validate_structure(contract: Any, check_domain_hashes: bool) -> Mapping[str
     timing = top["timing"]
     required_timing = {
         "development_wall_time_seconds_per_candidate",
-        "loss_ppm", "schedule", "fixed_received_overhead", "cell_key",
-        "seed_derivation", "domains", "confidence", "practical_margin_ppm",
+        "loss_ppm", "schedule", "fixed_received_overhead",
+        "receive_overhead_cap", "base_cell_key", "cell_key",
+        "seed_derivation", "source_derivation", "domains", "confidence",
+        "practical_margin_ppm",
         "effective_floor", "aa_repeatability_rule", "order", "cache_state",
         "production_policy", "eligibility", "scope_protocol",
         "required_panels", "scopes", "panel_protocol", "execution_geometry",
-        "statistics",
+        "statistics", "qualification",
         "invalid_timer_policy",
     }
     _exact_keys(timing, required_timing, "timing")
     exact_timing_integer_fields = (
         "development_wall_time_seconds_per_candidate", "loss_ppm",
-        "fixed_received_overhead", "practical_margin_ppm",
+        "fixed_received_overhead", "receive_overhead_cap",
+        "practical_margin_ppm",
     )
     for field in exact_timing_integer_fields:
         _exact_integer(timing[field], EXPECTED_TIMING_POLICY[field],
                        "timing." + field)
     for field in (
-            "schedule", "seed_derivation", "confidence", "effective_floor",
+            "schedule", "seed_derivation", "source_derivation", "confidence", "effective_floor",
             "aa_repeatability_rule", "order", "cache_state",
             "production_policy", "eligibility", "scope_protocol"):
         if timing[field] != EXPECTED_TIMING_POLICY[field]:
-            fail("timing-v4 {} changed without a contract revision".format(
+            fail("timing-v6 {} changed without a contract revision".format(
                 field))
     if (timing["panel_protocol"] != EXPECTED_PANEL_PROTOCOL or
             timing["execution_geometry"] !=
                 EXPECTED_TIMING_EXECUTION_GEOMETRY or
+            timing["qualification"] != EXPECTED_TIMING_QUALIFICATION or
             timing["statistics"] != EXPECTED_TIMING_STATISTICS or
             timing["invalid_timer_policy"] != EXPECTED_INVALID_TIMER_POLICY or
             type(timing["panel_protocol"].get("slots_per_panel")) is not int or
@@ -1153,7 +1356,7 @@ def _validate_structure(contract: Any, check_domain_hashes: bool) -> Mapping[str
             any(type(value) is not float for value in
                 timing["statistics"].get(
                     "t_critical_by_independent_rounds", {}).values())):
-        fail("timing-v4 execution/panel/statistics protocol changed without "
+        fail("timing-v6 execution/panel/statistics/qualification protocol changed without "
              "a contract revision")
     if (timing["required_panels"] != [
                 "each_arm_AA",
@@ -1163,15 +1366,24 @@ def _validate_structure(contract: Any, check_domain_hashes: bool) -> Mapping[str
             timing["scopes"] != [
                 "decoder_solve", "encoder_init_plus_first_K_symbols",
                 "receive_to_success"]):
-        fail("timing-v4 constants changed without a contract revision")
+        fail("timing-v6 constants changed without a contract revision")
+    expected_timing_base_key = [
+        "phase", "band", "K", "block_bytes", "loss_ppm", "schedule",
+        "replicate", "base_seed_attempt", "base_loss_seed",
+        "fixed_received_overhead", "receive_overhead_cap",
+        "invocations_per_slot", "interleave_policy",
+    ]
     expected_timing_key = [
         "phase", "band", "K", "block_bytes", "loss_ppm", "schedule",
-        "replicate", "base_seed_attempt", "loss_seed",
-        "fixed_received_overhead", "invocations_per_slot",
+        "replicate", "base_seed_attempt", "base_loss_seed",
+        "base_cell_sha256", "loss_retry_offset", "loss_seed",
+        "fixed_received_overhead", "receive_overhead_cap",
+        "invocations_per_slot",
         "interleave_policy",
     ]
-    if timing["cell_key"] != expected_timing_key:
-        fail("timing-v4 cell or seed derivation changed without a contract "
+    if (timing["base_cell_key"] != expected_timing_base_key or
+            timing["cell_key"] != expected_timing_key):
+        fail("timing-v6 cell or seed derivation changed without a contract "
              "revision")
     timing_domains = timing["domains"]
     if not isinstance(timing_domains, dict) or set(timing_domains) != {
@@ -1188,7 +1400,7 @@ def _validate_structure(contract: Any, check_domain_hashes: bool) -> Mapping[str
     for phase, expected in expected_timing_domains.items():
         domain = _exact_keys(timing_domains[phase], (
             "k_set", "block_bytes", "seed_mode", "paired_repetitions",
-            "independent_rounds", "expected_cells", "domain_sha256",
+            "independent_rounds", "expected_cells", "base_domain_sha256",
         ), "timing domain " + phase)
         (k_name, expected_widths, seed_mode, repetitions,
          independent_rounds, expected_count) = expected
@@ -1200,7 +1412,7 @@ def _validate_structure(contract: Any, check_domain_hashes: bool) -> Mapping[str
                 domain["independent_rounds"] != independent_rounds or
                 type(domain["expected_cells"]) is not int or
                 domain["expected_cells"] != expected_count):
-            fail("timing-v4 {} domain changed without a contract revision".
+            fail("timing-v6 {} domain changed without a contract revision".
                  format(phase))
         widths = domain["block_bytes"]
         if (not isinstance(widths, list) or widths != sorted(set(widths)) or
@@ -1215,9 +1427,10 @@ def _validate_structure(contract: Any, check_domain_hashes: bool) -> Mapping[str
             fail("{} timing repetitions must be exactly eight lanes in each "
                  "independent round".format(phase))
         if check_domain_hashes:
-            digest = timing_domain_sha256(top, phase)
-            if domain["domain_sha256"] != digest:
-                fail("{} timing domain hash mismatch: want {}".format(phase, digest))
+            digest = timing_base_domain_sha256(top, phase)
+            if domain["base_domain_sha256"] != digest:
+                fail("{} timing base-domain hash mismatch: want {}".format(
+                    phase, digest))
 
     selection = _exact_keys(top["selection"], (
         "controls", "noninferiority_margin_ppm",
@@ -1239,7 +1452,9 @@ def _validate_structure(contract: Any, check_domain_hashes: bool) -> Mapping[str
         fail("v3 comparison/weak-seed policy changed without a schema bump")
     evidence = _exact_keys(top["evidence"], (
         "freeze_before_results", "freeze_manifest_schema",
-        "trace_manifest_schema", "repair_map_schema", "canonical_hashing",
+        "trace_manifest_schema", "repair_map_schema",
+        "timing_qualification_schema", "timing_qualification_binding",
+        "canonical_hashing",
         "common_cell_policy",
         "invalid_domain_mutations", "selectable_excluded_cells",
         "unsupported_policy", "thermal_policy", "final_continuity_policy",
@@ -1276,7 +1491,9 @@ def _load_canonical_json_file(path: Path, context: str) -> Mapping[str, Any]:
 
 def load_freeze_manifest(
         contract: Mapping[str, Any], phase: str, path: Path,
-        evidence_kind: str = "recovery") -> Mapping[str, Any]:
+        evidence_kind: str = "recovery",
+        timing_qualification: Optional[TimingQualification] = None,
+        ) -> Mapping[str, Any]:
     manifest = _load_canonical_json_file(path, "freeze manifest")
     _exact_keys(manifest, FREEZE_FIELDS, "freeze manifest")
     schema = manifest["schema"]
@@ -1287,7 +1504,17 @@ def load_freeze_manifest(
         fail("freeze manifest does not bind this contract, kind, and phase")
     domains = contract[evidence_kind]["domains"]
     domain = domains.get(phase)
-    if domain is None or manifest["domain_sha256"] != domain["domain_sha256"]:
+    if evidence_kind == "timing":
+        if timing_qualification is None:
+            fail("timing freeze requires a validated qualification map")
+        qualification = _require_timing_qualification(
+            contract, phase, timing_qualification)
+        expected_domain_sha256 = qualification.qualified_domain_sha256
+    else:
+        qualification = None
+        expected_domain_sha256 = domain.get("domain_sha256") \
+            if isinstance(domain, Mapping) else None
+    if domain is None or manifest["domain_sha256"] != expected_domain_sha256:
         fail("freeze manifest does not bind the frozen domain")
     if (not isinstance(manifest["source_git_commit"], str) or
             GIT_COMMIT.fullmatch(manifest["source_git_commit"]) is None):
@@ -1424,6 +1651,19 @@ def load_freeze_manifest(
         arms[name] = arm
     if schema == RAW_FREEZE_SCHEMA and raw_candidate_count == 0:
         fail("raw v2 freeze must contain at least one raw candidate")
+    if qualification is not None:
+        if qualification.source_git_commit != manifest["source_git_commit"]:
+            fail("timing qualification substitutes the frozen source commit")
+        for control_tuple in qualification.controls:
+            control = dict(zip(
+                TIMING_QUALIFICATION_CONTROL_ORDER, control_tuple))
+            frozen = arms.get(control["arm"])
+            if frozen is None or any(
+                    frozen[field] != control[field]
+                    for field in (
+                        "binary_sha256", "arm_descriptor_sha256",
+                        "construction_policy", "repair_map_sha256")):
+                fail("timing qualification substitutes a frozen control")
     result = dict(manifest)
     result["arms_by_name"] = arms
     return result
@@ -1437,6 +1677,7 @@ def validate_selection_receipt(
     for field in (
             "selection_sha256", "recovery_freeze_manifest_sha256",
             "timing_freeze_manifest_sha256", "architecture_artifact_sha256",
+            "timing_domain_sha256", "timing_qualification_map_sha256",
             "selected_arm_descriptor_sha256",
             "selected_architecture_sha256"):
         if (not isinstance(value[field], str) or
@@ -1446,8 +1687,8 @@ def validate_selection_receipt(
             value["contract_sha256"] != contract_sha256(contract) or
             value["recovery_domain_sha256"] != contract["recovery"][
                 "domains"]["development"]["domain_sha256"] or
-            value["timing_domain_sha256"] != contract["timing"][
-                "domains"]["development"]["domain_sha256"] or
+            value["timing_base_domain_sha256"] != contract["timing"][
+                "domains"]["development"]["base_domain_sha256"] or
             value["selection_sha256"] != sha256_json(unsigned)):
         fail("architecture selection receipt identity is invalid")
     _exact_integer(
@@ -1547,14 +1788,24 @@ def validate_selection_receipt(
 def validate_final_freeze_continuity(
         contract: Mapping[str, Any],
         freeze_paths: Mapping[Tuple[str, str], Path],
-        selection_receipt: Mapping[str, Any]) -> Mapping[str, Any]:
+        selection_receipt: Mapping[str, Any],
+        timing_qualification: TimingQualification,
+        timing_trace_manifest_path: Path,
+        ) -> Mapping[str, Any]:
     selection = validate_selection_receipt(contract, selection_receipt)
     if set(freeze_paths) != FINAL_FREEZE_KEYS:
         fail("final continuity requires exactly the five frozen final phases")
     freezes = {
-        key: load_freeze_manifest(contract, key[1], path, key[0])
+        key: load_freeze_manifest(
+            contract, key[1], path, key[0],
+            timing_qualification if key == ("timing", "final") else None)
         for key, path in freeze_paths.items()
     }
+    final_timing_freeze = freezes[("timing", "final")]
+    load_timing_trace_manifest(
+        contract, "final", timing_trace_manifest_path,
+        final_timing_freeze["trace_manifest_sha256"],
+        timing_qualification)
     anchor = freezes[("recovery", "final_raw")]
     controls = tuple(contract["selection"]["controls"])
     candidates = tuple(
@@ -1819,7 +2070,9 @@ def timing_worker_slot(
     return (lane + cohort_index + independent_round) % workers
 
 
-def iter_timing_cells(contract: Mapping[str, Any], phase: str) -> Iterator[Dict[str, Any]]:
+def iter_timing_base_cells(
+        contract: Mapping[str, Any], phase: str) -> Iterator[Dict[str, Any]]:
+    """Yield the arm- and outcome-free timing domain before loss retry."""
     domains = contract["timing"]["domains"]
     if phase not in domains:
         fail("unknown timing phase: " + phase)
@@ -1837,7 +2090,7 @@ def iter_timing_cells(contract: Mapping[str, Any], phase: str) -> Iterator[Dict[
                     replicate = independent_round * lanes + lane
                     pair = seed_pairs[replicate % len(seed_pairs)]
                     salt = (replicate * 0x9e3779b97f4a7c15) & mask
-                    loss_seed = _splitmix64(
+                    base_loss_seed = _splitmix64(
                         int(pair["loss_seed"], 16) ^ salt)
                     yield {
                         "phase": phase,
@@ -1848,21 +2101,160 @@ def iter_timing_cells(contract: Mapping[str, Any], phase: str) -> Iterator[Dict[
                         "schedule": contract["timing"]["schedule"],
                         "replicate": replicate,
                         "base_seed_attempt": pair["base_seed_attempt"],
-                        "loss_seed": "0x{:016x}".format(loss_seed),
+                        "base_loss_seed":
+                            "0x{:016x}".format(base_loss_seed),
                         "fixed_received_overhead":
                             contract["timing"]["fixed_received_overhead"],
+                        "receive_overhead_cap":
+                            contract["timing"]["receive_overhead_cap"],
                         "invocations_per_slot":
                             timing_invocations_per_slot(contract, K),
                         "interleave_policy": TIMING_INTERLEAVE_POLICY,
                     }
 
 
-def timing_domain_sha256(contract: Mapping[str, Any], phase: str) -> str:
+def timing_base_domain_sha256(
+        contract: Mapping[str, Any], phase: str) -> str:
     digest = hashlib.sha256()
-    for cell in iter_timing_cells(contract, phase):
+    for cell in iter_timing_base_cells(contract, phase):
         digest.update(canonical_json(cell).encode("utf-8"))
         digest.update(b"\n")
     return digest.hexdigest()
+
+
+def _qualified_timing_loss_seed(base_loss_seed: str, retry_offset: int) -> str:
+    base = int(_hex_seed(base_loss_seed, "timing base loss seed"), 16)
+    if (type(retry_offset) is not int or
+            not 0 <= retry_offset < TIMING_LOSS_RETRY_ATTEMPTS):
+        fail("timing loss retry offset must be a uint8 integer")
+    realized = (base + retry_offset * TIMING_LOSS_RETRY_STRIDE) & \
+        ((1 << 64) - 1)
+    return "0x{:016x}".format(realized)
+
+
+def _iter_qualified_timing_cells(
+        contract: Mapping[str, Any], phase: str,
+        retry_offsets: Sequence[int]) -> Iterator[Dict[str, Any]]:
+    expected_cells = contract["timing"]["domains"][phase]["expected_cells"]
+    if (not isinstance(retry_offsets, Sequence) or
+            isinstance(retry_offsets, (str, bytes)) or
+            len(retry_offsets) != expected_cells):
+        fail("timing qualification must contain one offset per base cell")
+    for ordinal, base_cell in enumerate(iter_timing_base_cells(
+            contract, phase)):
+        retry_offset = retry_offsets[ordinal]
+        loss_seed = _qualified_timing_loss_seed(
+            base_cell["base_loss_seed"], retry_offset)
+        cell = dict(base_cell)
+        cell["base_cell_sha256"] = sha256_json(base_cell)
+        cell["loss_retry_offset"] = retry_offset
+        cell["loss_seed"] = loss_seed
+        yield cell
+
+
+def _timing_domain_sha256_from_offsets(
+        contract: Mapping[str, Any], phase: str,
+        retry_offsets: Sequence[int]) -> str:
+    digest = hashlib.sha256()
+    for cell in _iter_qualified_timing_cells(
+            contract, phase, retry_offsets):
+        digest.update(canonical_json(cell).encode("utf-8"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def _require_timing_qualification(
+        contract: Mapping[str, Any], phase: str,
+        qualification: TimingQualification) -> TimingQualification:
+    if not _timing_qualification_is_registered(qualification):
+        fail("timing qualification object did not come from the strict loader "
+             "or was mutated after loading")
+    domain = contract["timing"]["domains"].get(phase)
+    if (not isinstance(domain, Mapping) or
+            qualification.contract_sha256 != contract_sha256(contract) or
+            qualification.phase != phase or
+            qualification.base_domain_sha256 !=
+                domain["base_domain_sha256"] or
+            len(qualification.retry_offsets) != domain["expected_cells"] or
+            len(qualification.selected_trace_sha256s) !=
+                domain["expected_cells"] or
+            not isinstance(qualification.map_sha256, str) or
+            SHA256.fullmatch(qualification.map_sha256) is None or
+            not isinstance(qualification.qualified_domain_sha256, str) or
+            SHA256.fullmatch(qualification.qualified_domain_sha256) is None or
+            not isinstance(qualification.qualification_audit_sha256, str) or
+            SHA256.fullmatch(
+                qualification.qualification_audit_sha256) is None or
+            not isinstance(qualification.selected_trace_roster_sha256, str) or
+            SHA256.fullmatch(
+                qualification.selected_trace_roster_sha256) is None or
+            not isinstance(qualification.source_git_commit, str) or
+            GIT_COMMIT.fullmatch(qualification.source_git_commit) is None):
+        fail("timing qualification does not bind this phase and base domain")
+    if any(not isinstance(trace_sha256, str) or
+           SHA256.fullmatch(trace_sha256) is None
+           for trace_sha256 in qualification.selected_trace_sha256s):
+        fail("timing qualification has a malformed selected trace identity")
+    if timing_selected_trace_roster_sha256(
+            qualification.selected_trace_sha256s) != \
+            qualification.selected_trace_roster_sha256:
+        fail("timing qualification object has a forged selected trace roster")
+    if (not isinstance(qualification.controls, tuple) or
+            any(not isinstance(control, tuple) or
+                len(control) != len(TIMING_QUALIFICATION_CONTROL_ORDER) or
+                any(not isinstance(item, str) for item in control)
+                for control in qualification.controls)):
+        fail("timing qualification has a mutable or malformed control roster")
+    control_records = [
+        dict(zip(TIMING_QUALIFICATION_CONTROL_ORDER, control))
+        for control in qualification.controls
+    ]
+    _validate_timing_qualification_controls(
+        contract, phase, control_records)
+    if any(type(offset) is not int or
+           not 0 <= offset < TIMING_LOSS_RETRY_ATTEMPTS
+           for offset in qualification.retry_offsets):
+        fail("timing qualification contains a non-uint8 retry offset")
+    qualified_digest = _timing_domain_sha256_from_offsets(
+        contract, phase, qualification.retry_offsets)
+    if qualified_digest != qualification.qualified_domain_sha256:
+        fail("timing qualification object has a forged qualified domain")
+    canonical_map = {
+        "schema": TIMING_QUALIFICATION_MAP_SCHEMA,
+        "contract_sha256": qualification.contract_sha256,
+        "phase": qualification.phase,
+        "source_git_commit": qualification.source_git_commit,
+        "base_domain_sha256": qualification.base_domain_sha256,
+        "qualified_domain_sha256": qualification.qualified_domain_sha256,
+        "entry_kind": TIMING_QUALIFICATION_ENTRY_KIND,
+        "controls": control_records,
+        "qualification_audit_sha256":
+            qualification.qualification_audit_sha256,
+        "selected_trace_roster_sha256":
+            qualification.selected_trace_roster_sha256,
+        "retry_offsets": list(qualification.retry_offsets),
+    }
+    if timing_qualification_map_sha256(canonical_map) != \
+            qualification.map_sha256:
+        fail("timing qualification object has a forged map SHA-256")
+    return qualification
+
+
+def iter_timing_cells(
+        contract: Mapping[str, Any], phase: str,
+        qualification: TimingQualification) -> Iterator[Dict[str, Any]]:
+    """Yield the arm-free qualified cells consumed identically by every arm."""
+    validated = _require_timing_qualification(contract, phase, qualification)
+    yield from _iter_qualified_timing_cells(
+        contract, phase, validated.retry_offsets)
+
+
+def timing_domain_sha256(
+        contract: Mapping[str, Any], phase: str,
+        qualification: TimingQualification) -> str:
+    validated = _require_timing_qualification(contract, phase, qualification)
+    return _timing_domain_sha256_from_offsets(
+        contract, phase, validated.retry_offsets)
 
 
 def timing_panels(
@@ -1915,9 +2307,11 @@ def _timing_four_slot_log_contrast(
 
 def _timing_cell_indexes(
         contract: Mapping[str, Any], phase: str,
+        qualification: TimingQualification,
         ) -> Mapping[str, Tuple[int, Mapping[str, Any]]]:
     result: Dict[str, Tuple[int, Mapping[str, Any]]] = {}
-    for ordinal, cell in enumerate(iter_timing_cells(contract, phase)):
+    for ordinal, cell in enumerate(iter_timing_cells(
+            contract, phase, qualification)):
         key = canonical_json(cell)
         if key in result:
             fail("internal duplicate timing cell")
@@ -1931,10 +2325,12 @@ def _timing_cell_ordinal(
         ) -> Tuple[int, Mapping[str, Any]]:
     integer_fields = (
         "K", "block_bytes", "loss_ppm", "replicate", "base_seed_attempt",
-        "fixed_received_overhead", "invocations_per_slot",
+        "loss_retry_offset", "fixed_received_overhead", "receive_overhead_cap",
+        "invocations_per_slot",
     )
     string_fields = (
-        "phase", "band", "schedule", "loss_seed", "interleave_policy",
+        "phase", "band", "schedule", "base_loss_seed", "base_cell_sha256",
+        "loss_seed", "interleave_policy",
     )
     if (any(type(row[field]) is not int for field in integer_fields) or
             any(not isinstance(row[field], str) for field in string_fields)):
@@ -2033,14 +2429,225 @@ def _parse_ledger(path: Path) -> Iterator[Mapping[str, Any]]:
     return _parse_canonical_jsonl(path, "ledger")
 
 
+def _validate_timing_qualification_controls(
+        contract: Mapping[str, Any], phase: str,
+        values: Any) -> Tuple[Mapping[str, Any], ...]:
+    expected = contract["timing"]["qualification"]["controls"]
+    if not isinstance(values, list) or len(values) != len(expected):
+        fail("timing qualification must contain exactly two controls")
+    result: List[Mapping[str, Any]] = []
+    for index, (control_value, policy) in enumerate(zip(values, expected)):
+        control = _exact_keys(
+            control_value, TIMING_QUALIFICATION_CONTROL_FIELDS,
+            "timing qualification control {}".format(index))
+        if (control["arm"] != policy["arm"] or
+                control["scope"] != policy["scope"]):
+            fail("timing qualification substitutes a mandatory control")
+        for field in (
+                "binary_sha256", "arm_descriptor_sha256",
+                "repair_map_sha256"):
+            if (not isinstance(control[field], str) or
+                    SHA256.fullmatch(control[field]) is None):
+                fail("timing qualification control {} is not a SHA-256".
+                     format(field))
+        if control["arm"] == "wirehair1":
+            expected_policy = "not_applicable"
+            expect_map = False
+        else:
+            expected_policy = "raw_base" if phase == "development" else \
+                "repair_map"
+            expect_map = phase == "final"
+        if control["construction_policy"] != expected_policy:
+            fail("timing qualification control construction policy changed")
+        has_map = control["repair_map_sha256"] != "0" * 64
+        if has_map != expect_map:
+            fail("timing qualification control repair-map binding changed")
+        result.append(control)
+    return tuple(result)
+
+
+def _validate_timing_qualification_outcome(
+        row: Mapping[str, Any], arm: str, cap: int) -> str:
+    outcome = row[arm + "_outcome"]
+    extra = row[arm + "_decoded_extra"]
+    if outcome == "success":
+        if arm == "wirehair2_head":
+            if type(extra) is not int or extra != 4:
+                fail("qualified WH2-head solve must succeed exactly at K+4")
+        elif type(extra) is not int or not 0 <= extra <= cap:
+            fail("qualified Wirehair1 receive has invalid decoded_extra")
+    elif outcome == "need_more_at_bound":
+        if extra is not None:
+            fail("qualification need-more outcome must use decoded_extra=null")
+    else:
+        fail("only success or need_more_at_bound may enter qualification audit")
+    return outcome
+
+
+def _load_timing_qualification_map(
+        contract: Mapping[str, Any], phase: str, path: Path,
+        audit_path: Path, expected_sha256: str,
+        seal: Any) -> TimingQualification:
+    """Load a frozen candidate-blind map and prove every lowest retry."""
+    domains = contract["timing"]["domains"]
+    domain = domains.get(phase)
+    if not isinstance(domain, Mapping):
+        fail("unknown timing qualification phase: " + str(phase))
+    if (not isinstance(expected_sha256, str) or
+            SHA256.fullmatch(expected_sha256) is None):
+        fail("expected timing qualification map hash is not a SHA-256")
+    value = _load_canonical_json_file(path, "timing qualification map")
+    _exact_keys(
+        value, TIMING_QUALIFICATION_MAP_FIELDS,
+        "timing qualification map")
+    actual_map_sha256 = timing_qualification_map_sha256(value)
+    if actual_map_sha256 != expected_sha256:
+        fail("timing qualification map differs from its frozen SHA-256")
+    if (value["schema"] != TIMING_QUALIFICATION_MAP_SCHEMA or
+            value["contract_sha256"] != contract_sha256(contract) or
+            value["phase"] != phase or
+            value["base_domain_sha256"] != domain["base_domain_sha256"] or
+            value["entry_kind"] != TIMING_QUALIFICATION_ENTRY_KIND):
+        fail("timing qualification map does not bind this contract and phase")
+    if (not isinstance(value["source_git_commit"], str) or
+            GIT_COMMIT.fullmatch(value["source_git_commit"]) is None):
+        fail("timing qualification source commit is not a full Git object ID")
+    for field in (
+            "qualified_domain_sha256", "qualification_audit_sha256",
+            "selected_trace_roster_sha256"):
+        if (not isinstance(value[field], str) or
+                SHA256.fullmatch(value[field]) is None):
+            fail("timing qualification {} is not a SHA-256".format(field))
+    controls = _validate_timing_qualification_controls(
+        contract, phase, value["controls"])
+    retry_offsets_value = value["retry_offsets"]
+    expected_cells = domain["expected_cells"]
+    if (not isinstance(retry_offsets_value, list) or
+            len(retry_offsets_value) != expected_cells):
+        fail("timing qualification map needs one retry offset per base cell")
+    retry_offsets: List[int] = []
+    for ordinal, retry_offset_value in enumerate(retry_offsets_value):
+        retry_offset = _integer(
+            retry_offset_value,
+            "timing qualification retry offset {}".format(ordinal))
+        if retry_offset >= TIMING_LOSS_RETRY_ATTEMPTS:
+            fail("timing qualification retry offset exceeds uint8 range")
+        retry_offsets.append(retry_offset)
+    qualified_digest = _timing_domain_sha256_from_offsets(
+        contract, phase, retry_offsets)
+    if value["qualified_domain_sha256"] != qualified_digest:
+        fail("timing qualification qualified-domain SHA-256 is invalid")
+
+    rows = iter(_parse_canonical_jsonl(
+        audit_path, "timing qualification audit"))
+    audit_digest = _timing_qualification_audit_hasher(contract, phase)
+    cap = contract["timing"]["receive_overhead_cap"]
+    selected_trace_sha256s: List[str] = []
+    for ordinal, (base_cell, selected_offset) in enumerate(zip(
+            iter_timing_base_cells(contract, phase), retry_offsets)):
+        base_cell_sha256 = sha256_json(base_cell)
+        for retry_offset in range(selected_offset + 1):
+            try:
+                row = next(rows)
+            except StopIteration:
+                fail("timing qualification audit ends before the selected retry")
+            audit_digest.update(canonical_json(row).encode("utf-8"))
+            audit_digest.update(b"\n")
+            _exact_keys(
+                row, TIMING_QUALIFICATION_AUDIT_FIELDS,
+                "timing qualification audit row")
+            _exact_integer(
+                row["ordinal"], ordinal,
+                "timing qualification audit ordinal")
+            _exact_integer(
+                row["loss_retry_offset"], retry_offset,
+                "timing qualification audit retry offset")
+            if row["base_cell_sha256"] != base_cell_sha256:
+                fail("timing qualification audit substitutes its base cell")
+            expected_seed = _qualified_timing_loss_seed(
+                base_cell["base_loss_seed"], retry_offset)
+            if row["loss_seed"] != expected_seed:
+                fail("timing qualification audit uses the wrong retry seed")
+            if (not isinstance(row["trace_sha256"], str) or
+                    SHA256.fullmatch(row["trace_sha256"]) is None):
+                fail("timing qualification trace is not a SHA-256")
+            outcomes = (
+                _validate_timing_qualification_outcome(
+                    row, "wirehair2_head", cap),
+                _validate_timing_qualification_outcome(
+                    row, "wirehair1", cap),
+            )
+            both_success = outcomes == ("success", "success")
+            if retry_offset < selected_offset and both_success:
+                fail("timing qualification map does not choose the lowest retry")
+            if retry_offset == selected_offset and not both_success:
+                fail("timing qualification terminal retry is not successful")
+            if retry_offset == selected_offset:
+                selected_trace_sha256s.append(row["trace_sha256"])
+    try:
+        next(rows)
+        fail("timing qualification audit contains rows after selected retries")
+    except StopIteration:
+        pass
+    if audit_digest.hexdigest() != value["qualification_audit_sha256"]:
+        fail("timing qualification audit differs from its map binding")
+    selected_trace_roster_sha256 = timing_selected_trace_roster_sha256(
+        selected_trace_sha256s)
+    if selected_trace_roster_sha256 != value["selected_trace_roster_sha256"]:
+        fail("timing qualification selected trace roster is invalid")
+    return seal({
+        "contract_sha256": value["contract_sha256"],
+        "phase": phase,
+        "map_sha256": actual_map_sha256,
+        "base_domain_sha256": value["base_domain_sha256"],
+        "qualified_domain_sha256": value["qualified_domain_sha256"],
+        "source_git_commit": value["source_git_commit"],
+        "controls": tuple(
+            tuple(control[field]
+                  for field in TIMING_QUALIFICATION_CONTROL_ORDER)
+            for control in controls),
+        "qualification_audit_sha256": value["qualification_audit_sha256"],
+        "retry_offsets": tuple(retry_offsets),
+        "selected_trace_roster_sha256": selected_trace_roster_sha256,
+        "selected_trace_sha256s": tuple(selected_trace_sha256s),
+    })
+
+
+def _make_timing_qualification_loader(seal: Any) -> Any:
+    """Capture the registry sealer without publishing it as module authority."""
+    def load_timing_qualification_map(
+            contract: Mapping[str, Any], phase: str, path: Path,
+            audit_path: Path, expected_sha256: str) -> TimingQualification:
+        return _load_timing_qualification_map(
+            contract, phase, path, audit_path, expected_sha256, seal)
+    return load_timing_qualification_map
+
+
+load_timing_qualification_map = _make_timing_qualification_loader(
+    _seal_timing_qualification)
+del _seal_timing_qualification
+
+
 def _trace_manifest_hasher(
         contract: Mapping[str, Any], evidence_kind: str,
-        phase: str) -> Any:
+        phase: str,
+        qualification: Optional[TimingQualification] = None) -> Any:
     domain = contract[evidence_kind]["domains"][phase]
     digest = hashlib.sha256()
-    digest.update(b"wirehair.wh2.trace-manifest.v1\0")
-    digest.update(bytes.fromhex(contract_sha256(contract)))
-    digest.update(bytes.fromhex(domain["domain_sha256"]))
+    if evidence_kind == "timing":
+        if qualification is None:
+            fail("timing trace manifests require a validated qualification map")
+        validated = _require_timing_qualification(
+            contract, phase, qualification)
+        digest.update(b"wirehair.wh2.trace-manifest.v2\0")
+        digest.update(bytes.fromhex(contract_sha256(contract)))
+        digest.update(bytes.fromhex(validated.base_domain_sha256))
+        digest.update(bytes.fromhex(validated.qualified_domain_sha256))
+        digest.update(bytes.fromhex(validated.map_sha256))
+    else:
+        digest.update(b"wirehair.wh2.trace-manifest.v1\0")
+        digest.update(bytes.fromhex(contract_sha256(contract)))
+        digest.update(bytes.fromhex(domain["domain_sha256"]))
     digest.update(phase.encode("utf-8"))
     digest.update(b"\0")
     return digest
@@ -2053,8 +2660,10 @@ def _hash_trace_manifest_row(digest: Any, value: Mapping[str, Any]) -> None:
 
 def trace_manifest_sha256(
         contract: Mapping[str, Any], evidence_kind: str, phase: str,
-        path: Path) -> str:
-    digest = _trace_manifest_hasher(contract, evidence_kind, phase)
+        path: Path,
+        qualification: Optional[TimingQualification] = None) -> str:
+    digest = _trace_manifest_hasher(
+        contract, evidence_kind, phase, qualification)
     for value in _parse_canonical_jsonl(path, "trace manifest"):
         _hash_trace_manifest_row(digest, value)
     return digest.hexdigest()
@@ -2064,8 +2673,10 @@ def _load_frozen_trace_manifest(
         contract: Mapping[str, Any], evidence_kind: str, phase: str,
         path: Path, expected_sha256: str,
         cells: Iterable[Mapping[str, Any]], count: int,
-        context: str) -> Sequence[str]:
-    digest = _trace_manifest_hasher(contract, evidence_kind, phase)
+        context: str,
+        qualification: Optional[TimingQualification] = None) -> Sequence[str]:
+    digest = _trace_manifest_hasher(
+        contract, evidence_kind, phase, qualification)
     traces: List[str] = []
     rows = iter(_parse_canonical_jsonl(path, context))
     for ordinal, cell in enumerate(cells):
@@ -2109,11 +2720,16 @@ def load_trace_manifest(
 
 def load_timing_trace_manifest(
         contract: Mapping[str, Any], phase: str, path: Path,
-        expected_sha256: str) -> Sequence[str]:
+        expected_sha256: str,
+        qualification: TimingQualification) -> Sequence[str]:
     count = contract["timing"]["domains"][phase]["expected_cells"]
-    return _load_frozen_trace_manifest(
+    traces = _load_frozen_trace_manifest(
         contract, "timing", phase, path, expected_sha256,
-        iter_timing_cells(contract, phase), count, "timing trace manifest")
+        iter_timing_cells(contract, phase, qualification), count,
+        "timing trace manifest", qualification)
+    if tuple(traces) != qualification.selected_trace_sha256s:
+        fail("timing trace manifest does not replay terminal audit traces")
+    return traces
 
 
 def validate_ledger(contract: Mapping[str, Any], phase: str, path: Path,
@@ -2420,7 +3036,8 @@ def _timing_outcome(
         elif scope == "decoder_solve":
             if type(extra) is not int or extra != 4:
                 fail("isolated solve timing must receipt the fixed K+4 prefix")
-        elif type(extra) is not int or not 0 <= extra <= 4:
+        elif (type(extra) is not int or
+              not 0 <= extra <= row["receive_overhead_cap"]):
             fail("successful decoder timing has invalid decoded_extra")
     elif extra is not None:
         fail("failed timing side must use decoded_extra=null")
@@ -2552,11 +3169,18 @@ def _timing_speed_gate(
 def validate_timing_receipt(
         contract: Mapping[str, Any], phase: str, path: Path,
         freeze_manifest_path: Path, trace_manifest_path: Path,
+        timing_qualification_map_path: Path,
+        timing_qualification_audit_path: Path,
+        timing_qualification_map_digest: str,
         repair_map_paths: Optional[Mapping[str, Path]] = None,
         ) -> Dict[str, Any]:
     if repair_map_paths is None:
         repair_map_paths = {}
-    freeze = load_freeze_manifest(contract, phase, freeze_manifest_path, "timing")
+    qualification = load_timing_qualification_map(
+        contract, phase, timing_qualification_map_path,
+        timing_qualification_audit_path, timing_qualification_map_digest)
+    freeze = load_freeze_manifest(
+        contract, phase, freeze_manifest_path, "timing", qualification)
     arms = tuple(freeze["arm_roster"])
     controls = tuple(contract["selection"]["controls"])
     candidates = tuple(arm for arm in arms if arm not in controls)
@@ -2564,9 +3188,10 @@ def validate_timing_receipt(
     if domain is None:
         fail("unknown timing phase: " + phase)
     cell_count = domain["expected_cells"]
-    cells = _timing_cell_indexes(contract, phase)
+    cells = _timing_cell_indexes(contract, phase, qualification)
     traces = load_timing_trace_manifest(
-        contract, phase, trace_manifest_path, freeze["trace_manifest_sha256"])
+        contract, phase, trace_manifest_path, freeze["trace_manifest_sha256"],
+        qualification)
     required_map_arms = {
         arm for arm in arms
         if freeze["arms_by_name"][arm]["repair_map_sha256"] != "0" * 64
@@ -2813,7 +3438,9 @@ def validate_timing_receipt(
         "schema": SCHEMA + ".timing-summary.v1",
         "phase": phase,
         "contract_sha256": contract_sha256(contract),
-        "domain_sha256": domain["domain_sha256"],
+        "base_domain_sha256": domain["base_domain_sha256"],
+        "domain_sha256": qualification.qualified_domain_sha256,
+        "timing_qualification_map_sha256": qualification.map_sha256,
         "freeze_manifest_sha256": freeze_manifest_sha256(freeze),
         "architecture_artifact_sha256":
             architecture_artifact_sha256(freeze),
@@ -2827,11 +3454,14 @@ def validate_timing_receipt(
 
 def select_development_architecture(
         contract: Mapping[str, Any], recovery: Mapping[str, Any],
-        timing: Mapping[str, Any]) -> Mapping[str, Any]:
+        timing: Mapping[str, Any],
+        timing_qualification: TimingQualification) -> Mapping[str, Any]:
     """Apply the frozen architecture ordering to validated development summaries."""
     contract_digest = contract_sha256(contract)
     recovery_domain = contract["recovery"]["domains"]["development"]
     timing_domain = contract["timing"]["domains"]["development"]
+    qualification = _require_timing_qualification(
+        contract, "development", timing_qualification)
     if (recovery.get("schema") != SCHEMA + ".ledger-summary.v2" or
             timing.get("schema") != SCHEMA + ".timing-summary.v1" or
             recovery.get("phase") != "development" or
@@ -2840,7 +3470,12 @@ def select_development_architecture(
             recovery.get("contract_sha256") != contract_digest or
             timing.get("contract_sha256") != contract_digest or
             recovery.get("domain_sha256") != recovery_domain["domain_sha256"] or
-            timing.get("domain_sha256") != timing_domain["domain_sha256"] or
+            timing.get("base_domain_sha256") !=
+                timing_domain["base_domain_sha256"] or
+            timing.get("domain_sha256") !=
+                qualification.qualified_domain_sha256 or
+            timing.get("timing_qualification_map_sha256") !=
+                qualification.map_sha256 or
             type(recovery.get("excluded_cells")) is not int or
             recovery.get("excluded_cells") != 0 or
             type(timing.get("excluded_cells")) is not int or
@@ -2940,7 +3575,10 @@ def select_development_architecture(
     bindings = {
         "contract_sha256": contract_digest,
         "recovery_domain_sha256": recovery_domain["domain_sha256"],
-        "timing_domain_sha256": timing_domain["domain_sha256"],
+        "timing_base_domain_sha256": timing_domain["base_domain_sha256"],
+        "timing_domain_sha256": timing["domain_sha256"],
+        "timing_qualification_map_sha256":
+            timing["timing_qualification_map_sha256"],
         "recovery_freeze_manifest_sha256": recovery_freeze,
         "timing_freeze_manifest_sha256": timing_freeze,
         "architecture_artifact_sha256": recovery_artifacts,
@@ -3038,8 +3676,8 @@ def _command_hashes(contract_path: Path) -> int:
         print("recovery:{} {}".format(
             phase, recovery_domain_sha256(contract, phase)))
     for phase in sorted(contract["timing"]["domains"]):
-        print("timing:{} {}".format(
-            phase, timing_domain_sha256(contract, phase)))
+        print("timing-base:{} {}".format(
+            phase, timing_base_domain_sha256(contract, phase)))
     return 0
 
 
@@ -3059,7 +3697,7 @@ def _command_describe(contract_path: Path) -> int:
         "timing_domains": {
             phase: {
                 "cells": domain["expected_cells"],
-                "domain_sha256": domain["domain_sha256"],
+                "base_domain_sha256": domain["base_domain_sha256"],
             }
             for phase, domain in sorted(contract["timing"]["domains"].items())
         },
@@ -3114,6 +3752,15 @@ def main(argv: Sequence[str] = ()) -> int:
     timing.add_argument("--freeze-manifest", required=True, type=Path)
     timing.add_argument("--trace-manifest", required=True, type=Path)
     timing.add_argument(
+        "--timing-qualification-map", required=True, type=Path,
+        help="canonical phase-scoped candidate-blind loss-retry map")
+    timing.add_argument(
+        "--timing-qualification-audit", required=True, type=Path,
+        help="ordered canonical audit of every attempted loss retry")
+    timing.add_argument(
+        "--timing-qualification-map-sha256", required=True,
+        help="pre-result content identity of the qualification map")
+    timing.add_argument(
         "--repair-map", action="append", default=[], metavar="ARM=PATH",
         help="canonical frozen repair map; repeat once per mapped arm")
     timing.add_argument("receipt", type=Path)
@@ -3127,6 +3774,15 @@ def main(argv: Sequence[str] = ()) -> int:
     continuity.add_argument(
         "--selection-receipt", required=True, type=Path,
         help="canonical development architecture-selection receipt")
+    continuity.add_argument(
+        "--timing-qualification-map", required=True, type=Path)
+    continuity.add_argument(
+        "--timing-qualification-audit", required=True, type=Path)
+    continuity.add_argument(
+        "--timing-qualification-map-sha256", required=True)
+    continuity.add_argument(
+        "--timing-trace-manifest", required=True, type=Path,
+        help="final ordered timing trace manifest frozen before results")
     args = parser.parse_args(list(argv) if argv else None)
     try:
         if args.command == "hashes":
@@ -3135,10 +3791,15 @@ def main(argv: Sequence[str] = ()) -> int:
             return _command_describe(args.contract)
         contract = load_contract(args.contract)
         if args.command == "validate-final-continuity":
+            timing_qualification = load_timing_qualification_map(
+                contract, "final", args.timing_qualification_map,
+                args.timing_qualification_audit,
+                args.timing_qualification_map_sha256)
             summary = validate_final_freeze_continuity(
                 contract, _final_freeze_arguments(args.freeze),
                 _load_canonical_json_file(
-                    args.selection_receipt, "architecture selection receipt"))
+                    args.selection_receipt, "architecture selection receipt"),
+                timing_qualification, args.timing_trace_manifest)
             print(json.dumps(summary, sort_keys=True, indent=2))
             return 0
         repair_maps = _repair_map_arguments(args.repair_map)
@@ -3149,7 +3810,9 @@ def main(argv: Sequence[str] = ()) -> int:
         else:
             summary = validate_timing_receipt(
                 contract, args.phase, args.receipt, args.freeze_manifest,
-                args.trace_manifest, repair_maps)
+                args.trace_manifest, args.timing_qualification_map,
+                args.timing_qualification_audit,
+                args.timing_qualification_map_sha256, repair_maps)
         print(json.dumps(summary, sort_keys=True, indent=2))
         return 0
     except ContractError as exc:

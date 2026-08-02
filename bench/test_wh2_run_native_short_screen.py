@@ -4,19 +4,21 @@
 from __future__ import annotations
 
 import copy
-from contextlib import redirect_stderr
+from contextlib import ExitStack, redirect_stderr
 import csv
+import errno
 import hashlib
 from io import StringIO
 import json
 import os
 from pathlib import Path
+import stat
 import subprocess
 import sys
 import tempfile
 import threading
 import time
-from typing import Any, Mapping
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 import unittest
 from unittest import mock
 
@@ -108,6 +110,7 @@ class NativeRunnerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
+        self.qualification_counter = 0
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -157,6 +160,100 @@ class NativeRunnerTests(unittest.TestCase):
 
     def _description(self, path: Path) -> Mapping[str, Any]:
         return subject.describe_worker(path, time.monotonic() + 5.0)
+
+    def _qualification(
+            self, contract: Optional[Mapping[str, Any]] = None,
+            retry_offsets: Optional[Sequence[int]] = None,
+            description: Optional[Mapping[str, Any]] = None,
+            ) -> contract_api.TimingQualification:
+        candidate = contract_api.load_contract() if contract is None else \
+            contract
+        base_cells = list(contract_api.iter_timing_base_cells(
+            candidate, "development"))
+        offsets = [0] * len(base_cells) if retry_offsets is None else \
+            list(retry_offsets)
+        if len(offsets) != len(base_cells):
+            raise AssertionError("qualification fixture offset cardinality")
+        audit_rows: List[Dict[str, Any]] = []
+        selected_traces: List[str] = []
+        for ordinal, (base_cell, selected) in enumerate(zip(
+                base_cells, offsets)):
+            for retry in range(selected + 1):
+                terminal = retry == selected
+                trace = hashlib.sha256(
+                    "runner qualification:{}:{}".format(
+                        ordinal, retry).encode("ascii")).hexdigest()
+                audit_rows.append({
+                    "ordinal": ordinal,
+                    "base_cell_sha256":
+                        contract_api.sha256_json(base_cell),
+                    "loss_retry_offset": retry,
+                    "loss_seed": contract_api._qualified_timing_loss_seed(
+                        base_cell["base_loss_seed"], retry),
+                    "trace_sha256": trace,
+                    "wirehair2_head_outcome":
+                        "success" if terminal else "need_more_at_bound",
+                    "wirehair2_head_decoded_extra":
+                        4 if terminal else None,
+                    "wirehair1_outcome": "success",
+                    "wirehair1_decoded_extra": 0,
+                })
+                if terminal:
+                    selected_traces.append(trace)
+        self.qualification_counter += 1
+        stem = "qualification-{}".format(self.qualification_counter)
+        audit_path = self.root / (stem + ".jsonl")
+        audit_path.write_bytes("".join(
+            contract_api.canonical_json(row) + "\n" for row in audit_rows
+        ).encode("utf-8"))
+        described = {
+            value["arm"]: value for value in
+            (description or {}).get("arms", [])
+        }
+        binary = (description or {}).get(
+            "binary_sha256", hashlib.sha256(b"runner binary").hexdigest())
+        controls = []
+        for arm, scope in (
+                ("wirehair2_head", "decoder_solve"),
+                ("wirehair1", "receive_to_success")):
+            controls.append({
+                "arm": arm,
+                "scope": scope,
+                "binary_sha256": binary,
+                "arm_descriptor_sha256": described.get(arm, {}).get(
+                    "arm_descriptor_sha256",
+                    hashlib.sha256(("descriptor:" + arm).encode(
+                        "ascii")).hexdigest()),
+                "construction_policy":
+                    "not_applicable" if arm == "wirehair1" else "raw_base",
+                "repair_map_sha256": "0" * 64,
+            })
+        value = {
+            "schema": contract_api.TIMING_QUALIFICATION_MAP_SCHEMA,
+            "contract_sha256": contract_api.contract_sha256(candidate),
+            "phase": "development",
+            "source_git_commit": "1" * 40,
+            "base_domain_sha256": candidate["timing"]["domains"]
+                ["development"]["base_domain_sha256"],
+            "qualified_domain_sha256":
+                contract_api._timing_domain_sha256_from_offsets(
+                    candidate, "development", offsets),
+            "entry_kind": contract_api.TIMING_QUALIFICATION_ENTRY_KIND,
+            "controls": controls,
+            "qualification_audit_sha256":
+                contract_api.timing_qualification_audit_sha256(
+                    candidate, "development", audit_path),
+            "selected_trace_roster_sha256":
+                contract_api.timing_selected_trace_roster_sha256(
+                    selected_traces),
+            "retry_offsets": offsets,
+        }
+        map_path = self.root / (stem + ".json")
+        map_path.write_bytes(
+            (contract_api.canonical_json(value) + "\n").encode("utf-8"))
+        return contract_api.load_timing_qualification_map(
+            candidate, "development", map_path, audit_path,
+            contract_api.timing_qualification_map_sha256(value))
 
     def _worker_cpus(self) -> list:
         values = sorted(os.sched_getaffinity(0))
@@ -248,6 +345,32 @@ class NativeRunnerTests(unittest.TestCase):
                     subject.RunnerError, "affinity contains an invalid"):
                 subject.select_cpu_layout(
                     0, affinity=invalid_affinity, sysfs_root=topology)
+
+    def test_default_qualification_affinity_rejects_sampler_logical_or_core(
+            self) -> None:
+        contract = contract_api.load_contract()
+        for sampler_cpu, topology in (
+                (1, {0: (0, 0), 1: (0, 1)}),
+                (17, {0: (0, 0), 1: (0, 17), 17: (0, 17)})):
+            args = mock.Mock(
+                deadline_seconds=1.0, contract=None, worker=Path("worker"),
+                sampler_cpu=sampler_cpu)
+
+            def cpu_topology(cpu, _root):
+                return topology[cpu]
+
+            with self.subTest(sampler_cpu=sampler_cpu), \
+                    mock.patch.object(
+                        contract_api, "load_contract", return_value=contract), \
+                    mock.patch.object(
+                        subject, "describe_worker", return_value={}), \
+                    mock.patch.object(
+                        os, "sched_getaffinity", return_value={0, 1}), \
+                    mock.patch.object(
+                        subject, "_cpu_topology", side_effect=cpu_topology), \
+                    self.assertRaisesRegex(
+                        subject.RunnerError, "sampler physical core"):
+                subject.run_short_screen(args)
 
     def test_llc_selection_maximizes_coverage_then_round_robin_fills(self) \
             -> None:
@@ -368,8 +491,10 @@ class NativeRunnerTests(unittest.TestCase):
             "recovery": hashlib.sha256(b"recovery trace").hexdigest(),
             "timing": hashlib.sha256(b"timing trace").hexdigest(),
         }
+        qualification = self._qualification(contract, description=description)
         freezes = subject.write_development_freezes(
-            contract, description, [0], 1, "1" * 40, trace_hashes, output)
+            contract, description, [0], 1, "1" * 40, trace_hashes, output,
+            qualification)
         for kind in ("recovery", "timing"):
             path = output / "{}-freeze.json".format(kind)
             self.assertTrue(path.is_file())
@@ -391,40 +516,503 @@ class NativeRunnerTests(unittest.TestCase):
         finally:
             sink.abort()
 
+    def test_qualification_pool_is_quit_and_reaped_before_exact_eight_spawn(
+            self) -> None:
+        contract = contract_api.load_contract()
+        qualification_offsets = [0] * len(list(
+            contract_api.iter_timing_base_cells(contract, "development")))
+        qualification_offsets[7] = 1
+        qualification_offsets[-1] = 2
+        qualification = self._qualification(
+            contract, retry_offsets=qualification_offsets)
+
+        class Process:
+            def __init__(self) -> None:
+                self.status = None
+
+            def poll(self):
+                return self.status
+
+        qualification_workers = [
+            mock.Mock(cpu=cpu, process=Process()) for cpu in range(12)
+        ]
+        timing_workers = [
+            mock.Mock(cpu=cpu, process=Process()) for cpu in range(8)
+        ]
+        spawn_count = 0
+        lifecycle = []
+
+        def spawn(_description, cpus, _deadline):
+            nonlocal spawn_count
+            spawn_count += 1
+            if spawn_count == 1:
+                self.assertEqual(cpus, list(range(12)))
+                lifecycle.append("qualification_spawn")
+                return qualification_workers
+            self.assertEqual(spawn_count, 2)
+            self.assertTrue(all(
+                worker.process.poll() is not None
+                for worker in qualification_workers))
+            self.assertEqual(cpus, list(range(8)))
+            lifecycle.append("timing_spawn")
+            return timing_workers
+
+        def quit_pool(workers, _deadline):
+            for worker in workers:
+                worker.process.status = 0
+            lifecycle.append(
+                "qualification_reaped" if workers is qualification_workers
+                else "timing_reaped")
+
+        def assemble_qualification(*_args, **_kwargs):
+            self.assertTrue(all(
+                worker.process.poll() is None
+                for worker in qualification_workers))
+            lifecycle.append("qualification_receipt_published_live")
+            return qualification, qualification_metadata, "f" * 64
+
+        def restore_affinity(_affinity):
+            lifecycle.append("affinity_restored")
+
+        def publish_summary(path, value):
+            if path.name == "run-summary.json":
+                self.assertTrue(all(
+                    worker.process.poll() is not None
+                    for worker in qualification_workers + timing_workers))
+                self.assertIn("affinity_restored", lifecycle)
+                lifecycle.append("summary_published")
+
+        description = {
+            "binary_sha256": "a" * 64,
+            "source_git_commit": "1" * 40,
+        }
+        qualification_metadata = {
+            "qualification_attempt_count":
+                len(qualification_offsets) + sum(qualification_offsets),
+            "qualification_worker_cpus": list(range(12)),
+        }
+        receipt = {
+            "record_count": 1,
+            "freeze_manifest_sha256": "b" * 64,
+            "result_stream_sha256": "c" * 64,
+            "thermal": {
+                "sample_count": 2,
+                "cpu_tctl_max_millic": 60000,
+                "dimm_max_millic": 40000,
+            },
+        }
+
+        def assembled(_contract, kind, *_args, **_kwargs):
+            value = dict(receipt)
+            if kind == "recovery":
+                value["thermal"] = dict(receipt["thermal"])
+            else:
+                value["qualification_thermal"] = {
+                    "sample_count": 3,
+                    "cpu_tctl_max_millic": 70000,
+                    "dimm_max_millic": 50000,
+                }
+            return {"execution_receipt": value}
+
+        args = mock.Mock(
+            deadline_seconds=60.0, contract=None, worker=Path("worker"),
+            sampler_cpu=99, sampler_pid=123, sampler_script=Path("s.py"),
+            sampler_csv=Path("thermal.csv"), cpus=None, controller_cpu=None,
+            output_dir=self.root / "run")
+        patches = (
+            mock.patch.object(
+                contract_api, "load_contract", return_value=contract),
+            mock.patch.object(
+                contract_api, "load_timing_qualification_map",
+                return_value=qualification),
+            mock.patch.object(
+                os, "sched_getaffinity", return_value=set(range(12))),
+            mock.patch.object(
+                subject, "_cpu_topology",
+                side_effect=lambda cpu, _root: (0, cpu)),
+            mock.patch.object(
+                subject, "describe_worker", return_value=description),
+            mock.patch.object(subject, "_development_timing_shape"),
+            mock.patch.object(subject, "_preflight_sampler"),
+            mock.patch.object(subject, "_git_head", return_value="1" * 40),
+            mock.patch.object(subject, "_require_worker_source_commit"),
+            mock.patch.object(
+                subject, "_emit_and_assemble_trace",
+                return_value=(self.root / "recovery-traces.jsonl", "d" * 64)),
+            mock.patch.object(
+                subject, "_timing_qualification_controls", return_value=[]),
+            mock.patch.object(
+                subject, "choose_new_sampler_start",
+                side_effect=(1000000000, 3000000000)),
+            mock.patch.object(subject, "spawn_workers", side_effect=spawn),
+            mock.patch.object(
+                subject, "run_timing_qualification",
+                return_value=(self.root / "qualification-native.jsonl",
+                              1500000000)),
+            mock.patch.object(
+                native_api, "assemble_timing_qualification",
+                side_effect=assemble_qualification),
+            mock.patch.object(subject, "quit_workers", side_effect=quit_pool),
+            mock.patch.object(
+                subject, "_wait_for_sampler_sample",
+                side_effect=(2000000000, 9000000000)),
+            mock.patch.object(native_api, "write_sampler_attestation"),
+            mock.patch.object(
+                subject, "select_cpu_layout",
+                return_value=(list(range(8)), 8)),
+            mock.patch.object(
+                native_api, "publish_timing_trace_manifest",
+                return_value="e" * 64),
+            mock.patch.object(
+                subject, "write_development_freezes", return_value={}),
+            mock.patch.object(subject, "_pin_controller"),
+            mock.patch.object(
+                subject, "_restore_controller_affinity",
+                side_effect=restore_affinity),
+            mock.patch.object(
+                subject, "_run_native_jobs",
+                return_value=({
+                    "recovery": self.root / "recovery-native.jsonl",
+                    "timing": self.root / "timing-native.jsonl",
+                }, 8000000000)),
+            mock.patch.object(
+                native_api, "assemble_results", side_effect=assembled),
+            mock.patch.object(native_api, "validate_execution_receipt"),
+            mock.patch.object(
+                subject, "_atomic_write_object", side_effect=publish_summary),
+        )
+        with ExitStack() as stack:
+            for patcher in patches:
+                stack.enter_context(patcher)
+            result = subject.run_short_screen(args)
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(result["cpu_tctl_max_millic"], 60000)
+        self.assertEqual(result["dimm_max_millic"], 40000)
+        self.assertEqual(result["qualification_cpu_tctl_max_millic"], 70000)
+        self.assertEqual(result["qualification_dimm_max_millic"], 50000)
+        self.assertEqual(result["overall_cpu_tctl_max_millic"], 70000)
+        self.assertEqual(result["overall_dimm_max_millic"], 50000)
+        self.assertEqual(
+            result["qualification_attempt_count"],
+            len(qualification_offsets) + 3)
+        self.assertEqual(result["qualification_retried_cell_count"], 2)
+        self.assertEqual(result["qualification_max_retry_offset"], 2)
+        self.assertEqual(result["qualification_sum_retry_offsets"], 3)
+        self.assertEqual(spawn_count, 2)
+        self.assertTrue(all(
+            worker.process.poll() is not None for worker in timing_workers))
+        self.assertLess(
+            lifecycle.index("qualification_receipt_published_live"),
+            lifecycle.index("qualification_reaped"))
+        self.assertLess(
+            lifecycle.index("timing_reaped"),
+            lifecycle.index("affinity_restored"))
+        self.assertLess(
+            lifecycle.index("affinity_restored"),
+            lifecycle.index("summary_published"))
+
+    def test_affinity_restore_failure_never_publishes_complete_summary(
+            self) -> None:
+        contract = contract_api.load_contract()
+        qualification = self._qualification(contract)
+
+        class Process:
+            def __init__(self) -> None:
+                self.status = None
+
+            def poll(self):
+                return self.status
+
+        for message in ("restore failure", "hard wall during restore"):
+            qualification_workers = [
+                mock.Mock(cpu=cpu, process=Process()) for cpu in range(12)
+            ]
+            timing_workers = [
+                mock.Mock(cpu=cpu, process=Process()) for cpu in range(8)
+            ]
+            pools = iter((qualification_workers, timing_workers))
+
+            def quit_pool(workers, _deadline):
+                for worker in workers:
+                    worker.process.status = 0
+
+            description = {
+                "binary_sha256": "a" * 64,
+                "source_git_commit": "1" * 40,
+            }
+            receipt = {
+                "record_count": 1,
+                "freeze_manifest_sha256": "b" * 64,
+                "result_stream_sha256": "c" * 64,
+                "thermal": {
+                    "sample_count": 2,
+                    "cpu_tctl_max_millic": 60000,
+                    "dimm_max_millic": 40000,
+                },
+                "qualification_thermal": {
+                    "sample_count": 2,
+                    "cpu_tctl_max_millic": 61000,
+                    "dimm_max_millic": 41000,
+                },
+            }
+            args = mock.Mock(
+                deadline_seconds=60.0, contract=None, worker=Path("worker"),
+                sampler_cpu=99, sampler_pid=123,
+                sampler_script=Path("s.py"),
+                sampler_csv=Path("thermal.csv"), cpus=None,
+                controller_cpu=None,
+                output_dir=self.root / ("run-" + message.replace(" ", "-")))
+            summary_writer = mock.Mock()
+            patches = (
+                mock.patch.object(
+                    contract_api, "load_contract", return_value=contract),
+                mock.patch.object(
+                    contract_api, "load_timing_qualification_map",
+                    return_value=qualification),
+                mock.patch.object(
+                    os, "sched_getaffinity", return_value=set(range(12))),
+                mock.patch.object(
+                    subject, "_cpu_topology",
+                    side_effect=lambda cpu, _root: (0, cpu)),
+                mock.patch.object(
+                    subject, "describe_worker", return_value=description),
+                mock.patch.object(subject, "_development_timing_shape"),
+                mock.patch.object(subject, "_preflight_sampler"),
+                mock.patch.object(
+                    subject, "_git_head", return_value="1" * 40),
+                mock.patch.object(subject, "_require_worker_source_commit"),
+                mock.patch.object(
+                    subject, "_create_output_dir", return_value=args.output_dir),
+                mock.patch.object(
+                    subject, "_emit_and_assemble_trace",
+                    return_value=(Path("recovery-traces"), "d" * 64)),
+                mock.patch.object(
+                    subject, "_timing_qualification_controls",
+                    return_value=[]),
+                mock.patch.object(
+                    subject, "choose_new_sampler_start",
+                    side_effect=(1000000000, 3000000000)),
+                mock.patch.object(
+                    subject, "spawn_workers",
+                    side_effect=lambda *_args: next(pools)),
+                mock.patch.object(
+                    subject, "run_timing_qualification",
+                    return_value=(Path("qualification-native"), 1500000000)),
+                mock.patch.object(
+                    native_api, "assemble_timing_qualification",
+                    return_value=(qualification, {}, "f" * 64)),
+                mock.patch.object(
+                    subject, "quit_workers", side_effect=quit_pool),
+                mock.patch.object(
+                    subject, "_wait_for_sampler_sample",
+                    side_effect=(2000000000, 9000000000)),
+                mock.patch.object(native_api, "write_sampler_attestation"),
+                mock.patch.object(
+                    subject, "select_cpu_layout",
+                    return_value=(list(range(8)), 8)),
+                mock.patch.object(
+                    native_api, "publish_timing_trace_manifest",
+                    return_value="e" * 64),
+                mock.patch.object(
+                    subject, "write_development_freezes", return_value={}),
+                mock.patch.object(subject, "_pin_controller"),
+                mock.patch.object(
+                    subject, "_restore_controller_affinity",
+                    side_effect=subject.RunnerError(message)),
+                mock.patch.object(
+                    subject, "_run_native_jobs",
+                    return_value=({"recovery": Path("r"), "timing": Path("t")},
+                                  8000000000)),
+                mock.patch.object(
+                    native_api, "assemble_results",
+                    return_value={"execution_receipt": receipt}),
+                mock.patch.object(native_api, "validate_execution_receipt"),
+                mock.patch.object(
+                    subject, "_atomic_write_object", summary_writer),
+            )
+            with self.subTest(message=message), ExitStack() as stack:
+                for patcher in patches:
+                    stack.enter_context(patcher)
+                with self.assertRaisesRegex(subject.RunnerError, message):
+                    subject.run_short_screen(args)
+            summary_writer.assert_not_called()
+
     def test_strict_timing_validator_precomputes_cell_indexes_once(self) -> None:
         worker = self._fake_worker()
         description = self._description(worker)
         contract = contract_api.load_contract()
         output = self.root / "output"
         output.mkdir()
+        qualification = self._qualification(contract, description=description)
         freezes = subject.write_development_freezes(
             contract, description, [0], 1, "1" * 40,
-            {"recovery": "2" * 64, "timing": "3" * 64}, output)
+            {"recovery": "2" * 64, "timing": "3" * 64}, output,
+            qualification)
         with mock.patch.object(
                 contract_api, "_timing_cell_indexes",
                 wraps=contract_api._timing_cell_indexes) as cell_indexes:
             validator = subject._strict_response_validator(
-                contract, freezes["timing"], "timing", description, 0)
+                contract, freezes["timing"], "timing", description, 0,
+                qualification)
             self.assertTrue(callable(validator))
             self.assertEqual(cell_indexes.call_count, 1)
 
-    def test_post_link_publish_failure_removes_own_artifact(self) -> None:
+    def test_post_link_publish_failure_preserves_visible_commit(self) -> None:
         destination = self.root / "atomic-output.json"
-        with mock.patch.object(
-                subject, "_fsync_directory",
-                side_effect=OSError("injected directory fsync failure")):
+        real_fsync = os.fsync
+
+        def fail_directory_fsync(descriptor: int) -> None:
+            if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+                raise OSError("injected directory fsync failure")
+            real_fsync(descriptor)
+
+        with mock.patch.object(os, "fsync", side_effect=fail_directory_fsync):
             with self.assertRaises(subject.RunnerError):
                 subject._atomic_write_bytes(destination, b"complete\n")
-        self.assertFalse(destination.exists())
+        self.assertEqual(destination.read_bytes(), b"complete\n")
 
-    def test_post_link_deadline_removes_own_artifact(self) -> None:
+    def test_atomic_write_fdopen_failure_closes_and_unlinks_staging(
+            self) -> None:
+        destination = self.root / "atomic-fdopen-failure.json"
+        descriptors = []
+
+        def reject_fdopen(descriptor: int, _mode: str):
+            descriptors.append(descriptor)
+            raise OSError("injected fdopen failure")
+
+        with mock.patch.object(
+                subject.os, "fdopen", side_effect=reject_fdopen), \
+                self.assertRaisesRegex(OSError, "injected fdopen failure"):
+            subject._atomic_write_bytes(destination, b"complete\n")
+        self.assertEqual(len(descriptors), 1)
+        with self.assertRaises(OSError) as raised:
+            os.fstat(descriptors[0])
+        self.assertEqual(raised.exception.errno, errno.EBADF)
+        self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_atomic_line_sink_fdopen_failure_closes_and_unlinks_staging(
+            self) -> None:
+        destination = self.root / "sink-fdopen-failure.jsonl"
+        descriptors = []
+
+        def reject_fdopen(descriptor: int, _mode: str):
+            descriptors.append(descriptor)
+            raise OSError("injected fdopen failure")
+
+        with mock.patch.object(
+                subject.os, "fdopen", side_effect=reject_fdopen), \
+                self.assertRaisesRegex(OSError, "injected fdopen failure"):
+            subject.AtomicLineSink(destination)
+        self.assertEqual(len(descriptors), 1)
+        with self.assertRaises(OSError) as raised:
+            os.fstat(descriptors[0])
+        self.assertEqual(raised.exception.errno, errno.EBADF)
+        self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_atomic_line_sink_field_failure_closes_and_unlinks_staging(
+            self) -> None:
+        class InjectedInterrupt(BaseException):
+            pass
+
+        class FailingSink(subject.AtomicLineSink):
+            def __setattr__(self, name, value):
+                if name == "sha256":
+                    raise InjectedInterrupt()
+                object.__setattr__(self, name, value)
+
+        destination = self.root / "sink-field-failure.jsonl"
+        descriptors = []
+        real_fdopen = os.fdopen
+
+        def capture_fdopen(descriptor: int, mode: str):
+            descriptors.append(descriptor)
+            return real_fdopen(descriptor, mode)
+
+        with mock.patch.object(
+                subject.os, "fdopen", side_effect=capture_fdopen), \
+                self.assertRaises(InjectedInterrupt):
+            FailingSink(destination)
+        self.assertEqual(len(descriptors), 1)
+        with self.assertRaises(OSError) as raised:
+            os.fstat(descriptors[0])
+        self.assertEqual(raised.exception.errno, errno.EBADF)
+        self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_post_link_deadline_preserves_visible_commit(self) -> None:
         destination = self.root / "deadline-output.json"
         error = subject.RunnerError("injected hard-wall deadline")
-        with mock.patch.object(
-                subject, "_fsync_directory", side_effect=error):
+        real_fsync = os.fsync
+
+        def fail_directory_fsync(descriptor: int) -> None:
+            if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+                raise error
+            real_fsync(descriptor)
+
+        with mock.patch.object(os, "fsync", side_effect=fail_directory_fsync):
             with self.assertRaisesRegex(subject.RunnerError, "hard-wall"):
                 subject._atomic_write_bytes(destination, b"complete\n")
-        self.assertFalse(destination.exists())
+        self.assertEqual(destination.read_bytes(), b"complete\n")
+
+    def test_atomic_callers_preserve_post_publish_commit_by_inode(self) \
+            -> None:
+        class InjectedInterrupt(BaseException):
+            pass
+
+        for writer in ("atomic", "sink"):
+            for replacement in (False, True):
+                with self.subTest(writer=writer, replacement=replacement):
+                    destination = self.root / "{}-{}.jsonl".format(
+                        writer, "replacement" if replacement else "own")
+                    real_publish = subject._publish_staged
+
+                    def publish_then_interrupt(
+                            staged, target, expected_identity=None):
+                        real_publish(staged, target, expected_identity)
+                        if replacement:
+                            target.unlink()
+                            target.write_bytes(b"replacement winner\n")
+                        raise InjectedInterrupt()
+
+                    with mock.patch.object(
+                            subject, "_publish_staged",
+                            side_effect=publish_then_interrupt):
+                        if writer == "atomic":
+                            with self.assertRaises(InjectedInterrupt):
+                                subject._atomic_write_bytes(
+                                    destination, b"new artifact\n")
+                        else:
+                            sink = subject.AtomicLineSink(destination)
+                            try:
+                                sink.write(b"new artifact\n")
+                                with self.assertRaises(InjectedInterrupt):
+                                    sink.publish()
+                            finally:
+                                sink.abort()
+                    if replacement:
+                        self.assertEqual(
+                            destination.read_bytes(), b"replacement winner\n")
+                    else:
+                        self.assertEqual(
+                            destination.read_bytes(), b"new artifact\n")
+
+        for writer in ("atomic", "sink"):
+            with self.subTest(writer=writer, preexisting=True):
+                destination = self.root / (writer + "-preexisting.jsonl")
+                destination.write_bytes(b"preexisting winner\n")
+                if writer == "atomic":
+                    with self.assertRaises(subject.RunnerError):
+                        subject._atomic_write_bytes(
+                            destination, b"new artifact\n")
+                else:
+                    sink = subject.AtomicLineSink(destination)
+                    try:
+                        sink.write(b"new artifact\n")
+                        with self.assertRaises(subject.RunnerError):
+                            sink.publish()
+                    finally:
+                        sink.abort()
+                self.assertEqual(
+                    destination.read_bytes(), b"preexisting winner\n")
 
     def test_exact_recovery_and_homogeneous_timing_wave_domains(self) -> None:
         contract = contract_api.load_contract()
@@ -437,9 +1025,11 @@ class NativeRunnerTests(unittest.TestCase):
         for repetitions in (16, 24):
             with self.subTest(repetitions=repetitions):
                 candidate = self._timing_contract(repetitions)
-                waves = subject._timing_job_waves(candidate, len(panels))
+                qualification = self._qualification(candidate)
+                waves = subject._timing_job_waves(
+                    candidate, len(panels), qualification)
                 cells = list(contract_api.iter_timing_cells(
-                    candidate, "development"))
+                    candidate, "development", qualification))
                 round_count = repetitions // subject.TIMING_WORKER_COUNT
                 self.assertEqual(len(waves), 264 * round_count)
                 self.assertTrue(all(
@@ -501,19 +1091,67 @@ class NativeRunnerTests(unittest.TestCase):
                     counts == [33] * subject.TIMING_WORKER_COUNT
                     for counts in worker_counts.values()))
 
-                rebuilt = subject._timing_job_waves(candidate, len(panels))
+                rebuilt = subject._timing_job_waves(
+                    candidate, len(panels), qualification)
                 self.assertEqual(
                     [(rotation, [job.command() for job in jobs])
                      for rotation, jobs in waves],
                     [(rotation, [job.command() for job in jobs])
                      for rotation, jobs in rebuilt])
 
+    def test_timing_waves_pack_each_cells_own_selected_retry(self) -> None:
+        contract = self._timing_contract(16)
+        base_cells = list(contract_api.iter_timing_base_cells(
+            contract, "development"))
+        stable_fields = [
+            field for field in contract["timing"]["cell_key"]
+            if field not in (
+                "replicate", "base_loss_seed", "base_cell_sha256",
+                "loss_retry_offset", "loss_seed")
+        ]
+        first_identity = {
+            field: base_cells[0][field] for field in stable_fields
+        }
+        first_cohort = [
+            ordinal for ordinal, cell in enumerate(base_cells)
+            if all(cell[field] == value
+                   for field, value in first_identity.items())
+        ]
+        self.assertEqual(len(first_cohort), 16)
+        offsets = [0] * len(base_cells)
+        expected_first = [0, 1, 2, 3, 0, 1, 2, 3]
+        for ordinal, retry in zip(first_cohort[:8], expected_first):
+            offsets[ordinal] = retry
+        qualification = self._qualification(contract, offsets)
+        panels = contract_api.timing_panels(
+            contract, [value[0] for value in subject.EXPECTED_ARMS])
+        cells = list(contract_api.iter_timing_cells(
+            contract, "development", qualification))
+        waves = subject._timing_job_waves(
+            contract, len(panels), qualification)
+        first_wave = waves[0][1]
+        self.assertEqual(
+            [job.retry_offset for job in first_wave], expected_first)
+        self.assertGreater(len({job.retry_offset for job in first_wave}), 1)
+        for _, jobs in waves:
+            for job in jobs:
+                self.assertEqual(
+                    job.retry_offset,
+                    cells[job.cell]["loss_retry_offset"])
+                prefix, cell, packed = job.command().decode("ascii").split()
+                self.assertEqual(prefix, "T")
+                self.assertEqual(int(cell), job.cell)
+                panel, retry = divmod(int(packed), 256)
+                self.assertEqual(panel, job.item)
+                self.assertEqual(retry, job.retry_offset)
+
     def test_timing_wave_builder_fails_closed_on_domain_mutations(self) -> None:
         contract = self._timing_contract(16)
+        qualification = self._qualification(contract)
         panel_count = len(contract_api.timing_panels(
             contract, [value[0] for value in subject.EXPECTED_ARMS]))
         original = list(contract_api.iter_timing_cells(
-            contract, "development"))
+            contract, "development", qualification))
         mutations = {}
         mutations["missing"] = original[:-1]
         mutations["extra"] = original + [dict(original[-1])]
@@ -529,18 +1167,22 @@ class NativeRunnerTests(unittest.TestCase):
         for name, cells in mutations.items():
             with self.subTest(name=name), mock.patch.object(
                     contract_api, "iter_timing_cells",
-                    side_effect=lambda _contract, _phase, values=cells:
+                    side_effect=lambda _contract, _phase, _qualification,
+                    values=cells:
                         iter(values)):
                 with self.assertRaises(subject.RunnerError):
-                    subject._timing_job_waves(contract, panel_count)
+                    subject._timing_job_waves(
+                        contract, panel_count, qualification)
         for bad_panel_count in (True, panel_count - 1, panel_count + 1):
             with self.subTest(panel_count=bad_panel_count):
                 with self.assertRaises(subject.RunnerError):
-                    subject._timing_job_waves(contract, bad_panel_count)
+                    subject._timing_job_waves(
+                        contract, bad_panel_count, qualification)
 
     def test_timing_wave_builder_derives_multi_candidate_cohort_count(self) \
             -> None:
         contract = self._timing_contract(16)
+        qualification = self._qualification(contract)
         expanded_arms = subject.EXPECTED_ARMS + (
             ("candidate_two", "wirehair2_experiment"),
         )
@@ -548,7 +1190,8 @@ class NativeRunnerTests(unittest.TestCase):
             roster = [value[0] for value in expanded_arms]
             panel_count = len(contract_api.timing_panels(contract, roster))
             self.assertEqual(panel_count, 18)
-            waves = subject._timing_job_waves(contract, panel_count)
+            waves = subject._timing_job_waves(
+                contract, panel_count, qualification)
             self.assertEqual(
                 len(waves),
                 contract_api.timing_cohort_count(
@@ -558,11 +1201,12 @@ class NativeRunnerTests(unittest.TestCase):
 
     def test_timing_worker_count_rejects_before_native_dispatch(self) -> None:
         contract = self._timing_contract(16)
+        qualification = self._qualification(contract)
         for count in (0, 7, 9):
             with self.subTest(count=count), self.assertRaisesRegex(
                     subject.RunnerError, "exactly eight timing workers"):
                 subject._run_native_jobs(
-                    contract, {}, {}, [object()] * count,
+                    contract, {}, qualification, {}, [object()] * count,
                     self.root, 0, time.monotonic() + 1.0)
         for repetitions in (0, 7, 12):
             candidate = self._timing_contract(16)
@@ -571,7 +1215,8 @@ class NativeRunnerTests(unittest.TestCase):
             with self.subTest(repetitions=repetitions), \
                     self.assertRaisesRegex(
                         subject.RunnerError, "positive multiple of eight"):
-                subject._timing_job_waves(candidate, 11)
+                subject._timing_job_waves(
+                    candidate, 11, qualification)
 
     def test_sampler_fixture_waits_for_an_exact_new_sample(self) -> None:
         path = self.root / "thermal.csv"
@@ -677,6 +1322,133 @@ class NativeRunnerTests(unittest.TestCase):
         self.assertEqual(len((self.root / "native.jsonl").read_text().splitlines()),
                          12)
 
+    def test_qualification_adaptive_tail_retries_only_one_unresolved_cell(
+            self) -> None:
+        allowed = sorted(os.sched_getaffinity(0))
+        if len(allowed) < 9:
+            self.skipTest("more than eight logical CPUs are required")
+        cpus = allowed[:min(12, len(allowed))]
+        contract = self._timing_contract(8)
+        expected_cells = contract["timing"]["domains"]["development"][
+            "expected_cells"]
+        target_cell = expected_cells - 1
+        worker_path = self._fake_worker()
+        description = self._description(worker_path)
+        log = self.root / "qualification-worker.log"
+        output = self.root / "qualification-native.jsonl"
+        old_log = os.environ.get("WH2_FAKE_WORKER_LOG")
+        os.environ["WH2_FAKE_WORKER_LOG"] = str(log)
+        workers = []
+        observed = []
+
+        def validate(_contract, _description, _cells, _window_start,
+                     _value, _worker, job):
+            observed.append((job.cell, job.retry_offset))
+            success = not (
+                job.cell == target_cell and job.retry_offset == 0)
+            return time.monotonic_ns(), success
+
+        try:
+            workers = subject.spawn_workers(
+                description, cpus, time.monotonic() + 10.0)
+            with mock.patch.object(
+                    subject, "_strict_qualification_response",
+                    side_effect=validate):
+                path, maximum_end = subject.run_timing_qualification(
+                    contract, description, workers, output, 0,
+                    time.monotonic() + 10.0)
+            self.assertEqual(path, output)
+            self.assertGreater(maximum_end, 0)
+            subject.quit_workers(workers, time.monotonic() + 10.0)
+            workers = []
+        finally:
+            subject.terminate_workers(workers)
+            if old_log is None:
+                os.environ.pop("WH2_FAKE_WORKER_LOG", None)
+            else:
+                os.environ["WH2_FAKE_WORKER_LOG"] = old_log
+        self.assertEqual(len(observed), expected_cells + 1)
+        self.assertEqual(
+            sorted(value for value in observed if value[0] == target_cell),
+            [(target_cell, 0), (target_cell, 1)])
+        self.assertTrue(all(
+            retry == 0 for cell, retry in observed if cell != target_cell))
+        self.assertEqual(
+            len(output.read_text(encoding="utf-8").splitlines()),
+            expected_cells + 1)
+        commands = [
+            json.loads(line)["command"]
+            for line in log.read_text(encoding="utf-8").splitlines()
+            if json.loads(line)["state"] == "start"
+        ]
+        self.assertEqual(commands.count(
+            "L {} 0".format(target_cell)), 1)
+        self.assertEqual(commands.count(
+            "L {} 1".format(target_cell)), 1)
+        self.assertFalse(any(command.endswith(" 2")
+                             for command in commands))
+
+    def test_qualification_selector_register_failure_closes_and_aborts(
+            self) -> None:
+        contract = {
+            "timing": {"domains": {"development": {"expected_cells": 1}}},
+        }
+        process = mock.Mock()
+        process.stdout = mock.Mock()
+        worker = mock.Mock(
+            cpu=3, process=process, pending=None, buffer=b"")
+        sink = mock.Mock()
+        selector = mock.Mock()
+        selector.register.side_effect = OSError(
+            "injected selector registration failure")
+        with mock.patch.object(
+                contract_api, "iter_timing_base_cells",
+                return_value=iter(({},))), \
+                mock.patch.object(
+                    subject, "AtomicLineSink", return_value=sink), \
+                mock.patch.object(
+                    subject.selectors, "DefaultSelector",
+                    return_value=selector), \
+                self.assertRaisesRegex(
+                    OSError, "selector registration failure"):
+            subject.run_timing_qualification(
+                contract, {}, [worker], self.root / "qualification.jsonl",
+                0, time.monotonic() + 1.0)
+        selector.close.assert_called_once_with()
+        sink.abort.assert_called_once_with()
+        sink.publish.assert_not_called()
+
+    def test_second_native_sink_constructor_failure_aborts_first(self) \
+            -> None:
+        recovery_sink = mock.Mock()
+        construction_paths = []
+
+        def construct(path):
+            construction_paths.append(path)
+            if len(construction_paths) == 1:
+                return recovery_sink
+            raise OSError("injected timing sink construction failure")
+
+        workers = [mock.Mock(cpu=cpu) for cpu in range(8)]
+        qualification = mock.Mock()
+        with mock.patch.object(
+                contract_api, "timing_panels", return_value=[]), \
+                mock.patch.object(
+                    subject, "_timing_job_waves", return_value=[]), \
+                mock.patch.object(
+                    subject, "AtomicLineSink", side_effect=construct), \
+                self.assertRaisesRegex(
+                    OSError, "timing sink construction failure"):
+            subject._run_native_jobs(
+                {}, {}, qualification, {}, workers, self.root, 0,
+                time.monotonic() + 1.0)
+        self.assertEqual(construction_paths, [
+            self.root / "recovery-native-results.jsonl",
+            self.root / "timing-native-results.jsonl",
+        ])
+        recovery_sink.abort.assert_called_once_with()
+        recovery_sink.publish.assert_not_called()
+
     def test_worker_error_terminates_complete_pool(self) -> None:
         worker_path = self._fake_worker()
         description = self._description(worker_path)
@@ -705,6 +1477,41 @@ class NativeRunnerTests(unittest.TestCase):
         self.assertTrue(all(worker.process.poll() is not None
                             for worker in workers))
         self.assertFalse((self.root / "failed.jsonl").exists())
+
+    def test_terminate_workers_reports_stubborn_survivor_after_full_cleanup(
+            self) -> None:
+        class StubbornProcess:
+            def __init__(self) -> None:
+                self.stdin = mock.Mock()
+                self.stdout = mock.Mock()
+                self.stderr = mock.Mock()
+                self.terminate_calls = 0
+                self.kill_calls = 0
+                self.wait_timeouts: List[float] = []
+
+            def poll(self):
+                return None
+
+            def terminate(self) -> None:
+                self.terminate_calls += 1
+
+            def kill(self) -> None:
+                self.kill_calls += 1
+
+            def wait(self, timeout=None):
+                self.wait_timeouts.append(timeout)
+                raise subprocess.TimeoutExpired("stubborn-worker", timeout)
+
+        process = StubbornProcess()
+        worker = subject.PersistentWorker(17, process, 1)
+        with self.assertRaisesRegex(
+                subject.RunnerError, "unreaped CPUs 17"):
+            subject.terminate_workers([worker])
+        self.assertEqual(process.terminate_calls, 1)
+        self.assertEqual(process.kill_calls, 1)
+        self.assertEqual(len(process.wait_timeouts), 2)
+        for stream in (process.stdin, process.stdout, process.stderr):
+            stream.close.assert_called_once_with()
 
     def test_git_head_rejects_relevant_dirty_or_untracked_source(self) -> None:
         repo = self.root / "repo"
