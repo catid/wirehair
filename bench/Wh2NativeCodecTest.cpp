@@ -18,6 +18,7 @@ using wirehair_wh2_bench::NativeEncoderFixture;
 using wirehair_wh2_bench::NativeReceiveFixture;
 using wirehair_wh2_bench::NativeRecoveryFixture;
 using wirehair_wh2_bench::NativeSolveFixture;
+using wirehair_wh2_bench::NativeWh2BaseKind;
 using wirehair_wh2_bench::RecoveryCellResult;
 using wirehair_wh2_bench::RecoveryOutcome;
 
@@ -265,6 +266,61 @@ struct TransformState
     uint32_t Calls = 0u;
 };
 
+bool SamePrecodeParams(
+    const wirehair_v2::PrecodeParams& left,
+    const wirehair_v2::PrecodeParams& right)
+{
+    return left.BlockCount == right.BlockCount &&
+        left.Staircase == right.Staircase &&
+        left.DenseRows == right.DenseRows &&
+        left.HeavyRows == right.HeavyRows &&
+        left.SourceHits == right.SourceHits &&
+        left.DenseIdentityCorner == right.DenseIdentityCorner &&
+        left.HeavyFamily == right.HeavyFamily &&
+        left.Seed == right.Seed;
+}
+
+struct CanonicalBaseState
+{
+    uint32_t ExpectedBlockCount = 0u;
+    uint32_t ExpectedBlockBytes = 0u;
+    uint32_t Calls = 0u;
+    bool SawCanonicalBase = false;
+};
+
+bool CanonicalBaseTransform(
+    uint32_t block_count,
+    uint32_t block_bytes,
+    wirehair_v2::PrecodeParams& params,
+    wirehair_v2::PacketRowConfig& packet_config,
+    void* context)
+{
+    CanonicalBaseState* const state =
+        static_cast<CanonicalBaseState*>(context);
+    if (!state) {
+        return false;
+    }
+    ++state->Calls;
+    const wirehair_v2::PrecodeParams expected =
+        wirehair_v2::MakeCertifiedParams(block_count, 0u);
+    state->SawCanonicalBase =
+        block_count == state->ExpectedBlockCount &&
+        block_bytes == state->ExpectedBlockBytes &&
+        SamePrecodeParams(params, expected) &&
+        packet_config.PeelSeed == 0u &&
+        packet_config.MixCount == wirehair_v2::kCertifiedPacketMixCount;
+    if (!state->SawCanonicalBase) {
+        return false;
+    }
+
+    // Install a fixed diagnostic schedule only after observing the closed,
+    // seed-free base.  These values are intentionally independent of K and
+    // block width and are known to admit the representative test shapes.
+    params.Seed = UINT64_C(0x487468302aad7105);
+    packet_config.PeelSeed = UINT32_C(0x4ec72102);
+    return true;
+}
+
 bool RuntimeCandidateTransform(
     uint32_t block_count,
     uint32_t block_bytes,
@@ -296,6 +352,104 @@ bool InvalidCandidateTransform(
     return true;
 }
 
+void CheckCanonicalCertifiedBase()
+{
+    struct Shape
+    {
+        uint32_t K;
+        uint32_t BlockBytes;
+    };
+    const Shape shapes[] = {
+        { 4u, 2u },
+        { 32u, 17u },
+        { 1001u, 1280u }
+    };
+    for (const Shape& shape : shapes)
+    {
+        std::vector<uint8_t> source;
+        Check(wirehair_wh2_bench::MakeDeterministicSource(
+                  shape.K,
+                  shape.BlockBytes,
+                  UINT64_C(0xa12f05e46379bdc8) ^ shape.K ^
+                      shape.BlockBytes,
+                  source),
+            "canonical-base source generation failed");
+        CanonicalBaseState state;
+        state.ExpectedBlockCount = shape.K;
+        state.ExpectedBlockBytes = shape.BlockBytes;
+        const NativeArmSpec spec =
+            wirehair_wh2_bench::MakeExperimentalWh2Arm(
+                0u,
+                CanonicalBaseTransform,
+                &state,
+                nullptr,
+                NativeWh2BaseKind::CanonicalCertifiedStructure);
+        Check(spec.Kind == NativeArmKind::Wirehair2Experiment &&
+                  spec.BaseKind ==
+                      NativeWh2BaseKind::CanonicalCertifiedStructure,
+            "canonical-base factory produced the wrong arm identity");
+
+        NativeArm arm;
+        Check(arm.Initialize(
+                  spec, shape.K, shape.BlockBytes, source) == Wirehair_Success,
+            "canonical-base exact construction failed");
+        Check(state.Calls == 1u && state.SawCanonicalBase,
+            "canonical transform did not observe the zero-seed certified base");
+        std::vector<uint8_t> packet;
+        Check(arm.Encode(shape.K + 7u, packet) == Wirehair_Success &&
+                  packet.size() == shape.BlockBytes,
+            "canonical-base arm did not remain usable after its transform");
+    }
+
+    // The timed encoder copies a spec and reconstructs the arm later through
+    // the private initialization seam.  Exercise that path and prove that a
+    // rejected reinitialization cannot replace the previously frozen spec.
+    const Shape timed_shape = { 4u, 2u };
+    std::vector<uint8_t> timed_source;
+    Check(wirehair_wh2_bench::MakeDeterministicSource(
+              timed_shape.K,
+              timed_shape.BlockBytes,
+              UINT64_C(0x6ad54e1c830fb972),
+              timed_source),
+        "canonical timed source generation failed");
+    CanonicalBaseState timed_state;
+    timed_state.ExpectedBlockCount = timed_shape.K;
+    timed_state.ExpectedBlockBytes = timed_shape.BlockBytes;
+    const NativeArmSpec timed_spec =
+        wirehair_wh2_bench::MakeExperimentalWh2Arm(
+            0u,
+            CanonicalBaseTransform,
+            &timed_state,
+            nullptr,
+            NativeWh2BaseKind::CanonicalCertifiedStructure);
+    NativeEncoderFixture timed_fixture;
+    Check(timed_fixture.Initialize(
+              timed_spec,
+              timed_shape.K,
+              timed_shape.BlockBytes,
+              timed_source) == Wirehair_Success &&
+              timed_state.Calls == 0u,
+        "canonical timed fixture constructed before its measured run");
+    NativeArmSpec invalid_replacement = timed_spec;
+    invalid_replacement.Wh2Options.PrecodeSeedSalt = 1u;
+    Check(timed_fixture.Initialize(
+              invalid_replacement,
+              timed_shape.K,
+              timed_shape.BlockBytes,
+              timed_source) == Wirehair_InvalidInput &&
+              timed_fixture.IsInitialized() &&
+              timed_state.Calls == 0u,
+        "invalid canonical timed reinitialization replaced the prior spec");
+    const wirehair_wh2_bench::TimedArmResult timed_result =
+        timed_fixture.Run();
+    Check(timed_result.Result == Wirehair_Success &&
+              timed_result.BytesVerified &&
+              timed_result.ElapsedNanoseconds > 0u &&
+              timed_state.Calls == 1u &&
+              timed_state.SawCanonicalBase,
+        "canonical timed path did not use its preserved zero-seed base");
+}
+
 void CheckArmsAndNestedRecovery()
 {
     const uint32_t K = 32u;
@@ -325,6 +479,8 @@ void CheckArmsAndNestedRecovery()
     const NativeArmSpec candidate =
         wirehair_wh2_bench::MakeExperimentalWh2Arm(
             1u, RuntimeCandidateTransform, &transform_state);
+    Check(candidate.BaseKind == NativeWh2BaseKind::ProductionProfile,
+        "experimental factory no longer defaults to the production profile");
     NativeArm candidate_arm;
     Check(candidate_arm.Initialize(
               candidate, K, block_bytes, source) == Wirehair_Success,
@@ -333,6 +489,27 @@ void CheckArmsAndNestedRecovery()
               candidate_arm.ConstructionAttempt() == 1u &&
               transform_state.Calls == 1u,
         "runtime candidate transform/identity receipt is wrong");
+
+    TransformState explicit_production_state;
+    const NativeArmSpec explicit_production =
+        wirehair_wh2_bench::MakeExperimentalWh2Arm(
+            1u,
+            RuntimeCandidateTransform,
+            &explicit_production_state,
+            nullptr,
+            NativeWh2BaseKind::ProductionProfile);
+    NativeArm explicit_production_arm;
+    Check(explicit_production_arm.Initialize(
+              explicit_production, K, block_bytes, source) == Wirehair_Success &&
+              explicit_production_state.Calls == 1u,
+        "explicit production-profile experiment changed behavior");
+    std::vector<uint8_t> default_packet;
+    std::vector<uint8_t> explicit_packet;
+    Check(candidate_arm.Encode(K + 9u, default_packet) == Wirehair_Success &&
+              explicit_production_arm.Encode(K + 9u, explicit_packet) ==
+                  Wirehair_Success &&
+              default_packet == explicit_packet,
+        "default and explicit production experiments diverged");
 
     NativeRecoveryFixture fixture;
     Check(fixture.Initialize(candidate_arm, ids) == Wirehair_Success,
@@ -392,6 +569,63 @@ void CheckTransactionalArmAndValidation()
               arm.Encode(K + 5u, after) == Wirehair_Success &&
               after == before,
         "failed reinitialization modified the prior exact arm");
+
+    TransformState canonical_rejection_state;
+    const NativeArmSpec canonical =
+        wirehair_wh2_bench::MakeExperimentalWh2Arm(
+            0u,
+            RuntimeCandidateTransform,
+            &canonical_rejection_state,
+            nullptr,
+            NativeWh2BaseKind::CanonicalCertifiedStructure);
+    std::vector<NativeArmSpec> invalid_canonical_specs;
+    NativeArmSpec bad_base_legacy = wirehair_wh2_bench::MakeWirehair1Arm();
+    bad_base_legacy.BaseKind =
+        NativeWh2BaseKind::CanonicalCertifiedStructure;
+    invalid_canonical_specs.push_back(bad_base_legacy);
+    NativeArmSpec bad_base_control =
+        wirehair_wh2_bench::MakeCertifiedWh2Arm(0u);
+    bad_base_control.BaseKind =
+        NativeWh2BaseKind::CanonicalCertifiedStructure;
+    invalid_canonical_specs.push_back(bad_base_control);
+    invalid_canonical_specs.push_back(
+        wirehair_wh2_bench::MakeExperimentalWh2Arm(
+            0u,
+            nullptr,
+            nullptr,
+            nullptr,
+            NativeWh2BaseKind::CanonicalCertifiedStructure));
+    NativeArmSpec unknown_base = canonical;
+    unknown_base.BaseKind = static_cast<NativeWh2BaseKind>(UINT32_MAX);
+    invalid_canonical_specs.push_back(unknown_base);
+    for (uint32_t option = 0u; option < 6u; ++option)
+    {
+        NativeArmSpec nondefault = canonical;
+        if (option == 0u) nondefault.Wh2Options.RecoveryMixCount = 2u;
+        else if (option == 1u) nondefault.Wh2Options.DenseIdentityCorner = true;
+        else if (option == 2u) nondefault.Wh2Options.PrecodeSeedSalt = 1u;
+        else if (option == 3u) nondefault.Wh2Options.RecoveryRowSeedSalt = 1u;
+        else if (option == 4u)
+            nondefault.Wh2Options.CacheSystematicSource = true;
+        else
+            nondefault.Wh2Options.CacheReceivedSystematicPackets = true;
+        invalid_canonical_specs.push_back(nondefault);
+    }
+    for (const NativeArmSpec& invalid : invalid_canonical_specs)
+    {
+        Check(arm.Initialize(invalid, K, block_bytes, source) ==
+                  Wirehair_InvalidInput,
+            "invalid canonical-base combination was accepted");
+        after.clear();
+        Check(arm.IsInitialized() &&
+                  arm.Kind() == NativeArmKind::Wirehair2Certified &&
+                  arm.ConstructionAttempt() == 0u &&
+                  arm.Encode(K + 5u, after) == Wirehair_Success &&
+                  after == before,
+            "invalid canonical-base reinitialization modified the prior arm");
+    }
+    Check(canonical_rejection_state.Calls == 0u,
+        "invalid canonical-base spec invoked its transform");
 
     NativeArmSpec bad_legacy = wirehair_wh2_bench::MakeWirehair1Arm();
     bad_legacy.ConstructionAttempt = 1u;
@@ -551,6 +785,7 @@ int main()
     CheckDeterministicSource();
     CheckCertifiedMatchesPublicProfile();
     CheckSourceIndependentRankClassification();
+    CheckCanonicalCertifiedBase();
     CheckArmsAndNestedRecovery();
     CheckTransactionalArmAndValidation();
     CheckIsolatedSolveFixture();

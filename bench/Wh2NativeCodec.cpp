@@ -68,18 +68,32 @@ bool ValidArmSpec(const NativeArmSpec& spec)
     if (spec.Kind == NativeArmKind::Wirehair1)
     {
         return spec.ConstructionAttempt == 0u && !spec.Transform &&
-            !spec.TransformContext && DefaultWh2Options(spec.Wh2Options);
+            !spec.TransformContext && DefaultWh2Options(spec.Wh2Options) &&
+            spec.BaseKind == NativeWh2BaseKind::ProductionProfile;
     }
     if (spec.Kind == NativeArmKind::Wirehair2Certified)
     {
         return spec.ConstructionAttempt <= kMaxConstructionAttempt &&
             !spec.Transform && !spec.TransformContext &&
-            CertifiedEquationOptions(spec.Wh2Options);
+            CertifiedEquationOptions(spec.Wh2Options) &&
+            spec.BaseKind == NativeWh2BaseKind::ProductionProfile;
     }
     if (spec.Kind == NativeArmKind::Wirehair2Experiment)
     {
-        return spec.ConstructionAttempt <= kMaxConstructionAttempt &&
-            (spec.Transform || !spec.TransformContext);
+        if (spec.ConstructionAttempt > kMaxConstructionAttempt ||
+            (!spec.Transform && spec.TransformContext))
+        {
+            return false;
+        }
+        if (spec.BaseKind == NativeWh2BaseKind::ProductionProfile) {
+            return true;
+        }
+        if (spec.BaseKind ==
+                NativeWh2BaseKind::CanonicalCertifiedStructure)
+        {
+            return spec.Transform && DefaultWh2Options(spec.Wh2Options);
+        }
+        return false;
     }
     return false;
 }
@@ -339,10 +353,12 @@ NativeArmSpec MakeExperimentalWh2Arm(
     uint32_t construction_attempt,
     Wh2EquationTransform transform,
     void* transform_context,
-    const wirehair_v2::MessagePrecodeEncoderOptions* options)
+    const wirehair_v2::MessagePrecodeEncoderOptions* options,
+    NativeWh2BaseKind base_kind)
 {
     NativeArmSpec spec;
     spec.Kind = NativeArmKind::Wirehair2Experiment;
+    spec.BaseKind = base_kind;
     spec.ConstructionAttempt = construction_attempt;
     spec.Transform = transform;
     spec.TransformContext = transform_context;
@@ -472,20 +488,30 @@ WirehairResult NativeArm::InitializeOwnedSourceAfterGlobalInit(
             return Wirehair_Success;
         }
 
-        wirehair_v2::SeedProfile profile =
-            wirehair_v2::SelectSeedProfile(block_count, block_bytes);
-        wirehair_v2::MessagePrecodeEncoderOptions options;
-        if (!wirehair_v2::ResolveMessagePrecodeOptions(
-                profile, &spec.Wh2Options, options))
-        {
-            return Wirehair_InvalidInput;
-        }
-
         wirehair_v2::PrecodeParams base_params;
         wirehair_v2::PacketRowConfig base_packet_config;
-        if (!wirehair_v2::ResolveMessagePrecodeConfiguration(
-                profile, options, base_params, base_packet_config))
+        if (spec.BaseKind == NativeWh2BaseKind::ProductionProfile)
         {
+            const wirehair_v2::SeedProfile profile =
+                wirehair_v2::SelectSeedProfile(block_count, block_bytes);
+            wirehair_v2::MessagePrecodeEncoderOptions options;
+            if (!wirehair_v2::ResolveMessagePrecodeOptions(
+                    profile, &spec.Wh2Options, options) ||
+                !wirehair_v2::ResolveMessagePrecodeConfiguration(
+                    profile, options, base_params, base_packet_config))
+            {
+                return Wirehair_InvalidInput;
+            }
+        }
+        else if (spec.BaseKind ==
+                     NativeWh2BaseKind::CanonicalCertifiedStructure)
+        {
+            base_params = wirehair_v2::MakeCertifiedParams(block_count, 0u);
+            base_packet_config.PeelSeed = 0u;
+            base_packet_config.MixCount =
+                wirehair_v2::kCertifiedPacketMixCount;
+        }
+        else {
             return Wirehair_InvalidInput;
         }
         if (spec.Transform &&

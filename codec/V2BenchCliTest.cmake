@@ -50,6 +50,54 @@ function(expect_success pattern)
     reject_sanitizer("${out}${err}" "expected success: ${ARGN}")
 endfunction()
 
+function(expect_precodefail_attempt_csv expected_seed expected_precode
+        expected_packet expected_mode expected_basis)
+    cmake_policy(PUSH)
+    cmake_policy(SET CMP0007 NEW)
+    run_bench(result out err ${ARGN})
+    string(REPLACE "\r\n" "\n" out "${out}")
+    string(REPLACE "\r" "\n" out "${out}")
+    string(REPLACE "\r\n" "\n" err "${err}")
+    string(REPLACE "\r" "\n" err "${err}")
+    if(NOT result MATCHES "^-?[0-9]+$" OR NOT result EQUAL 0)
+        message(FATAL_ERROR
+            "expected exit 0, got '${result}': ${ARGN}\n"
+            "stdout=${out}\nstderr=${err}")
+    endif()
+    string(REGEX MATCH "(^|\n)N,bb,[^\n]*" header "${out}")
+    string(REGEX MATCH "(^|\n)2,1,periodic,[^\n]*" row "${out}")
+    string(REGEX REPLACE "^\n" "" header "${header}")
+    string(REGEX REPLACE "^\n" "" row "${row}")
+    string(REPLACE "," ";" header_fields "${header}")
+    string(REPLACE "," ";" row_fields "${row}")
+    list(LENGTH header_fields header_count)
+    list(LENGTH row_fields row_count)
+    if(NOT header_count EQUAL 38 OR NOT row_count EQUAL header_count)
+        message(FATAL_ERROR
+            "precodefail attempt CSV is not 38 aligned fields: ${ARGN}\n"
+            "header=${header}\nrow=${row}")
+    endif()
+    foreach(name IN ITEMS seed_attempt precode_attempt packet_attempt
+            attempt_mode construction_seed_basis)
+        list(FIND header_fields "${name}" index)
+        if(index LESS 0)
+            message(FATAL_ERROR "precodefail CSV lacks ${name}: ${header}")
+        endif()
+        list(GET row_fields ${index} actual_${name})
+    endforeach()
+    if(NOT "${actual_seed_attempt}" STREQUAL "${expected_seed}" OR
+       NOT "${actual_precode_attempt}" STREQUAL "${expected_precode}" OR
+       NOT "${actual_packet_attempt}" STREQUAL "${expected_packet}" OR
+       NOT "${actual_attempt_mode}" STREQUAL "${expected_mode}" OR
+       NOT "${actual_construction_seed_basis}" STREQUAL "${expected_basis}")
+        message(FATAL_ERROR
+            "precodefail attempt CSV values are misaligned: ${ARGN}\n"
+            "row=${row}")
+    endif()
+    reject_sanitizer("${out}${err}" "attempt CSV: ${ARGN}")
+    cmake_policy(POP)
+endfunction()
+
 # Trial count boundaries, including the old uint16 narrowing boundary.
 expect_failure("trials must be" seedtable --N 2 --bb-list 1
     --peel-candidates 1 --trials 0)
@@ -224,6 +272,113 @@ expect_failure("--gf256-heavy-rows must be in" precodefail
     --gf256-heavy-rows 129)
 expect_failure("--source-hits must be in" precodefail --N 64 --bb-list 8
     --overhead 0 --trials 1 --threads 1 --loss 0.1 --source-hits 0)
+
+# Exact attempts are a paired test hook.  K=2/bb=1 normally requires the
+# selector's attempt 2; forcing (0,0) must expose that weak construction
+# instead of silently retrying.  Unequal pairs prove that the two seeds are
+# controlled independently, and 255 exercises the inclusive uint8 boundary.
+expect_success("2,1,periodic,3,0,1,1,0,0,.*0x0,2,2,selected" precodefail
+    --N 2 --bb-list 1 --overhead 0 --trials 1 --threads 1 --loss 0)
+expect_precodefail_attempt_csv("2" "2" "2" "selected" "production-profile"
+    precodefail
+    --N 2 --bb-list 1 --overhead 0 --trials 1 --threads 1 --loss 0)
+expect_success("2,1,periodic,3,0,1,0,1,0,.*0x0,0,0,exact" precodefail
+    --N 2 --bb-list 1 --overhead 0 --trials 1 --threads 1 --loss 0
+    --exact-precode-attempt 0 --exact-packet-attempt 0
+    --construction-seed-basis production-profile)
+expect_success("2,1,periodic,3,0,1,0,1,0,.*0x0,0,2,exact" precodefail
+    --N 2 --bb-list 1 --overhead 0 --trials 1 --threads 1 --loss 0
+    --exact-precode-attempt 0 --exact-packet-attempt 2
+    --construction-seed-basis production-profile)
+expect_success("2,1,periodic,3,0,1,0,1,0,.*0x0,2,0,exact" precodefail
+    --N 2 --bb-list 1 --overhead 0 --trials 1 --threads 1 --loss 0
+    --exact-precode-attempt 2 --exact-packet-attempt 0
+    --construction-seed-basis production-profile)
+# These asymmetric pairs have different outcomes, so swapping the p/q
+# implementation while leaving the CSV labels unchanged cannot pass.
+expect_success("2,1,periodic,3,0,1,1,0,0,.*0x0,2,1,exact" precodefail
+    --N 2 --bb-list 1 --overhead 0 --trials 1 --threads 1 --loss 0
+    --exact-precode-attempt 2 --exact-packet-attempt 1
+    --construction-seed-basis production-profile)
+expect_success("2,1,periodic,3,0,1,0,1,0,.*0x0,1,2,exact" precodefail
+    --N 2 --bb-list 1 --overhead 0 --trials 1 --threads 1 --loss 0
+    --exact-precode-attempt 1 --exact-packet-attempt 2
+    --construction-seed-basis production-profile)
+expect_success("2,1,periodic,3,0,1,1,0,0,.*0x0,2,2,exact" precodefail
+    --N 2 --bb-list 1 --overhead 0 --trials 1 --threads 1 --loss 0
+    --exact-precode-attempt 2 --exact-packet-attempt 2
+    --construction-seed-basis production-profile)
+expect_precodefail_attempt_csv("" "2" "2" "exact" "production-profile"
+    precodefail
+    --N 2 --bb-list 1 --overhead 0 --trials 1 --threads 1 --loss 0
+    --exact-precode-attempt 2 --exact-packet-attempt 2
+    --construction-seed-basis production-profile)
+expect_success("0x0,255,255,exact" precodefail
+    --N 2 --bb-list 1 --overhead 0 --trials 1 --threads 1 --loss 0
+    --exact-precode-attempt 255 --exact-packet-attempt 255
+    --construction-seed-basis production-profile)
+expect_precodefail_attempt_csv(
+    "" "2" "2" "exact" "uniform-raw-v1"
+    precodefail --N 2 --bb-list 1 --overhead 0 --trials 1 --threads 1
+    --loss 0 --exact-precode-attempt 2 --exact-packet-attempt 2
+    --construction-seed-basis uniform-raw-v1)
+expect_success("uniform-raw-v1,90a98a3db207852dabdf5fb27573ef48bce52e0228cee4e291d96fa44ed509a7,0x84e35ba32942692f,0x8b361474"
+    precodefail --N 2 --bb-list 1 --overhead 0 --trials 1 --threads 1
+    --loss 0 --exact-precode-attempt 2 --exact-packet-attempt 2
+    --construction-seed-basis uniform-raw-v1)
+expect_failure("must be specified together" precodefail
+    --N 2 --bb-list 1 --overhead 0 --trials 1 --threads 1 --loss 0
+    --exact-precode-attempt 0)
+expect_failure("must be specified together" precodefail
+    --N 2 --bb-list 1 --overhead 0 --trials 1 --threads 1 --loss 0
+    --exact-packet-attempt 0)
+expect_failure("exact attempts must be in" precodefail
+    --N 2 --bb-list 1 --overhead 0 --trials 1 --threads 1 --loss 0
+    --exact-precode-attempt 256 --exact-packet-attempt 0)
+expect_failure("bad --exact-packet-attempt value" precodefail
+    --N 2 --bb-list 1 --overhead 0 --trials 1 --threads 1 --loss 0
+    --exact-precode-attempt 0 --exact-packet-attempt malformed)
+expect_failure("must be specified together" precodefail
+    --N 2 --bb-list 1 --overhead 0 --trials 1 --threads 1 --loss 0
+    --construction-seed-basis uniform-raw-v1)
+expect_failure("controls and --construction-seed-basis must be specified together"
+    precodefail --N 2 --bb-list 1 --overhead 0 --trials 1 --threads 1
+    --loss 0 --exact-precode-attempt 0 --exact-packet-attempt 0)
+expect_failure("--exact-precode-attempt may be specified only once"
+    precodefail --N 2 --bb-list 1 --overhead 0 --trials 1 --threads 1
+    --loss 0 --exact-precode-attempt 0 --exact-precode-attempt 1
+    --exact-packet-attempt 0 --construction-seed-basis uniform-raw-v1)
+expect_failure("--exact-packet-attempt may be specified only once"
+    precodefail --N 2 --bb-list 1 --overhead 0 --trials 1 --threads 1
+    --loss 0 --exact-precode-attempt 0 --exact-packet-attempt 0
+    --exact-packet-attempt 1 --construction-seed-basis uniform-raw-v1)
+expect_failure("--construction-seed-basis may be specified only once"
+    precodefail --N 2 --bb-list 1 --overhead 0 --trials 1 --threads 1
+    --loss 0 --exact-precode-attempt 0 --exact-packet-attempt 0
+    --construction-seed-basis uniform-raw-v1
+    --construction-seed-basis production-profile)
+expect_failure("cannot be combined with --seed-block-bytes" precodefail
+    --N 2 --bb-list 1 --overhead 0 --trials 1 --threads 1 --loss 0
+    --exact-precode-attempt 0 --exact-packet-attempt 0
+    --construction-seed-basis uniform-raw-v1 --seed-block-bytes 2)
+expect_failure("cannot be combined with packet-row seed perturbations"
+    precodefail --N 2 --bb-list 1 --overhead 0 --trials 1 --threads 1
+    --loss 0 --exact-precode-attempt 0 --exact-packet-attempt 0
+    --construction-seed-basis uniform-raw-v1 --packet-peel-seed-xor 1)
+expect_failure("cannot be combined with packet-row seed perturbations"
+    precodefail --N 2 --bb-list 1 --overhead 0 --trials 1 --threads 1
+    --loss 0 --exact-precode-attempt 0 --exact-packet-attempt 0
+    --construction-seed-basis uniform-raw-v1 --odd-packet-peel-seed-xor 1)
+expect_failure("cannot be combined with packet-row seed perturbations"
+    precodefail --N 2 --bb-list 1 --overhead 0 --trials 1 --threads 1
+    --loss 0 --exact-precode-attempt 0 --exact-packet-attempt 0
+    --construction-seed-basis uniform-raw-v1
+    --packet-row-seed-multiplier 3)
+expect_failure("cannot be combined with packet-row seed perturbations"
+    precodefail --N 2 --bb-list 1 --overhead 0 --trials 1 --threads 1
+    --loss 0 --exact-precode-attempt 0 --exact-packet-attempt 0
+    --construction-seed-basis uniform-raw-v1
+    --packet-row-seed-avalanche)
 expect_failure("working set exceeds|message dimensions are unsupported" precodefail --N 64000
     --bb-list 2147483647 --overhead 0 --trials 1 --threads 1 --loss 0.1
     --payload-e2e)

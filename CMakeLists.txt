@@ -818,6 +818,36 @@ if(BUILD_TESTS)
         ${WIREHAIR_INTERNAL_LIBRARY}
         Threads::Threads)
     wirehair_apply_project_options(wirehair_wh2_contract_worker)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT CMAKE_CROSSCOMPILING)
+        add_test(
+            NAME wirehair_wh2_contract_worker_cli_test
+            COMMAND ${Python3_EXECUTABLE}
+                ${PROJECT_SOURCE_DIR}/bench/wh2_contract_worker_cli_test.py
+                $<TARGET_FILE:wirehair_wh2_contract_worker>)
+        set_tests_properties(wirehair_wh2_contract_worker_cli_test PROPERTIES
+            WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+            ENVIRONMENT "PYTHONWARNINGS=error"
+            TIMEOUT 120
+            LABELS "wh2;benchmark;contract;native;worker;recovery")
+        add_test(
+            NAME wh2_run_native_recovery_screen_test
+            COMMAND ${Python3_EXECUTABLE} -m unittest -v
+                bench/test_wh2_run_native_recovery_screen.py)
+        set_tests_properties(wh2_run_native_recovery_screen_test PROPERTIES
+            WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+            ENVIRONMENT "PYTHONWARNINGS=error"
+            TIMEOUT 180
+            LABELS "wh2;benchmark;contract;native;runner;recovery")
+        add_test(
+            NAME wh2_precodefail_work_screen_test
+            COMMAND ${Python3_EXECUTABLE} -m unittest -v
+                bench/test_wh2_precodefail_work_screen.py)
+        set_tests_properties(wh2_precodefail_work_screen_test PROPERTIES
+            WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+            ENVIRONMENT "PYTHONWARNINGS=error"
+            TIMEOUT 180
+            LABELS "wh2;benchmark;contract;recovery;precodefail;runner")
+    endif()
     add_test(
         NAME wh2_benchmark_contract_test
         COMMAND ${Python3_EXECUTABLE} -m unittest -v

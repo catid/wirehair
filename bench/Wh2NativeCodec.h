@@ -27,6 +27,21 @@ enum class NativeArmKind : uint32_t
     Wirehair2Experiment
 };
 
+/**
+    Base equation source for a native WH2 arm.
+
+    ProductionProfile preserves the public codec path.  The canonical
+    certified structure is an experiment-only seam: it starts from the
+    certified K-derived geometry with zero precode and packet seeds, so a
+    transform can install a closed diagnostic seed schedule without first
+    traversing production seed selection.
+*/
+enum class NativeWh2BaseKind : uint32_t
+{
+    ProductionProfile = 0,
+    CanonicalCertifiedStructure
+};
+
 typedef bool (*Wh2EquationTransform)(
     uint32_t block_count,
     uint32_t block_bytes,
@@ -37,6 +52,9 @@ typedef bool (*Wh2EquationTransform)(
 struct NativeArmSpec
 {
     NativeArmKind Kind = NativeArmKind::Invalid;
+
+    /** Controls how the pre-transform WH2 equations are constructed. */
+    NativeWh2BaseKind BaseKind = NativeWh2BaseKind::ProductionProfile;
 
     /**
         Exact WH2 public construction attempt in [0,255].  Wirehair1 has no
@@ -69,7 +87,8 @@ NativeArmSpec MakeExperimentalWh2Arm(
     uint32_t construction_attempt,
     Wh2EquationTransform transform,
     void* transform_context = nullptr,
-    const wirehair_v2::MessagePrecodeEncoderOptions* options = nullptr);
+    const wirehair_v2::MessagePrecodeEncoderOptions* options = nullptr,
+    NativeWh2BaseKind base_kind = NativeWh2BaseKind::ProductionProfile);
 
 /**
     Generate an arm-independent, byte-stable message of exactly

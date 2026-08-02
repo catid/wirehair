@@ -1095,70 +1095,116 @@ bool CheckExactSystematicFailureClassification()
 
 bool CheckHeavyCoefficientBoundaryOracle()
 {
-    static const uint32_t kHeavyRows[] = {0u, 1u, 12u, 128u};
+    struct Geometry
+    {
+        uint32_t DenseRows;
+        uint32_t HeavyRows;
+    };
+    static const uint32_t kBoundaryHeavyRows[] = {
+        0u, 1u, 11u, 12u, 13u, 128u
+    };
+    static const uint32_t kCandidateBlockCounts[] = {3u, 4u};
+    static const Geometry kCandidateGeometries[] = {
+        {12u, 11u},
+        {12u, 13u},
+        {13u, 12u}
+    };
     static const wirehair_v2::HeavyCoefficientFamily kFamilies[] = {
         wirehair_v2::HeavyCoefficientFamily::PeriodicCauchy,
         wirehair_v2::HeavyCoefficientFamily::HashedNonzero
     };
-    const uint32_t K = 8u;
     const uint32_t block_bytes = 5u;
-    std::vector<uint8_t> message((size_t)K * block_bytes);
-    for (size_t i = 0; i < message.size(); ++i) {
-        message[i] = (uint8_t)(i * 97u + (i >> 2) + 41u);
-    }
-    std::vector<wirehair_v2::SolvePacket> packets(K);
-    for (uint32_t id = 0u; id < K; ++id) {
-        packets[id].BlockId = id;
-        packets[id].Data = message.data() + (size_t)id * block_bytes;
-    }
 
-    for (wirehair_v2::HeavyCoefficientFamily family : kFamilies)
+    const auto check_case = [](
+        uint32_t K,
+        uint32_t dense_rows,
+        uint32_t heavy_rows,
+        wirehair_v2::HeavyCoefficientFamily family) -> bool
     {
-        for (uint32_t heavy_rows : kHeavyRows)
-        {
-            wirehair_v2::PrecodeParams params =
-                wirehair_v2::MakeCertifiedParams(
-                    K,
-                    UINT64_C(0x4845415659424f55) ^
-                        ((uint64_t)heavy_rows << 8) ^ (uint32_t)family);
-            params.HeavyRows = heavy_rows;
-            params.HeavyFamily = family;
-            wirehair_v2::PacketRowConfig base_config;
-            base_config.PeelSeed =
-                UINT32_C(0xa17e31d9) ^ heavy_rows ^ (uint32_t)family;
-            base_config.MixCount = wirehair_v2::kCertifiedPacketMixCount;
-            wirehair_v2::PrecodeSystem system;
-            wirehair_v2::PacketRowConfig config;
-            if (wirehair_v2::SelectSystematicConfiguration(
-                    params, base_config, system, config) != Wirehair_Success)
-            {
-                std::fprintf(stderr,
-                    "solve: heavy boundary configuration failed H=%u "
-                    "family=%u\n",
-                    heavy_rows, (unsigned)family);
-                return false;
-            }
+        std::vector<uint8_t> message((size_t)K * block_bytes);
+        for (size_t i = 0; i < message.size(); ++i) {
+            message[i] = (uint8_t)(
+                i * 97u + (i >> 2) + K * 17u + dense_rows * 7u +
+                heavy_rows * 3u + (uint32_t)family);
+        }
+        std::vector<wirehair_v2::SolvePacket> packets(K);
+        for (uint32_t id = 0u; id < K; ++id) {
+            packets[id].BlockId = id;
+            packets[id].Data = message.data() + (size_t)id * block_bytes;
+        }
 
-            std::vector<uint8_t> solved;
-            std::vector<uint8_t> oracle;
-            if (wirehair_v2::SolvePrecodeSystem(
-                    system, config, packets, block_bytes, solved) !=
-                    Wirehair_Success ||
-                wirehair_v2::test::SolvePrecodeSystemTinyDenseOracle(
-                    system, config, packets, block_bytes, oracle) !=
-                    Wirehair_Success ||
-                solved != oracle ||
-                !wirehair_v2::VerifyPrecodeSolution(
-                    system, config, packets, solved.data(), block_bytes))
-            {
-                std::fprintf(stderr,
-                    "solve: heavy boundary oracle mismatch H=%u family=%u\n",
-                    heavy_rows, (unsigned)family);
+        wirehair_v2::PrecodeParams params =
+            wirehair_v2::MakeCertifiedParams(
+                K,
+                UINT64_C(0x4845415659424f55) ^
+                    ((uint64_t)K << 32) ^
+                    ((uint64_t)dense_rows << 16) ^
+                    ((uint64_t)heavy_rows << 8) ^ (uint32_t)family);
+        params.DenseRows = dense_rows;
+        params.HeavyRows = heavy_rows;
+        params.HeavyFamily = family;
+        wirehair_v2::PacketRowConfig base_config;
+        base_config.PeelSeed =
+            UINT32_C(0xa17e31d9) ^ K ^ (dense_rows << 16) ^
+            heavy_rows ^ (uint32_t)family;
+        base_config.MixCount = wirehair_v2::kCertifiedPacketMixCount;
+        wirehair_v2::PrecodeSystem system;
+        wirehair_v2::PacketRowConfig config;
+        if (wirehair_v2::SelectSystematicConfiguration(
+                params, base_config, system, config) != Wirehair_Success ||
+            system.Params.DenseRows != dense_rows ||
+            system.Params.HeavyRows != heavy_rows ||
+            system.Params.HeavyFamily != family)
+        {
+            std::fprintf(stderr,
+                "solve: candidate configuration failed K=%u D=%u H=%u "
+                "family=%u\n",
+                K, dense_rows, heavy_rows, (unsigned)family);
+            return false;
+        }
+
+        std::vector<uint8_t> solved;
+        std::vector<uint8_t> oracle;
+        if (wirehair_v2::SolvePrecodeSystem(
+                system, config, packets, block_bytes, solved) !=
+                Wirehair_Success ||
+            wirehair_v2::test::SolvePrecodeSystemTinyDenseOracle(
+                system, config, packets, block_bytes, oracle) !=
+                Wirehair_Success ||
+            solved != oracle ||
+            !wirehair_v2::VerifyPrecodeSolution(
+                system, config, packets, solved.data(), block_bytes))
+        {
+            std::fprintf(stderr,
+                "solve: dense oracle mismatch K=%u D=%u H=%u family=%u\n",
+                K, dense_rows, heavy_rows, (unsigned)family);
+            return false;
+        }
+        return true;
+    };
+
+    for (wirehair_v2::HeavyCoefficientFamily family : kFamilies) {
+        for (uint32_t heavy_rows : kBoundaryHeavyRows) {
+            if (!check_case(8u, 12u, heavy_rows, family)) {
                 return false;
             }
         }
     }
-    std::printf("heavy H=0/1/12/128 periodic/hashed dense oracle: PASS\n");
+    for (wirehair_v2::HeavyCoefficientFamily family : kFamilies)
+    {
+        for (uint32_t K : kCandidateBlockCounts) {
+            for (const Geometry& geometry : kCandidateGeometries) {
+                if (!check_case(
+                        K, geometry.DenseRows, geometry.HeavyRows, family))
+                {
+                    return false;
+                }
+            }
+        }
+    }
+    std::printf(
+        "heavy H=0/1/11/12/13/128 and K=3/4 D/H candidates "
+        "periodic/hashed dense oracle: PASS\n");
     return true;
 }
 

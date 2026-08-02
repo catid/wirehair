@@ -298,3 +298,34 @@ Test-hook builds of `precodefail` also accept
 `--gf256-heavy-rows 1..128` for an absolute GF(256) completion-row count.
 These controls compare denser binary and larger GF(256) alternatives on
 identical packet traces; they do not change named or production profiles.
+
+For construction-mechanism diagnostics, test-hook builds additionally accept
+the paired controls `--exact-precode-attempt p --exact-packet-attempt q`, with
+each attempt in `[0,255]`.  The pair also requires an explicit
+`--construction-seed-basis production-profile|uniform-raw-v1`; all three
+options are rejected outside exact mode.  Exact mode directly builds
+`PrecodeParamsForAttempt(p)` and independently applies
+`PacketConfigForAttempt(q)`; it does not call the systematic selector, probe
+later attempts, or retry a rank failure.  The CSV appends `precode_attempt`,
+`packet_attempt`, `attempt_mode`, `construction_seed_basis`, the bound seed
+schedule hash, and both effective construction seeds to every row.  Its legacy
+`seed_attempt` column retains the selector's common attempt in selected mode
+and is empty in exact mode, where no common selected attempt exists.
+
+`production-profile` starts from the ordinary K- and payload-width-dependent
+seed tables and is retained only for mechanism diagnostics.  Architecture
+screens use `uniform-raw-v1`: fixed precode seed `0x487468302aad7105` and
+packet seed `0x4ec72102`, followed independently by the existing p/q attempt
+strides.  This basis excludes K, payload width, production seed tables, and
+production exact-K fixups; it rejects `--seed-block-bytes`.  Its canonical
+schedule is bound by SHA-256
+`90a98a3db207852dabdf5fb27573ef48bce52e0228cee4e291d96fa44ed509a7`.
+It also rejects packet-row seed XOR, multiplier, and avalanche perturbations,
+which would otherwise make the effective equations disagree with that bound
+schedule.
+The two bases were fixed without a codec search: they are the little-endian
+first 64 and 32 bits of SHA-256 over
+`wirehair.wh2.raw-architecture.precode.v1` and
+`wirehair.wh2.raw-architecture.packet.v1`, respectively.
+These controls and seeds are benchmark inputs only and are never serialized or
+promoted as named codec profiles.

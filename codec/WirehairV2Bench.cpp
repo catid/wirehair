@@ -1,6 +1,7 @@
 #include "WirehairV2Codec.h"
 #include "WirehairV2Plan.h"
 #include "WirehairV2Precode.h"
+#include "WirehairV2RawSeed.h"
 #include "WirehairV2Seeds.h"
 #include "WirehairV2Solve.h"
 
@@ -3461,12 +3462,19 @@ int CmdPrecodeFail(int argc, char** argv)
     bool packet_row_seed_avalanche = false;
     uint32_t seed_block_bytes_override = 0u;
     bool paired_overhead_stream = false;
+    uint32_t exact_precode_attempt = 0u;
+    uint32_t exact_packet_attempt = 0u;
+    bool exact_attempt_mode = false;
+    bool raw_architecture_seeds = false;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     uint32_t fail_thread_launch_after = UINT32_MAX;
     bool source_hits_explicit = false;
     bool binary_dense_rows_explicit = false;
     bool gf256_heavy_rows_explicit = false;
     bool seed_block_bytes_explicit = false;
+    bool exact_precode_attempt_explicit = false;
+    bool exact_packet_attempt_explicit = false;
+    bool construction_seed_basis_explicit = false;
 #endif
 
     for (int i = 0; i < argc; ++i)
@@ -3653,6 +3661,70 @@ int CmdPrecodeFail(int argc, char** argv)
             }
             seed_block_bytes_explicit = true;
         }
+        else if (!std::strcmp(argv[i], "--exact-precode-attempt")) {
+            if (exact_precode_attempt_explicit) {
+                std::fprintf(stderr,
+                    "precodefail --exact-precode-attempt may be "
+                    "specified only once\n");
+                return 1;
+            }
+            if (!TakeArg(
+                    "precodefail", "--exact-precode-attempt",
+                    argc, argv, i, value) ||
+                !ParseU32Arg(
+                    "--exact-precode-attempt", value,
+                    exact_precode_attempt))
+            {
+                return 1;
+            }
+            exact_precode_attempt_explicit = true;
+        }
+        else if (!std::strcmp(argv[i], "--exact-packet-attempt")) {
+            if (exact_packet_attempt_explicit) {
+                std::fprintf(stderr,
+                    "precodefail --exact-packet-attempt may be "
+                    "specified only once\n");
+                return 1;
+            }
+            if (!TakeArg(
+                    "precodefail", "--exact-packet-attempt",
+                    argc, argv, i, value) ||
+                !ParseU32Arg(
+                    "--exact-packet-attempt", value,
+                    exact_packet_attempt))
+            {
+                return 1;
+            }
+            exact_packet_attempt_explicit = true;
+        }
+        else if (!std::strcmp(argv[i], "--construction-seed-basis")) {
+            if (construction_seed_basis_explicit) {
+                std::fprintf(stderr,
+                    "precodefail --construction-seed-basis may be "
+                    "specified only once\n");
+                return 1;
+            }
+            if (!TakeArg(
+                    "precodefail", "--construction-seed-basis",
+                    argc, argv, i, value))
+            {
+                return 1;
+            }
+            if (!std::strcmp(value, "uniform-raw-v1")) {
+                raw_architecture_seeds = true;
+            }
+            else if (!std::strcmp(value, "production-profile")) {
+                raw_architecture_seeds = false;
+            }
+            else
+            {
+                std::fprintf(stderr,
+                    "precodefail unknown --construction-seed-basis %s\n",
+                    value);
+                return 1;
+            }
+            construction_seed_basis_explicit = true;
+        }
         else if (!std::strcmp(argv[i], "--fail-thread-launch-after")) {
             if (!TakeArg(
                     "precodefail", "--fail-thread-launch-after",
@@ -3743,6 +3815,17 @@ int CmdPrecodeFail(int argc, char** argv)
             "precodefail --gf256-heavy-rows must be in [1,128]\n");
         return 1;
     }
+    if (raw_architecture_seeds &&
+        (packet_peel_seed_xor != 0u ||
+         odd_packet_peel_seed_xor != 0u ||
+         packet_row_seed_multiplier != 1u ||
+         packet_row_seed_avalanche))
+    {
+        std::fprintf(stderr,
+            "precodefail uniform-raw-v1 cannot be combined with "
+            "packet-row seed perturbations\n");
+        return 1;
+    }
     if (!wirehair_v2::SetPacketRowSeedMultiplierForTesting(
             packet_row_seed_multiplier))
     {
@@ -3761,6 +3844,37 @@ int CmdPrecodeFail(int argc, char** argv)
             "precodefail --seed-block-bytes must be nonzero\n");
         return 1;
     }
+    if (exact_precode_attempt_explicit != exact_packet_attempt_explicit)
+    {
+        std::fprintf(stderr,
+            "precodefail --exact-precode-attempt and "
+            "--exact-packet-attempt must be specified together\n");
+        return 1;
+    }
+    if (exact_precode_attempt_explicit &&
+        (exact_precode_attempt >= wirehair_v2::kMaxPacketSeedAttempts ||
+         exact_packet_attempt >= wirehair_v2::kMaxPacketSeedAttempts))
+    {
+        std::fprintf(stderr,
+            "precodefail exact attempts must be in [0,%u]\n",
+            wirehair_v2::kMaxPacketSeedAttempts - 1u);
+        return 1;
+    }
+    exact_attempt_mode = exact_precode_attempt_explicit;
+    if (exact_attempt_mode != construction_seed_basis_explicit)
+    {
+        std::fprintf(stderr,
+            "precodefail exact attempt controls and "
+            "--construction-seed-basis must be specified together\n");
+        return 1;
+    }
+    if (raw_architecture_seeds && seed_block_bytes_explicit)
+    {
+        std::fprintf(stderr,
+            "precodefail uniform-raw-v1 cannot be combined with "
+            "--seed-block-bytes\n");
+        return 1;
+    }
 #endif
 
     std::printf(
@@ -3770,7 +3884,10 @@ int CmdPrecodeFail(int argc, char** argv)
         "odd_packet_peel_seed_xor=0x%x "
         "packet_row_seed_multiplier=0x%x "
         "packet_row_seed_avalanche=%u seed_block_bytes_override=%u "
-        "overhead_stream=%s full_payload_solve=%u schedule=%s\n",
+        "overhead_stream=%s full_payload_solve=%u schedule=%s "
+        "exact_attempt_mode=%u exact_precode_attempt=%u "
+        "exact_packet_attempt=%u construction_seed_basis=%s "
+        "seed_schedule_sha256=%s\n",
         trials, threads, loss, (unsigned long long)seed,
         source_hits_override,
         packet_peel_seed_xor,
@@ -3782,7 +3899,16 @@ int CmdPrecodeFail(int argc, char** argv)
         seed_block_bytes_override,
         paired_overhead_stream ? "paired" : "salted",
         full_payload_solve ? 1u : 0u,
-        PacketScheduleName(schedule_kind));
+        PacketScheduleName(schedule_kind),
+        exact_attempt_mode ? 1u : 0u,
+        exact_precode_attempt,
+        exact_packet_attempt,
+        raw_architecture_seeds ?
+            wirehair_v2::test::kRawArchitectureSeedBasis :
+            "production-profile",
+        raw_architecture_seeds ?
+            wirehair_v2::test::kRawArchitectureSeedScheduleSha256 :
+            "0000000000000000000000000000000000000000000000000000000000000000");
     std::printf(
         "N,bb,heavy_family,mix_count,overhead,trials,success,rank_fail,error,"
         "fail_rate,"
@@ -3790,7 +3916,10 @@ int CmdPrecodeFail(int argc, char** argv)
         "heavy_gain_min,heavy_shortfall,solve_ms_mu,build_ms_mu,peel_ms_mu,"
         "project_ms_mu,residual_ms_mu,backsub_ms_mu,seed_attempt,"
         "block_xors_mu,block_muladds_mu,first_rank_fail,binary_def_hist,"
-        "heavy_gain_hist,failure_trials,active_packet_peel_seed_xor\n");
+        "heavy_gain_hist,failure_trials,active_packet_peel_seed_xor,"
+        "precode_attempt,packet_attempt,attempt_mode,construction_seed_basis,"
+        "seed_schedule_sha256,effective_precode_seed,"
+        "effective_packet_seed\n");
 
     for (int bb_value : BBs) for (int n_value : Ns)
     {
@@ -3815,27 +3944,43 @@ int CmdPrecodeFail(int argc, char** argv)
             return 1;
         }
 #endif
-        const wirehair_v2::SeedProfile profile =
-            wirehair_v2::SelectSeedProfile(K, bb);
-        // Research graph portability without changing the payload width used
-        // by E2E validation, loss-stream pairing, or full-payload solving.
-        const wirehair_v2::SeedProfile seed_profile =
-            seed_block_bytes_override != 0u ?
-                wirehair_v2::SelectSeedProfile(
-                    K, seed_block_bytes_override) :
-                profile;
-        const uint64_t matrix_seed = wirehair_v2::MatrixSeedFromProfile(
-            seed_profile, 0u, wirehair_v2::kMessagePrecodeSeedSalt);
-        const wirehair_v2::PrecodeParams canonical_params =
-            wirehair_v2::MakeCertifiedParams(K, matrix_seed);
-        wirehair_v2::PacketRowConfig base_config;
-        base_config.PeelSeed = wirehair_v2::PacketPeelSeedFromProfile(
-            seed_profile, wirehair_v2::kMessageRecoveryRowSeedSalt) ^
-            active_packet_peel_seed_xor;
+        wirehair_v2::PrecodeParams canonical_params;
+        wirehair_v2::PacketRowConfig canonical_config;
+        if (raw_architecture_seeds)
+        {
+            // Raw architecture comparisons must not even traverse the
+            // production K-indexed seed tables or their fixups.  Construct
+            // the complete closed base directly from the bound raw schedule.
+            wirehair_v2::test::MakeRawArchitectureConfiguration(
+                K, canonical_params, canonical_config);
+        }
+        else
+        {
+            const wirehair_v2::SeedProfile profile =
+                wirehair_v2::SelectSeedProfile(K, bb);
+            // Research graph portability without changing the payload width
+            // used by E2E validation, loss-stream pairing, or full-payload
+            // solving.
+            const wirehair_v2::SeedProfile seed_profile =
+                seed_block_bytes_override != 0u ?
+                    wirehair_v2::SelectSeedProfile(
+                        K, seed_block_bytes_override) :
+                    profile;
+            const uint64_t matrix_seed = wirehair_v2::MatrixSeedFromProfile(
+                seed_profile, 0u, wirehair_v2::kMessagePrecodeSeedSalt);
+            canonical_params =
+                wirehair_v2::MakeCertifiedParams(K, matrix_seed);
+            canonical_config.PeelSeed =
+                wirehair_v2::PacketPeelSeedFromProfile(
+                    seed_profile,
+                    wirehair_v2::kMessageRecoveryRowSeedSalt) ^
+                active_packet_peel_seed_xor;
+        }
         for (wirehair_v2::HeavyCoefficientFamily heavy_family : heavy_families)
         {
         for (int mix_count_value : mix_counts)
         {
+            wirehair_v2::PacketRowConfig base_config = canonical_config;
             base_config.MixCount = (uint32_t)mix_count_value;
             wirehair_v2::PrecodeParams base_params = canonical_params;
             if (source_hits_override != 0u) {
@@ -3851,16 +3996,44 @@ int CmdPrecodeFail(int argc, char** argv)
             wirehair_v2::PrecodeSystem system;
             wirehair_v2::PacketRowConfig config;
             uint32_t seed_attempt = 0u;
-            const WirehairResult select_result =
-                wirehair_v2::SelectSystematicConfiguration(
-                    base_params, base_config, system, config, &seed_attempt);
-            if (select_result != Wirehair_Success) {
+            uint32_t precode_attempt = 0u;
+            uint32_t packet_attempt = 0u;
+            WirehairResult configure_result = Wirehair_Success;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            if (exact_attempt_mode)
+            {
+                precode_attempt = exact_precode_attempt;
+                packet_attempt = exact_packet_attempt;
+                if (!wirehair_v2::BuildPrecodeSystem(
+                        wirehair_v2::PrecodeParamsForAttempt(
+                            base_params, precode_attempt),
+                        system))
+                {
+                    configure_result = Wirehair_InvalidInput;
+                }
+                config = wirehair_v2::PacketConfigForAttempt(
+                    base_config, packet_attempt);
+            }
+            else
+#endif
+            {
+                configure_result =
+                    wirehair_v2::SelectSystematicConfiguration(
+                        base_params, base_config,
+                        system, config, &seed_attempt);
+                precode_attempt = seed_attempt;
+                packet_attempt = seed_attempt;
+            }
+            if (configure_result != Wirehair_Success) {
                 std::fprintf(stderr,
-                    "precodefail seed selection failed N=%u bb=%u "
-                    "heavy_family=%s mix_count=%u result=%d\n",
+                    "precodefail configuration failed N=%u bb=%u "
+                    "heavy_family=%s mix_count=%u attempt_mode=%s "
+                    "precode_attempt=%u packet_attempt=%u result=%d\n",
                     K, bb, HeavyFamilyName(heavy_family),
                     (uint32_t)mix_count_value,
-                    (int)select_result);
+                    exact_attempt_mode ? "exact" : "selected",
+                    precode_attempt, packet_attempt,
+                    (int)configure_result);
                 return 2;
             }
             const uint64_t precode_count_wide =
@@ -4115,10 +4288,12 @@ int CmdPrecodeFail(int argc, char** argv)
             const std::string binary_hist_text =
                 CountHistogram(binary_def_hist);
             const std::string heavy_hist_text = CountHistogram(heavy_gain_hist);
+            const std::string seed_attempt_text = exact_attempt_mode ?
+                std::string() : std::to_string(seed_attempt);
             std::printf(
                 "%u,%u,%s,%u,%u,%u,%u,%u,%u,%.8f,%.3f,%u,%.3f,%u,%.3f,"
-                "%u,%u,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%u,%.3f,%.3f,%d,"
-                "%s,%s,%s,0x%x\n",
+                "%u,%u,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%s,%.3f,%.3f,%d,"
+                "%s,%s,%s,0x%x,%u,%u,%s,%s,%s,0x%016llx,0x%08x\n",
                 K, bb, HeavyFamilyName(heavy_family),
                 (uint32_t)mix_count_value, overhead, trials,
                 successes, rank_failures, errors,
@@ -4136,13 +4311,23 @@ int CmdPrecodeFail(int argc, char** argv)
                 (double)project_ns_sum / trials / 1000000.0,
                 (double)residual_ns_sum / trials / 1000000.0,
                 (double)backsub_ns_sum / trials / 1000000.0,
-                seed_attempt,
+                seed_attempt_text.c_str(),
                 (double)block_xors_sum / trials,
                 (double)block_muladds_sum / trials,
                 first_rank_failure == UINT32_MAX ?
                     -1 : (int)first_rank_failure,
                 binary_hist_text.c_str(), heavy_hist_text.c_str(),
-                failure_trials.c_str(), active_packet_peel_seed_xor);
+                failure_trials.c_str(), active_packet_peel_seed_xor,
+                precode_attempt, packet_attempt,
+                exact_attempt_mode ? "exact" : "selected",
+                raw_architecture_seeds ?
+                    wirehair_v2::test::kRawArchitectureSeedBasis :
+                    "production-profile",
+                raw_architecture_seeds ?
+                    wirehair_v2::test::kRawArchitectureSeedScheduleSha256 :
+                    "0000000000000000000000000000000000000000000000000000000000000000",
+                (unsigned long long)system.Params.Seed,
+                config.PeelSeed);
         }
         }
         }

@@ -325,54 +325,118 @@ unsigned SquareRank(std::vector<uint8_t>& m, unsigned h)
 
 bool TestHeavyCoefficients()
 {
-    const uint32_t H = 12u;
-    const uint32_t window = 256u - H; // 244
+    static const uint32_t kHeavyRows[] = {11u, 12u, 13u};
+    for (uint32_t H : kHeavyRows)
+    {
+        const uint32_t window = 256u - H;
 
-    // Nonzero everywhere across a wide column range
-    for (uint32_t r = 0; r < H; ++r) {
-        for (uint32_t c = 0; c < 1024u; ++c) {
-            if (wirehair_v2::HeavyCoefficient(r, c, H) == 0u) {
-                std::fprintf(stderr, "heavy coefficient zero at %u,%u\n", r, c);
+        // Nonzero everywhere across a wide column range
+        for (uint32_t r = 0; r < H; ++r) {
+            for (uint32_t c = 0; c < 1024u; ++c) {
+                if (wirehair_v2::HeavyCoefficient(r, c, H) == 0u) {
+                    std::fprintf(stderr,
+                        "H=%u: heavy coefficient zero at %u,%u\n",
+                        H, r, c);
+                    return false;
+                }
+            }
+        }
+
+        // H x H submatrices within one coefficient period must be invertible
+        // (Cauchy MDS property).  The coefficient depends only on c modulo
+        // 256-H, so sampled distinct-column subsets of one period cover the
+        // structure; the MDS guarantee itself is analytic (Cauchy
+        // determinant).
+        wirehair::PCGRandom prng;
+        prng.Seed(UINT64_C(0x4ea7c0de), H);
+        for (uint32_t base = 0; base < window; base += 7u)
+        {
+            std::vector<uint32_t> cols(H);
+            for (uint32_t i = 0; i < H; ++i)
+            {
+                // Distinct columns inside [base, base + window)
+                for (bool collide = true; collide;)
+                {
+                    cols[i] = base + prng.Next() % window;
+                    collide = false;
+                    for (uint32_t j = 0; j < i; ++j) {
+                        if ((cols[j] % window) == (cols[i] % window)) {
+                            collide = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            std::vector<uint8_t> m(H * H);
+            for (uint32_t r = 0; r < H; ++r) {
+                for (uint32_t i = 0; i < H; ++i) {
+                    m[r * H + i] =
+                        wirehair_v2::HeavyCoefficient(r, cols[i], H);
+                }
+            }
+            if (SquareRank(m, H) != H)
+            {
+                std::fprintf(stderr,
+                    "H=%u: heavy submatrix singular at window base %u\n",
+                    H, base);
                 return false;
             }
         }
     }
+    return true;
+}
 
-    // H x H submatrices within a 244-column window must be invertible
-    // (Cauchy MDS property).  The coefficient depends only on c mod 244, so
-    // sampled distinct-column subsets of one window cover the structure;
-    // the MDS guarantee itself is analytic (Cauchy determinant).
-    wirehair::PCGRandom prng;
-    prng.Seed(UINT64_C(0x4ea7c0de), 12u);
-    for (uint32_t base = 0; base < window; base += 7u)
+bool TestCandidateGeometries()
+{
+    struct Geometry
     {
-        uint32_t cols[12];
-        for (uint32_t i = 0; i < H; ++i)
+        uint32_t DenseRows;
+        uint32_t HeavyRows;
+    };
+    static const uint32_t kBlockCounts[] = {3u, 4u, 1001u};
+    static const Geometry kGeometries[] = {
+        {12u, 11u},
+        {12u, 13u},
+        {13u, 12u}
+    };
+    static const wirehair_v2::HeavyCoefficientFamily kFamilies[] = {
+        wirehair_v2::HeavyCoefficientFamily::PeriodicCauchy,
+        wirehair_v2::HeavyCoefficientFamily::HashedNonzero
+    };
+
+    for (uint32_t K : kBlockCounts)
+    {
+        for (const Geometry& geometry : kGeometries)
         {
-            // Distinct columns inside [base, base + window)
-            for (bool collide = true; collide;)
+            for (wirehair_v2::HeavyCoefficientFamily family : kFamilies)
             {
-                cols[i] = base + prng.Next() % window;
-                collide = false;
-                for (uint32_t j = 0; j < i; ++j) {
-                    if ((cols[j] % window) == (cols[i] % window)) {
-                        collide = true;
-                        break;
-                    }
+                wirehair_v2::PrecodeParams params =
+                    wirehair_v2::MakeCertifiedParams(
+                        K,
+                        UINT64_C(0x4448434f56455241) ^
+                            ((uint64_t)K << 24) ^
+                            ((uint64_t)geometry.DenseRows << 16) ^
+                            ((uint64_t)geometry.HeavyRows << 8) ^
+                            (uint32_t)family);
+                params.DenseRows = geometry.DenseRows;
+                params.HeavyRows = geometry.HeavyRows;
+                params.HeavyFamily = family;
+
+                wirehair_v2::PrecodeSystem system;
+                if (!BuildPrecodeSystem(params, system) ||
+                    !wirehair_v2::ValidatePrecodeSystem(system) ||
+                    system.Params.DenseRows != geometry.DenseRows ||
+                    system.Params.HeavyRows != geometry.HeavyRows ||
+                    system.Params.HeavyFamily != family ||
+                    !TestStaircase(system) || !TestDenseRows(system))
+                {
+                    std::fprintf(stderr,
+                        "candidate geometry failed K=%u D=%u H=%u family=%u\n",
+                        K, geometry.DenseRows, geometry.HeavyRows,
+                        (unsigned)family);
+                    return false;
                 }
             }
-        }
-        std::vector<uint8_t> m(H * H);
-        for (uint32_t r = 0; r < H; ++r) {
-            for (uint32_t i = 0; i < H; ++i) {
-                m[r * H + i] = wirehair_v2::HeavyCoefficient(r, cols[i], H);
-            }
-        }
-        if (SquareRank(m, H) != H)
-        {
-            std::fprintf(stderr,
-                "heavy submatrix singular at window base %u\n", base);
-            return false;
         }
     }
     return true;
@@ -390,8 +454,13 @@ int main()
     if (!TestHeavyCoefficients()) {
         return 1;
     }
+    if (!TestCandidateGeometries()) {
+        return 1;
+    }
 
-    const uint32_t Ks[] = {2u, 3u, 64u, 1000u, 3200u, 10000u, 32000u, 64000u};
+    const uint32_t Ks[] = {
+        2u, 3u, 4u, 64u, 1000u, 1001u, 3200u, 10000u, 32000u, 64000u
+    };
     for (uint32_t K : Ks)
     {
         wirehair_v2::PrecodeSystem system;
