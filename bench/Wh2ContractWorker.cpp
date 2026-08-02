@@ -2159,14 +2159,16 @@ bool TimingOutcomeJson(
 std::string TimingInvocationIdentity(
     const ArmDescriptor& arm,
     const std::string& realized_sha256,
-    FrozenTimingScope scope)
+    FrozenTimingScope scope,
+    const NativeArmSpec& spec)
 {
     std::string identity = arm.DescriptorSha256;
     identity += ':';
     identity += realized_sha256;
     identity += ':';
     identity += wirehair::wh2_benchmark::FrozenTimingScopeName(scope);
-    return identity;
+    return wirehair_wh2_bench::BindNativeWh2ExecutionIdentity(
+        identity, spec.ExecutionMode);
 }
 
 bool TimingQualificationOutcomeJson(
@@ -2656,9 +2658,9 @@ bool RunTimingJob(
     }
 
     const std::string left_identity = TimingInvocationIdentity(
-        context.Arms[left_index], left_realized, panel.scope);
+        context.Arms[left_index], left_realized, panel.scope, left_spec);
     const std::string right_identity = TimingInvocationIdentity(
-        context.Arms[right_index], right_realized, panel.scope);
+        context.Arms[right_index], right_realized, panel.scope, right_spec);
     const NativePanelArm left_arm(
         left_identity,
         [left_identity, panel, left_spec, &cell, &source, &trace]() {

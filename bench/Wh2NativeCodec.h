@@ -6,6 +6,7 @@
 
 #include <stdint.h>
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace wirehair_wh2_bench {
@@ -41,6 +42,25 @@ enum class NativeWh2BaseKind : uint32_t
     ProductionProfile = 0,
     CanonicalCertifiedStructure
 };
+
+/**
+    Benchmark-only selection of the thread-local tiny-WH2 solve path.
+
+    This is execution metadata, not an equation or wire-profile axis.  The
+    default preserves the caller's thread-local state.  Explicit modes require
+    a caller-supplied setter so this benchmark carrier remains buildable before
+    (and independently of) any particular codec test hook.
+*/
+enum class NativeWh2ExecutionMode : uint32_t
+{
+    Inherit = 0,
+    TinyDirectDisabled,
+    TinyDirectEnabled
+};
+
+typedef bool (*NativeWh2ExecutionModeSetter)(
+    bool enabled,
+    void* context);
 
 typedef bool (*Wh2EquationTransform)(
     uint32_t block_count,
@@ -79,6 +99,18 @@ struct NativeArmSpec
     */
     Wh2EquationTransform Transform = nullptr;
     void* TransformContext = nullptr;
+
+    /**
+        Benchmark-only native execution mode.  Explicit off/on modes are
+        valid only for WH2 and require SetExecutionMode.  Fixtures invoke the
+        setter on their worker thread outside every measured interval and
+        restore the disabled state afterward.  These fields never participate
+        in equation resolution or construction hashing.
+    */
+    NativeWh2ExecutionMode ExecutionMode =
+        NativeWh2ExecutionMode::Inherit;
+    NativeWh2ExecutionModeSetter SetExecutionMode = nullptr;
+    void* ExecutionModeContext = nullptr;
 };
 
 NativeArmSpec MakeWirehair1Arm();
@@ -89,6 +121,27 @@ NativeArmSpec MakeExperimentalWh2Arm(
     void* transform_context = nullptr,
     const wirehair_v2::MessagePrecodeEncoderOptions* options = nullptr,
     NativeWh2BaseKind base_kind = NativeWh2BaseKind::ProductionProfile);
+
+/** Stable spelling used only in benchmark execution identities. */
+const char* NativeWh2ExecutionModeName(NativeWh2ExecutionMode mode);
+
+/**
+    Transactionally attach an execution mode to a valid native WH2 arm.
+    Inherit requires a null setter/context; explicit modes require a setter.
+*/
+bool ConfigureNativeWh2ExecutionMode(
+    NativeArmSpec& spec,
+    NativeWh2ExecutionMode mode,
+    NativeWh2ExecutionModeSetter setter,
+    void* setter_context = nullptr);
+
+/**
+    Append explicit execution mode to a benchmark invocation identity.
+    Inherit returns base_identity byte-for-byte; an invalid mode returns empty.
+*/
+std::string BindNativeWh2ExecutionIdentity(
+    const std::string& base_identity,
+    NativeWh2ExecutionMode mode);
 
 /**
     Fully resolved WH2 equation configuration after the optional experiment
@@ -143,7 +196,9 @@ public:
     /**
         Construct exactly the requested arm once.  WH2 never calls a seed
         selector or retries another attempt.  A rank-deficient exact WH2
-        attempt is returned as Wirehair_BadPeelSeed.
+        attempt is returned as Wirehair_BadPeelSeed.  An explicit execution
+        mode's setter context is retained by the arm and must remain valid for
+        the arm and any fixture initialized from it.
     */
     WirehairResult Initialize(
         const NativeArmSpec& spec,
@@ -170,6 +225,16 @@ public:
 
 private:
     WirehairResult InitializeOwnedSourceAfterGlobalInit(
+        const NativeArmSpec& spec,
+        uint32_t block_count,
+        uint32_t block_bytes,
+        std::vector<uint8_t>&& source);
+    WirehairResult InitializeOwnedSourceAfterGlobalInitWithModeApplied(
+        const NativeArmSpec& spec,
+        uint32_t block_count,
+        uint32_t block_bytes,
+        std::vector<uint8_t>&& source);
+    WirehairResult InitializeOwnedSourceWithModeApplied(
         const NativeArmSpec& spec,
         uint32_t block_count,
         uint32_t block_bytes,
@@ -226,6 +291,8 @@ public:
     RecoveryCellResult RunNested() const;
 
 private:
+    RecoveryCellResult RunNestedWithModeApplied() const;
+
     struct Impl;
     std::unique_ptr<Impl> ImplValue;
 };
@@ -285,8 +352,10 @@ struct NativeTimingControlQualificationResult
     Reusable untimed rank probe for mandatory timing controls.
 
     Initialize() resolves and validates the certified WH2 head with the real
-    timing-cell block width.  Run() then uses one-byte all-zero right-hand
-    sides while retaining those exact coefficients.  Wirehair1 uses a fresh
+    timing-cell block width and requires inherited execution mode so this
+    structural control cannot carry a benchmark execution overlay.  Run()
+    then uses one-byte all-zero right-hand sides while retaining those exact
+    coefficients.  Wirehair1 uses a fresh
     real LegacyCurrent decoder, feeds the complete unique K+256 ID trace, and
     requires public recovery to return exactly K zero bytes.  WH2 is
     cold-solved on exactly the first K+4 IDs and its intermediate output must
@@ -327,8 +396,8 @@ private:
     fixture ownership of the source bytes, and output-buffer allocation are
     outside the measured interval.  Each Run() constructs a new exact arm and
     encodes exactly IDs 0 through K-1; comparison with the source occurs after
-    the clock stops.  A transform context stored in the arm spec must remain
-    valid for the lifetime of this fixture.
+    the clock stops.  Transform and execution-mode setter contexts stored in
+    the arm spec must remain valid for the lifetime of this fixture.
 */
 class NativeEncoderFixture
 {

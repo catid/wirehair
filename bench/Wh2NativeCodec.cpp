@@ -14,6 +14,85 @@ namespace {
 static const uint32_t kMaxConstructionAttempt = 255u;
 static const uint32_t kRecoveryOverheadCap = 4u;
 
+bool ValidExecutionMode(const NativeArmSpec& spec)
+{
+    switch (spec.ExecutionMode)
+    {
+    case NativeWh2ExecutionMode::Inherit:
+        return !spec.SetExecutionMode && !spec.ExecutionModeContext;
+    case NativeWh2ExecutionMode::TinyDirectDisabled:
+    case NativeWh2ExecutionMode::TinyDirectEnabled:
+        return spec.Kind != NativeArmKind::Wirehair1 &&
+            spec.Kind != NativeArmKind::Invalid && spec.SetExecutionMode;
+    default:
+        return false;
+    }
+}
+
+class NativeExecutionModeGuard
+{
+public:
+    NativeExecutionModeGuard(
+        NativeWh2ExecutionMode mode,
+        NativeWh2ExecutionModeSetter setter,
+        void* context,
+        bool apply)
+        : Setter(setter)
+        , Context(context)
+    {
+        if (!apply || mode == NativeWh2ExecutionMode::Inherit) {
+            return;
+        }
+        Active = true;
+        ReadyValue = Call(
+            mode == NativeWh2ExecutionMode::TinyDirectEnabled);
+    }
+
+    ~NativeExecutionModeGuard()
+    {
+        if (Active) {
+            (void)Restore();
+        }
+    }
+
+    NativeExecutionModeGuard(const NativeExecutionModeGuard&) = delete;
+    NativeExecutionModeGuard& operator=(
+        const NativeExecutionModeGuard&) = delete;
+
+    bool Ready() const
+    {
+        return ReadyValue;
+    }
+
+    bool Restore()
+    {
+        if (!Active) {
+            return true;
+        }
+        if (!Call(false)) {
+            return false;
+        }
+        Active = false;
+        return true;
+    }
+
+private:
+    bool Call(bool enabled) const
+    {
+        try {
+            return Setter && Setter(enabled, Context);
+        }
+        catch (...) {
+            return false;
+        }
+    }
+
+    NativeWh2ExecutionModeSetter Setter = nullptr;
+    void* Context = nullptr;
+    bool Active = false;
+    bool ReadyValue = true;
+};
+
 uint64_t SplitMix64(uint64_t& state)
 {
     state += UINT64_C(0x9e3779b97f4a7c15);
@@ -57,7 +136,8 @@ bool DefaultWh2Options(
 
 bool ValidArmSpec(const NativeArmSpec& spec)
 {
-    if (spec.Wh2Options.CacheSystematicSource ||
+    if (!ValidExecutionMode(spec) ||
+        spec.Wh2Options.CacheSystematicSource ||
         spec.Wh2Options.CacheReceivedSystematicPackets)
     {
         // These flags affect only facade storage, while this adapter operates
@@ -69,7 +149,8 @@ bool ValidArmSpec(const NativeArmSpec& spec)
     {
         return spec.ConstructionAttempt == 0u && !spec.Transform &&
             !spec.TransformContext && DefaultWh2Options(spec.Wh2Options) &&
-            spec.BaseKind == NativeWh2BaseKind::ProductionProfile;
+            spec.BaseKind == NativeWh2BaseKind::ProductionProfile &&
+            spec.ExecutionMode == NativeWh2ExecutionMode::Inherit;
     }
     if (spec.Kind == NativeArmKind::Wirehair2Certified)
     {
@@ -350,6 +431,10 @@ struct NativeArm::Impl
     uint32_t K = 0u;
     uint32_t BlockBytes = 0u;
     uint32_t Attempt = 0u;
+    NativeWh2ExecutionMode ExecutionMode =
+        NativeWh2ExecutionMode::Inherit;
+    NativeWh2ExecutionModeSetter SetExecutionMode = nullptr;
+    void* ExecutionModeContext = nullptr;
     std::vector<uint8_t> Source;
     WirehairCodec LegacyEncoder = nullptr;
     wirehair_v2::PrecodeSystem System = {};
@@ -391,6 +476,55 @@ NativeArmSpec MakeExperimentalWh2Arm(
         spec.Wh2Options = *options;
     }
     return spec;
+}
+
+const char* NativeWh2ExecutionModeName(NativeWh2ExecutionMode mode)
+{
+    switch (mode)
+    {
+    case NativeWh2ExecutionMode::Inherit:
+        return "inherit";
+    case NativeWh2ExecutionMode::TinyDirectDisabled:
+        return "tiny-direct-off";
+    case NativeWh2ExecutionMode::TinyDirectEnabled:
+        return "tiny-direct-on";
+    default:
+        return nullptr;
+    }
+}
+
+bool ConfigureNativeWh2ExecutionMode(
+    NativeArmSpec& spec,
+    NativeWh2ExecutionMode mode,
+    NativeWh2ExecutionModeSetter setter,
+    void* setter_context)
+{
+    NativeArmSpec next = spec;
+    next.ExecutionMode = mode;
+    next.SetExecutionMode = setter;
+    next.ExecutionModeContext = setter_context;
+    if (!ValidArmSpec(next)) {
+        return false;
+    }
+    spec = next;
+    return true;
+}
+
+std::string BindNativeWh2ExecutionIdentity(
+    const std::string& base_identity,
+    NativeWh2ExecutionMode mode)
+{
+    const char* const name = NativeWh2ExecutionModeName(mode);
+    if (!name) {
+        return std::string();
+    }
+    if (mode == NativeWh2ExecutionMode::Inherit) {
+        return base_identity;
+    }
+    std::string identity = base_identity;
+    identity += ":native-execution=";
+    identity += name;
+    return identity;
 }
 
 bool ResolveNativeWh2Configuration(
@@ -554,6 +688,48 @@ WirehairResult NativeArm::InitializeOwnedSourceAfterGlobalInit(
         return Wirehair_InvalidInput;
     }
 
+    NativeExecutionModeGuard execution_mode(
+        spec.ExecutionMode,
+        spec.SetExecutionMode,
+        spec.ExecutionModeContext,
+        true);
+    if (!execution_mode.Ready()) {
+        return Wirehair_Error;
+    }
+
+    const std::shared_ptr<Impl> previous = ImplValue;
+    const WirehairResult result = InitializeOwnedSourceWithModeApplied(
+        spec, block_count, block_bytes, std::move(source));
+    if (!execution_mode.Restore())
+    {
+        ImplValue = previous;
+        return Wirehair_Error;
+    }
+    return result;
+}
+
+WirehairResult
+NativeArm::InitializeOwnedSourceAfterGlobalInitWithModeApplied(
+    const NativeArmSpec& spec,
+    uint32_t block_count,
+    uint32_t block_bytes,
+    std::vector<uint8_t>&& source)
+{
+    if (!ValidSourceShape(block_count, block_bytes, source) ||
+        !ValidArmSpec(spec))
+    {
+        return Wirehair_InvalidInput;
+    }
+    return InitializeOwnedSourceWithModeApplied(
+        spec, block_count, block_bytes, std::move(source));
+}
+
+WirehairResult NativeArm::InitializeOwnedSourceWithModeApplied(
+    const NativeArmSpec& spec,
+    uint32_t block_count,
+    uint32_t block_bytes,
+    std::vector<uint8_t>&& source)
+{
     try
     {
         std::shared_ptr<Impl> next(new Impl);
@@ -561,6 +737,9 @@ WirehairResult NativeArm::InitializeOwnedSourceAfterGlobalInit(
         next->K = block_count;
         next->BlockBytes = block_bytes;
         next->Attempt = spec.ConstructionAttempt;
+        next->ExecutionMode = spec.ExecutionMode;
+        next->SetExecutionMode = spec.SetExecutionMode;
+        next->ExecutionModeContext = spec.ExecutionModeContext;
         next->Source = std::move(source);
 
         if (spec.Kind == NativeArmKind::Wirehair1)
@@ -809,6 +988,26 @@ RecoveryCellResult NativeRecoveryFixture::RunNested() const
         return cell;
     }
 
+    const NativeArm::Impl& mode_arm = *ImplValue->ArmState;
+    NativeExecutionModeGuard execution_mode(
+        mode_arm.ExecutionMode,
+        mode_arm.SetExecutionMode,
+        mode_arm.ExecutionModeContext,
+        true);
+    if (!execution_mode.Ready()) {
+        return cell;
+    }
+
+    cell = RunNestedWithModeApplied();
+    if (!execution_mode.Restore()) {
+        cell = RecoveryCellResult();
+    }
+    return cell;
+}
+
+RecoveryCellResult NativeRecoveryFixture::RunNestedWithModeApplied() const
+{
+    RecoveryCellResult cell;
     try
     {
         for (uint32_t overhead = 0u; overhead <= kRecoveryOverheadCap;
@@ -985,6 +1184,8 @@ WirehairResult NativeTimingControlProbe::Initialize(
     uint32_t block_bytes)
 {
     if (wirehair2_head_spec.Kind != NativeArmKind::Wirehair2Certified ||
+        wirehair2_head_spec.ExecutionMode !=
+            NativeWh2ExecutionMode::Inherit ||
         !ValidArmSpec(wirehair2_head_spec) ||
         block_count < 2u || block_count > 64000u ||
         block_bytes == 0u || block_bytes > UINT32_C(0x7fffffff))
@@ -1332,9 +1533,18 @@ TimedArmResult NativeEncoderFixture::Run() const
         std::vector<uint8_t> owned_source(ImplValue->Source);
         NativeArm arm;
         WirehairResult invocation_result = Wirehair_Error;
+        NativeExecutionModeGuard execution_mode(
+            ImplValue->Spec.ExecutionMode,
+            ImplValue->Spec.SetExecutionMode,
+            ImplValue->Spec.ExecutionModeContext,
+            true);
+        if (!execution_mode.Ready()) {
+            return result;
+        }
         const std::chrono::steady_clock::time_point start =
             std::chrono::steady_clock::now();
-        invocation_result = arm.InitializeOwnedSourceAfterGlobalInit(
+        invocation_result =
+            arm.InitializeOwnedSourceAfterGlobalInitWithModeApplied(
             ImplValue->Spec,
             ImplValue->K,
             ImplValue->BlockBytes,
@@ -1357,6 +1567,9 @@ TimedArmResult NativeEncoderFixture::Run() const
         }
         const std::chrono::steady_clock::time_point finish =
             std::chrono::steady_clock::now();
+        if (!execution_mode.Restore()) {
+            return result;
+        }
         const std::chrono::nanoseconds elapsed =
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 finish - start);
@@ -1467,6 +1680,14 @@ TimedArmResult NativeReceiveFixture::Run() const
         std::vector<uint8_t> recovered(arm.Source.size(), 0u);
         WirehairResult receive_result = Wirehair_NeedMore;
         uint32_t success_packet_count = 0u;
+        NativeExecutionModeGuard execution_mode(
+            arm.ExecutionMode,
+            arm.SetExecutionMode,
+            arm.ExecutionModeContext,
+            true);
+        if (!execution_mode.Ready()) {
+            return result;
+        }
 
         if (arm.Kind == NativeArmKind::Wirehair1)
         {
@@ -1601,6 +1822,9 @@ TimedArmResult NativeReceiveFixture::Run() const
                 (uint64_t)elapsed.count() : 0u;
         }
 
+        if (!execution_mode.Restore()) {
+            return result;
+        }
         result.Result = receive_result;
         if (receive_result == Wirehair_Success)
         {
@@ -1735,6 +1959,14 @@ IsolatedSolveResult NativeSolveFixture::Run() const
         const NativeArm::Impl& arm = *ImplValue->ArmState;
         std::vector<uint8_t> intermediate;
         wirehair_v2::PrecodeSolveStats stats;
+        NativeExecutionModeGuard execution_mode(
+            arm.ExecutionMode,
+            arm.SetExecutionMode,
+            arm.ExecutionModeContext,
+            true);
+        if (!execution_mode.Ready()) {
+            return result;
+        }
         const std::chrono::steady_clock::time_point start =
             std::chrono::steady_clock::now();
         const WirehairResult solve_result =
@@ -1748,6 +1980,9 @@ IsolatedSolveResult NativeSolveFixture::Run() const
                 &stats);
         const std::chrono::steady_clock::time_point finish =
             std::chrono::steady_clock::now();
+        if (!execution_mode.Restore()) {
+            return result;
+        }
         const std::chrono::nanoseconds elapsed =
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 finish - start);

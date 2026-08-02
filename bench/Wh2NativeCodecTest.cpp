@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstring>
 #include <numeric>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -22,6 +23,7 @@ using wirehair_wh2_bench::NativeTimingControlProbe;
 using wirehair_wh2_bench::NativeTimingControlQualification;
 using wirehair_wh2_bench::NativeTimingControlQualificationResult;
 using wirehair_wh2_bench::NativeWh2BaseKind;
+using wirehair_wh2_bench::NativeWh2ExecutionMode;
 using wirehair_wh2_bench::RecoveryCellResult;
 using wirehair_wh2_bench::RecoveryOutcome;
 
@@ -466,6 +468,387 @@ bool TwoAnchorTransform(
     }
     params.DenseAnchors = wirehair_v2::DenseAnchorLayout::Two07;
     return true;
+}
+
+thread_local bool FakeTinyDirectEnabled = false;
+
+struct ExecutionModeState
+{
+    std::vector<bool> Calls;
+    std::vector<std::thread::id> Threads;
+    size_t FailCall = static_cast<size_t>(-1);
+};
+
+bool SetFakeTinyDirectMode(bool enabled, void* context)
+{
+    ExecutionModeState* const state =
+        static_cast<ExecutionModeState*>(context);
+    if (!state) {
+        return false;
+    }
+    const size_t call = state->Calls.size();
+    state->Calls.push_back(enabled);
+    state->Threads.push_back(std::this_thread::get_id());
+    if (call == state->FailCall) {
+        return false;
+    }
+    FakeTinyDirectEnabled = enabled;
+    return true;
+}
+
+bool CheckExecutionModePair(
+    const ExecutionModeState& state,
+    size_t first_call,
+    bool expected_enabled,
+    const char* message)
+{
+    return Check(
+        state.Calls.size() == first_call + 2u &&
+            state.Calls[first_call] == expected_enabled &&
+            !state.Calls[first_call + 1u] &&
+            !FakeTinyDirectEnabled,
+        message);
+}
+
+void CheckNativeExecutionModeOverlay()
+{
+    const std::string base_identity =
+        "descriptor:construction:decoder-solve";
+    Check(wirehair_wh2_bench::BindNativeWh2ExecutionIdentity(
+              base_identity, NativeWh2ExecutionMode::Inherit) ==
+              base_identity,
+        "inherit execution mode changed the existing identity");
+    Check(wirehair_wh2_bench::BindNativeWh2ExecutionIdentity(
+              base_identity,
+              NativeWh2ExecutionMode::TinyDirectDisabled) ==
+              base_identity + ":native-execution=tiny-direct-off" &&
+          wirehair_wh2_bench::BindNativeWh2ExecutionIdentity(
+              base_identity,
+              NativeWh2ExecutionMode::TinyDirectEnabled) ==
+              base_identity + ":native-execution=tiny-direct-on",
+        "explicit execution modes were not distinct identities");
+    Check(wirehair_wh2_bench::NativeWh2ExecutionModeName(
+              static_cast<NativeWh2ExecutionMode>(UINT32_MAX)) == nullptr &&
+          wirehair_wh2_bench::BindNativeWh2ExecutionIdentity(
+              base_identity,
+              static_cast<NativeWh2ExecutionMode>(UINT32_MAX)).empty(),
+        "unknown execution mode did not fail identity binding closed");
+
+    ExecutionModeState validation_state;
+    NativeArmSpec wirehair1 = wirehair_wh2_bench::MakeWirehair1Arm();
+    Check(!wirehair_wh2_bench::ConfigureNativeWh2ExecutionMode(
+              wirehair1,
+              NativeWh2ExecutionMode::TinyDirectEnabled,
+              SetFakeTinyDirectMode,
+              &validation_state) &&
+          wirehair1.ExecutionMode == NativeWh2ExecutionMode::Inherit &&
+          !wirehair1.SetExecutionMode &&
+          !wirehair1.ExecutionModeContext,
+        "Wirehair1 accepted or retained a WH2 execution overlay");
+    NativeArmSpec invalid_mode =
+        wirehair_wh2_bench::MakeCertifiedWh2Arm(0u);
+    invalid_mode.ExecutionMode = NativeWh2ExecutionMode::TinyDirectEnabled;
+    wirehair_wh2_bench::ResolvedNativeWh2Configuration untouched;
+    untouched.Params.Seed = UINT64_C(0xd34ce18a9765bf20);
+    const uint64_t untouched_seed = untouched.Params.Seed;
+    Check(!wirehair_wh2_bench::ResolveNativeWh2Configuration(
+              invalid_mode, 5u, 64u, untouched) &&
+          untouched.Params.Seed == untouched_seed,
+        "explicit execution mode without a setter resolved equations");
+
+    const uint32_t widths[] = { 64u, 1280u };
+    for (uint32_t K = 2u; K <= 8u; ++K)
+    {
+        for (uint32_t block_bytes : widths)
+        {
+            for (uint32_t anchored = 0u; anchored < 2u; ++anchored)
+            {
+                const NativeArmSpec attempt_zero = anchored ?
+                    wirehair_wh2_bench::MakeExperimentalWh2Arm(
+                        0u, TwoAnchorTransform) :
+                    wirehair_wh2_bench::MakeCertifiedWh2Arm(0u);
+                ExecutionModeState equation_state;
+                NativeArmSpec equation_off = attempt_zero;
+                NativeArmSpec equation_on = attempt_zero;
+                Check(wirehair_wh2_bench::ConfigureNativeWh2ExecutionMode(
+                          equation_off,
+                          NativeWh2ExecutionMode::TinyDirectDisabled,
+                          SetFakeTinyDirectMode,
+                          &equation_state) &&
+                      wirehair_wh2_bench::ConfigureNativeWh2ExecutionMode(
+                          equation_on,
+                          NativeWh2ExecutionMode::TinyDirectEnabled,
+                          SetFakeTinyDirectMode,
+                          &equation_state),
+                    "valid tiny execution modes could not be configured");
+
+                wirehair_wh2_bench::ResolvedNativeWh2Configuration
+                    off_configuration;
+                wirehair_wh2_bench::ResolvedNativeWh2Configuration
+                    on_configuration;
+                Check(wirehair_wh2_bench::ResolveNativeWh2Configuration(
+                          equation_off, K, block_bytes, off_configuration) &&
+                      wirehair_wh2_bench::ResolveNativeWh2Configuration(
+                          equation_on, K, block_bytes, on_configuration) &&
+                      SamePrecodeParams(
+                          off_configuration.Params,
+                          on_configuration.Params) &&
+                      off_configuration.PacketConfig.PeelSeed ==
+                          on_configuration.PacketConfig.PeelSeed &&
+                      off_configuration.PacketConfig.MixCount ==
+                          on_configuration.PacketConfig.MixCount &&
+                      off_configuration.PrecodeAttempt ==
+                          on_configuration.PrecodeAttempt &&
+                      off_configuration.PacketAttempt ==
+                          on_configuration.PacketAttempt,
+                    "execution mode changed the resolved equation system");
+
+                std::vector<uint8_t> source;
+                Check(wirehair_wh2_bench::MakeDeterministicSource(
+                          K,
+                          block_bytes,
+                          UINT64_C(0x75c693d48be210af) ^
+                              (static_cast<uint64_t>(K) << 32) ^
+                              block_bytes ^ anchored,
+                          source),
+                    "tiny execution-mode source generation failed");
+                const std::vector<uint32_t> ids = ConsecutiveIds(K);
+
+                // Some frozen attempt-zero tiny systems are rank-invalid on
+                // the generic solver.  Select the first exact
+                // construction that succeeds so this carrier smoke tests its
+                // execution plumbing rather than imposing a seed policy.
+                NativeArmSpec base;
+                bool found_usable_attempt = false;
+                for (uint32_t attempt = 0u; attempt <= 255u; ++attempt)
+                {
+                    NativeArmSpec candidate = anchored ?
+                        wirehair_wh2_bench::MakeExperimentalWh2Arm(
+                            attempt, TwoAnchorTransform) :
+                        wirehair_wh2_bench::MakeCertifiedWh2Arm(attempt);
+                    NativeArm probe;
+                    if (probe.Initialize(
+                            candidate, K, block_bytes, source) ==
+                        Wirehair_Success)
+                    {
+                        base = candidate;
+                        found_usable_attempt = true;
+                        break;
+                    }
+                }
+                if (!Check(found_usable_attempt,
+                        "no usable tiny construction attempt was found"))
+                {
+                    continue;
+                }
+
+                ExecutionModeState off_state;
+                ExecutionModeState on_state;
+                NativeArmSpec off = base;
+                NativeArmSpec on = base;
+                Check(wirehair_wh2_bench::ConfigureNativeWh2ExecutionMode(
+                          off,
+                          NativeWh2ExecutionMode::TinyDirectDisabled,
+                          SetFakeTinyDirectMode,
+                          &off_state) &&
+                      wirehair_wh2_bench::ConfigureNativeWh2ExecutionMode(
+                          on,
+                          NativeWh2ExecutionMode::TinyDirectEnabled,
+                          SetFakeTinyDirectMode,
+                          &on_state),
+                    "usable tiny execution modes could not be configured");
+
+                NativeArmSpec modes[] = { off, on };
+                ExecutionModeState* states[] = { &off_state, &on_state };
+                const bool enabled[] = { false, true };
+                for (uint32_t mode_index = 0u; mode_index < 2u;
+                     ++mode_index)
+                {
+                    ExecutionModeState& state = *states[mode_index];
+                    size_t first_call = state.Calls.size();
+                    NativeArm arm;
+                    const WirehairResult arm_result = arm.Initialize(
+                        modes[mode_index], K, block_bytes, source);
+                    Check(arm_result == Wirehair_Success,
+                        "tiny execution-mode arm construction failed");
+                    CheckExecutionModePair(
+                        state,
+                        first_call,
+                        enabled[mode_index],
+                        "arm construction did not apply/reset mode once");
+
+                    NativeSolveFixture solve;
+                    Check(solve.Initialize(arm, ids, 4u) == Wirehair_Success,
+                        "tiny execution-mode solve setup failed");
+                    first_call = state.Calls.size();
+                    const IsolatedSolveResult solve_result = solve.Run();
+                    Check(solve_result.Result == Wirehair_Success &&
+                              solve_result.BytesVerified &&
+                              solve_result.ElapsedNanoseconds > 0u,
+                        "tiny execution-mode solve failed");
+                    CheckExecutionModePair(
+                        state,
+                        first_call,
+                        enabled[mode_index],
+                        "timed solve did not apply/reset mode once");
+
+                    NativeReceiveFixture receive;
+                    Check(receive.Initialize(arm, ids, 4u) ==
+                              Wirehair_Success,
+                        "tiny execution-mode receive setup failed");
+                    first_call = state.Calls.size();
+                    const wirehair_wh2_bench::TimedArmResult receive_result =
+                        receive.Run();
+                    Check(receive_result.Result == Wirehair_Success &&
+                              receive_result.BytesVerified &&
+                              receive_result.ElapsedNanoseconds > 0u,
+                        "tiny execution-mode receive failed");
+                    CheckExecutionModePair(
+                        state,
+                        first_call,
+                        enabled[mode_index],
+                        "timed receive did not apply/reset mode once");
+
+                    NativeRecoveryFixture recovery;
+                    Check(recovery.Initialize(arm, ids) == Wirehair_Success,
+                        "tiny execution-mode recovery setup failed");
+                    first_call = state.Calls.size();
+                    const RecoveryCellResult recovery_result =
+                        recovery.RunNested();
+                    Check(recovery_result.Outcome == RecoveryOutcome::Success &&
+                              recovery_result.Result == Wirehair_Success,
+                        "tiny execution-mode nested recovery failed");
+                    CheckExecutionModePair(
+                        state,
+                        first_call,
+                        enabled[mode_index],
+                        "nested recovery did not apply/reset mode once");
+
+                    NativeEncoderFixture encoder;
+                    Check(encoder.Initialize(
+                              modes[mode_index],
+                              K,
+                              block_bytes,
+                              source) == Wirehair_Success,
+                        "tiny execution-mode encoder setup failed");
+                    first_call = state.Calls.size();
+                    const wirehair_wh2_bench::TimedArmResult encoder_result =
+                        encoder.Run();
+                    Check(encoder_result.Result == Wirehair_Success &&
+                              encoder_result.BytesVerified &&
+                              encoder_result.ElapsedNanoseconds > 0u,
+                        "tiny execution-mode encoder failed");
+                    CheckExecutionModePair(
+                        state,
+                        first_call,
+                        enabled[mode_index],
+                        "timed encoder did not apply/reset mode once");
+                }
+            }
+        }
+    }
+
+    // NativeArm may be prepared on one thread and consumed by a benchmark
+    // worker on another.  The fixture must reapply the mode on that worker;
+    // setting it only during arm construction would leave its TLS unchanged.
+    {
+        const uint32_t K = 8u;
+        const uint32_t block_bytes = 64u;
+        std::vector<uint8_t> source;
+        Check(wirehair_wh2_bench::MakeDeterministicSource(
+                  K,
+                  block_bytes,
+                  UINT64_C(0xc2815be6937ad40f),
+                  source),
+            "worker-thread execution-mode source generation failed");
+        ExecutionModeState state;
+        NativeArmSpec spec = wirehair_wh2_bench::MakeCertifiedWh2Arm(0u);
+        Check(wirehair_wh2_bench::ConfigureNativeWh2ExecutionMode(
+                  spec,
+                  NativeWh2ExecutionMode::TinyDirectEnabled,
+                  SetFakeTinyDirectMode,
+                  &state),
+            "worker-thread execution mode could not be configured");
+        NativeArm arm;
+        Check(arm.Initialize(spec, K, block_bytes, source) == Wirehair_Success,
+            "worker-thread execution-mode arm construction failed");
+        NativeSolveFixture solve;
+        Check(solve.Initialize(arm, ConsecutiveIds(K), 4u) ==
+                  Wirehair_Success,
+            "worker-thread execution-mode solve setup failed");
+        const size_t first_call = state.Calls.size();
+        const std::thread::id parent_thread = std::this_thread::get_id();
+        std::thread::id worker_thread;
+        bool worker_finished_disabled = false;
+        IsolatedSolveResult worker_result;
+        std::thread worker([&]() {
+            worker_thread = std::this_thread::get_id();
+            worker_result = solve.Run();
+            worker_finished_disabled = !FakeTinyDirectEnabled;
+        });
+        worker.join();
+        Check(worker_result.Result == Wirehair_Success &&
+                  worker_result.BytesVerified &&
+                  worker_result.ElapsedNanoseconds > 0u &&
+                  worker_finished_disabled &&
+                  worker_thread != parent_thread &&
+                  state.Threads.size() == first_call + 2u &&
+                  state.Threads[first_call] == worker_thread &&
+                  state.Threads[first_call + 1u] == worker_thread,
+            "mode was not applied/reset on the consuming worker thread");
+        CheckExecutionModePair(
+            state,
+            first_call,
+            true,
+            "worker-thread solve did not apply/reset mode once");
+    }
+
+    // A setter failure is an execution failure, never a reason to change the
+    // previously valid arm.  A failed reset is retried by the guard while the
+    // public result still fails closed.
+    const uint32_t K = 5u;
+    const uint32_t block_bytes = 64u;
+    std::vector<uint8_t> source;
+    Check(wirehair_wh2_bench::MakeDeterministicSource(
+              K, block_bytes, UINT64_C(0x53eac2798b1064df), source),
+        "execution-mode rollback source generation failed");
+    NativeArm transactional;
+    Check(transactional.Initialize(
+              wirehair_wh2_bench::MakeCertifiedWh2Arm(3u),
+              K,
+              block_bytes,
+              source) == Wirehair_Success,
+        "execution-mode rollback baseline construction failed");
+    std::vector<uint8_t> before;
+    Check(transactional.Encode(K + 3u, before) == Wirehair_Success,
+        "execution-mode rollback baseline encode failed");
+    ExecutionModeState reset_failure;
+    reset_failure.FailCall = 1u;
+    NativeArmSpec enabled = wirehair_wh2_bench::MakeCertifiedWh2Arm(3u);
+    Check(wirehair_wh2_bench::ConfigureNativeWh2ExecutionMode(
+              enabled,
+              NativeWh2ExecutionMode::TinyDirectEnabled,
+              SetFakeTinyDirectMode,
+              &reset_failure),
+        "execution-mode rollback spec configuration failed");
+    Check(transactional.Initialize(
+              enabled, K, block_bytes, source) == Wirehair_Error &&
+          reset_failure.Calls.size() == 3u &&
+          reset_failure.Calls[0] &&
+          !reset_failure.Calls[1] &&
+          !reset_failure.Calls[2] &&
+          !FakeTinyDirectEnabled,
+        "failed execution-mode reset was not retried and reported");
+    std::vector<uint8_t> after;
+    Check(transactional.IsInitialized() &&
+              transactional.Encode(K + 3u, after) == Wirehair_Success &&
+              after == before,
+        "failed execution-mode reset replaced the prior arm");
+
+    NativeTimingControlProbe probe;
+    Check(probe.Initialize(enabled, K, block_bytes) ==
+              Wirehair_InvalidInput,
+        "formal timing-control probe accepted an execution overlay");
 }
 
 void CheckCanonicalCertifiedBase()
@@ -1179,6 +1562,7 @@ int main()
     CheckDeterministicSource();
     CheckCertifiedMatchesPublicProfile();
     CheckSourceIndependentRankClassification();
+    CheckNativeExecutionModeOverlay();
     CheckCanonicalCertifiedBase();
     CheckArmsAndNestedRecovery();
     CheckTransactionalArmAndValidation();

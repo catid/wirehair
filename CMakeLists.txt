@@ -800,7 +800,8 @@ if(BUILD_TESTS)
             bench/Wh2NativeCodec.h
             bench/Wh2NativeCodecTest.cpp)
         target_link_libraries(wirehair_wh2_native_codec_test PRIVATE
-            wirehair_v2_policy)
+            wirehair_v2_policy
+            Threads::Threads)
         wirehair_apply_project_options(wirehair_wh2_native_codec_test)
         add_test(
             NAME wirehair_wh2_native_codec_test
