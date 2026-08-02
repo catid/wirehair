@@ -9,6 +9,9 @@ namespace {
 static const uint64_t kSplitMixIncrement = UINT64_C(0x9e3779b97f4a7c15);
 static const uint64_t kSplitMixMultiplier1 = UINT64_C(0xbf58476d1ce4e5b9);
 static const uint64_t kSplitMixMultiplier2 = UINT64_C(0x94d049bb133111eb);
+static const uint32_t kDevelopmentTimingRepetitions = 16u;
+static const uint32_t kDevelopmentTimingWorkers = 8u;
+static const std::size_t kDevelopmentTimingCohorts = 264u;
 
 static const uint32_t kTimingK[] = {
     8u, 32u, 100u, 128u, 512u, 1000u,
@@ -188,7 +191,7 @@ bool ExactDevelopmentTimingCell(const FrozenTimingCell& cell)
     const uint32_t* const width_position =
         std::find(kTimingWidths, width_end, cell.block_bytes);
     if (k_position == k_end || width_position == width_end ||
-        cell.replicate >= 8u)
+        cell.replicate >= kDevelopmentTimingRepetitions)
     {
         return false;
     }
@@ -201,7 +204,7 @@ bool ExactDevelopmentTimingCell(const FrozenTimingCell& cell)
         return false;
     }
     const std::size_t expected_ordinal =
-        static_cast<std::size_t>(width_position - kTimingWidths) * 96u +
+        static_cast<std::size_t>(width_position - kTimingWidths) * 192u +
         static_cast<std::size_t>(cell.replicate) * 12u +
         static_cast<std::size_t>(k_position - kTimingK);
     return cell.ordinal == expected_ordinal &&
@@ -317,6 +320,35 @@ uint32_t DevelopmentTimingInvocationsPerSlot(uint32_t K)
     return std::max(1u, rounded_up);
 }
 
+uint32_t DevelopmentTimingWorkerCount()
+{
+    return kDevelopmentTimingWorkers;
+}
+
+std::size_t DevelopmentTimingCohortCount()
+{
+    return kDevelopmentTimingCohorts;
+}
+
+bool DevelopmentTimingWorkerSlot(
+    std::size_t cohort_index,
+    uint32_t replicate,
+    uint32_t& worker_slot)
+{
+    worker_slot = 0u;
+    if (cohort_index >= kDevelopmentTimingCohorts ||
+        replicate >= kDevelopmentTimingRepetitions)
+    {
+        return false;
+    }
+    const uint32_t wave_index = replicate / kDevelopmentTimingWorkers;
+    worker_slot = (
+        replicate % kDevelopmentTimingWorkers +
+        static_cast<uint32_t>(cohort_index % kDevelopmentTimingWorkers) +
+        wave_index) % kDevelopmentTimingWorkers;
+    return true;
+}
+
 bool DevelopmentTimingSeed(
     uint32_t replicate,
     uint32_t& base_seed_attempt,
@@ -324,7 +356,7 @@ bool DevelopmentTimingSeed(
 {
     base_seed_attempt = 0u;
     loss_seed = 0u;
-    if (replicate >= 8u) {
+    if (replicate >= kDevelopmentTimingRepetitions) {
         return false;
     }
     const uint32_t pair_index = replicate % 3u;
@@ -338,12 +370,14 @@ bool DevelopmentTimingSeed(
 std::vector<FrozenTimingCell> EnumerateDevelopmentTimingCells()
 {
     std::vector<FrozenTimingCell> cells;
-    cells.reserve(192u);
+    cells.reserve(384u);
     for (std::size_t width_index = 0u;
         width_index < sizeof(kTimingWidths) / sizeof(kTimingWidths[0]);
         ++width_index)
     {
-        for (uint32_t replicate = 0u; replicate < 8u; ++replicate)
+        for (uint32_t replicate = 0u;
+            replicate < kDevelopmentTimingRepetitions;
+            ++replicate)
         {
             uint32_t attempt = 0u;
             uint64_t loss_seed = 0u;
@@ -418,7 +452,7 @@ std::string DevelopmentTimingDomainSha256()
     const std::vector<FrozenTimingCell> cells =
         EnumerateDevelopmentTimingCells();
     std::string stream;
-    stream.reserve(44000u);
+    stream.reserve(88000u);
     for (std::size_t i = 0u; i < cells.size(); ++i)
     {
         const std::string json = CanonicalTimingCellJson(cells[i]);
@@ -469,12 +503,12 @@ FrozenTraceStatus GenerateDevelopmentTimingTrace(
 std::string CanonicalTimingTraceManifestRow(
     const FrozenTimingTraceReceipt& receipt)
 {
-    if (receipt.ordinal >= 192u) {
+    if (receipt.ordinal >= 384u) {
         return std::string();
     }
     const std::vector<FrozenTimingCell> cells =
         EnumerateDevelopmentTimingCells();
-    if (cells.size() != 192u) {
+    if (cells.size() != 384u) {
         return std::string();
     }
     FrozenPacketTrace expected_trace;

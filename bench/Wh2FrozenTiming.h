@@ -29,7 +29,7 @@ struct FrozenTimingCell
     FrozenTimingCell();
 };
 
-// The exact 2 widths x 8 replicates x 12 K values, in checker order.
+// The exact 2 widths x 16 replicates x 12 K values, in checker order.
 std::vector<FrozenTimingCell> EnumerateDevelopmentTimingCells();
 
 std::string CanonicalTimingCellJson(const FrozenTimingCell& cell);
@@ -41,8 +41,18 @@ std::string DevelopmentTimingDomainSha256();
 // max(1, ceil(65536 / K)) without overflowing at UINT32_MAX.
 uint32_t DevelopmentTimingInvocationsPerSlot(uint32_t K);
 
+// Frozen v3 execution geometry for the one-candidate development timing
+// screen: 264 homogeneous (K, width, panel) cohorts, two eight-job waves, and
+// a barrier after every wave.  Worker slots index the sorted eight-CPU roster.
+uint32_t DevelopmentTimingWorkerCount();
+std::size_t DevelopmentTimingCohortCount();
+bool DevelopmentTimingWorkerSlot(
+    std::size_t cohort_index,
+    uint32_t replicate,
+    uint32_t& worker_slot);
+
 // Derive the paired development loss seed and fixed production construction
-// attempt for one of the eight frozen replicates.  Loss roots continue to
+// attempt for one of the sixteen frozen replicates.  Loss roots continue to
 // cycle, while timing always uses public construction attempt zero.
 bool DevelopmentTimingSeed(
     uint32_t replicate,

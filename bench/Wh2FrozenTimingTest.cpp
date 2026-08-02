@@ -25,6 +25,7 @@ bool Check(bool condition, const char* message)
 void TestTimingSeeds()
 {
     static const uint32_t attempts[] = {
+        0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u,
         0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u
     };
     static const uint64_t seeds[] = {
@@ -35,9 +36,17 @@ void TestTimingSeeds()
         UINT64_C(0x8886c61661bd0c88),
         UINT64_C(0x4694f3b073a0c6c7),
         UINT64_C(0x7d771d8bc3d7af5f),
-        UINT64_C(0xe4db579c79a43708)
+        UINT64_C(0xe4db579c79a43708),
+        UINT64_C(0xc34be295f3f62201),
+        UINT64_C(0x8df810ac40206963),
+        UINT64_C(0xc1ba1dde6ccd5c85),
+        UINT64_C(0xc5b7018f93a18591),
+        UINT64_C(0x554ea6750448cc4c),
+        UINT64_C(0x5a1602ce508795aa),
+        UINT64_C(0x6e670f6df8b37a57),
+        UINT64_C(0x2302e830b01627be)
     };
-    for (uint32_t replicate = 0u; replicate < 8u; ++replicate)
+    for (uint32_t replicate = 0u; replicate < 16u; ++replicate)
     {
         uint32_t attempt = UINT32_MAX;
         uint64_t seed = UINT64_MAX;
@@ -51,7 +60,7 @@ void TestTimingSeeds()
 
     uint32_t attempt = 9u;
     uint64_t seed = 9u;
-    Check(!DevelopmentTimingSeed(8u, attempt, seed) &&
+    Check(!DevelopmentTimingSeed(16u, attempt, seed) &&
             attempt == 0u && seed == 0u,
         "out-of-domain timing replicate was accepted");
 }
@@ -71,6 +80,72 @@ void TestInvocationsPerSlotFormula()
             DevelopmentTimingInvocationsPerSlot(65537u) == 1u &&
             DevelopmentTimingInvocationsPerSlot(UINT32_MAX) == 1u,
         "batch-count boundary or overflow handling changed");
+}
+
+void TestExecutionGeometry()
+{
+    Check(DevelopmentTimingWorkerCount() == 8u &&
+            DevelopmentTimingCohortCount() == 264u,
+        "frozen timing worker/cohort cardinality changed");
+    const std::vector<FrozenTimingCell> cells =
+        EnumerateDevelopmentTimingCells();
+    const std::vector<FrozenTimingPanel> panels =
+        EnumerateOneCandidateTimingPanels("candidate");
+    Check(cells.size() == 384u && panels.size() == 11u &&
+            cells.size() / 16u * panels.size() ==
+                DevelopmentTimingCohortCount(),
+        "timing cohort count does not match cells and panels");
+
+    for (std::size_t cohort = 0u;
+        cohort < DevelopmentTimingCohortCount();
+        ++cohort)
+    {
+        for (uint32_t wave = 0u; wave < 2u; ++wave)
+        {
+            bool seen[8] = {};
+            for (uint32_t local = 0u; local < 8u; ++local)
+            {
+                const uint32_t replicate = wave * 8u + local;
+                uint32_t slot = UINT32_MAX;
+                const uint32_t expected = static_cast<uint32_t>(
+                    (local + cohort + wave) % 8u);
+                Check(DevelopmentTimingWorkerSlot(
+                        cohort, replicate, slot) &&
+                        slot == expected && !seen[slot],
+                    "timing wave is not an exact Latin worker rotation");
+                if (slot < 8u) {
+                    seen[slot] = true;
+                }
+            }
+            Check(std::count(seen, seen + 8, true) == 8,
+                "timing wave does not use every worker exactly once");
+        }
+    }
+
+    for (uint32_t replicate = 0u; replicate < 16u; ++replicate)
+    {
+        uint32_t counts[8] = {};
+        for (std::size_t cohort = 0u;
+            cohort < DevelopmentTimingCohortCount();
+            ++cohort)
+        {
+            uint32_t slot = UINT32_MAX;
+            if (DevelopmentTimingWorkerSlot(cohort, replicate, slot) &&
+                slot < 8u)
+            {
+                ++counts[slot];
+            }
+        }
+        Check(std::count(counts, counts + 8, 33u) == 8,
+            "one timing replicate is not balanced over worker slots");
+    }
+
+    uint32_t slot = UINT32_MAX;
+    Check(!DevelopmentTimingWorkerSlot(264u, 0u, slot) && slot == 0u,
+        "out-of-domain timing cohort was accepted");
+    slot = UINT32_MAX;
+    Check(!DevelopmentTimingWorkerSlot(0u, 16u, slot) && slot == 0u,
+        "out-of-domain timing replicate received a worker slot");
 }
 
 void TestDefaultTimingValuesAreSafelyInvalid()
@@ -95,14 +170,14 @@ void TestTimingCellEnumeration()
 
     const std::vector<FrozenTimingCell> cells =
         EnumerateDevelopmentTimingCells();
-    Check(cells.size() == 192u,
-        "development timing cell cardinality is not 192");
+    Check(cells.size() == 384u,
+        "development timing cell cardinality is not 384");
     for (std::size_t ordinal = 0u; ordinal < cells.size(); ++ordinal)
     {
         const FrozenTimingCell& cell = cells[ordinal];
-        const std::size_t width_index = ordinal / 96u;
+        const std::size_t width_index = ordinal / 192u;
         const uint32_t replicate =
-            static_cast<uint32_t>((ordinal % 96u) / 12u);
+            static_cast<uint32_t>((ordinal % 192u) / 12u);
         const std::size_t k_index = ordinal % 12u;
         uint32_t expected_attempt = 0u;
         uint64_t expected_seed = 0u;
@@ -144,19 +219,19 @@ void TestTimingCellEnumeration()
             "9688a6fa89677503e7d12cc4736f0a9f",
         "first timing cell SHA-256 changed");
     Check(
-        TimingCellSha256(cells[96]) ==
+        TimingCellSha256(cells[192]) ==
             "66f9fe3a15beb8a6284e3609a79c4743"
             "c73fc34f698cf3720389633956104ee9",
         "first wide timing cell SHA-256 changed");
     Check(
-        TimingCellSha256(cells[191]) ==
-            "24edfb573e66d4bd5763927938b00a1c6"
-            "6ea59abab38f770c8f131cbd4b50973",
+        TimingCellSha256(cells[383]) ==
+            "08d5ab5c41e778574fdc1c57d8284780"
+            "b65242c2446a57808c72245987be94f5",
         "last timing cell SHA-256 changed");
     Check(
         DevelopmentTimingDomainSha256() ==
-            "289111f2fe4ecf3aff3875f852e386f5"
-            "44cc52b261ef9c2ce0159302c4f5bb61",
+            "4d094a6d351d3b57cbc2654bf269b1da"
+            "41886a68c7bebd14803b2892d1cd89d7",
         "development timing domain SHA-256 changed");
 
     const std::vector<FrozenTimingCell> repeat =
@@ -197,8 +272,8 @@ void TestAllTimingTracesAndReceipts()
         EnumerateDevelopmentTimingCells();
     std::string trace_aggregate;
     std::string pair_aggregate;
-    trace_aggregate.reserve(13400u);
-    pair_aggregate.reserve(25000u);
+    trace_aggregate.reserve(26800u);
+    pair_aggregate.reserve(50000u);
     uint64_t total_attempts = 0u;
     uint64_t maximum_attempts = 0u;
 
@@ -256,28 +331,28 @@ void TestAllTimingTracesAndReceipts()
                     "4bbef05c82c93d6e0e75bcf482e36e94\"}",
                 "first canonical timing trace manifest row changed");
         }
-        if (i == 191u) {
+        if (i == 383u) {
             Check(trace.trace_sha256 ==
-                    "8829d12cd3ef85df09051bef9cad285e"
-                    "965e1c2d45f6b51c43aacc551620dd20" &&
-                    trace.attempted_candidates == 71181u,
+                    "24c43a92dcc1705e46a772abbfc2bd09e"
+                    "d491f1f9829972025f0dec9397fb123" &&
+                    trace.attempted_candidates == 71131u,
                 "last native timing trace golden changed");
         }
     }
 
-    Check(total_attempts == UINT64_C(2378674),
+    Check(total_attempts == UINT64_C(4759082),
         "all-timing-trace candidate total changed");
-    Check(maximum_attempts == UINT64_C(71238),
+    Check(maximum_attempts == UINT64_C(71360),
         "all-timing-trace maximum candidate count changed");
     Check(
         Sha256Hex(trace_aggregate) ==
-            "62dd9de7f685c7b4b373d8dea7603a45"
-            "8525ba6aa99f7c8226b526ec245ec26d",
-        "all 192 timing trace hashes disagree with Python reference");
+            "f326fec5818e4f6e15ec31fec161623a0"
+            "96bce8c352657d119989ef6a9902161",
+        "all 384 timing trace hashes disagree with Python reference");
     Check(
         Sha256Hex(pair_aggregate) ==
-            "690a4b3762df2d65aa18bdc9900b9223"
-            "19753f7b1615d0674953f7230ab117cd",
+            "0fdb16de07899ee0ab4bf8e116efa120"
+            "666856d77283c557af0f8e15460582d8",
         "timing cell-to-trace mapping disagrees with Python reference");
 
     FrozenPacketTrace first_trace;
@@ -296,7 +371,7 @@ void TestAllTimingTracesAndReceipts()
         "repeated timing trace/receipt generation was not deterministic");
 
     FrozenTimingCell invalid = cells[0];
-    invalid.replicate = 8u;
+    invalid.replicate = 16u;
     Check(GenerateDevelopmentTimingTrace(
             invalid, repeated_trace, repeated_receipt) ==
                 FrozenTraceStatus::InvalidInput &&
@@ -436,8 +511,8 @@ void TestOneCandidatePanelsAndOrders()
             }
         }
     }
-    Check(abba == 1056u && baab == 1056u,
-        "2,112 timing rows are not parity-counterbalanced");
+    Check(abba == 2112u && baab == 2112u,
+        "4,224 timing rows are not parity-counterbalanced");
 
     FrozenTimingPanel mutant = panels[0];
     mutant.ordinal = 1u;
@@ -505,6 +580,7 @@ int main()
 {
     TestTimingSeeds();
     TestInvocationsPerSlotFormula();
+    TestExecutionGeometry();
     TestDefaultTimingValuesAreSafelyInvalid();
     TestTimingCellEnumeration();
     TestAllTimingTracesAndReceipts();

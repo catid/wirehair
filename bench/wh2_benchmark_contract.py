@@ -19,10 +19,10 @@ import sys
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 
-SCHEMA = "wirehair.wh2.benchmark-contract.v2"
+SCHEMA = "wirehair.wh2.benchmark-contract.v3"
 FREEZE_SCHEMA = "wirehair.wh2.benchmark-freeze.v1"
 REPAIR_MAP_SCHEMA = "wirehair.wh2.repair-map.v1"
-DEFAULT_CONTRACT = Path(__file__).with_name("wh2_benchmark_contract_v2.json")
+DEFAULT_CONTRACT = Path(__file__).with_name("wh2_benchmark_contract_v3.json")
 MAX_JSON_LINE_BYTES = 64 * 1024
 HEX64 = re.compile(r"0x[0-9a-f]{16}\Z")
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
@@ -207,6 +207,28 @@ EXPECTED_PANEL_PROTOCOL = {
         "replicate parity equals phase_bit, otherwise BAAB"
     ),
 }
+EXPECTED_TIMING_EXECUTION_GEOMETRY = {
+    "timing_worker_count": 8,
+    "jobs_per_wave": 8,
+    "cohort_identity": (
+        "all timing cell fields except replicate and loss_seed, plus panel"
+    ),
+    "cohort_order": (
+        "block_bytes order, then K-set order, then frozen panel ordinal"
+    ),
+    "wave_partition": "floor(replicate/8)",
+    "worker_slot": "(replicate%8+cohort_index+wave_index)%8",
+    "barrier": "after_each_wave",
+    "cohort_count_formula": (
+        "(expected_cells/paired_repetitions)*"
+        "len(timing_panels(contract,frozen_arms))"
+    ),
+    "topology_policy": (
+        "eight singleton-pinned workers on distinct physical cores; maximize "
+        "coverage of available L3/LLC groups, then fill deterministically; "
+        "distinct L3/LLC groups are preferred but not required"
+    ),
+}
 EXPECTED_TIMING_STATISTICS = {
     "block_log_ratio": (
         "ABBA=((ln e0-ln e1)+(ln e3-ln e2))/2; "
@@ -220,7 +242,7 @@ EXPECTED_TIMING_STATISTICS = {
     ),
     "variance": "unbiased sample variance over replicate means",
     "t_critical_by_repetitions": {
-        "8": 2.364624251592784,
+        "16": 2.131449545559323,
         "24": 2.0686576104190477,
     },
     "faster": "A/B upper 95% bound < -effective_floor",
@@ -311,6 +333,7 @@ EXPECTED_EVIDENCE_POLICY = {
         "wrong_band", "wrong_loss", "incomplete_roster", "domain_hash_drift",
         "trace_drift", "repair_map_drift", "construction_attempt_drift",
         "timing_panel_drift", "timing_order_drift", "timing_batch_drift",
+        "timing_geometry_drift",
     ],
     "selectable_excluded_cells": 0,
     "unsupported_policy": (
@@ -627,8 +650,9 @@ def _validate_structure(contract: Any, check_domain_hashes: bool) -> Mapping[str
     ), "contract")
     if top["schema"] != SCHEMA:
         fail("unexpected contract schema")
-    if top["contract_id"] != "wh2-pure-gf256-1pct-v2" or top["field"] != "GF(256)":
-        fail("v2 is pure GF(256) only")
+    if (top["contract_id"] != "wh2-pure-gf256-1pct-v3" or
+            top["field"] != "GF(256)"):
+        fail("v3 is pure GF(256) only")
 
     goal = _exact_keys(top["goal"], (
         "primary_failure_threshold_ppm", "primary_overhead",
@@ -643,7 +667,7 @@ def _validate_structure(contract: Any, check_domain_hashes: bool) -> Mapping[str
                            "final bad-seed count") != 0 or
             goal["primary_speed_scope"] != "decoder_solve" or
             goal["cross_codec_speed_scope"] != "receive_to_success"):
-        fail("v2 goal constants changed without a schema bump")
+        fail("v3 goal constants changed without a schema bump")
 
     bands = top["k_bands"]
     if not isinstance(bands, list) or len(bands) != 6:
@@ -666,7 +690,7 @@ def _validate_structure(contract: Any, check_domain_hashes: bool) -> Mapping[str
     actual_bands = tuple(
         (band["name"], band["first"], band["last"]) for band in bands)
     if actual_bands != EXPECTED_BANDS:
-        fail("v2 K bands changed without a schema bump")
+        fail("v3 K bands changed without a schema bump")
 
     k_sets = _exact_keys(top["k_sets"], ("short", "timing_short", "all"), "k_sets")
     all_set = _exact_keys(k_sets["all"], ("first", "last"), "k_sets.all")
@@ -684,7 +708,7 @@ def _validate_structure(contract: Any, check_domain_hashes: bool) -> Mapping[str
             fail("{} K set must cover all six bands".format(name))
     if tuple(k_sets["short"]) != EXPECTED_SHORT_K or \
             tuple(k_sets["timing_short"]) != EXPECTED_TIMING_SHORT_K:
-        fail("v2 bounded K cohorts changed without a schema bump")
+        fail("v3 bounded K cohorts changed without a schema bump")
 
     seeds = _exact_keys(top["seeds"], (
         "raw_base_seed_attempts", "production_base_seed_attempt",
@@ -698,7 +722,7 @@ def _validate_structure(contract: Any, check_domain_hashes: bool) -> Mapping[str
             len(set(raw_base_attempts)) != 3):
         fail("raw_base_seed_attempts must contain three unique uint8 values")
     if tuple(raw_base_attempts) != EXPECTED_RAW_BASE_ATTEMPTS:
-        fail("v2 raw base seed attempts changed without a schema bump")
+        fail("v3 raw base seed attempts changed without a schema bump")
     _exact_integer(seeds["production_base_seed_attempt"], 0,
                    "production base seed attempt")
     if seeds["production_base_seed_attempt"] not in raw_base_attempts:
@@ -714,7 +738,7 @@ def _validate_structure(contract: Any, check_domain_hashes: bool) -> Mapping[str
     if (tuple(seeds["training_loss_roots"]) != EXPECTED_TRAINING_LOSS_ROOTS or
             tuple(seeds["validation_loss_roots"]) !=
             EXPECTED_VALIDATION_LOSS_ROOTS):
-        fail("v2 loss roots changed without a schema bump")
+        fail("v3 loss roots changed without a schema bump")
     if not set(seeds["training_loss_roots"]).isdisjoint(
             seeds["validation_loss_roots"]):
         fail("training and validation loss roots must be disjoint")
@@ -739,7 +763,7 @@ def _validate_structure(contract: Any, check_domain_hashes: bool) -> Mapping[str
         for set_name in strata_sets
     }
     if actual_strata != EXPECTED_STRATA_SETS:
-        fail("v2 loss/schedule strata changed without a schema bump")
+        fail("v3 loss/schedule strata changed without a schema bump")
 
     recovery = _exact_keys(top["recovery"], (
         "overhead_thresholds", "overhead_cap", "raw_construction_attempts",
@@ -759,13 +783,13 @@ def _validate_structure(contract: Any, check_domain_hashes: bool) -> Mapping[str
                            "raw production seed fixups") != 0 or
             _exact_integer(recovery["max_construction_attempts"], 256,
                            "maximum construction attempts") != 256):
-        fail("v2 raw/overhead constants changed without a schema bump")
+        fail("v3 raw/overhead constants changed without a schema bump")
     if (recovery["phase_seed_policy"] != EXPECTED_PHASE_SEED_POLICY or
             recovery["repair_rule"] != EXPECTED_REPAIR_RULE or
             recovery["attempt_derivation"] != EXPECTED_ATTEMPT_DERIVATION):
-        fail("v2 raw/repaired seed policy changed without a schema bump")
+        fail("v3 raw/repaired seed policy changed without a schema bump")
     if recovery["packet_trace"] != EXPECTED_PACKET_TRACE:
-        fail("v2 packet-trace algorithm changed without a schema bump")
+        fail("v3 packet-trace algorithm changed without a schema bump")
     expected_key = [
         "phase", "band", "K", "block_bytes", "loss_ppm", "schedule",
         "trial", "base_seed_attempt", "loss_seed", "overhead_cap",
@@ -777,7 +801,7 @@ def _validate_structure(contract: Any, check_domain_hashes: bool) -> Mapping[str
         "fatal_or_internal",
     ), "recovery outcomes")
     if outcomes != EXPECTED_OUTCOMES:
-        fail("v2 recovery outcomes changed without a schema bump")
+        fail("v3 recovery outcomes changed without a schema bump")
 
     domains = recovery["domains"]
     expected_phases = {
@@ -797,13 +821,13 @@ def _validate_structure(contract: Any, check_domain_hashes: bool) -> Mapping[str
             if isinstance(domain["block_bytes"], list) else ()
         if (domain["k_set"] != expected_k_set or
                 actual_widths != expected_widths):
-            fail("v2 {} K set or widths changed without a schema bump".format(
+            fail("v3 {} K set or widths changed without a schema bump".format(
                 phase))
         if (domain["seed_mode"] != expected_seed_mode or
                 domain["strata_set"] != expected_strata_set or
                 type(domain["expected_cells_per_arm"]) is not int or
                 domain["expected_cells_per_arm"] != expected_count):
-            fail("v2 {} recovery domain changed without a schema bump".format(
+            fail("v3 {} recovery domain changed without a schema bump".format(
                 phase))
         widths = domain["block_bytes"]
         if (not isinstance(widths, list) or not widths or
@@ -828,7 +852,8 @@ def _validate_structure(contract: Any, check_domain_hashes: bool) -> Mapping[str
         "seed_derivation", "domains", "confidence", "practical_margin_ppm",
         "effective_floor", "aa_repeatability_rule", "order", "cache_state",
         "production_policy", "eligibility", "scope_protocol",
-        "required_panels", "scopes", "panel_protocol", "statistics",
+        "required_panels", "scopes", "panel_protocol", "execution_geometry",
+        "statistics",
         "invalid_timer_policy",
     }
     _exact_keys(timing, required_timing, "timing")
@@ -844,8 +869,10 @@ def _validate_structure(contract: Any, check_domain_hashes: bool) -> Mapping[str
             "aa_repeatability_rule", "order", "cache_state",
             "production_policy", "eligibility", "scope_protocol"):
         if timing[field] != EXPECTED_TIMING_POLICY[field]:
-            fail("v2 timing.{} changed without a schema bump".format(field))
+            fail("v3 timing.{} changed without a schema bump".format(field))
     if (timing["panel_protocol"] != EXPECTED_PANEL_PROTOCOL or
+            timing["execution_geometry"] !=
+                EXPECTED_TIMING_EXECUTION_GEOMETRY or
             timing["statistics"] != EXPECTED_TIMING_STATISTICS or
             timing["invalid_timer_policy"] != EXPECTED_INVALID_TIMER_POLICY or
             type(timing["panel_protocol"].get("slots_per_panel")) is not int or
@@ -857,7 +884,8 @@ def _validate_structure(contract: Any, check_domain_hashes: bool) -> Mapping[str
             any(type(value) is not float for value in
                 timing["statistics"].get(
                     "t_critical_by_repetitions", {}).values())):
-        fail("v2 timing panel/statistics protocol changed without a schema bump")
+        fail("v3 timing execution/panel/statistics protocol changed without "
+             "a schema bump")
     if (timing["required_panels"] != [
                 "each_arm_AA",
                 "candidate_vs_wirehair2_head_decoder_solve",
@@ -866,21 +894,21 @@ def _validate_structure(contract: Any, check_domain_hashes: bool) -> Mapping[str
             timing["scopes"] != [
                 "decoder_solve", "encoder_init_plus_first_K_symbols",
                 "receive_to_success"]):
-        fail("v2 timing constants changed without a schema bump")
+        fail("v3 timing constants changed without a schema bump")
     expected_timing_key = [
         "phase", "band", "K", "block_bytes", "loss_ppm", "schedule",
         "replicate", "base_seed_attempt", "loss_seed",
         "fixed_received_overhead", "invocations_per_slot",
     ]
     if timing["cell_key"] != expected_timing_key:
-        fail("v2 timing cell or seed derivation changed without a schema bump")
+        fail("v3 timing cell or seed derivation changed without a schema bump")
     timing_domains = timing["domains"]
     if not isinstance(timing_domains, dict) or set(timing_domains) != {
             "development", "final"}:
         fail("timing domain roster changed without a schema bump")
     expected_timing_domains = {
         "development": (
-            "timing_short", [64, 1280], "production_training", 8, 192),
+            "timing_short", [64, 1280], "production_training", 16, 384),
         "final": (
             "short", [2, 64, 256, 1280, 4096],
             "production_validation", 24, 3600),
@@ -897,7 +925,8 @@ def _validate_structure(contract: Any, check_domain_hashes: bool) -> Mapping[str
                 domain["paired_repetitions"] != repetitions or
                 type(domain["expected_cells"]) is not int or
                 domain["expected_cells"] != expected_count):
-            fail("v2 {} timing domain changed without a schema bump".format(phase))
+            fail("v3 {} timing domain changed without a schema bump".format(
+                phase))
         widths = domain["block_bytes"]
         if (not isinstance(widths, list) or widths != sorted(set(widths)) or
                 any(type(width) is not int or width <= 0 for width in widths)):
@@ -905,6 +934,10 @@ def _validate_structure(contract: Any, check_domain_hashes: bool) -> Mapping[str
         count = len(_k_values(top, k_name)) * len(widths) * repetitions
         if count != expected_count:
             fail("{} timing cell count is inconsistent".format(phase))
+        worker_count = timing["execution_geometry"]["timing_worker_count"]
+        if repetitions <= 0 or repetitions % worker_count != 0:
+            fail("{} timing repetitions must be a positive multiple of the "
+                 "frozen worker count".format(phase))
         if check_domain_hashes:
             digest = timing_domain_sha256(top, phase)
             if domain["domain_sha256"] != digest:
@@ -927,7 +960,7 @@ def _validate_structure(contract: Any, check_domain_hashes: bool) -> Mapping[str
             selection["raw_individual_weak_seeds_are_vetoes"] is not False or
             selection["raw_repairs_and_introductions_are_descriptive"] is not True or
             selection["development_resolved_slowdown_rejects"] is not True):
-        fail("v2 comparison/weak-seed policy changed without a schema bump")
+        fail("v3 comparison/weak-seed policy changed without a schema bump")
     evidence = _exact_keys(top["evidence"], (
         "freeze_before_results", "freeze_manifest_schema",
         "trace_manifest_schema", "repair_map_schema", "canonical_hashing",
@@ -1387,6 +1420,64 @@ def timing_invocations_per_slot(
             formula != INVOCATIONS_PER_SLOT_FORMULA):
         fail("timing measured-batch protocol is invalid")
     return max(1, (target + K - 1) // K)
+
+
+def timing_cohort_count(
+        contract: Mapping[str, Any], phase: str,
+        frozen_arms: Sequence[str]) -> int:
+    """Derive the exact phase cohort count for one frozen arm roster."""
+    timing = contract.get("timing") if isinstance(contract, Mapping) else None
+    geometry = timing.get("execution_geometry") \
+        if isinstance(timing, Mapping) else None
+    domains = timing.get("domains") if isinstance(timing, Mapping) else None
+    if not isinstance(phase, str):
+        fail("timing phase must be a string")
+    domain = domains.get(phase) if isinstance(domains, Mapping) else None
+    if geometry != EXPECTED_TIMING_EXECUTION_GEOMETRY or \
+            not isinstance(domain, Mapping):
+        fail("timing execution geometry or phase is invalid")
+    if (not isinstance(frozen_arms, Sequence) or
+            isinstance(frozen_arms, (str, bytes)) or not frozen_arms or
+            any(not isinstance(arm, str) or not arm for arm in frozen_arms) or
+            len(frozen_arms) != len(set(frozen_arms))):
+        fail("timing frozen arm roster must be nonempty unique strings")
+    controls = set(contract["selection"]["controls"])
+    if not controls.issubset(set(frozen_arms)):
+        fail("timing frozen arm roster omits a required control")
+    repetitions = domain.get("paired_repetitions")
+    expected_cells = domain.get("expected_cells")
+    if (type(repetitions) is not int or repetitions <= 0 or
+            type(expected_cells) is not int or expected_cells <= 0 or
+            expected_cells % repetitions != 0):
+        fail("timing phase cardinality cannot form exact cohorts")
+    panels = timing_panels(contract, frozen_arms)
+    if not panels:
+        fail("timing frozen arm roster produces no panels")
+    return expected_cells // repetitions * len(panels)
+
+
+def timing_worker_slot(
+        contract: Mapping[str, Any], phase: str,
+        frozen_arms: Sequence[str], cohort_index: int,
+        replicate: int) -> int:
+    """Return the frozen sorted-worker slot for one cohort replicate."""
+    timing = contract.get("timing") if isinstance(contract, Mapping) else None
+    geometry = timing.get("execution_geometry") \
+        if isinstance(timing, Mapping) else None
+    domains = timing.get("domains") if isinstance(timing, Mapping) else None
+    domain = domains.get(phase) if isinstance(domains, Mapping) else None
+    cohort_count = timing_cohort_count(contract, phase, frozen_arms)
+    if type(cohort_index) is not int or not 0 <= cohort_index < cohort_count:
+        fail("timing cohort index is outside the frozen phase/arm roster")
+    repetitions = domain.get("paired_repetitions") \
+        if isinstance(domain, Mapping) else None
+    if (type(replicate) is not int or type(repetitions) is not int or
+            not 0 <= replicate < repetitions):
+        fail("timing replicate is outside the frozen phase")
+    workers = geometry["timing_worker_count"]
+    jobs_per_wave = geometry["jobs_per_wave"]
+    wave_index = replicate // jobs_per_wave
+    return (replicate % jobs_per_wave + cohort_index + wave_index) % workers
 
 
 def iter_timing_cells(contract: Mapping[str, Any], phase: str) -> Iterator[Dict[str, Any]]:

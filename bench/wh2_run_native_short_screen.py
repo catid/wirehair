@@ -4,8 +4,8 @@
 This is deliberately a narrow controller for the frozen development domain.
 It emits and freezes arm-free traces before starting any result job, keeps one
 persistent native worker on each selected physical core, executes timing one
-replicate barrier at a time, and delegates publication to the fail-closed
-native evidence assembler.
+homogeneous eight-job wave and barrier at a time, and delegates publication to
+the fail-closed native evidence assembler.
 """
 
 from __future__ import annotations
@@ -51,8 +51,11 @@ EXPECTED_ARMS = (
 SUMMARY_SCHEMA = "wirehair.wh2.native-short-screen-run.v1"
 MAX_WALL_SECONDS = 7200.0
 MAX_RESPONSE_BYTES = 1024 * 1024
+TIMING_WORKER_COUNT = 8
 ZERO_SHA256 = "0" * 64
 CPU_TOKEN = re.compile(r"(?:0|[1-9][0-9]*)\Z")
+CACHE_INDEX_TOKEN = re.compile(r"index(?:0|[1-9][0-9]*)\Z")
+POSITIVE_TOKEN = re.compile(r"[1-9][0-9]*\Z")
 
 
 class RunnerError(RuntimeError):
@@ -277,13 +280,85 @@ def _cpu_topology(cpu: int, sysfs_root: Path) -> Tuple[int, int]:
     return values[0], values[1]
 
 
+def _cpu_llc_identity(cpu: int, sysfs_root: Path) -> Tuple[int, int]:
+    """Read the highest data/unified cache level and ID without assuming index3."""
+    cache_root = sysfs_root / "cpu{}".format(cpu) / "cache"
+    try:
+        entries = sorted(
+            (path for path in cache_root.iterdir()
+             if CACHE_INDEX_TOKEN.fullmatch(path.name) is not None),
+            key=lambda path: int(path.name[5:]))
+    except OSError as exc:
+        fail("cannot enumerate CPU {} cache topology: {}".format(cpu, exc))
+    if not entries:
+        fail("CPU {} has no indexed cache topology".format(cpu))
+    data_caches: List[Tuple[int, int]] = []
+    for entry in entries:
+        try:
+            level_text = (entry / "level").read_text(
+                encoding="ascii").strip()
+            cache_type = (entry / "type").read_text(
+                encoding="ascii").strip()
+        except OSError as exc:
+            fail("cannot read CPU {} cache topology: {}".format(cpu, exc))
+        if POSITIVE_TOKEN.fullmatch(level_text) is None or \
+                cache_type not in ("Data", "Instruction", "Unified"):
+            fail("CPU {} has malformed cache level/type metadata".format(cpu))
+        if cache_type == "Instruction":
+            continue
+        try:
+            cache_id_text = (entry / "id").read_text(
+                encoding="ascii").strip()
+        except OSError as exc:
+            fail("cannot read CPU {} cache ID: {}".format(cpu, exc))
+        if CPU_TOKEN.fullmatch(cache_id_text) is None:
+            fail("CPU {} has a noncanonical cache ID".format(cpu))
+        data_caches.append((int(level_text), int(cache_id_text)))
+    if not data_caches:
+        fail("CPU {} has no data/unified cache topology".format(cpu))
+    highest_level = max(level for level, _ in data_caches)
+    ids = {cache_id for level, cache_id in data_caches
+           if level == highest_level}
+    if len(ids) != 1:
+        fail("CPU {} has ambiguous last-level cache IDs".format(cpu))
+    return highest_level, next(iter(ids))
+
+
+def _select_llc_spread_workers(
+        candidates: Mapping[Tuple[int, int], int],
+        llc_by_core: Mapping[
+            Tuple[int, int], Tuple[int, int, int]]) -> List[int]:
+    """Pick eight cores with maximum LLC coverage, then round-robin fill."""
+    grouped: Dict[Tuple[int, int, int], List[int]] = {}
+    for core, cpu in candidates.items():
+        grouped.setdefault(llc_by_core[core], []).append(cpu)
+    for values in grouped.values():
+        values.sort()
+    selected: List[int] = []
+    group_ids = sorted(grouped)
+    while len(selected) < TIMING_WORKER_COUNT:
+        progressed = False
+        for cache_id in group_ids:
+            values = grouped[cache_id]
+            if values:
+                selected.append(values.pop(0))
+                progressed = True
+                if len(selected) == TIMING_WORKER_COUNT:
+                    break
+        if not progressed:
+            break
+    if len(selected) != TIMING_WORKER_COUNT:
+        fail("fewer than eight eligible physical worker cores are available")
+    return sorted(selected)
+
+
 def select_cpu_layout(
         sampler_cpu: int, explicit_workers: Optional[Sequence[int]] = None,
         explicit_controller: Optional[int] = None,
         affinity: Optional[Iterable[int]] = None,
         sysfs_root: Path = Path("/sys/devices/system/cpu"),
         ) -> Tuple[List[int], int]:
-    """Reserve a controller core and one worker CPU on every other core."""
+    """Select eight LLC-spread physical cores plus an isolated controller."""
     if type(sampler_cpu) is not int or sampler_cpu < 0:
         fail("sampler CPU must be a nonnegative integer")
     if affinity is None:
@@ -292,17 +367,51 @@ def select_cpu_layout(
         except (AttributeError, OSError) as exc:
             fail("cannot inspect controller CPU affinity: {}".format(exc))
     else:
-        allowed = sorted(set(affinity))
+        affinity_values = list(affinity)
+        if any(type(cpu) is not int or cpu < 0 for cpu in affinity_values):
+            fail("controller CPU affinity contains an invalid CPU ID")
+        allowed = sorted(set(affinity_values))
     if not allowed:
         fail("controller CPU affinity is empty")
     sampler_core = _cpu_topology(sampler_cpu, sysfs_root)
     topology = {cpu: _cpu_topology(cpu, sysfs_root) for cpu in allowed}
+    # Cache IDs need not be globally unique across packages or cache levels.
+    # Bind both dimensions before comparing last-level cache groups.
+    llc_by_cpu = {
+        cpu: (topology[cpu][0],) + _cpu_llc_identity(cpu, sysfs_root)
+        for cpu in allowed
+    }
     allowed_set = set(allowed)
+
+    by_core: Dict[Tuple[int, int], int] = {}
+    llc_by_core: Dict[Tuple[int, int], Tuple[int, int, int]] = {}
+    for cpu in allowed:
+        core = topology[cpu]
+        cache_id = llc_by_cpu[cpu]
+        if core in llc_by_core and llc_by_core[core] != cache_id:
+            fail("SMT siblings disagree on their last-level cache ID")
+        llc_by_core[core] = cache_id
+        by_core[core] = min(cpu, by_core.get(core, cpu))
+
+    controller_core: Optional[Tuple[int, int]] = None
+    if explicit_controller is not None:
+        if type(explicit_controller) is not int or explicit_controller < 0 or \
+                explicit_controller not in allowed_set:
+            fail("controller CPU is outside current sched affinity")
+        controller_core = topology[explicit_controller]
+        if explicit_controller == sampler_cpu or controller_core == sampler_core:
+            fail("controller CPU overlaps the sampler's physical core")
+
+    worker_candidates = {
+        core: cpu for core, cpu in by_core.items()
+        if core != sampler_core and core != controller_core
+    }
 
     if explicit_workers is not None:
         workers = list(explicit_workers)
-        if workers != sorted(set(workers)) or not workers:
-            fail("explicit worker CPUs must be sorted, unique, and nonempty")
+        if (workers != sorted(set(workers)) or
+                len(workers) != TIMING_WORKER_COUNT):
+            fail("explicit worker CPUs must be eight sorted unique IDs")
         if any(type(cpu) is not int or cpu < 0 for cpu in workers):
             fail("explicit worker CPUs contain an invalid CPU ID")
         if not set(workers).issubset(allowed_set):
@@ -312,60 +421,40 @@ def select_cpu_layout(
             fail("explicit worker CPUs contain SMT siblings")
         if sampler_cpu in workers or sampler_core in worker_cores:
             fail("worker CPUs overlap the sampler's physical core")
-    else:
-        by_core: Dict[Tuple[int, int], int] = {}
-        for cpu in allowed:
-            core = topology[cpu]
-            if cpu == sampler_cpu or core == sampler_core:
-                continue
-            by_core[core] = min(cpu, by_core.get(core, cpu))
-        workers = sorted(by_core.values())
-        worker_cores = [topology[cpu] for cpu in workers]
-
-    if explicit_workers is None and explicit_controller is not None:
-        if type(explicit_controller) is not int or \
-                explicit_controller not in allowed_set:
-            fail("controller CPU is outside current sched affinity")
-        requested_core = topology[explicit_controller]
-        workers = [cpu for cpu in workers
-                   if topology[cpu] != requested_core]
-        worker_cores = [topology[cpu] for cpu in workers]
-
-    if explicit_controller is not None:
-        if type(explicit_controller) is not int or explicit_controller < 0 or \
-                explicit_controller not in allowed_set:
-            fail("controller CPU is outside current sched affinity")
-        controller_cpu = explicit_controller
-        controller_core = topology[controller_cpu]
-        if controller_cpu == sampler_cpu or controller_core == sampler_core:
-            fail("controller CPU overlaps the sampler's physical core")
         if controller_core in worker_cores:
             fail("controller CPU shares a physical core with a worker")
     else:
+        workers = _select_llc_spread_workers(
+            worker_candidates, llc_by_core)
+        worker_cores = [topology[cpu] for cpu in workers]
+
+    available_llc_ids = {
+        llc_by_core[core] for core in worker_candidates
+    }
+    required_llc_coverage = min(
+        TIMING_WORKER_COUNT, len(available_llc_ids))
+    observed_llc_coverage = len({
+        llc_by_core[topology[cpu]] for cpu in workers
+    })
+    if observed_llc_coverage != required_llc_coverage:
+        fail("worker CPU roster does not maximize available LLC coverage")
+
+    if explicit_controller is not None:
+        controller_cpu = explicit_controller
+    else:
         worker_core_set = set(worker_cores)
-        controller_candidates: Dict[Tuple[int, int], int] = {}
-        for cpu in allowed:
-            core = topology[cpu]
-            if (cpu == sampler_cpu or core == sampler_core or
-                    core in worker_core_set):
-                continue
-            controller_candidates[core] = min(
-                cpu, controller_candidates.get(core, cpu))
+        controller_candidates = {
+            core: cpu for core, cpu in by_core.items()
+            if core != sampler_core and core not in worker_core_set
+        }
         if controller_candidates:
             controller_cpu = max(controller_candidates.values())
             controller_core = topology[controller_cpu]
-        elif explicit_workers is None and workers:
-            # Automatic discovery initially names one CPU on every usable
-            # physical core.  Reserve the highest-numbered core for Python.
-            controller_cpu = workers.pop()
-            controller_core = topology[controller_cpu]
-            worker_cores.pop()
         else:
             fail("no dedicated controller core remains outside frozen workers")
 
-    if not workers:
-        fail("no physical worker core remains after controller reservation")
-    if (controller_cpu in workers or controller_core == sampler_core or
+    if (len(workers) != TIMING_WORKER_COUNT or
+            controller_cpu in workers or controller_core == sampler_core or
             controller_core in {topology[cpu] for cpu in workers}):
         fail("controller/worker/sampler CPU layout is not physically isolated")
     return workers, controller_cpu
@@ -1010,32 +1099,167 @@ def _recovery_jobs(contract: Mapping[str, Any], arm_count: int) -> List[Job]:
         Job("recovery", cell, arm, cell * arm_count + arm)
         for cell in range(cells) for arm in range(arm_count)
     ]
-    if cells != 360 or arm_count != 3 or len(jobs) != 1080:
-        fail("development recovery domain is not the frozen 360x3 screen")
+    if (cells != 360 or arm_count != len(EXPECTED_ARMS) or
+            len(jobs) != cells * arm_count):
+        fail("development recovery jobs differ from the frozen arm roster")
     return jobs
 
 
-def _timing_job_batches(
+def _development_timing_shape(
+        contract: Mapping[str, Any], panel_count: int,
+        ) -> Tuple[int, int]:
+    timing = contract.get("timing")
+    if not isinstance(timing, Mapping):
+        fail("development timing policy is missing")
+    geometry = timing.get("execution_geometry")
+    if geometry != contract_api.EXPECTED_TIMING_EXECUTION_GEOMETRY:
+        fail("development timing execution geometry is not frozen")
+    if geometry.get("timing_worker_count") != TIMING_WORKER_COUNT or \
+            geometry.get("jobs_per_wave") != TIMING_WORKER_COUNT:
+        fail("development timing geometry does not use exactly eight workers")
+    domains = timing.get("domains")
+    domain = domains.get("development") \
+        if isinstance(domains, Mapping) else None
+    repetitions = domain.get("paired_repetitions") \
+        if isinstance(domain, Mapping) else None
+    expected_cells = domain.get("expected_cells") \
+        if isinstance(domain, Mapping) else None
+    if (type(repetitions) is not int or repetitions <= 0 or
+            repetitions % TIMING_WORKER_COUNT != 0):
+        fail("development timing repetitions must be a positive multiple of eight")
+    if (type(expected_cells) is not int or expected_cells <= 0 or
+            expected_cells % repetitions != 0):
+        fail("development timing cell cardinality is invalid")
+    try:
+        expected_panels = len(contract_api.timing_panels(
+            contract, [value[0] for value in EXPECTED_ARMS]))
+    except contract_api.ContractError as exc:
+        fail(str(exc))
+    if type(panel_count) is not int or panel_count != expected_panels:
+        fail("development timing panel cardinality is invalid")
+    return repetitions, expected_cells
+
+
+def _timing_job_waves(
         contract: Mapping[str, Any], panel_count: int,
         ) -> List[Tuple[int, List[Job]]]:
-    cells = list(contract_api.iter_timing_cells(contract, "development"))
-    repetitions = contract["timing"]["domains"]["development"][
-        "paired_repetitions"]
-    batches = []
-    for replicate in range(repetitions):
-        jobs = []
-        for cell, value in enumerate(cells):
-            if value["replicate"] != replicate:
-                continue
-            for panel in range(panel_count):
-                jobs.append(Job(
-                    "timing", cell, panel, cell * panel_count + panel))
-        batches.append((replicate, jobs))
-    if (len(cells) != 192 or repetitions != 8 or panel_count != 11 or
-            any(len(jobs) != 264 for _, jobs in batches) or
-            sum(len(jobs) for _, jobs in batches) != 2112):
-        fail("development timing domain is not the frozen 8x264 screen")
-    return batches
+    """Build homogeneous, barrier-delimited eight-job timing waves."""
+    repetitions, expected_cells = _development_timing_shape(
+        contract, panel_count)
+    try:
+        cells = list(contract_api.iter_timing_cells(
+            contract, "development"))
+    except contract_api.ContractError as exc:
+        fail(str(exc))
+    if len(cells) != expected_cells:
+        fail("development timing cell cardinality differs from its contract")
+
+    timing = contract["timing"]
+    cell_fields = timing.get("cell_key")
+    if (not isinstance(cell_fields, list) or
+            any(not isinstance(field, str) for field in cell_fields) or
+            len(cell_fields) != len(set(cell_fields)) or
+            "replicate" not in cell_fields or "loss_seed" not in cell_fields):
+        fail("development timing cell identity is invalid")
+    stable_fields = [
+        field for field in cell_fields
+        if field not in ("replicate", "loss_seed")
+    ]
+    by_replicate: List[Dict[str, Tuple[int, Mapping[str, Any]]]] = [
+        {} for _ in range(repetitions)
+    ]
+    identity_order: List[str] = []
+    expected_field_set = set(cell_fields)
+    for cell_ordinal, cell in enumerate(cells):
+        if not isinstance(cell, Mapping) or set(cell) != expected_field_set:
+            fail("development timing cell has an unexpected identity")
+        replicate = cell.get("replicate")
+        if (type(replicate) is not int or
+                not 0 <= replicate < repetitions):
+            fail("development timing cell has an invalid replicate")
+        identity = contract_api.canonical_json({
+            field: cell[field] for field in stable_fields
+        })
+        if identity in by_replicate[replicate]:
+            fail("duplicate timing cell identity within one replicate")
+        by_replicate[replicate][identity] = (cell_ordinal, cell)
+        if replicate == 0:
+            identity_order.append(identity)
+
+    cells_per_replicate = expected_cells // repetitions
+    if (len(identity_order) != cells_per_replicate or
+            len(set(identity_order)) != cells_per_replicate):
+        fail("development timing replicate zero has invalid cardinality")
+    expected_identities = set(identity_order)
+    for replicate, values in enumerate(by_replicate):
+        if (len(values) != cells_per_replicate or
+                set(values) != expected_identities):
+            fail("timing cohort identity differs across replicate {}".format(
+                replicate))
+
+    waves: List[Tuple[int, List[Job]]] = []
+    cohort_index = 0
+    frozen_arms = [value[0] for value in EXPECTED_ARMS]
+    for identity in identity_order:
+        for panel in range(panel_count):
+            for wave_index, first_replicate in enumerate(
+                    range(0, repetitions, TIMING_WORKER_COUNT)):
+                jobs = []
+                for replicate in range(
+                        first_replicate,
+                        first_replicate + TIMING_WORKER_COUNT):
+                    cell_ordinal, _ = by_replicate[replicate][identity]
+                    jobs.append(Job(
+                        "timing", cell_ordinal, panel,
+                        cell_ordinal * panel_count + panel))
+                # run_job_batch assigns job position r to worker slot
+                # (r + rotation) modulo eight.  Derive that rotation from the
+                # bounded contract helper and verify the complete wave before
+                # allowing any native command to be issued.
+                try:
+                    rotation = contract_api.timing_worker_slot(
+                        contract, "development", frozen_arms, cohort_index,
+                        first_replicate)
+                    for position, replicate in enumerate(range(
+                            first_replicate,
+                            first_replicate + TIMING_WORKER_COUNT)):
+                        expected_slot = contract_api.timing_worker_slot(
+                            contract, "development", frozen_arms,
+                            cohort_index, replicate)
+                        if expected_slot != (
+                                position + rotation) % TIMING_WORKER_COUNT:
+                            fail("timing worker-slot formula is not a rotation")
+                except contract_api.ContractError as exc:
+                    fail(str(exc))
+                waves.append((rotation, jobs))
+            cohort_index += 1
+
+    expected_cohorts = cells_per_replicate * panel_count
+    try:
+        frozen_cohorts = contract_api.timing_cohort_count(
+            contract, "development", frozen_arms)
+    except contract_api.ContractError as exc:
+        fail(str(exc))
+    expected_waves = expected_cohorts * (
+        repetitions // TIMING_WORKER_COUNT)
+    expected_jobs = {
+        (cell, panel, cell * panel_count + panel)
+        for cell in range(expected_cells)
+        for panel in range(panel_count)
+    }
+    actual_jobs = [
+        (job.cell, job.item, job.ordinal)
+        for _, jobs in waves for job in jobs
+    ]
+    if (cohort_index != expected_cohorts or
+            expected_cohorts != frozen_cohorts or
+            len(waves) != expected_waves or
+            any(len(jobs) != TIMING_WORKER_COUNT for _, jobs in waves) or
+            len(actual_jobs) != len(expected_jobs) or
+            len(set(actual_jobs)) != len(actual_jobs) or
+            set(actual_jobs) != expected_jobs):
+        fail("development timing waves do not cover the exact frozen domain")
+    return waves
 
 
 def _run_native_jobs(
@@ -1043,6 +1267,14 @@ def _run_native_jobs(
         description: Mapping[str, Any], workers: Sequence[PersistentWorker],
         output_dir: Path, window_start_ns: int, deadline: float,
         ) -> Tuple[Mapping[str, Path], int]:
+    if len(workers) != TIMING_WORKER_COUNT:
+        fail("native short screen requires exactly eight timing workers")
+    try:
+        panel_count = len(contract_api.timing_panels(
+            contract, [value[0] for value in EXPECTED_ARMS]))
+    except contract_api.ContractError as exc:
+        fail(str(exc))
+    timing_waves = _timing_job_waves(contract, panel_count)
     paths = {
         "recovery": output_dir / "recovery-native-results.jsonl",
         "timing": output_dir / "timing-native-results.jsonl",
@@ -1061,18 +1293,18 @@ def _run_native_jobs(
         recovery_sink.publish()
         maximum_end = max(maximum_end, recovery_end)
 
-        timing_cpus: Set[int] = set()
+        expected_timing_cpus = set(worker.cpu for worker in workers)
         timing_validator = _strict_response_validator(
             contract, freezes["timing"], "timing", description,
             window_start_ns)
-        for replicate, jobs in _timing_job_batches(contract, 11):
+        for wave_ordinal, (rotation, jobs) in enumerate(timing_waves):
             end, used = run_job_batch(
-                workers, jobs, replicate % len(workers), timing_sink,
+                workers, jobs, rotation, timing_sink,
                 deadline, timing_validator)
-            timing_cpus.update(used)
+            if used != expected_timing_cpus:
+                fail("timing wave {} did not use every frozen CPU".format(
+                    wave_ordinal))
             maximum_end = max(maximum_end, end)
-        if timing_cpus != set(worker.cpu for worker in workers):
-            fail("timing did not exercise every frozen CPU")
         timing_sink.publish()
         return paths, maximum_end
     finally:
@@ -1110,10 +1342,14 @@ def run_short_screen(args: argparse.Namespace) -> Mapping[str, Any]:
     cpus, controller_cpu = select_cpu_layout(
         args.sampler_cpu, explicit, args.controller_cpu,
         affinity=original_affinity)
-    # Every recovery stream and every timing replicate must use the complete
-    # frozen roster.  Larger CPU sets cannot satisfy that provenance rule.
-    if len(cpus) > 264:
-        fail("at most 264 physical worker CPUs fit one timing replicate")
+    # Recovery remains work-conserving on this same frozen roster.  Timing
+    # uses one exact job per worker and a barrier after every homogeneous wave.
+    if len(cpus) != TIMING_WORKER_COUNT:
+        fail("native short screen requires exactly eight physical worker CPUs")
+    _development_timing_shape(
+        contract,
+        len(contract_api.timing_panels(
+            contract, [value[0] for value in EXPECTED_ARMS])))
     _preflight_sampler(
         args.sampler_pid, args.sampler_cpu,
         args.sampler_script, args.sampler_csv)

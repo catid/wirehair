@@ -6,8 +6,9 @@ cardinality and runtime provenance, strips the envelopes to the exact frozen
 ledger/timing schemas, runs the authoritative contract validator, and only
 then publishes the result stream and its terminal execution receipt.
 
-It is intentionally not a campaign scheduler.  A caller may distribute work
-however it likes, provided every frozen ordinal is returned exactly once.
+It is intentionally not a campaign scheduler.  Recovery work may be
+distributed over the frozen workers, but v3 timing evidence must also prove
+the frozen homogeneous-wave CPU placement and non-overlapping wave barriers.
 """
 
 from __future__ import annotations
@@ -77,6 +78,7 @@ THERMAL_HEADER = (
     "load5", "load15", "edac_ce", "edac_ue",
 )
 MAX_THERMAL_LINE_BYTES = 65536
+CPU_SYSFS_ROOT = Path("/sys/devices/system/cpu")
 
 
 class NativeEvidenceError(ValueError):
@@ -478,9 +480,28 @@ def _parse_nonnegative_integer(value: str, context: str) -> int:
     return int(value)
 
 
+def _cpu_physical_core(
+        cpu: int, sysfs_root: Optional[Path] = None) -> Tuple[int, int]:
+    if type(cpu) is not int or cpu < 0:
+        fail("CPU topology lookup requires a nonnegative integer")
+    root = CPU_SYSFS_ROOT if sysfs_root is None else sysfs_root
+    topology = root / "cpu{}".format(cpu) / "topology"
+    values = []
+    for name in ("physical_package_id", "core_id"):
+        try:
+            text = (topology / name).read_text(encoding="ascii").strip()
+        except (OSError, UnicodeError) as exc:
+            fail("cannot read CPU {} physical topology: {}".format(cpu, exc))
+        values.append(_parse_nonnegative_integer(
+            text, "CPU {} {}".format(cpu, name)))
+    return values[0], values[1]
+
+
 def _thermal_window(
         sampler: Mapping[str, Any], worker_start_ns: int, worker_end_ns: int,
-        worker_cpus: Sequence[int], verify_live_sampler: bool) \
+        worker_cpus: Sequence[int], verify_live_sampler: bool,
+        controller_cpu: Optional[int] = None,
+        sysfs_root: Optional[Path] = None) \
         -> Mapping[str, Any]:
     sampler = _exact_keys(sampler, SAMPLER_FIELDS, "sampler attestation")
     if sampler["schema"] != SAMPLER_SCHEMA or \
@@ -504,8 +525,17 @@ def _thermal_window(
         fail("thermal window does not cover the complete worker interval")
     _require_process_predates_window(
         sampler["process_start_ticks"], start_ns, "sampler")
-    if sampler["cpu"] in worker_cpus:
-        fail("sampler CPU overlaps a frozen worker CPU")
+    worker_cores = {
+        _cpu_physical_core(cpu, sysfs_root) for cpu in worker_cpus
+    }
+    sampler_core = _cpu_physical_core(sampler["cpu"], sysfs_root)
+    if sampler_core in worker_cores:
+        fail("sampler CPU overlaps a frozen worker physical core")
+    if controller_cpu is not None:
+        if type(controller_cpu) is not int or controller_cpu < 0:
+            fail("frozen controller CPU is invalid")
+        if sampler_core == _cpu_physical_core(controller_cpu, sysfs_root):
+            fail("sampler CPU overlaps the controller physical core")
 
     script_path = Path(sampler["script_path"])
     csv_path = Path(sampler["csv_path"])
@@ -769,11 +799,158 @@ def _reverify_native_workers(workers: Sequence[Mapping[str, Any]]) -> None:
             worker["binary_sha256"])
 
 
+def _timing_worker_roster(
+        contract: Mapping[str, Any], freeze: Mapping[str, Any]) -> List[int]:
+    timing = contract.get("timing") if isinstance(contract, Mapping) else None
+    geometry = timing.get("execution_geometry") \
+        if isinstance(timing, Mapping) else None
+    if geometry != contract_api.EXPECTED_TIMING_EXECUTION_GEOMETRY:
+        fail("timing execution geometry is not frozen")
+    worker_count = geometry.get("timing_worker_count")
+    jobs_per_wave = geometry.get("jobs_per_wave")
+    roster = freeze.get("cpu_affinity") if isinstance(freeze, Mapping) else None
+    if (type(worker_count) is not int or worker_count != 8 or
+            type(jobs_per_wave) is not int or jobs_per_wave != worker_count or
+            not isinstance(roster, list) or len(roster) != worker_count or
+            any(type(cpu) is not int or cpu < 0 for cpu in roster) or
+            roster != sorted(set(roster))):
+        fail("timing freeze must bind exactly eight sorted worker CPUs")
+    return list(roster)
+
+
+def _validate_timing_execution_geometry(
+        contract: Mapping[str, Any], freeze: Mapping[str, Any], phase: str,
+        envelopes: Sequence[Mapping[str, Any]],
+        sysfs_root: Optional[Path] = None) -> None:
+    """Verify exact v3 timing placement and every inter-wave barrier."""
+    worker_cpus = _timing_worker_roster(contract, freeze)
+    worker_cores = [
+        _cpu_physical_core(cpu, sysfs_root) for cpu in worker_cpus
+    ]
+    if len(set(worker_cores)) != len(worker_cores):
+        fail("timing worker CPUs are not eight unique physical cores")
+    host_identity = freeze.get("host_identity") \
+        if isinstance(freeze, Mapping) else None
+    controller_cpu = host_identity.get("controller_cpu") \
+        if isinstance(host_identity, Mapping) else None
+    if type(controller_cpu) is not int or controller_cpu < 0:
+        fail("timing freeze does not bind a valid controller CPU")
+    if _cpu_physical_core(controller_cpu, sysfs_root) in set(worker_cores):
+        fail("timing controller shares a worker physical core")
+    geometry = contract["timing"]["execution_geometry"]
+    jobs_per_wave = geometry["jobs_per_wave"]
+    domain = contract["timing"]["domains"].get(phase)
+    repetitions = domain.get("paired_repetitions") \
+        if isinstance(domain, Mapping) else None
+    expected_cells = domain.get("expected_cells") \
+        if isinstance(domain, Mapping) else None
+    if (type(repetitions) is not int or repetitions <= 0 or
+            repetitions % jobs_per_wave != 0 or
+            type(expected_cells) is not int or expected_cells <= 0):
+        fail("timing wave domain has invalid cardinality")
+    try:
+        cells = list(contract_api.iter_timing_cells(contract, phase))
+        panels = contract_api.timing_panels(contract, freeze["arm_roster"])
+    except (KeyError, contract_api.ContractError) as exc:
+        fail(str(exc))
+    if len(cells) != expected_cells or not panels:
+        fail("timing wave domain differs from its frozen cardinality")
+
+    cell_fields = contract["timing"].get("cell_key")
+    if (not isinstance(cell_fields, list) or
+            "replicate" not in cell_fields or "loss_seed" not in cell_fields):
+        fail("timing cohort identity fields are invalid")
+    stable_fields = [
+        field for field in cell_fields
+        if field not in ("replicate", "loss_seed")
+    ]
+    identity_order: List[str] = []
+    cell_identities: List[str] = []
+    for cell in cells:
+        if not isinstance(cell, Mapping) or set(cell) != set(cell_fields):
+            fail("timing cell has an unexpected cohort identity")
+        identity = contract_api.canonical_json({
+            field: cell[field] for field in stable_fields
+        })
+        cell_identities.append(identity)
+        if cell.get("replicate") == 0:
+            identity_order.append(identity)
+    if len(identity_order) != len(set(identity_order)):
+        fail("timing replicate zero has duplicate cohort identities")
+    identity_indexes = {
+        identity: index for index, identity in enumerate(identity_order)
+    }
+    if (not identity_order or
+            any(identity not in identity_indexes for identity in cell_identities)):
+        fail("timing cohort identity differs across replicates")
+
+    panel_count = len(panels)
+    cohort_count = len(identity_order) * panel_count
+    try:
+        frozen_cohort_count = contract_api.timing_cohort_count(
+            contract, phase, freeze["arm_roster"])
+    except (KeyError, contract_api.ContractError) as exc:
+        fail(str(exc))
+    if cohort_count != frozen_cohort_count:
+        fail("timing cohort count differs from frozen execution geometry")
+    waves_per_cohort = repetitions // jobs_per_wave
+    expected_wave_count = cohort_count * waves_per_cohort
+    expected_record_count = expected_cells * panel_count
+    if len(envelopes) != expected_record_count:
+        fail("timing execution has an invalid record cardinality")
+
+    waves: List[List[Tuple[int, int, int]]] = [
+        [] for _ in range(expected_wave_count)
+    ]
+    for ordinal, row in enumerate(envelopes):
+        if row.get("ordinal") != ordinal:
+            fail("timing execution envelopes are not ordinal-complete")
+        cell_ordinal, panel_index = divmod(ordinal, panel_count)
+        cell = cells[cell_ordinal]
+        replicate = cell.get("replicate")
+        if type(replicate) is not int or not 0 <= replicate < repetitions:
+            fail("timing execution has an invalid replicate")
+        stable_index = identity_indexes[cell_identities[cell_ordinal]]
+        cohort_index = stable_index * panel_count + panel_index
+        wave_index = replicate // jobs_per_wave
+        wave_ordinal = cohort_index * waves_per_cohort + wave_index
+        try:
+            worker_slot = contract_api.timing_worker_slot(
+                contract, phase, freeze["arm_roster"], cohort_index,
+                replicate)
+        except contract_api.ContractError as exc:
+            fail(str(exc))
+        if (type(worker_slot) is not int or
+                not 0 <= worker_slot < len(worker_cpus) or
+                row.get("cpu") != worker_cpus[worker_slot]):
+            fail("timing result CPU differs from frozen worker-slot placement")
+        waves[wave_ordinal].append((
+            replicate, row["started_monotonic_ns"],
+            row["finished_monotonic_ns"]))
+
+    prior_wave_finish: Optional[int] = None
+    for wave_ordinal, values in enumerate(waves):
+        wave_index = wave_ordinal % waves_per_cohort
+        expected_replicates = list(range(
+            wave_index * jobs_per_wave,
+            (wave_index + 1) * jobs_per_wave))
+        if (len(values) != jobs_per_wave or
+                sorted(value[0] for value in values) != expected_replicates):
+            fail("timing wave does not contain its exact replicate roster")
+        minimum_start = min(value[1] for value in values)
+        maximum_finish = max(value[2] for value in values)
+        if prior_wave_finish is not None and \
+                prior_wave_finish > minimum_start:
+            fail("timing waves overlap across a frozen barrier")
+        prior_wave_finish = maximum_finish
+
+
 def _validate_native_records(
         contract: Mapping[str, Any], freeze: Mapping[str, Any],
         evidence_kind: str, phase: str,
         records: Sequence[Mapping[str, Any]],
-        verify_live_workers: bool = False) \
+        verify_live_workers: bool = False,
+        sysfs_root: Optional[Path] = None) \
         -> Tuple[List[Mapping[str, Any]], Mapping[str, Any]]:
     if evidence_kind == "recovery":
         payload_fields = contract_api.LEDGER_FIELDS
@@ -782,6 +959,7 @@ def _validate_native_records(
             "expected_cells_per_arm"]
         expected_count = cell_count * len(freeze["arm_roster"])
     elif evidence_kind == "timing":
+        _timing_worker_roster(contract, freeze)
         payload_fields = contract_api.TIMING_RECEIPT_FIELDS
         record_schema = TIMING_RECORD_SCHEMA
         cell_count = contract["timing"]["domains"][phase]["expected_cells"]
@@ -883,6 +1061,11 @@ def _validate_native_records(
         fail("native result stream has no worker interval")
     if any(value is None for value in work_by_ordinal):
         fail("native result stream has an incomplete work-hash roster")
+    if evidence_kind == "timing":
+        _validate_timing_execution_geometry(
+            contract, freeze, phase,
+            [value for value in envelope_ordered if value is not None],
+            sysfs_root)
     runtime_workers = [
         {
             "cpu": cpu,
@@ -944,7 +1127,8 @@ def assemble_results(
     thermal = _thermal_window(
         sampler, metadata["worker_start_monotonic_ns"],
         metadata["worker_end_monotonic_ns"], metadata["worker_cpus"],
-        verify_live_sampler)
+        verify_live_sampler,
+        controller_cpu=freeze.get("host_identity", {}).get("controller_cpu"))
 
     staged_result = _temporary_path(output_path, ".jsonl")
     staged_receipt = _temporary_path(execution_receipt_path, ".json")
@@ -1102,7 +1286,8 @@ def validate_execution_receipt(
     actual_thermal = _thermal_window(
         sampler, receipt["worker_start_monotonic_ns"],
         receipt["worker_end_monotonic_ns"], receipt["worker_cpus"],
-        verify_live_sampler)
+        verify_live_sampler,
+        controller_cpu=freeze.get("host_identity", {}).get("controller_cpu"))
     if actual_thermal != thermal:
         fail("execution receipt thermal summary differs from sampler bytes")
 

@@ -672,7 +672,7 @@ bool EmitTimingTraces()
 {
     const std::vector<FrozenTimingCell> cells =
         wirehair::wh2_benchmark::EnumerateDevelopmentTimingCells();
-    if (cells.size() != 192u) {
+    if (cells.size() != 384u) {
         return false;
     }
     for (std::size_t i = 0u; i < cells.size(); ++i)
@@ -1352,7 +1352,7 @@ bool RunTimingJob(
     const std::vector<FrozenTimingPanel> panels =
         wirehair::wh2_benchmark::EnumerateOneCandidateTimingPanels(
             "wirehair2_identity");
-    if (cells.size() != 192u || panels.size() != 11u ||
+    if (cells.size() != 384u || panels.size() != 11u ||
         cell_ordinal >= cells.size() || panel_index >= panels.size())
     {
         error = "timing job index is outside the frozen domain";

@@ -1,6 +1,6 @@
 {
-  "schema": "wirehair.wh2.benchmark-contract.v2",
-  "contract_id": "wh2-pure-gf256-1pct-v2",
+  "schema": "wirehair.wh2.benchmark-contract.v3",
+  "contract_id": "wh2-pure-gf256-1pct-v3",
   "field": "GF(256)",
   "goal": {
     "primary_failure_threshold_ppm": 10000,
@@ -156,9 +156,9 @@
         "k_set": "timing_short",
         "block_bytes": [64, 1280],
         "seed_mode": "production_training",
-        "paired_repetitions": 8,
-        "expected_cells": 192,
-        "domain_sha256": "289111f2fe4ecf3aff3875f852e386f544cc52b261ef9c2ce0159302c4f5bb61"
+        "paired_repetitions": 16,
+        "expected_cells": 384,
+        "domain_sha256": "4d094a6d351d3b57cbc2654bf269b1da41886a68c7bebd14803b2892d1cd89d7"
       },
       "final": {
         "k_set": "short",
@@ -211,13 +211,24 @@
       "invocations_per_slot": "max(1,ceil(measured_batch_block_target/K))",
       "order_assignment": "phase_bit=low bit of SHA256(canonical panel key); ABBA iff replicate parity equals phase_bit, otherwise BAAB"
     },
+    "execution_geometry": {
+      "timing_worker_count": 8,
+      "jobs_per_wave": 8,
+      "cohort_identity": "all timing cell fields except replicate and loss_seed, plus panel",
+      "cohort_order": "block_bytes order, then K-set order, then frozen panel ordinal",
+      "wave_partition": "floor(replicate/8)",
+      "worker_slot": "(replicate%8+cohort_index+wave_index)%8",
+      "barrier": "after_each_wave",
+      "cohort_count_formula": "(expected_cells/paired_repetitions)*len(timing_panels(contract,frozen_arms))",
+      "topology_policy": "eight singleton-pinned workers on distinct physical cores; maximize coverage of available L3/LLC groups, then fill deterministically; distinct L3/LLC groups are preferred but not required"
+    },
     "statistics": {
       "block_log_ratio": "ABBA=((ln e0-ln e1)+(ln e3-ln e2))/2; BAAB=((ln e1-ln e0)+(ln e2-ln e3))/2",
       "independent_unit": "one replicate mean over every frozen K in the reported band and width",
       "aggregate_weighting": "within each replicate, equal weight for every frozen K x width cell",
       "variance": "unbiased sample variance over replicate means",
       "t_critical_by_repetitions": {
-        "8": 2.364624251592784,
+        "16": 2.131449545559323,
         "24": 2.0686576104190477
       },
       "faster": "A/B upper 95% bound < -effective_floor",
@@ -266,7 +277,8 @@
       "missing", "duplicate", "extra", "seed_swapped", "partial",
       "wrong_band", "wrong_loss", "incomplete_roster", "domain_hash_drift",
       "trace_drift", "repair_map_drift", "construction_attempt_drift",
-      "timing_panel_drift", "timing_order_drift", "timing_batch_drift"
+      "timing_panel_drift", "timing_order_drift", "timing_batch_drift",
+      "timing_geometry_drift"
     ],
     "selectable_excluded_cells": 0,
     "unsupported_policy": "only an explicitly measured routed composite is selectable",

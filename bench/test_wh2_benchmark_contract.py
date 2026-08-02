@@ -25,11 +25,11 @@ EXPECTED_RECOVERY_HASHES = {
     "cross_width_validation": "80fb4c19b31f88101ef4b3c480e6d5ff4a3bba7d45c96f02dc3518cd7c1c0399",
 }
 EXPECTED_TIMING_HASHES = {
-    "development": "289111f2fe4ecf3aff3875f852e386f544cc52b261ef9c2ce0159302c4f5bb61",
+    "development": "4d094a6d351d3b57cbc2654bf269b1da41886a68c7bebd14803b2892d1cd89d7",
     "final": "62e8fdbe636dba08eefd5bd7ff48b6c63fb5f021253d5a1df0d27e1a6bbc71e1",
 }
 EXPECTED_CONTRACT_SHA256 = \
-    "1fbc60bc6841a44b90fe5a79304645ef40508c68fddf9006ea6f9396155d6c5c"
+    "1ca0e416b3f4d66fb9ea5f0041dbdde95d53527ea08b27ebd91714dc6b8b0593"
 
 
 def digest(label: str) -> str:
@@ -320,7 +320,7 @@ def architecture_selection_receipt(
         "timing_freeze_manifest_sha256": digest("timing freeze"),
         "architecture_artifact_sha256": digest("architecture artifacts"),
         "recovery_cells_per_arm": 360,
-        "timing_rows": 2112,
+        "timing_rows": 4224,
         "candidate_roster": [selected],
         "eligible_candidates": [selected],
         "eligible_overhead0_failures": {selected: 0},
@@ -442,14 +442,14 @@ class ContractTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.contract = subject.load_contract()
 
-    def test_v2_identity_and_default_contract_path_are_exact(self) -> None:
+    def test_v3_identity_and_default_contract_path_are_exact(self) -> None:
         self.assertEqual(subject.SCHEMA,
-                         "wirehair.wh2.benchmark-contract.v2")
+                         "wirehair.wh2.benchmark-contract.v3")
         self.assertEqual(subject.DEFAULT_CONTRACT.name,
-                         "wh2_benchmark_contract_v2.json")
+                         "wh2_benchmark_contract_v3.json")
         self.assertEqual(self.contract["schema"], subject.SCHEMA)
         self.assertEqual(self.contract["contract_id"],
-                         "wh2-pure-gf256-1pct-v2")
+                         "wh2-pure-gf256-1pct-v3")
         self.assertEqual(subject.contract_sha256(self.contract),
                          EXPECTED_CONTRACT_SHA256)
 
@@ -478,7 +478,7 @@ class ContractTests(unittest.TestCase):
                 self.assertEqual(domain["domain_sha256"], expected_hash)
         self.assertEqual(
             self.contract["timing"]["domains"]["development"]["expected_cells"],
-            192,
+            384,
         )
         self.assertEqual(
             self.contract["timing"]["domains"]["final"]["expected_cells"],
@@ -488,10 +488,79 @@ class ContractTests(unittest.TestCase):
     def test_timing_batch_formula_and_production_training_seed_are_exact(
             self) -> None:
         protocol = self.contract["timing"]["panel_protocol"]
+        geometry = self.contract["timing"]["execution_geometry"]
         self.assertEqual(protocol["measured_batch_block_target"], 65536)
         self.assertEqual(
             protocol["invocations_per_slot"],
             "max(1,ceil(measured_batch_block_target/K))")
+        self.assertEqual(
+            geometry, subject.EXPECTED_TIMING_EXECUTION_GEOMETRY)
+        self.assertEqual(geometry["timing_worker_count"], 8)
+        self.assertEqual(geometry["jobs_per_wave"], 8)
+        for domain in self.contract["timing"]["domains"].values():
+            self.assertGreater(domain["paired_repetitions"], 0)
+            self.assertEqual(
+                domain["paired_repetitions"] %
+                geometry["timing_worker_count"], 0)
+        self.assertEqual(
+            self.contract["timing"]["statistics"][
+                "t_critical_by_repetitions"]["16"],
+            2.131449545559323)
+        arms = ("wirehair2_head", "wirehair1", "candidate")
+        multi_arms = arms + ("candidate2",)
+        self.assertEqual(subject.timing_cohort_count(
+            self.contract, "development", arms), 264)
+        self.assertEqual(subject.timing_cohort_count(
+            self.contract, "development", multi_arms), 432)
+        self.assertEqual(subject.timing_cohort_count(
+            self.contract, "final", arms), 1650)
+        for cohort in range(264):
+            for wave in range(2):
+                slots = {
+                    subject.timing_worker_slot(
+                        self.contract, "development", arms, cohort,
+                        wave * 8 + local)
+                    for local in range(8)
+                }
+                self.assertEqual(slots, set(range(8)))
+        for replicate in range(16):
+            counts = [0] * 8
+            for cohort in range(264):
+                counts[subject.timing_worker_slot(
+                    self.contract, "development", arms,
+                    cohort, replicate)] += 1
+            self.assertEqual(counts, [33] * 8)
+        self.assertEqual(
+            subject.timing_worker_slot(
+                self.contract, "development", arms, 263, 15),
+            (15 % 8 + 263 + 1) % 8)
+        self.assertEqual(
+            subject.timing_worker_slot(
+                self.contract, "final", arms, 1649, 23),
+            (23 % 8 + 1649 + 2) % 8)
+        for phase, cohort, replicate in (
+                ("missing", 0, 0), (True, 0, 0),
+                ("development", -1, 0),
+                ("development", True, 0), ("development", 0, True),
+                ("development", 264, 0), ("development", 0, 16),
+                ("final", 1650, 0), ("final", 0, 24)):
+            with self.assertRaises(subject.ContractError):
+                subject.timing_worker_slot(
+                    self.contract, phase, arms, cohort, replicate)
+        self.assertEqual(
+            subject.timing_worker_slot(
+                self.contract, "development", multi_arms, 431, 15),
+            (15 % 8 + 431 + 1) % 8)
+        with self.assertRaises(subject.ContractError):
+            subject.timing_worker_slot(
+                self.contract, "development", multi_arms, 432, 0)
+        for invalid_arms in (
+                (), ("wirehair2_head", "candidate"),
+                ("wirehair2_head", "wirehair1", "candidate", "candidate"),
+                "wirehair2_head"):
+            with self.assertRaises(subject.ContractError):
+                subject.timing_cohort_count(
+                    self.contract, "development", invalid_arms)
         expected = {
             8: 8192, 32: 2048, 100: 656, 128: 512,
             512: 128, 1000: 66, 2048: 32, 5000: 14,
@@ -551,6 +620,33 @@ class ContractTests(unittest.TestCase):
         raw_timing["timing"]["domains"]["development"][
             "seed_mode"] = "raw_paired_training"
         mutations.append(("development_seed_mode", raw_timing))
+        wrong_workers = copy.deepcopy(self.contract)
+        wrong_workers["timing"]["execution_geometry"][
+            "timing_worker_count"] = 7
+        mutations.append(("worker_count", wrong_workers))
+        bool_workers = copy.deepcopy(self.contract)
+        bool_workers["timing"]["execution_geometry"][
+            "timing_worker_count"] = True
+        mutations.append(("worker_count_type", bool_workers))
+        wrong_wave = copy.deepcopy(self.contract)
+        wrong_wave["timing"]["execution_geometry"]["jobs_per_wave"] = 7
+        mutations.append(("wave_size", wrong_wave))
+        wrong_cohort = copy.deepcopy(self.contract)
+        wrong_cohort["timing"]["execution_geometry"][
+            "cohort_identity"] = "K and panel"
+        mutations.append(("cohort_identity", wrong_cohort))
+        wrong_rotation = copy.deepcopy(self.contract)
+        wrong_rotation["timing"]["execution_geometry"][
+            "worker_slot"] = "replicate%8"
+        mutations.append(("worker_rotation", wrong_rotation))
+        wrong_barrier = copy.deepcopy(self.contract)
+        wrong_barrier["timing"]["execution_geometry"][
+            "barrier"] = "after_each_cohort"
+        mutations.append(("wave_barrier", wrong_barrier))
+        wrong_cohort_formula = copy.deepcopy(self.contract)
+        wrong_cohort_formula["timing"]["execution_geometry"][
+            "cohort_count_formula"] = "24*11"
+        mutations.append(("cohort_count_formula", wrong_cohort_formula))
         for name, changed in mutations:
             with self.subTest(name=name), \
                     self.assertRaises(subject.ContractError):
@@ -567,7 +663,7 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(first["loss_seed"],
                          self.contract["seeds"]["training_loss_roots"][0])
 
-    def test_v2_bands_and_short_cohorts_are_immutable(self) -> None:
+    def test_v3_bands_and_short_cohorts_are_immutable(self) -> None:
         for mutation in ("band", "short", "timing"):
             changed = copy.deepcopy(self.contract)
             if mutation == "band":
@@ -590,7 +686,7 @@ class ContractTests(unittest.TestCase):
                     self.assertRaises(subject.ContractError):
                 subject._validate_structure(changed, check_domain_hashes=True)
 
-    def test_v2_semantics_cannot_be_resealed_to_an_easier_contract(self) -> None:
+    def test_v3_semantics_cannot_be_resealed_to_an_easier_contract(self) -> None:
         changes = []
         easy_loss = copy.deepcopy(self.contract)
         easy_loss["strata_sets"]["development"][1] = {
@@ -1056,7 +1152,7 @@ class TimingReceiptTests(unittest.TestCase):
 
     def test_exact_panels_counterbalancing_and_student_t_gate(self) -> None:
         summary = self.validate(self.valid_rows)
-        self.assertEqual(summary["rows"], 192 * 11)
+        self.assertEqual(summary["rows"], 384 * 11)
         self.assertTrue(summary["candidates"]["candidate"][
             "phase_speed_gate_pass"])
         decisions = summary["candidates"]["candidate"]["panels"]
@@ -1253,7 +1349,7 @@ class SelectionTests(unittest.TestCase):
             "architecture_artifact_sha256": artifact,
             "arm_artifacts": copy.deepcopy(arm_artifacts),
             "excluded_cells": 0,
-            "rows": 192 * (4 + 7 * len(candidates)),
+            "rows": 384 * (4 + 7 * len(candidates)),
             "candidates": {
                 arm: {
                     "phase_speed_gate_pass": True,

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 from contextlib import redirect_stderr
 import csv
 import hashlib
@@ -113,14 +114,38 @@ class NativeRunnerTests(unittest.TestCase):
 
     def _topology(self, values: Mapping[int, tuple]) -> Path:
         root = self.root / "sysfs"
-        for cpu, (package, core) in values.items():
+        for cpu, value in values.items():
+            package, core = value[:2]
+            llc = value[2] if len(value) == 3 else core
             path = root / "cpu{}".format(cpu) / "topology"
             path.mkdir(parents=True)
             (path / "physical_package_id").write_text(
                 str(package) + "\n", encoding="ascii")
             (path / "core_id").write_text(
                 str(core) + "\n", encoding="ascii")
+            # Deliberately use index7 so the reader cannot assume index3.
+            for index, level, cache_type, cache_id in (
+                    (0, 1, "Data", core), (7, 3, "Unified", llc)):
+                cache = root / "cpu{}".format(cpu) / "cache" / \
+                    "index{}".format(index)
+                cache.mkdir(parents=True)
+                (cache / "level").write_text(
+                    str(level) + "\n", encoding="ascii")
+                (cache / "type").write_text(
+                    cache_type + "\n", encoding="ascii")
+                (cache / "id").write_text(
+                    str(cache_id) + "\n", encoding="ascii")
         return root
+
+    def _timing_contract(self, repetitions: int) -> Mapping[str, Any]:
+        contract = copy.deepcopy(contract_api.load_contract())
+        domain = contract["timing"]["domains"]["development"]
+        original_repetitions = domain["paired_repetitions"]
+        cells_per_replicate = domain["expected_cells"] // \
+            original_repetitions
+        domain["paired_repetitions"] = repetitions
+        domain["expected_cells"] = cells_per_replicate * repetitions
+        return contract
 
     def _fake_worker(self) -> Path:
         path = self.root / "fake_worker.py"
@@ -172,30 +197,137 @@ class NativeRunnerTests(unittest.TestCase):
 
     def test_cpu_parser_and_physical_core_selection(self) -> None:
         topology = self._topology({
-            0: (0, 0), 1: (0, 0), 2: (0, 1), 3: (0, 1), 7: (1, 0),
-            9: (1, 1),
+            0: (0, 0, 0),
+            1: (0, 1, 0), 2: (0, 2, 0),
+            3: (0, 3, 1), 4: (0, 4, 1),
+            5: (0, 5, 2), 6: (0, 6, 2),
+            7: (0, 7, 3), 8: (0, 8, 3),
+            9: (0, 9, 4),
+            11: (0, 1, 0),
         })
         self.assertEqual(subject.parse_cpu_list("0,3,7"), [0, 3, 7])
         for invalid in ("", "00", "0,0", "1,0", "0, 1", "+1"):
             with self.assertRaises(subject.RunnerError):
                 subject.parse_cpu_list(invalid)
-        affinity = [0, 1, 2, 3, 7, 9]
+        affinity = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11]
         self.assertEqual(subject.select_cpu_layout(
-            3, affinity=affinity, sysfs_root=topology), ([0, 7], 9))
+            0, explicit_controller=9, affinity=affinity,
+            sysfs_root=topology), (list(range(1, 9)), 9))
+        diverse_workers = [1, 2, 3, 4, 5, 6, 7, 9]
         self.assertEqual(subject.select_cpu_layout(
-            3, explicit_workers=[1, 7], affinity=affinity,
-            sysfs_root=topology), ([1, 7], 9))
+            0, explicit_workers=diverse_workers, affinity=affinity,
+            sysfs_root=topology), (diverse_workers, 8))
+        secondary_smt = [2, 3, 4, 5, 6, 7, 8, 11]
         self.assertEqual(subject.select_cpu_layout(
-            3, explicit_controller=7, affinity=affinity,
-            sysfs_root=topology), ([0, 9], 7))
-        for invalid in ([0, 1], [2], [3], [7, 1], [8]):
+            0, explicit_workers=secondary_smt, explicit_controller=9,
+            affinity=affinity, sysfs_root=topology), (secondary_smt, 9))
+        self.assertEqual(subject.select_cpu_layout(
+            0, affinity=affinity, sysfs_root=topology),
+            ([1, 2, 3, 4, 5, 6, 7, 9], 8))
+        invalid_rosters = (
+            list(range(1, 8)),
+            list(range(1, 10)),
+            [0, 1, 2, 3, 4, 5, 6, 7],
+            [1, 2, 3, 4, 5, 6, 7, 11],
+            [2, 3, 4, 5, 6, 7, 8, 10],
+        )
+        for invalid in invalid_rosters:
             with self.assertRaises(subject.RunnerError):
                 subject.select_cpu_layout(
-                    3, explicit_workers=invalid, affinity=affinity,
+                    0, explicit_workers=invalid, affinity=affinity,
                     sysfs_root=topology)
         with self.assertRaises(subject.RunnerError):
             subject.select_cpu_layout(
-                3, explicit_workers=[0, 7, 9], affinity=affinity,
+                0, explicit_workers=list(range(1, 9)),
+                explicit_controller=8, affinity=affinity,
+                sysfs_root=topology)
+        for invalid_affinity in ([True] + affinity, [-1] + affinity):
+            with self.assertRaisesRegex(
+                    subject.RunnerError, "affinity contains an invalid"):
+                subject.select_cpu_layout(
+                    0, affinity=invalid_affinity, sysfs_root=topology)
+
+    def test_llc_selection_maximizes_coverage_then_round_robin_fills(self) \
+            -> None:
+        topology = self._topology({
+            0: (0, 0, 9),
+            1: (0, 1, 0), 2: (0, 2, 0), 3: (0, 3, 0),
+            4: (0, 4, 1), 5: (0, 5, 1),
+            6: (0, 6, 2),
+            7: (0, 7, 3), 8: (0, 8, 3), 9: (0, 9, 3),
+            10: (0, 10, 4),
+        })
+        affinity = list(range(11))
+        expected = ([1, 2, 3, 4, 5, 6, 7, 8], 10)
+        self.assertEqual(subject.select_cpu_layout(
+            0, explicit_controller=10, affinity=affinity,
+            sysfs_root=topology), expected)
+        self.assertEqual(subject.select_cpu_layout(
+            0, explicit_controller=10, affinity=reversed(affinity),
+            sysfs_root=topology), expected)
+
+    def test_explicit_worker_roster_rejects_avoidable_llc_reuse(self) -> None:
+        values = {0: (0, 0, 9), 10: (0, 10, 9)}
+        values.update({1: (0, 1, 0), 2: (0, 2, 0)})
+        for cpu in range(3, 10):
+            values[cpu] = (0, cpu, cpu - 2)
+        topology = self._topology(values)
+        affinity = list(range(11))
+        with self.assertRaisesRegex(
+                subject.RunnerError, "maximize available LLC coverage"):
+            subject.select_cpu_layout(
+                0, explicit_workers=list(range(1, 9)),
+                explicit_controller=10, affinity=affinity,
+                sysfs_root=topology)
+        diverse = [1, 3, 4, 5, 6, 7, 8, 9]
+        self.assertEqual(subject.select_cpu_layout(
+            0, explicit_workers=diverse, explicit_controller=10,
+            affinity=affinity, sysfs_root=topology), (diverse, 10))
+
+    def test_llc_identity_includes_physical_package(self) -> None:
+        values = {
+            0: (0, 0, 8), 10: (0, 10, 9), 9: (0, 9, 0),
+        }
+        for cpu in range(1, 5):
+            values[cpu] = (0, cpu, cpu - 1)
+        for cpu in range(5, 9):
+            values[cpu] = (1, cpu - 4, cpu - 5)
+        topology = self._topology(values)
+        affinity = list(range(11))
+        under_diverse = [1, 2, 3, 4, 5, 6, 7, 9]
+        with self.assertRaisesRegex(
+                subject.RunnerError, "maximize available LLC coverage"):
+            subject.select_cpu_layout(
+                0, explicit_workers=under_diverse, explicit_controller=10,
+                affinity=affinity, sysfs_root=topology)
+        diverse = list(range(1, 9))
+        self.assertEqual(subject.select_cpu_layout(
+            0, explicit_workers=diverse, explicit_controller=10,
+            affinity=affinity, sysfs_root=topology), (diverse, 10))
+
+    def test_llc_identity_includes_cache_level(self) -> None:
+        topology = self._topology({0: (0, 0, 0), 1: (0, 1, 0)})
+        (topology / "cpu1" / "cache" / "index7" / "level").write_text(
+            "4\n", encoding="ascii")
+        self.assertEqual(subject._cpu_llc_identity(0, topology), (3, 0))
+        self.assertEqual(subject._cpu_llc_identity(1, topology), (4, 0))
+
+    def test_llc_topology_rejects_missing_and_malformed_metadata(self) -> None:
+        values = {cpu: (0, cpu, cpu) for cpu in range(10)}
+        topology = self._topology(values)
+        affinity = list(range(10))
+        cache_id = topology / "cpu1" / "cache" / "index7" / "id"
+        cache_id.unlink()
+        with self.assertRaisesRegex(subject.RunnerError, "cache ID"):
+            subject.select_cpu_layout(
+                0, explicit_controller=9, affinity=affinity,
+                sysfs_root=topology)
+        cache_id.write_text("1\n", encoding="ascii")
+        level = topology / "cpu1" / "cache" / "index7" / "level"
+        level.write_text("03\n", encoding="ascii")
+        with self.assertRaisesRegex(subject.RunnerError, "malformed cache"):
+            subject.select_cpu_layout(
+                0, explicit_controller=9, affinity=affinity,
                 sysfs_root=topology)
 
     def test_worker_description_is_exact_and_hashes_executable(self) -> None:
@@ -275,24 +407,152 @@ class NativeRunnerTests(unittest.TestCase):
                 subject._atomic_write_bytes(destination, b"complete\n")
         self.assertFalse(destination.exists())
 
-    def test_exact_recovery_and_replicate_barrier_job_domains(self) -> None:
+    def test_exact_recovery_and_homogeneous_timing_wave_domains(self) -> None:
         contract = contract_api.load_contract()
         recovery = subject._recovery_jobs(contract, 3)
         self.assertEqual(len(recovery), 1080)
         self.assertEqual(
             {job.ordinal for job in recovery}, set(range(1080)))
-        batches = subject._timing_job_batches(contract, 11)
-        self.assertEqual([replicate for replicate, _ in batches], list(range(8)))
-        self.assertTrue(all(len(jobs) == 264 for _, jobs in batches))
-        self.assertEqual(
-            {job.ordinal for _, jobs in batches for job in jobs},
-            set(range(2112)))
-        cells = list(contract_api.iter_timing_cells(contract, "development"))
-        for replicate, jobs in batches:
-            self.assertTrue(all(cells[job.cell]["replicate"] == replicate
-                                for job in jobs))
+        panels = contract_api.timing_panels(
+            contract, [value[0] for value in subject.EXPECTED_ARMS])
+        for repetitions in (8, 16):
+            with self.subTest(repetitions=repetitions):
+                candidate = self._timing_contract(repetitions)
+                waves = subject._timing_job_waves(candidate, len(panels))
+                cells = list(contract_api.iter_timing_cells(
+                    candidate, "development"))
+                waves_per_cohort = repetitions // subject.TIMING_WORKER_COUNT
+                self.assertEqual(len(waves), 264 * waves_per_cohort)
+                self.assertTrue(all(
+                    len(jobs) == subject.TIMING_WORKER_COUNT
+                    for _, jobs in waves))
+                self.assertEqual(
+                    {job.ordinal for _, jobs in waves for job in jobs},
+                    set(range(len(cells) * len(panels))))
+                commands = [job.command() for _, jobs in waves for job in jobs]
+                self.assertEqual(len(commands), len(set(commands)))
+
+                worker_counts = {
+                    replicate: [0] * subject.TIMING_WORKER_COUNT
+                    for replicate in range(repetitions)
+                }
+                for cohort_index in range(264):
+                    stable_index, panel = divmod(cohort_index, len(panels))
+                    width_index, k_index = divmod(
+                        stable_index, len(contract_api.EXPECTED_TIMING_SHORT_K))
+                    for wave_index in range(waves_per_cohort):
+                        rotation, jobs = waves[
+                            cohort_index * waves_per_cohort + wave_index]
+                        replicates = [
+                            cells[job.cell]["replicate"] for job in jobs
+                        ]
+                        self.assertEqual(replicates, list(range(
+                            wave_index * subject.TIMING_WORKER_COUNT,
+                            (wave_index + 1) * subject.TIMING_WORKER_COUNT)))
+                        self.assertEqual({job.item for job in jobs}, {panel})
+                        self.assertEqual(
+                            {cells[job.cell]["block_bytes"] for job in jobs},
+                            {candidate["timing"]["domains"]["development"]
+                             ["block_bytes"][width_index]})
+                        self.assertEqual(
+                            {cells[job.cell]["K"] for job in jobs},
+                            {contract_api.EXPECTED_TIMING_SHORT_K[k_index]})
+                        orders = [contract_api.timing_order(
+                            panels[panel], replicate)
+                            for replicate in replicates]
+                        self.assertEqual(orders.count("ABBA"), 4)
+                        self.assertEqual(orders.count("BAAB"), 4)
+                        expected_rotation = contract_api.timing_worker_slot(
+                            candidate, "development",
+                            [value[0] for value in subject.EXPECTED_ARMS],
+                            cohort_index,
+                            replicates[0])
+                        self.assertEqual(rotation, expected_rotation)
+                        for position, replicate in enumerate(replicates):
+                            slot = (position + rotation) % \
+                                subject.TIMING_WORKER_COUNT
+                            self.assertEqual(slot,
+                                contract_api.timing_worker_slot(
+                                    candidate, "development",
+                                    [value[0] for value in
+                                     subject.EXPECTED_ARMS],
+                                    cohort_index, replicate))
+                            worker_counts[replicate][slot] += 1
+                self.assertTrue(all(
+                    counts == [33] * subject.TIMING_WORKER_COUNT
+                    for counts in worker_counts.values()))
+
+                rebuilt = subject._timing_job_waves(candidate, len(panels))
+                self.assertEqual(
+                    [(rotation, [job.command() for job in jobs])
+                     for rotation, jobs in waves],
+                    [(rotation, [job.command() for job in jobs])
+                     for rotation, jobs in rebuilt])
+
+    def test_timing_wave_builder_fails_closed_on_domain_mutations(self) -> None:
+        contract = self._timing_contract(16)
+        panel_count = len(contract_api.timing_panels(
+            contract, [value[0] for value in subject.EXPECTED_ARMS]))
+        original = list(contract_api.iter_timing_cells(
+            contract, "development"))
+        mutations = {}
+        mutations["missing"] = original[:-1]
+        mutations["extra"] = original + [dict(original[-1])]
+        duplicate = [dict(cell) for cell in original]
+        duplicate[-1] = dict(duplicate[0])
+        mutations["duplicate"] = duplicate
+        identity_drift = [dict(cell) for cell in original]
+        identity_drift[13]["K"] += 1
+        mutations["identity_drift"] = identity_drift
+        bad_replicate = [dict(cell) for cell in original]
+        bad_replicate[0]["replicate"] = 16
+        mutations["bad_replicate"] = bad_replicate
+        for name, cells in mutations.items():
+            with self.subTest(name=name), mock.patch.object(
+                    contract_api, "iter_timing_cells",
+                    side_effect=lambda _contract, _phase, values=cells:
+                        iter(values)):
+                with self.assertRaises(subject.RunnerError):
+                    subject._timing_job_waves(contract, panel_count)
+        for bad_panel_count in (True, panel_count - 1, panel_count + 1):
+            with self.subTest(panel_count=bad_panel_count):
+                with self.assertRaises(subject.RunnerError):
+                    subject._timing_job_waves(contract, bad_panel_count)
+
+    def test_timing_wave_builder_derives_multi_candidate_cohort_count(self) \
+            -> None:
+        contract = self._timing_contract(16)
+        expanded_arms = subject.EXPECTED_ARMS + (
+            ("candidate_two", "wirehair2_experiment"),
+        )
+        with mock.patch.object(subject, "EXPECTED_ARMS", expanded_arms):
+            roster = [value[0] for value in expanded_arms]
+            panel_count = len(contract_api.timing_panels(contract, roster))
+            self.assertEqual(panel_count, 18)
+            waves = subject._timing_job_waves(contract, panel_count)
             self.assertEqual(
-                {cells[job.cell]["block_bytes"] for job in jobs}, {64, 1280})
+                len(waves),
+                contract_api.timing_cohort_count(
+                    contract, "development", roster) * 2)
+            self.assertEqual(
+                sum(len(jobs) for _, jobs in waves), 384 * panel_count)
+
+    def test_timing_worker_count_rejects_before_native_dispatch(self) -> None:
+        contract = self._timing_contract(16)
+        for count in (0, 7, 9):
+            with self.subTest(count=count), self.assertRaisesRegex(
+                    subject.RunnerError, "exactly eight timing workers"):
+                subject._run_native_jobs(
+                    contract, {}, {}, [object()] * count,
+                    self.root, 0, time.monotonic() + 1.0)
+        for repetitions in (0, 7, 12):
+            candidate = self._timing_contract(16)
+            domain = candidate["timing"]["domains"]["development"]
+            domain["paired_repetitions"] = repetitions
+            with self.subTest(repetitions=repetitions), \
+                    self.assertRaisesRegex(
+                        subject.RunnerError, "positive multiple of eight"):
+                subject._timing_job_waves(candidate, 11)
 
     def test_sampler_fixture_waits_for_an_exact_new_sample(self) -> None:
         path = self.root / "thermal.csv"

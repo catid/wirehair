@@ -13,7 +13,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from typing import Any, Dict, List, Mapping, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 import unittest
 from unittest import mock
 
@@ -23,7 +23,7 @@ import wh2_native_short_screen as subject
 
 
 ARMS = ("wirehair2_head", "wirehair1", "candidate")
-WORKER_CPUS = (0, 1)
+WORKER_CPUS = tuple(range(8))
 WORKER_BINARY = hashlib.sha256(b"one native worker").hexdigest()
 
 
@@ -104,7 +104,9 @@ def freeze_manifest(
         "repair_training_trace_manifest_sha256": "0" * 64,
         "commands": [["wirehair_v2_contract_worker", kind, phase]],
         "cpu_affinity": list(WORKER_CPUS),
-        "host_identity": {"name": "native-fixture"},
+        "host_identity": {
+            "name": "native-fixture", "controller_cpu": 8,
+        },
         "arms": records,
     }
 
@@ -115,16 +117,25 @@ def realized(arm: str, K: int, block_bytes: int, attempt: int) -> str:
 
 
 def envelope(ordinal: int, message_ordinal: int,
-             payload: Mapping[str, Any], schema: str) -> Dict[str, Any]:
+             payload: Mapping[str, Any], schema: str,
+             cpu: Optional[int] = None,
+             started_monotonic_ns: Optional[int] = None,
+             finished_monotonic_ns: Optional[int] = None) -> Dict[str, Any]:
     kind = "recovery" if schema == subject.RECOVERY_RECORD_SCHEMA else "timing"
+    selected_cpu = WORKER_CPUS[ordinal % len(WORKER_CPUS)] \
+        if cpu is None else cpu
+    start = 2000000000 + ordinal * 2 \
+        if started_monotonic_ns is None else started_monotonic_ns
+    finish = start + 1 \
+        if finished_monotonic_ns is None else finished_monotonic_ns
     return {
         "schema": schema,
         "ordinal": ordinal,
-        "cpu": WORKER_CPUS[ordinal % len(WORKER_CPUS)],
-        "worker_pid": 1000 + WORKER_CPUS[ordinal % len(WORKER_CPUS)],
+        "cpu": selected_cpu,
+        "worker_pid": 1000 + selected_cpu,
         "worker_process_start_ticks": 1,
-        "started_monotonic_ns": 2000000000 + ordinal * 2,
-        "finished_monotonic_ns": 2000000001 + ordinal * 2,
+        "started_monotonic_ns": start,
+        "finished_monotonic_ns": finish,
         "worker_binary_sha256": WORKER_BINARY,
         "message_sha256": digest("message:{}".format(message_ordinal)),
         "work_sha256": subject._expected_work_sha256(
@@ -169,8 +180,28 @@ def timing_records(
         ) -> List[Dict[str, Any]]:
     rows = []
     panels = contract_api.timing_panels(contract, ARMS)
-    for cell_ordinal, cell in enumerate(contract_api.iter_timing_cells(
-            contract, "development")):
+    cells = list(contract_api.iter_timing_cells(contract, "development"))
+    cell_fields = contract["timing"]["cell_key"]
+    stable_fields = [
+        field for field in cell_fields
+        if field not in ("replicate", "loss_seed")
+    ]
+    identities = [contract_api.canonical_json({
+        field: cell[field] for field in stable_fields
+    }) for cell in cells]
+    identity_order = []
+    for cell, identity in zip(cells, identities):
+        if cell["replicate"] == 0:
+            identity_order.append(identity)
+    identity_indexes = {
+        identity: index for index, identity in enumerate(identity_order)
+    }
+    repetitions = contract["timing"]["domains"]["development"][
+        "paired_repetitions"]
+    jobs_per_wave = contract["timing"]["execution_geometry"][
+        "jobs_per_wave"]
+    waves_per_cohort = repetitions // jobs_per_wave
+    for cell_ordinal, cell in enumerate(cells):
         for panel_index, panel in enumerate(panels):
             order = contract_api.timing_order(panel, cell["replicate"])
             payload: Dict[str, Any] = {
@@ -199,9 +230,64 @@ def timing_records(
                     arm, cell["K"], cell["block_bytes"], attempt)
                 payload[side + "_repair_map_sha256"] = "0" * 64
             ordinal = cell_ordinal * len(panels) + panel_index
+            cohort_index = identity_indexes[identities[cell_ordinal]] * \
+                len(panels) + panel_index
+            wave_index = cell["replicate"] // jobs_per_wave
+            global_wave = cohort_index * waves_per_cohort + wave_index
+            position = cell["replicate"] % jobs_per_wave
+            cpu = WORKER_CPUS[contract_api.timing_worker_slot(
+                contract, "development", ARMS, cohort_index,
+                cell["replicate"])]
+            start = 2000000000 + global_wave * 1000000 + position * 10
             rows.append(envelope(
-                ordinal, cell_ordinal, payload, subject.TIMING_RECORD_SCHEMA))
+                ordinal, cell_ordinal, payload, subject.TIMING_RECORD_SCHEMA,
+                cpu=cpu, started_monotonic_ns=start,
+                finished_monotonic_ns=start + 500000))
     return rows
+
+
+def timing_wave_rows(
+        contract: Mapping[str, Any], records: Sequence[Mapping[str, Any]],
+        ) -> Mapping[Tuple[int, int], List[int]]:
+    panels = contract_api.timing_panels(contract, ARMS)
+    cells = list(contract_api.iter_timing_cells(contract, "development"))
+    stable_fields = [
+        field for field in contract["timing"]["cell_key"]
+        if field not in ("replicate", "loss_seed")
+    ]
+    identities = [contract_api.canonical_json({
+        field: cell[field] for field in stable_fields
+    }) for cell in cells]
+    identity_order = [
+        identity for cell, identity in zip(cells, identities)
+        if cell["replicate"] == 0
+    ]
+    identity_indexes = {
+        identity: index for index, identity in enumerate(identity_order)
+    }
+    jobs_per_wave = contract["timing"]["execution_geometry"][
+        "jobs_per_wave"]
+    result: Dict[Tuple[int, int], List[int]] = {}
+    for row_index, row in enumerate(records):
+        cell_ordinal, panel_index = divmod(row["ordinal"], len(panels))
+        cell = cells[cell_ordinal]
+        cohort_index = identity_indexes[identities[cell_ordinal]] * \
+            len(panels) + panel_index
+        wave_index = cell["replicate"] // jobs_per_wave
+        result.setdefault((cohort_index, wave_index), []).append(row_index)
+    return result
+
+
+def write_cpu_topology(
+        root: Path, values: Mapping[int, Tuple[int, int]]) -> Path:
+    for cpu, (package, core) in values.items():
+        topology = root / "cpu{}".format(cpu) / "topology"
+        topology.mkdir(parents=True)
+        (topology / "physical_package_id").write_text(
+            str(package) + "\n", encoding="ascii")
+        (topology / "core_id").write_text(
+            str(core) + "\n", encoding="ascii")
+    return root
 
 
 def sampler_fixture(root: Path, *, edac: int = 0,
@@ -243,7 +329,19 @@ def sampler_fixture(root: Path, *, edac: int = 0,
 class NativeShortScreenTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
+        cls.topology_temporary = tempfile.TemporaryDirectory()
+        cls.sysfs_root = write_cpu_topology(
+            Path(cls.topology_temporary.name) / "sysfs",
+            {cpu: (0, cpu) for cpu in list(range(9)) + [127]})
+        cls.topology_patch = mock.patch.object(
+            subject, "CPU_SYSFS_ROOT", cls.sysfs_root)
+        cls.topology_patch.start()
         cls.contract = contract_api.load_contract()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.topology_patch.stop()
+        cls.topology_temporary.cleanup()
 
     def build_kind(self, root: Path, kind: str) -> Tuple[
             Path, Path, Path, List[Dict[str, Any]]]:
@@ -268,7 +366,7 @@ class NativeShortScreenTests(unittest.TestCase):
             root = Path(temporary)
             sampler_path = sampler_fixture(root)
             outputs = {}
-            for kind, expected in (("recovery", 1080), ("timing", 2112)):
+            for kind, expected in (("recovery", 1080), ("timing", 4224)):
                 freeze, traces, native, _ = self.build_kind(root, kind)
                 output = root / (kind + "-output.jsonl")
                 receipt = root / (kind + "-execution.json")
@@ -279,7 +377,8 @@ class NativeShortScreenTests(unittest.TestCase):
                 self.assertEqual(
                     result["execution_receipt"]["record_count"], expected)
                 self.assertEqual(
-                    result["execution_receipt"]["worker_cpus"], [0, 1])
+                    result["execution_receipt"]["worker_cpus"],
+                    list(WORKER_CPUS))
                 self.assertEqual(
                     result["execution_receipt"]["thermal"]["edac_ce_max"], 0)
                 self.assertTrue(output.exists())
@@ -348,6 +447,172 @@ class NativeShortScreenTests(unittest.TestCase):
             with self.assertRaises(subject.NativeEvidenceError):
                 subject._validate_native_records(
                     self.contract, freeze, "timing", "development", legacy)
+
+    def test_terminal_timing_geometry_rejects_placement_and_barrier_drift(
+            self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            freeze_path, _, _, records = self.build_kind(root, "timing")
+            freeze = contract_api.load_freeze_manifest(
+                self.contract, "development", freeze_path, "timing")
+            waves = timing_wave_rows(self.contract, records)
+            self.assertEqual(len(records), 4224)
+            self.assertEqual(len(waves), 528)
+            self.assertTrue(all(len(indexes) == 8
+                                for indexes in waves.values()))
+            subject._validate_native_records(
+                self.contract, freeze, "timing", "development", records)
+
+            first_wave = waves[(0, 0)]
+            second_wave = waves[(0, 1)]
+            first_by_replicate = {
+                records[index]["payload"]["replicate"]: index
+                for index in first_wave
+            }
+            second_by_replicate = {
+                records[index]["payload"]["replicate"]: index
+                for index in second_wave
+            }
+            self.assertEqual(
+                [records[first_by_replicate[replicate]]["cpu"]
+                 for replicate in range(8)], list(WORKER_CPUS))
+            self.assertEqual(
+                [records[second_by_replicate[replicate]]["cpu"]
+                 for replicate in range(8, 16)],
+                [1, 2, 3, 4, 5, 6, 7, 0])
+
+            cpu_remap = copy.deepcopy(records)
+            for row in cpu_remap:
+                if row["cpu"] == 0:
+                    row["cpu"] = 1
+                elif row["cpu"] == 1:
+                    row["cpu"] = 0
+            with self.assertRaisesRegex(
+                    subject.NativeEvidenceError, "worker-slot placement"):
+                subject._validate_native_records(
+                    self.contract, freeze, "timing", "development",
+                    cpu_remap)
+
+            swapped = copy.deepcopy(records)
+            panels = contract_api.timing_panels(self.contract, ARMS)
+            cells = list(contract_api.iter_timing_cells(
+                self.contract, "development"))
+            first_identity = {
+                field: cells[0][field]
+                for field in self.contract["timing"]["cell_key"]
+                if field not in ("replicate", "loss_seed")
+            }
+            matching_cells = [
+                index for index, cell in enumerate(cells)
+                if all(cell[field] == value
+                       for field, value in first_identity.items())
+            ]
+            cell0, cell1 = matching_cells[:2]
+            identity_fields = (
+                "ordinal", "payload", "message_sha256", "work_sha256",
+            )
+            for panel_index in range(len(panels)):
+                left = cell0 * len(panels) + panel_index
+                right = cell1 * len(panels) + panel_index
+                for field in identity_fields:
+                    swapped[left][field], swapped[right][field] = \
+                        swapped[right][field], swapped[left][field]
+            with self.assertRaisesRegex(
+                    subject.NativeEvidenceError, "worker-slot placement"):
+                subject._validate_native_records(
+                    self.contract, freeze, "timing", "development", swapped)
+
+            ordered_wave_keys = [
+                (cohort, wave)
+                for cohort in range(264) for wave in range(2)
+            ]
+            prior_indexes = waves[ordered_wave_keys[0]]
+            next_indexes = waves[ordered_wave_keys[1]]
+            prior_finish = max(
+                records[index]["finished_monotonic_ns"]
+                for index in prior_indexes)
+            next_min_index = min(
+                next_indexes,
+                key=lambda index: records[index]["started_monotonic_ns"])
+            equality = copy.deepcopy(records)
+            equality[next_min_index]["started_monotonic_ns"] = prior_finish
+            subject._validate_native_records(
+                self.contract, freeze, "timing", "development", equality)
+            overlap = copy.deepcopy(equality)
+            overlap[next_min_index]["started_monotonic_ns"] = prior_finish - 1
+            with self.assertRaisesRegex(
+                    subject.NativeEvidenceError, "overlap"):
+                subject._validate_native_records(
+                    self.contract, freeze, "timing", "development", overlap)
+
+            with self.assertRaises(subject.NativeEvidenceError):
+                subject._validate_native_records(
+                    self.contract, freeze, "timing", "development",
+                    [row for index, row in enumerate(records)
+                     if index not in set(first_wave)])
+            with self.assertRaises(subject.NativeEvidenceError):
+                subject._validate_native_records(
+                    self.contract, freeze, "timing", "development",
+                    records + [copy.deepcopy(records[index])
+                               for index in first_wave])
+
+            for roster in (
+                    list(range(7)), list(range(9)),
+                    [1, 0, 2, 3, 4, 5, 6, 7]):
+                changed_freeze = copy.deepcopy(freeze)
+                changed_freeze["cpu_affinity"] = roster
+                with self.subTest(roster=roster), self.assertRaisesRegex(
+                        subject.NativeEvidenceError,
+                        "exactly eight sorted worker CPUs"):
+                    subject._validate_native_records(
+                        self.contract, changed_freeze, "timing",
+                        "development", records)
+
+            sibling_root = write_cpu_topology(
+                root / "sibling-sysfs",
+                {**{cpu: (0, cpu) for cpu in range(9)},
+                 64: (0, 0), 127: (0, 127)})
+            sibling_records = copy.deepcopy(records)
+            for row in sibling_records:
+                if row["cpu"] == 7:
+                    row["cpu"] = 64
+                    row["worker_pid"] = 1064
+            sibling_freeze = copy.deepcopy(freeze)
+            sibling_freeze["cpu_affinity"] = list(range(7)) + [64]
+            with self.assertRaisesRegex(
+                    subject.NativeEvidenceError, "unique physical cores"):
+                subject._validate_native_records(
+                    self.contract, sibling_freeze, "timing", "development",
+                    sibling_records, sysfs_root=sibling_root)
+
+            controller_freeze = copy.deepcopy(freeze)
+            controller_freeze["host_identity"]["controller_cpu"] = 64
+            with self.assertRaisesRegex(
+                    subject.NativeEvidenceError, "controller shares"):
+                subject._validate_native_records(
+                    self.contract, controller_freeze, "timing", "development",
+                    records, sysfs_root=sibling_root)
+
+            sampler_case = root / "sampler-physical-core"
+            sampler_case.mkdir()
+            sampler_path = sampler_fixture(sampler_case)
+            sampler = json.loads(sampler_path.read_text(encoding="utf-8"))
+            sampler["cpu"] = 64
+            with self.assertRaisesRegex(
+                    subject.NativeEvidenceError, "worker physical core"):
+                subject._thermal_window(
+                    sampler, 2000000000, 2500000000, WORKER_CPUS, False,
+                    controller_cpu=8, sysfs_root=sibling_root)
+
+            controller_sampler_root = write_cpu_topology(
+                root / "controller-sampler-sysfs",
+                {**{cpu: (0, cpu) for cpu in range(9)},
+                 64: (0, 8), 127: (0, 127)})
+            with self.assertRaisesRegex(
+                    subject.NativeEvidenceError, "controller physical core"):
+                subject._thermal_window(
+                    sampler, 2000000000, 2500000000, WORKER_CPUS, False,
+                    controller_cpu=8, sysfs_root=controller_sampler_root)
 
     def test_timing_batch_count_mutations_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -1,7 +1,7 @@
-# Wirehair2 benchmark contract v2
+# Wirehair2 benchmark contract v3
 
 The machine-readable source of truth is
-[`wh2_benchmark_contract_v2.json`](wh2_benchmark_contract_v2.json).  The
+[`wh2_benchmark_contract_v3.json`](wh2_benchmark_contract_v3.json).  The
 companion checker, [`wh2_benchmark_contract.py`](wh2_benchmark_contract.py),
 validates its exact domains and rejects result ledgers that omit or replace a
 cell.  This is intentionally a small contract and checker, not another
@@ -33,8 +33,8 @@ training-loss roots and uses these four strata:
 - repair-only loss at 50%.
 
 That is 360 recovery cells per arm at the two-byte structure width.  The
-separate speed screen is 192 common cells: 12 K anchors, widths 64 and 1280,
-and eight paired repetitions.  Unlike raw recovery, development timing uses
+separate speed screen is 384 common cells: 12 K anchors, widths 64 and 1280,
+and sixteen paired repetitions.  Unlike raw recovery, development timing uses
 the production base attempt zero with the three training roots.  Timing is a
 speed measurement of one predeclared production construction, not another raw
 seed census; raw attempts 0, 1, and 2 remain fully represented by the recovery
@@ -188,7 +188,7 @@ Timing uses warm-cache, pinned four-slot panels.  With one candidate, each base
 cell has seven A/A panels (one for every arm/scope used) and four A/B panels:
 candidate versus Wirehair2 solve, candidate versus Wirehair1
 receive-to-success, and candidate versus each control for encoder work.  Thus
-development has exactly 192 × 11 = 2,112 timing rows and final timing has
+development has exactly 384 × 11 = 4,224 timing rows and final timing has
 3,600 × 11 = 39,600.  Missing, duplicate, extra, side-swapped, or omitted A/A
 rows invalidate the receipt.
 
@@ -197,7 +197,7 @@ bit of its SHA-256.  Use ABBA exactly when that bit equals replicate parity and
 BAAB otherwise.  Run one untimed fresh warm-up per logical side immediately
 before the four measured slots.
 
-Contract v2 replaces each underpowered one-shot measured slot with a
+The frozen protocol replaces each underpowered one-shot measured slot with a
 deterministic batch.  The machine-readable block target is 65,536 and every
 timing cell receipts
 
@@ -222,6 +222,36 @@ arm-free timing cell key is:
 
 Changing the batch count therefore cannot preserve either the cell identity
 or its frozen trace/domain binding.
+
+Contract v3 additionally freezes the execution geometry that removed the
+heterogeneous-load artifact.  Timing uses exactly eight singleton-pinned
+workers on distinct physical cores.  For one candidate, the 12 K values, two
+widths, and eleven frozen panels form 264 homogeneous cohorts ordered by width,
+K-set position, then panel ordinal.  A cohort contains only one K, width, and
+panel.  Its sixteen development replicates run as two waves of eight jobs:
+wave `w` contains replicates with `floor(replicate / 8) == w`, and the next
+wave or cohort may not start until all eight jobs in the current wave finish.
+The one-candidate final domain analogously has 1,650 cohorts and three waves;
+both phase bounds reject out-of-range cohort indices.
+For zero-based cohort and wave indices, replicate `r` runs on
+
+```text
+sorted_worker_cpus[(r % 8 + cohort_index + wave_index) % 8]
+```
+
+This Latin rotation balances replicate identity over worker slots without
+mixing K, payload width, or panel load inside a wave.  Before freezing results,
+the runner requires the eight cores to cover as many L3/LLC groups as the
+eligible CPU affinity permits, then fills them deterministically.  Unique L3
+groups are preferred, not required: this host exposes only seven eligible L3
+groups, so an honest eight-worker run necessarily reuses one group.  Terminal
+validation independently rechecks that workers, controller, and sampler occupy
+distinct physical cores, then checks every record's CPU, timestamp, placement,
+and wave barrier.  A complete row set with the wrong placement or overlap is
+not selectable.  Maximum-LLC coverage itself is a runner pre-freeze check;
+reconstructing that decision offline would also require freezing the complete
+pre-pin eligible CPU roster.
+
 For the four aggregate elapsed nanoseconds `e0..e3`, one panel observation is:
 
 ```text
@@ -231,8 +261,8 @@ BAAB: ((ln e1 - ln e0) + (ln e2 - ln e3)) / 2
 
 The independent statistical unit is the replicate, not an individual K or one
 of the two adjacent pairs.  Within each band × width, average all frozen K
-observations for a replicate, then use the 8 or 24 replicate means with unbiased
-sample variance and the exact two-sided Student-t critical value (2.364624251592784
+observations for a replicate, then use the 16 or 24 replicate means with unbiased
+sample variance and the exact two-sided Student-t critical value (2.131449545559323
 or 2.0686576104190477).  Aggregate encoder results give every frozen K × width
 cell equal weight within its replicate.  No rounding occurs before a decision.
 
@@ -267,10 +297,10 @@ Final promotion requires:
 - encoder timing noninferior to both controls in every band × payload width and
   faster than both controls under the equal-cell aggregate.
 
-Run independent single-thread timing cells concurrently on pinned cores to use
-the machine without putting multiple benchmark arms on one core.  The existing
-sole CPU/DIMM/EDAC sampler remains active for the complete load interval and
-its thermal/error policy is authoritative.
+Run the frozen homogeneous eight-worker waves on pinned cores.  No worker may
+share a physical core with another worker, the controller, or the sampler.  The
+existing sole CPU/DIMM/EDAC sampler remains active for the complete load
+interval and its thermal/error policy is authoritative.
 
 ## Checker commands
 
@@ -298,11 +328,11 @@ PYTHONWARNINGS=error python3 bench/wh2_benchmark_contract.py \
 ```
 
 Repaired recovery and final timing additionally repeat
-`--repair-map ARM=PATH` for each mapped WH2/composite arm.  The native benchmark
-still needs the narrow raw-cell and timing emitters before the first campaign;
-the checked-in validators and statistical reduction are complete.  Aggregate
-`compare` or `precodefail` output remains diagnostic and cannot satisfy this
-contract.
+`--repair-map ARM=PATH` for each mapped WH2/composite arm.  The checked-in
+native worker and short-screen runner emit and validate the development
+raw-cell and timing streams.  Separate final-phase native emitters remain
+required before promotion.  Aggregate `compare` or `precodefail` output remains
+diagnostic and cannot satisfy this contract.
 
 Before final promotion, run the continuity check with one argument for each
 required freeze:
