@@ -119,6 +119,18 @@ bool ValidPrecodeParamsShape(
     const uint64_t total_span = binary_span + params.HeavyRows;
     const uint64_t known_span =
         (uint64_t)params.BlockCount + params.Staircase;
+    bool valid_dense_anchors = params.DenseAnchors ==
+        wirehair_v2::DenseAnchorLayout::Disabled;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    valid_dense_anchors = valid_dense_anchors ||
+        ((params.DenseAnchors == wirehair_v2::DenseAnchorLayout::Two07 ||
+          params.DenseAnchors ==
+              wirehair_v2::DenseAnchorLayout::Four0369) &&
+         params.DenseRows == 12u && params.HeavyRows == 12u &&
+         !params.DenseIdentityCorner &&
+         params.HeavyFamily ==
+             wirehair_v2::HeavyCoefficientFamily::PeriodicCauchy);
+#endif
     return params.BlockCount == expected_block_count &&
         params.BlockCount >= 2u && params.BlockCount <= 64000u &&
         params.Staircase != 0u &&
@@ -128,6 +140,7 @@ bool ValidPrecodeParamsShape(
              wirehair_v2::HeavyCoefficientFamily::PeriodicCauchy ||
          params.HeavyFamily ==
              wirehair_v2::HeavyCoefficientFamily::HashedNonzero) &&
+        valid_dense_anchors &&
         binary_span <= UINT16_MAX && total_span <= UINT16_MAX &&
         (!params.DenseIdentityCorner ||
          known_span >= 2u * (uint64_t)(params.DenseRows >> 1));

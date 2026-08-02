@@ -47,7 +47,11 @@ DESCRIPTION_ARM_FIELDS = frozenset((
 EXPECTED_ARMS = (
     ("wirehair2_head", "wirehair2_certified"),
     ("wirehair1", "wirehair1"),
-    ("wirehair2_identity", "wirehair2_experiment"),
+    ("wirehair2_dense_two07_basis_v1", "wirehair2_experiment"),
+)
+TIMING_CANDIDATE_DESCRIPTOR_SHA256 = (
+    "9527f200ad38c7eec6502b2f768fdd67"
+    "b92787fb227eed3d7616274ffc2df388"
 )
 SUMMARY_SCHEMA = "wirehair.wh2.native-short-screen-run.v1"
 MAX_WALL_SECONDS = 7200.0
@@ -675,6 +679,9 @@ def describe_worker(worker_path: Path, deadline: float) -> Mapping[str, Any]:
                 not _is_sha256(arm.get("arm_descriptor_sha256")):
             fail("native worker description has an invalid arm at index {}".format(
                 index))
+        if index == 2 and arm["arm_descriptor_sha256"] != \
+                TIMING_CANDIDATE_DESCRIPTOR_SHA256:
+            fail("native worker description has the wrong timing candidate")
     if len({arm["arm_descriptor_sha256"] for arm in arms}) != len(arms):
         fail("native worker description reuses an arm descriptor")
     result = dict(value)

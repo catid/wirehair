@@ -323,6 +323,7 @@ bool SamePrecodeParams(
         left.HeavyRows == right.HeavyRows &&
         left.SourceHits == right.SourceHits &&
         left.DenseIdentityCorner == right.DenseIdentityCorner &&
+        left.DenseAnchors == right.DenseAnchors &&
         left.HeavyFamily == right.HeavyFamily &&
         left.Seed == right.Seed;
 }
@@ -396,6 +397,74 @@ bool InvalidCandidateTransform(
     void*)
 {
     params.Staircase = 0u;
+    return true;
+}
+
+bool InvalidDenseAnchorTransform(
+    uint32_t,
+    uint32_t,
+    wirehair_v2::PrecodeParams& params,
+    wirehair_v2::PacketRowConfig&,
+    void*)
+{
+    params.DenseAnchors =
+        static_cast<wirehair_v2::DenseAnchorLayout>(UINT32_MAX);
+    return true;
+}
+
+enum class InvalidDenseAnchorCombination
+{
+    DenseRows,
+    HeavyRows,
+    IdentityCorner,
+    HeavyFamily
+};
+
+bool InvalidDenseAnchorCombinationTransform(
+    uint32_t,
+    uint32_t,
+    wirehair_v2::PrecodeParams& params,
+    wirehair_v2::PacketRowConfig&,
+    void* context)
+{
+    const InvalidDenseAnchorCombination* const combination =
+        static_cast<const InvalidDenseAnchorCombination*>(context);
+    if (!combination) {
+        return false;
+    }
+    params.DenseAnchors = wirehair_v2::DenseAnchorLayout::Two07;
+    switch (*combination)
+    {
+    case InvalidDenseAnchorCombination::DenseRows:
+        params.DenseRows = 13u;
+        break;
+    case InvalidDenseAnchorCombination::HeavyRows:
+        params.HeavyRows = 11u;
+        break;
+    case InvalidDenseAnchorCombination::IdentityCorner:
+        params.DenseIdentityCorner = true;
+        break;
+    case InvalidDenseAnchorCombination::HeavyFamily:
+        params.HeavyFamily =
+            wirehair_v2::HeavyCoefficientFamily::HashedNonzero;
+        break;
+    }
+    return true;
+}
+
+bool TwoAnchorTransform(
+    uint32_t block_count,
+    uint32_t block_bytes,
+    wirehair_v2::PrecodeParams& params,
+    wirehair_v2::PacketRowConfig&,
+    void*)
+{
+    if (block_count != params.BlockCount || block_bytes == 0u ||
+        params.DenseAnchors != wirehair_v2::DenseAnchorLayout::Disabled)
+    {
+        return false;
+    }
+    params.DenseAnchors = wirehair_v2::DenseAnchorLayout::Two07;
     return true;
 }
 
@@ -566,6 +635,22 @@ void CheckArmsAndNestedRecovery()
               candidate_recovery.FirstOverhead == 0u,
         "runtime candidate failed byte-verified nested recovery");
 
+    NativeArm two_anchor_arm;
+    Check(two_anchor_arm.Initialize(
+              wirehair_wh2_bench::MakeExperimentalWh2Arm(
+                  0u, TwoAnchorTransform),
+              K, block_bytes, source) == Wirehair_Success,
+        "enabled two-anchor codec failed exact construction");
+    NativeRecoveryFixture two_anchor_fixture;
+    Check(two_anchor_fixture.Initialize(two_anchor_arm, ids) ==
+              Wirehair_Success,
+        "enabled two-anchor recovery fixture failed");
+    const RecoveryCellResult two_anchor_recovery =
+        two_anchor_fixture.RunNested();
+    Check(two_anchor_recovery.Outcome == RecoveryOutcome::Success &&
+              two_anchor_recovery.FirstOverhead == 0u,
+        "enabled two-anchor codec failed byte-verified recovery");
+
     std::vector<uint32_t> duplicate_ids = ids;
     duplicate_ids.back() = duplicate_ids.front();
     NativeRecoveryFixture duplicate_fixture;
@@ -582,6 +667,27 @@ void CheckArmsAndNestedRecovery()
         source);
     Check(invalid_result == Wirehair_InvalidInput,
         "invalid runtime equation transform was not rejected");
+    Check(invalid_candidate.Initialize(
+              wirehair_wh2_bench::MakeExperimentalWh2Arm(
+                  0u, InvalidDenseAnchorTransform),
+              K, block_bytes, source) == Wirehair_InvalidInput,
+        "invalid dense-anchor layout was not rejected by native resolution");
+    const InvalidDenseAnchorCombination invalid_combinations[] = {
+        InvalidDenseAnchorCombination::DenseRows,
+        InvalidDenseAnchorCombination::HeavyRows,
+        InvalidDenseAnchorCombination::IdentityCorner,
+        InvalidDenseAnchorCombination::HeavyFamily
+    };
+    for (InvalidDenseAnchorCombination combination : invalid_combinations)
+    {
+        NativeArm invalid_combination;
+        Check(invalid_combination.Initialize(
+                  wirehair_wh2_bench::MakeExperimentalWh2Arm(
+                      0u, InvalidDenseAnchorCombinationTransform,
+                      &combination),
+                  K, block_bytes, source) == Wirehair_InvalidInput,
+            "invalid dense-anchor parameter combination was accepted");
+    }
 }
 
 void CheckTransactionalArmAndValidation()

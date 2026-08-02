@@ -59,8 +59,11 @@ arms = [
      "arm_descriptor_sha256": digest("head")},
     {"arm": "wirehair1", "codec": "wirehair1",
      "arm_descriptor_sha256": digest("wh1")},
-    {"arm": "wirehair2_identity", "codec": "wirehair2_experiment",
-     "arm_descriptor_sha256": digest("identity")},
+    {"arm": "wirehair2_dense_two07_basis_v1",
+     "codec": "wirehair2_experiment",
+     "arm_descriptor_sha256":
+         "9527f200ad38c7eec6502b2f768fdd67"
+         "b92787fb227eed3d7616274ffc2df388"},
 ]
 if sys.argv[1:] == ["--describe"]:
     print(canonical({"arms": arms, "binary_sha256": binary,
@@ -469,6 +472,18 @@ class NativeRunnerTests(unittest.TestCase):
         with self.assertRaises(subject.RunnerError):
             subject._require_worker_source_commit(description, "2" * 40)
 
+        candidate_digest_prefix = (
+            "9527f200ad38c7eec6502b2f768fdd67")
+        self.assertIn(candidate_digest_prefix, FAKE_WORKER)
+        wrong_worker = self.root / "wrong_candidate_worker.py"
+        wrong_worker.write_text(
+            FAKE_WORKER.replace(candidate_digest_prefix, "0" * 32),
+            encoding="utf-8")
+        wrong_worker.chmod(0o755)
+        with self.assertRaisesRegex(
+                subject.RunnerError, "wrong timing candidate"):
+            self._description(wrong_worker)
+
     def test_controller_affinity_is_singleton_and_restored(self) -> None:
         original = set(os.sched_getaffinity(0))
         if not original:
@@ -501,7 +516,8 @@ class NativeRunnerTests(unittest.TestCase):
             self.assertEqual(freezes[kind]["trace_manifest_sha256"],
                              trace_hashes[kind])
             self.assertEqual(freezes[kind]["arm_roster"], [
-                "wirehair2_head", "wirehair1", "wirehair2_identity"])
+                "wirehair2_head", "wirehair1",
+                "wirehair2_dense_two07_basis_v1"])
             self.assertEqual(freezes[kind]["host_identity"]["controller_cpu"],
                              1)
             self.assertEqual(

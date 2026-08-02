@@ -103,6 +103,12 @@ static const char kRawControlArm[] =
     "wirehair2_raw_d12_h12_periodic";
 static const char kRawControlDescriptorSha256[] =
     "739092a7824449e6168f08b46661dfbe8ad5495ea4166b36073c79cd3bacdd11";
+static const char kTimingCandidateArm[] =
+    "wirehair2_dense_two07_basis_v1";
+static const char kTimingCandidateTransform[] =
+    "dense-anchor-two07+basis-segment-adjacent-symdiff-v1";
+static const char kTimingCandidateDescriptorSha256[] =
+    "9527f200ad38c7eec6502b2f768fdd67b92787fb227eed3d7616274ffc2df388";
 static const char kProductionSeedBasis[] = "production-profile-v1";
 static const char kNotApplicableSeedBasis[] = "not-applicable";
 
@@ -367,13 +373,13 @@ std::string CanonicalDescriptor(
 bool BuildArmDescriptors(std::vector<ArmDescriptor>& arms)
 {
     static const char* const names[] = {
-        "wirehair2_head", "wirehair1", "wirehair2_identity"
+        "wirehair2_head", "wirehair1", kTimingCandidateArm
     };
     static const char* const codecs[] = {
         "wirehair2_certified", "wirehair1", "wirehair2_experiment"
     };
     static const char* const transforms[] = {
-        "none", "none", "identity"
+        "none", "none", kTimingCandidateTransform
     };
     std::vector<ArmDescriptor> built;
     built.reserve(3u);
@@ -389,7 +395,10 @@ bool BuildArmDescriptors(std::vector<ArmDescriptor>& arms)
         descriptor.ConstructionSeedBasis = i == 1u ?
             kNotApplicableSeedBasis : kProductionSeedBasis;
         descriptor.SeedScheduleSha256 = kZeroSha256;
-        if (!IsLowerSha256(descriptor.DescriptorSha256)) {
+        if (!IsLowerSha256(descriptor.DescriptorSha256) ||
+            (i == 2u && descriptor.DescriptorSha256 !=
+                kTimingCandidateDescriptorSha256))
+        {
             return false;
         }
         built.push_back(descriptor);
@@ -574,13 +583,19 @@ bool BuildCandidateArmDescriptors(
     return true;
 }
 
-bool IdentityTransform(
-    uint32_t,
-    uint32_t,
-    wirehair_v2::PrecodeParams&,
+bool TwoAnchorBasisTransform(
+    uint32_t block_count,
+    uint32_t block_bytes,
+    wirehair_v2::PrecodeParams& params,
     wirehair_v2::PacketRowConfig&,
     void*)
 {
+    if (block_count != params.BlockCount || block_bytes == 0u ||
+        params.DenseAnchors != wirehair_v2::DenseAnchorLayout::Disabled)
+    {
+        return false;
+    }
+    params.DenseAnchors = wirehair_v2::DenseAnchorLayout::Two07;
     return true;
 }
 
@@ -598,6 +613,7 @@ bool CanonicalStructureTransformInput(
         params.HeavyRows == expected.HeavyRows &&
         params.SourceHits == expected.SourceHits &&
         params.DenseIdentityCorner == expected.DenseIdentityCorner &&
+        params.DenseAnchors == expected.DenseAnchors &&
         params.HeavyFamily == expected.HeavyFamily &&
         params.Seed == 0u && packet.PeelSeed == 0u &&
         packet.MixCount == wirehair_v2::kCertifiedPacketMixCount;
@@ -655,6 +671,7 @@ bool RecoveryCandidateTransform(
         transformed.SourceHits != original_params.SourceHits ||
         transformed.DenseIdentityCorner !=
             original_params.DenseIdentityCorner ||
+        transformed.DenseAnchors != original_params.DenseAnchors ||
         transformed.Seed != wirehair_v2::test::kRawArchitecturePrecodeSeed ||
         transformed_packet.PeelSeed !=
             wirehair_v2::test::kRawArchitecturePacketSeed ||
@@ -763,6 +780,10 @@ bool ValidateRecoveryCandidateDefinition(
                         certified.DenseIdentityCorner ||
                     actual.Params.DenseIdentityCorner !=
                         certified.DenseIdentityCorner ||
+                    control.Params.DenseAnchors !=
+                        wirehair_v2::DenseAnchorLayout::Disabled ||
+                    actual.Params.DenseAnchors !=
+                        wirehair_v2::DenseAnchorLayout::Disabled ||
                     control.Params.DenseRows != 12u ||
                     control.Params.HeavyRows != 12u ||
                     control.Params.HeavyFamily !=
@@ -782,7 +803,7 @@ bool ValidateRecoveryCandidateDefinition(
 
         // Exercise each fail-closed base guard independently and require a
         // rejected transform to leave both inputs exactly unchanged.
-        for (unsigned mutation = 0u; mutation < 9u; ++mutation)
+        for (unsigned mutation = 0u; mutation < 10u; ++mutation)
         {
             wirehair_v2::PrecodeParams unexpected = certified;
             if (mutation == 0u) unexpected.DenseRows = 11u;
@@ -793,6 +814,8 @@ bool ValidateRecoveryCandidateDefinition(
             else if (mutation == 4u) unexpected.SourceHits = 1u;
             else if (mutation == 5u) unexpected.DenseIdentityCorner = true;
             else if (mutation == 7u) unexpected.Seed = 1u;
+            else if (mutation == 9u) unexpected.DenseAnchors =
+                    wirehair_v2::DenseAnchorLayout::Two07;
             wirehair_v2::PacketRowConfig packet = certified_packet;
             if (mutation == 6u) packet.MixCount = 2u;
             else if (mutation == 8u) packet.PeelSeed = 1u;
@@ -807,6 +830,7 @@ bool ValidateRecoveryCandidateDefinition(
                 unexpected.HeavyRows != before.HeavyRows ||
                 unexpected.SourceHits != before.SourceHits ||
                 unexpected.DenseIdentityCorner != before.DenseIdentityCorner ||
+                unexpected.DenseAnchors != before.DenseAnchors ||
                 unexpected.HeavyFamily != before.HeavyFamily ||
                 unexpected.Seed != before.Seed ||
                 packet.PeelSeed != before_packet.PeelSeed ||
@@ -851,7 +875,7 @@ bool ArmSpecFor(
         else
         {
             spec = wirehair_wh2_bench::MakeExperimentalWh2Arm(
-                construction_attempt, &IdentityTransform);
+                construction_attempt, &TwoAnchorBasisTransform);
         }
         return true;
     case 3u:
@@ -876,6 +900,147 @@ bool ArmSpecFor(
 uint32_t ConstructionAttemptFor(std::size_t arm_index, uint32_t base_attempt)
 {
     return arm_index == 1u ? 0u : base_attempt;
+}
+
+bool ValidateResolvedProductionArm(
+    std::size_t arm_index,
+    const NativeArmSpec& spec,
+    uint32_t K,
+    uint32_t block_bytes,
+    uint32_t construction_attempt)
+{
+    if (arm_index == 1u) {
+        return spec.Kind == wirehair_wh2_bench::NativeArmKind::Wirehair1 &&
+            construction_attempt == 0u;
+    }
+    if (arm_index > 2u) {
+        return false;
+    }
+
+    wirehair_wh2_bench::ResolvedNativeWh2Configuration actual;
+    wirehair_wh2_bench::ResolvedNativeWh2Configuration head;
+    if (!wirehair_wh2_bench::ResolveNativeWh2Configuration(
+            spec, K, block_bytes, actual) ||
+        !wirehair_wh2_bench::ResolveNativeWh2Configuration(
+            wirehair_wh2_bench::MakeCertifiedWh2Arm(
+                construction_attempt),
+            K, block_bytes, head))
+    {
+        return false;
+    }
+
+    const wirehair_v2::DenseAnchorLayout expected_layout = arm_index == 2u ?
+        wirehair_v2::DenseAnchorLayout::Two07 :
+        wirehair_v2::DenseAnchorLayout::Disabled;
+    const wirehair_v2::PrecodeParams& a = actual.Params;
+    const wirehair_v2::PrecodeParams& h = head.Params;
+    return actual.PrecodeAttempt == construction_attempt &&
+        actual.PacketAttempt == construction_attempt &&
+        head.PrecodeAttempt == construction_attempt &&
+        head.PacketAttempt == construction_attempt &&
+        a.BlockCount == h.BlockCount && a.Staircase == h.Staircase &&
+        a.DenseRows == h.DenseRows && a.HeavyRows == h.HeavyRows &&
+        a.SourceHits == h.SourceHits &&
+        a.DenseIdentityCorner == h.DenseIdentityCorner &&
+        a.HeavyFamily == h.HeavyFamily && a.Seed == h.Seed &&
+        h.DenseAnchors == wirehair_v2::DenseAnchorLayout::Disabled &&
+        a.DenseAnchors == expected_layout &&
+        actual.PacketConfig.PeelSeed == head.PacketConfig.PeelSeed &&
+        actual.PacketConfig.MixCount == head.PacketConfig.MixCount;
+}
+
+bool ValidateProductionTimingArmDefinitions()
+{
+    static const uint32_t block_counts[] = { 3u, 1001u, 64000u };
+    static const uint32_t block_bytes_values[] = { 64u, 1280u };
+    static const uint32_t attempts[] = { 0u, 1u, 2u, 255u };
+    for (uint32_t K : block_counts)
+    {
+        for (uint32_t block_bytes : block_bytes_values)
+        {
+            for (uint32_t attempt : attempts)
+            {
+                NativeArmSpec head_spec;
+                NativeArmSpec candidate_spec;
+                if (!ArmSpecFor(0u, attempt, nullptr, head_spec) ||
+                    !ArmSpecFor(2u, attempt, nullptr, candidate_spec) ||
+                    !ValidateResolvedProductionArm(
+                        0u, head_spec, K, block_bytes, attempt) ||
+                    !ValidateResolvedProductionArm(
+                        2u, candidate_spec, K, block_bytes, attempt))
+                {
+                    return false;
+                }
+            }
+        }
+    }
+
+    wirehair_v2::PrecodeParams params =
+        wirehair_v2::MakeCertifiedParams(1001u, UINT64_C(0x5eed));
+    wirehair_v2::PacketRowConfig packet;
+    const wirehair_v2::PrecodeParams original = params;
+    const wirehair_v2::PacketRowConfig original_packet = packet;
+    if (!TwoAnchorBasisTransform(
+            1001u, 64u, params, packet, nullptr) ||
+        params.DenseAnchors != wirehair_v2::DenseAnchorLayout::Two07 ||
+        params.BlockCount != original.BlockCount ||
+        params.Staircase != original.Staircase ||
+        params.DenseRows != original.DenseRows ||
+        params.HeavyRows != original.HeavyRows ||
+        params.SourceHits != original.SourceHits ||
+        params.DenseIdentityCorner != original.DenseIdentityCorner ||
+        params.HeavyFamily != original.HeavyFamily ||
+        params.Seed != original.Seed ||
+        packet.PeelSeed != original_packet.PeelSeed ||
+        packet.MixCount != original_packet.MixCount)
+    {
+        return false;
+    }
+    wirehair_v2::PrecodeSystem transformed_system;
+    if (!wirehair_v2::BuildPrecodeSystem(params, transformed_system) ||
+        transformed_system.Params.DenseAnchors !=
+            wirehair_v2::DenseAnchorLayout::Two07)
+    {
+        return false;
+    }
+    params = original;
+    packet = original_packet;
+    if (TwoAnchorBasisTransform(1000u, 64u, params, packet, nullptr) ||
+        params.DenseAnchors != original.DenseAnchors ||
+        packet.PeelSeed != original_packet.PeelSeed ||
+        packet.MixCount != original_packet.MixCount)
+    {
+        return false;
+    }
+    params = original;
+    packet = original_packet;
+    if (TwoAnchorBasisTransform(1001u, 0u, params, packet, nullptr) ||
+        params.DenseAnchors != original.DenseAnchors ||
+        packet.PeelSeed != original_packet.PeelSeed ||
+        packet.MixCount != original_packet.MixCount)
+    {
+        return false;
+    }
+    params = original;
+    packet = original_packet;
+    params.DenseAnchors = wirehair_v2::DenseAnchorLayout::Two07;
+    const wirehair_v2::PrecodeParams invalid_before = params;
+    if (TwoAnchorBasisTransform(1001u, 64u, params, packet, nullptr) ||
+        params.BlockCount != invalid_before.BlockCount ||
+        params.Staircase != invalid_before.Staircase ||
+        params.DenseRows != invalid_before.DenseRows ||
+        params.HeavyRows != invalid_before.HeavyRows ||
+        params.SourceHits != invalid_before.SourceHits ||
+        params.DenseIdentityCorner != invalid_before.DenseIdentityCorner ||
+        params.DenseAnchors != invalid_before.DenseAnchors ||
+        params.HeavyFamily != invalid_before.HeavyFamily ||
+        params.Seed != invalid_before.Seed ||
+        packet.PeelSeed != original_packet.PeelSeed ||
+        packet.MixCount != original_packet.MixCount)
+    {
+        return false;
+    }
+    return true;
 }
 
 bool RealizedConstructionSha256(
@@ -1713,10 +1878,14 @@ bool RunRecoveryJob(
     }
     const bool raw_arm = context.Candidate && arm_index >= 2u;
     wirehair_wh2_bench::ResolvedNativeWh2Configuration resolved;
-    if (raw_arm && !wirehair_wh2_bench::ResolveNativeWh2Configuration(
-            spec, cell.K, cell.block_bytes, resolved))
+    if ((raw_arm && !wirehair_wh2_bench::ResolveNativeWh2Configuration(
+             spec, cell.K, cell.block_bytes, resolved)) ||
+        (!raw_arm && !ValidateResolvedProductionArm(
+             arm_index, spec, cell.K, cell.block_bytes, attempt)))
     {
-        error = "cannot resolve selected raw recovery construction";
+        error = raw_arm ?
+            "cannot resolve selected raw recovery construction" :
+            "recovery arm differs from its production descriptor";
         return false;
     }
     const RecoveryCellResult result = wirehair_wh2_bench::RunRecoveryCell(
@@ -2372,7 +2541,7 @@ bool RunTimingJob(
         wirehair::wh2_benchmark::EnumerateDevelopmentTimingBaseCells();
     static const std::vector<FrozenTimingPanel> panels =
         wirehair::wh2_benchmark::EnumerateOneCandidateTimingPanels(
-            "wirehair2_identity");
+            kTimingCandidateArm);
     if (cells.size() != 2304u || panels.size() != 11u ||
         cell_ordinal >= cells.size() || panel_index >= panels.size() ||
         retry_offset >= 256u)
@@ -2464,9 +2633,13 @@ bool RunTimingJob(
     if (!ArmSpecFor(
             left_index, left_attempt, context.Candidate, left_spec) ||
         !ArmSpecFor(
-            right_index, right_attempt, context.Candidate, right_spec))
+            right_index, right_attempt, context.Candidate, right_spec) ||
+        !ValidateResolvedProductionArm(
+            left_index, left_spec, cell.K, cell.block_bytes, left_attempt) ||
+        !ValidateResolvedProductionArm(
+            right_index, right_spec, cell.K, cell.block_bytes, right_attempt))
     {
-        error = "cannot construct timing arm specifications";
+        error = "timing arm differs from its production descriptor";
         return false;
     }
     std::string left_realized;
@@ -2653,9 +2826,13 @@ bool RunWorker(
     const CandidateDefinition* candidate)
 {
     std::string error;
-    if (!PinSingletonCpu(cpu, error))
+    if ((!candidate && !ValidateProductionTimingArmDefinitions()) ||
+        !PinSingletonCpu(cpu, error))
     {
-        std::cerr << "wirehair_wh2_contract_worker: " << error << '\n';
+        std::cerr << "wirehair_wh2_contract_worker: " <<
+            (error.empty() ?
+                "production timing arm definition is invalid" : error) <<
+            '\n';
         return false;
     }
 #if defined(__linux__)

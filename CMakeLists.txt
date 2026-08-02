@@ -792,46 +792,53 @@ if(BUILD_TESTS)
     set_tests_properties(wirehair_wh2_native_panel_test PROPERTIES
         TIMEOUT 120
         LABELS "wh2;benchmark;contract;native;timing;affinity")
-    add_executable(wirehair_wh2_native_codec_test
-        bench/Wh2NativeCodec.cpp
-        bench/Wh2NativeCodec.h
-        bench/Wh2NativeCodecTest.cpp)
-    target_link_libraries(wirehair_wh2_native_codec_test PRIVATE
-        ${WIREHAIR_INTERNAL_LIBRARY})
-    wirehair_apply_project_options(wirehair_wh2_native_codec_test)
-    add_test(
-        NAME wirehair_wh2_native_codec_test
-        COMMAND wirehair_wh2_native_codec_test)
-    set_tests_properties(wirehair_wh2_native_codec_test PROPERTIES
-        TIMEOUT 180
-        LABELS "wh2;benchmark;contract;native;codec")
-    add_executable(wirehair_wh2_contract_worker
-        bench/Wh2ContractWorker.cpp
-        bench/Wh2FrozenTrace.cpp
-        bench/Wh2FrozenTrace.h
-        bench/Wh2FrozenTiming.cpp
-        bench/Wh2FrozenTiming.h
-        bench/Wh2NativeCodec.cpp
-        bench/Wh2NativeCodec.h
-        bench/Wh2NativePanel.cpp
-        bench/Wh2NativePanel.h)
-    target_compile_definitions(wirehair_wh2_contract_worker PRIVATE
-        "WIREHAIR_WH2_SOURCE_GIT_COMMIT=\"${WIREHAIR_WH2_SOURCE_GIT_COMMIT}\"")
-    target_link_libraries(wirehair_wh2_contract_worker PRIVATE
-        ${WIREHAIR_INTERNAL_LIBRARY}
-        Threads::Threads)
-    wirehair_apply_project_options(wirehair_wh2_contract_worker)
-    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT CMAKE_CROSSCOMPILING)
+    if(BUILD_CODEC_V2)
+        # These native experiment targets execute test-hook-only equation
+        # transforms.  The production library intentionally rejects them.
+        add_executable(wirehair_wh2_native_codec_test
+            bench/Wh2NativeCodec.cpp
+            bench/Wh2NativeCodec.h
+            bench/Wh2NativeCodecTest.cpp)
+        target_link_libraries(wirehair_wh2_native_codec_test PRIVATE
+            wirehair_v2_policy)
+        wirehair_apply_project_options(wirehair_wh2_native_codec_test)
         add_test(
-            NAME wirehair_wh2_contract_worker_cli_test
-            COMMAND ${Python3_EXECUTABLE}
-                ${PROJECT_SOURCE_DIR}/bench/wh2_contract_worker_cli_test.py
-                $<TARGET_FILE:wirehair_wh2_contract_worker>)
-        set_tests_properties(wirehair_wh2_contract_worker_cli_test PROPERTIES
-            WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
-            ENVIRONMENT "PYTHONWARNINGS=error"
-            TIMEOUT 120
-            LABELS "wh2;benchmark;contract;native;worker;recovery")
+            NAME wirehair_wh2_native_codec_test
+            COMMAND wirehair_wh2_native_codec_test)
+        set_tests_properties(wirehair_wh2_native_codec_test PROPERTIES
+            TIMEOUT 180
+            LABELS "wh2;benchmark;contract;native;codec")
+        add_executable(wirehair_wh2_contract_worker
+            bench/Wh2ContractWorker.cpp
+            bench/Wh2FrozenTrace.cpp
+            bench/Wh2FrozenTrace.h
+            bench/Wh2FrozenTiming.cpp
+            bench/Wh2FrozenTiming.h
+            bench/Wh2NativeCodec.cpp
+            bench/Wh2NativeCodec.h
+            bench/Wh2NativePanel.cpp
+            bench/Wh2NativePanel.h)
+        target_compile_definitions(wirehair_wh2_contract_worker PRIVATE
+            "WIREHAIR_WH2_SOURCE_GIT_COMMIT=\"${WIREHAIR_WH2_SOURCE_GIT_COMMIT}\"")
+        target_link_libraries(wirehair_wh2_contract_worker PRIVATE
+            wirehair_v2_policy
+            Threads::Threads)
+        wirehair_apply_project_options(wirehair_wh2_contract_worker)
+    endif()
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT CMAKE_CROSSCOMPILING)
+        if(BUILD_CODEC_V2)
+            add_test(
+                NAME wirehair_wh2_contract_worker_cli_test
+                COMMAND ${Python3_EXECUTABLE}
+                    ${PROJECT_SOURCE_DIR}/bench/wh2_contract_worker_cli_test.py
+                    $<TARGET_FILE:wirehair_wh2_contract_worker>)
+            set_tests_properties(wirehair_wh2_contract_worker_cli_test
+                PROPERTIES
+                WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+                ENVIRONMENT "PYTHONWARNINGS=error"
+                TIMEOUT 120
+                LABELS "wh2;benchmark;contract;native;worker;recovery")
+        endif()
         add_test(
             NAME wh2_run_native_recovery_screen_test
             COMMAND ${Python3_EXECUTABLE} -m unittest -v
