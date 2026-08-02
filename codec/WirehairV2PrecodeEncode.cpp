@@ -1346,8 +1346,8 @@ WirehairResult MessagePrecodeEncoder::InitializeResult(
             solve_result == Wirehair_Error)
         {
             if (profile.V2SeedSelected) {
-                return solve_result == Wirehair_NeedMore ?
-                    Wirehair_BadPeelSeed : solve_result;
+                return ClassifyExactSystematicConstructionFailure(
+                    system, packet_config, solve_runtime, solve_result);
             }
             PrecodeSystem selected_system;
             PacketRowConfig selected_config;

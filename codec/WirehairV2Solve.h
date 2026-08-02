@@ -343,6 +343,24 @@ WirehairResult SelectSystematicConfiguration(
     PacketRowConfig& selected_config,
     uint32_t* attempt_out = nullptr);
 
+/**
+    Normalize a failed exact systematic construction independently of its RHS.
+
+    A deficient square construction returns NeedMore for a consistent RHS but
+    may report Error when a different source RHS is inconsistent.  On Error,
+    this performs a one-byte all-zero rank probe over the identical equations;
+    a rank failure or inactive-column-cap failure is converted to BadPeelSeed.
+    Full-rank Error and all other failures remain fatal and unchanged.
+
+    The system, config, and runtime must be the already-validated, immutable
+    coefficient inputs used by the failed solve.
+*/
+WirehairResult ClassifyExactSystematicConstructionFailure(
+    const PrecodeSystem& system,
+    const PacketRowConfig& config,
+    const PacketRowRuntime& runtime,
+    WirehairResult solve_result);
+
 /** Expensive test/oracle validation of every supplied equation. */
 bool VerifyPrecodeSolution(
     const PrecodeSystem& system,

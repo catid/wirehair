@@ -734,6 +734,90 @@ install(FILES
 
 if(BUILD_TESTS)
     find_package(Python3 3.8 COMPONENTS Interpreter REQUIRED)
+    add_executable(wirehair_wh2_frozen_trace_test
+        bench/Wh2FrozenTrace.cpp
+        bench/Wh2FrozenTrace.h
+        bench/Wh2FrozenTraceTest.cpp)
+    wirehair_apply_project_options(wirehair_wh2_frozen_trace_test)
+    add_test(
+        NAME wirehair_wh2_frozen_trace_test
+        COMMAND wirehair_wh2_frozen_trace_test)
+    set_tests_properties(wirehair_wh2_frozen_trace_test PROPERTIES
+        TIMEOUT 120
+        LABELS "wh2;benchmark;contract;native;trace")
+    add_executable(wirehair_wh2_frozen_timing_test
+        bench/Wh2FrozenTrace.cpp
+        bench/Wh2FrozenTrace.h
+        bench/Wh2FrozenTiming.cpp
+        bench/Wh2FrozenTiming.h
+        bench/Wh2FrozenTimingTest.cpp)
+    wirehair_apply_project_options(wirehair_wh2_frozen_timing_test)
+    add_test(
+        NAME wirehair_wh2_frozen_timing_test
+        COMMAND wirehair_wh2_frozen_timing_test)
+    set_tests_properties(wirehair_wh2_frozen_timing_test PROPERTIES
+        TIMEOUT 120
+        LABELS "wh2;benchmark;contract;native;timing")
+    add_executable(wirehair_wh2_native_panel_test
+        bench/Wh2NativePanel.cpp
+        bench/Wh2NativePanel.h
+        bench/Wh2NativePanelTest.cpp)
+    wirehair_apply_project_options(wirehair_wh2_native_panel_test)
+    add_test(
+        NAME wirehair_wh2_native_panel_test
+        COMMAND wirehair_wh2_native_panel_test)
+    set_tests_properties(wirehair_wh2_native_panel_test PROPERTIES
+        TIMEOUT 120
+        LABELS "wh2;benchmark;contract;native;timing;affinity")
+    add_executable(wirehair_wh2_native_codec_test
+        bench/Wh2NativeCodec.cpp
+        bench/Wh2NativeCodec.h
+        bench/Wh2NativeCodecTest.cpp)
+    target_link_libraries(wirehair_wh2_native_codec_test PRIVATE
+        ${WIREHAIR_INTERNAL_LIBRARY})
+    wirehair_apply_project_options(wirehair_wh2_native_codec_test)
+    add_test(
+        NAME wirehair_wh2_native_codec_test
+        COMMAND wirehair_wh2_native_codec_test)
+    set_tests_properties(wirehair_wh2_native_codec_test PROPERTIES
+        TIMEOUT 180
+        LABELS "wh2;benchmark;contract;native;codec")
+    add_executable(wirehair_wh2_contract_worker
+        bench/Wh2ContractWorker.cpp
+        bench/Wh2FrozenTrace.cpp
+        bench/Wh2FrozenTrace.h
+        bench/Wh2FrozenTiming.cpp
+        bench/Wh2FrozenTiming.h
+        bench/Wh2NativeCodec.cpp
+        bench/Wh2NativeCodec.h
+        bench/Wh2NativePanel.cpp
+        bench/Wh2NativePanel.h)
+    set(WIREHAIR_WH2_SOURCE_GIT_COMMIT
+        "0000000000000000000000000000000000000000")
+    find_package(Git QUIET)
+    if(Git_FOUND)
+        execute_process(
+            COMMAND ${GIT_EXECUTABLE} rev-parse --verify HEAD^{commit}
+            WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+            RESULT_VARIABLE WIREHAIR_WH2_GIT_RESULT
+            OUTPUT_VARIABLE WIREHAIR_WH2_GIT_OUTPUT
+            ERROR_QUIET
+            OUTPUT_STRIP_TRAILING_WHITESPACE)
+        string(LENGTH "${WIREHAIR_WH2_GIT_OUTPUT}"
+            WIREHAIR_WH2_GIT_OUTPUT_LENGTH)
+        if(WIREHAIR_WH2_GIT_RESULT EQUAL 0 AND
+           WIREHAIR_WH2_GIT_OUTPUT_LENGTH EQUAL 40 AND
+           WIREHAIR_WH2_GIT_OUTPUT MATCHES "^[0-9a-f]+$")
+            set(WIREHAIR_WH2_SOURCE_GIT_COMMIT
+                "${WIREHAIR_WH2_GIT_OUTPUT}")
+        endif()
+    endif()
+    target_compile_definitions(wirehair_wh2_contract_worker PRIVATE
+        "WIREHAIR_WH2_SOURCE_GIT_COMMIT=\"${WIREHAIR_WH2_SOURCE_GIT_COMMIT}\"")
+    target_link_libraries(wirehair_wh2_contract_worker PRIVATE
+        ${WIREHAIR_INTERNAL_LIBRARY}
+        Threads::Threads)
+    wirehair_apply_project_options(wirehair_wh2_contract_worker)
     add_test(
         NAME wh2_benchmark_contract_test
         COMMAND ${Python3_EXECUTABLE} -m unittest -v
@@ -743,6 +827,24 @@ if(BUILD_TESTS)
         ENVIRONMENT "PYTHONWARNINGS=error"
         TIMEOUT 180
         LABELS "wh2;benchmark;contract")
+    add_test(
+        NAME wh2_native_short_screen_test
+        COMMAND ${Python3_EXECUTABLE} -m unittest -v
+            bench/test_wh2_native_short_screen.py)
+    set_tests_properties(wh2_native_short_screen_test PROPERTIES
+        WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+        ENVIRONMENT "PYTHONWARNINGS=error"
+        TIMEOUT 180
+        LABELS "wh2;benchmark;contract;native")
+    add_test(
+        NAME wh2_run_native_short_screen_test
+        COMMAND ${Python3_EXECUTABLE} -m unittest -v
+            bench/test_wh2_run_native_short_screen.py)
+    set_tests_properties(wh2_run_native_short_screen_test PROPERTIES
+        WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+        ENVIRONMENT "PYTHONWARNINGS=error"
+        TIMEOUT 120
+        LABELS "wh2;benchmark;contract;native;runner;affinity")
 endif()
 
 if(BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)

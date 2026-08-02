@@ -957,6 +957,142 @@ bool CheckTinyDenseOracle()
     return true;
 }
 
+bool CheckZeroRhsAcrossBlockWidths(
+    const wirehair_v2::PrecodeSystem& system,
+    const wirehair_v2::PacketRowConfig& config,
+    WirehairResult expected)
+{
+    static const uint32_t kBlockBytes[] = { 1u, 64u, 2048u, 4096u };
+    const uint32_t K = system.Params.BlockCount;
+    const uint32_t P = system.Params.Staircase +
+        system.Params.DenseRows + system.Params.HeavyRows;
+    wirehair_v2::PacketRowRuntime runtime;
+    if (!runtime.Initialize(K, P, config.MixCount)) {
+        return false;
+    }
+    for (uint32_t block_bytes : kBlockBytes)
+    {
+        std::vector<uint8_t> message((size_t)K * block_bytes, 0u);
+        std::vector<wirehair_v2::SolvePacket> packets(K);
+        for (uint32_t id = 0u; id < K; ++id)
+        {
+            packets[id].BlockId = id;
+            packets[id].Data =
+                message.data() + (size_t)id * block_bytes;
+        }
+        std::vector<uint8_t> intermediate;
+        const WirehairResult actual =
+            wirehair_v2::SolvePrecodeSystemForValidatedSystemWithRuntime(
+                system,
+                config,
+                runtime,
+                packets,
+                block_bytes,
+                intermediate);
+        if (actual != expected)
+        {
+            std::fprintf(stderr,
+                "solve: zero-RHS rank changed at bb=%u expected=%d actual=%d\n",
+                block_bytes, (int)expected, (int)actual);
+            return false;
+        }
+    }
+    return true;
+}
+
+bool CheckExactSystematicFailureClassification()
+{
+    const uint32_t K = 8u;
+    const wirehair_v2::SeedProfile profile =
+        wirehair_v2::SelectSeedProfile(K, 64u);
+    wirehair_v2::MessagePrecodeEncoderOptions options;
+    wirehair_v2::PrecodeParams params;
+    wirehair_v2::PacketRowConfig base_config;
+    if (!wirehair_v2::ResolveMessagePrecodeOptions(
+            profile, nullptr, options) ||
+        !wirehair_v2::ResolveMessagePrecodeConfiguration(
+            profile, options, params, base_config))
+    {
+        std::fprintf(stderr,
+            "solve: exact-failure profile setup failed\n");
+        return false;
+    }
+
+    wirehair_v2::PrecodeSystem full_rank_system;
+    wirehair_v2::PacketRowConfig full_rank_config;
+    if (wirehair_v2::SelectSystematicConfiguration(
+            params,
+            base_config,
+            full_rank_system,
+            full_rank_config) != Wirehair_Success ||
+        !CheckZeroRhsAcrossBlockWidths(
+            full_rank_system, full_rank_config, Wirehair_Success))
+    {
+        std::fprintf(stderr,
+            "solve: exact-failure full-rank setup failed\n");
+        return false;
+    }
+
+    wirehair_v2::PrecodeSystem deficient_system;
+    const wirehair_v2::PrecodeParams deficient_params =
+        wirehair_v2::PrecodeParamsForAttempt(params, 2u);
+    const wirehair_v2::PacketRowConfig deficient_config =
+        wirehair_v2::PacketConfigForAttempt(base_config, 2u);
+    if (!wirehair_v2::BuildPrecodeSystem(
+            deficient_params, deficient_system) ||
+        !CheckZeroRhsAcrossBlockWidths(
+            deficient_system, deficient_config, Wirehair_NeedMore))
+    {
+        std::fprintf(stderr,
+            "solve: exact-failure deficient setup failed\n");
+        return false;
+    }
+    const uint32_t full_rank_P = full_rank_system.Params.Staircase +
+        full_rank_system.Params.DenseRows + full_rank_system.Params.HeavyRows;
+    const uint32_t deficient_P = deficient_system.Params.Staircase +
+        deficient_system.Params.DenseRows + deficient_system.Params.HeavyRows;
+    wirehair_v2::PacketRowRuntime full_rank_runtime;
+    wirehair_v2::PacketRowRuntime deficient_runtime;
+    if (!full_rank_runtime.Initialize(
+            K, full_rank_P, full_rank_config.MixCount) ||
+        !deficient_runtime.Initialize(
+            K, deficient_P, deficient_config.MixCount))
+    {
+        std::fprintf(stderr,
+            "solve: exact-failure runtime setup failed\n");
+        return false;
+    }
+    if (wirehair_v2::ClassifyExactSystematicConstructionFailure(
+            full_rank_system,
+            full_rank_config,
+            full_rank_runtime,
+            Wirehair_Error) != Wirehair_Error ||
+        wirehair_v2::ClassifyExactSystematicConstructionFailure(
+            deficient_system,
+            deficient_config,
+            deficient_runtime,
+            Wirehair_Error) != Wirehair_BadPeelSeed ||
+        wirehair_v2::ClassifyExactSystematicConstructionFailure(
+            deficient_system,
+            deficient_config,
+            deficient_runtime,
+            Wirehair_NeedMore) !=
+                Wirehair_BadPeelSeed ||
+        wirehair_v2::ClassifyExactSystematicConstructionFailure(
+            full_rank_system,
+            full_rank_config,
+            full_rank_runtime,
+            Wirehair_InvalidInput) !=
+                Wirehair_InvalidInput)
+    {
+        std::fprintf(stderr,
+            "solve: exact-failure classification changed fatal status\n");
+        return false;
+    }
+    std::printf("exact systematic failure classification: PASS\n");
+    return true;
+}
+
 bool CheckHeavyCoefficientBoundaryOracle()
 {
     static const uint32_t kHeavyRows[] = {0u, 1u, 12u, 128u};
@@ -2347,6 +2483,7 @@ int main(int argc, char** argv)
     ok = CheckPacketRowSeedPermutation() && ok;
     ok = CheckPacketRuntimeBoundaries() && ok;
     ok = CheckTinyDenseOracle() && ok;
+    ok = CheckExactSystematicFailureClassification() && ok;
     ok = CheckHeavyCoefficientBoundaryOracle() && ok;
     ok = CheckBinaryQuotientBoundary() && ok;
     ok = CheckConcurrentCoefficientCaches() && ok;

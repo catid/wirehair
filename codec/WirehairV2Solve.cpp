@@ -3321,6 +3321,53 @@ WirehairResult SelectSystematicConfiguration(
     }
 }
 
+WirehairResult ClassifyExactSystematicConstructionFailure(
+    const PrecodeSystem& system,
+    const PacketRowConfig& config,
+    const PacketRowRuntime& runtime,
+    WirehairResult solve_result)
+{
+    if (solve_result == Wirehair_NeedMore) {
+        return Wirehair_BadPeelSeed;
+    }
+    if (solve_result != Wirehair_Error) {
+        return solve_result;
+    }
+
+    try
+    {
+        const uint32_t K = system.Params.BlockCount;
+        const uint8_t zero = 0u;
+        std::vector<SolvePacket> packets(K);
+        for (uint32_t block_id = 0u; block_id < K; ++block_id)
+        {
+            packets[block_id].BlockId = block_id;
+            packets[block_id].Data = &zero;
+        }
+        std::vector<uint8_t> intermediate;
+        const WirehairResult probe =
+            SolvePrecodeSystemForValidatedSystemWithRuntime(
+                system,
+                config,
+                runtime,
+                packets,
+                1u,
+                intermediate);
+        if (probe == Wirehair_NeedMore) {
+            return Wirehair_BadPeelSeed;
+        }
+        // A full-rank zero-RHS probe proves that the original Error was not a
+        // rank failure.  Preserve it rather than hiding an internal defect.
+        return probe == Wirehair_Success ? Wirehair_Error : probe;
+    }
+    catch (const std::bad_alloc&) {
+        return Wirehair_OOM;
+    }
+    catch (const std::length_error&) {
+        return Wirehair_OOM;
+    }
+}
+
 bool VerifyPrecodeSolution(
     const PrecodeSystem& system,
     const PacketRowConfig& config,
