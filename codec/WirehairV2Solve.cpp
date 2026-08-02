@@ -15,6 +15,13 @@
 #include <stdexcept>
 #include <utility>
 
+#if defined(__has_feature)
+#if __has_feature(memory_sanitizer)
+#include <sanitizer/msan_interface.h>
+#define WIREHAIR_V2_MEMORY_SANITIZER 1
+#endif
+#endif
+
 #if defined(__linux__)
 #include <sys/mman.h>
 #include <unistd.h>
@@ -27,6 +34,9 @@ namespace {
 thread_local uint32_t OddPacketPeelSeedXor = 0u;
 thread_local uint32_t PacketRowSeedMultiplier = 1u;
 thread_local bool PacketRowSeedAvalanche = false;
+thread_local bool PoisonSolveValueArena = false;
+thread_local bool ForceFusedBlockInitialization = false;
+thread_local bool FailSolveValueArenaAllocation = false;
 #endif
 
 constexpr uint32_t PackedWordCount(uint32_t bit_count)
@@ -649,7 +659,7 @@ static GF256_FORCE_INLINE uint32_t AccumulatePeeledProjectionConstant(
     const std::vector<uint32_t>& inactive_index,
     uint32_t words,
     const std::vector<uint64_t>& projection,
-    const std::vector<uint8_t>& values,
+    const uint8_t* values,
     uint32_t block_bytes,
     std::vector<uint64_t>& accumulator,
     XorAccumulator& constant_xor,
@@ -680,7 +690,7 @@ static GF256_FORCE_INLINE uint32_t AccumulatePeeledProjectionConstant(
             // stage.  Only peeled columns can contribute to the affine RHS;
             // XORing an inactive slot would have no algebraic effect.
             constant_xor.Add(
-                values.data() + (size_t)other * block_bytes);
+                values + (size_t)other * block_bytes);
             ++stats.BlockXors;
         }
     }
@@ -1302,6 +1312,21 @@ void ResetBinaryPeelOracleComparisonsForTesting()
 uint64_t BinaryPeelOracleComparisonsForTesting()
 {
     return BinaryPeelOracleComparisons.load(std::memory_order_relaxed);
+}
+
+void SetSolveValueArenaPoisonForTesting(bool enabled)
+{
+    PoisonSolveValueArena = enabled;
+}
+
+void SetFusedBlockInitializationForTesting(bool enabled)
+{
+    ForceFusedBlockInitialization = enabled;
+}
+
+void SetSolveValueArenaAllocationFailureForTesting(bool enabled)
+{
+    FailSolveValueArenaAllocation = enabled;
 }
 #endif
 
@@ -1935,13 +1960,113 @@ WirehairResult SolvePrecodeSystem(
         intermediate_blocks_out, stats, resume_state);
 }
 
+WirehairResult SolvePrecodeSystem(
+    const PrecodeSystem& system,
+    const PacketRowConfig& config,
+    const std::vector<SolvePacket>& packets,
+    uint32_t block_bytes,
+    SolveValueStorage& intermediate_blocks_out,
+    PrecodeSolveStats* stats,
+    PrecodeSolveResumeState* resume_state)
+{
+    const uint64_t P_wide = (uint64_t)system.Params.Staircase +
+        system.Params.DenseRows + system.Params.HeavyRows;
+    PacketRowRuntime runtime;
+    if (P_wide > UINT32_MAX ||
+        !runtime.Initialize(
+            system.Params.BlockCount,
+            (uint32_t)P_wide,
+            config.MixCount))
+    {
+        return Wirehair_InvalidInput;
+    }
+    return SolvePrecodeSystemWithRuntime(
+        system, config, runtime, packets, block_bytes,
+        intermediate_blocks_out, stats, resume_state);
+}
+
+struct SolveValueDestination
+{
+    std::vector<uint8_t>* Compatible = nullptr;
+    SolveValueStorage* Owned = nullptr;
+};
+
+static SolveValueDestination MakeSolveValueDestination(
+    std::vector<uint8_t>& output)
+{
+    SolveValueDestination destination;
+    destination.Compatible = &output;
+    return destination;
+}
+
+static SolveValueDestination MakeSolveValueDestination(
+    SolveValueStorage& output)
+{
+    SolveValueDestination destination;
+    destination.Owned = &output;
+    return destination;
+}
+
+static void PublishCheckpointValues(
+    SolveValueStorage& source,
+    std::vector<uint8_t>& destination)
+{
+    destination.assign(source.begin(), source.end());
+}
+
+static void PublishSolvedValues(
+    SolveValueStorage& source,
+    const SolveValueDestination& destination,
+    PrecodeSolveStats& stats)
+{
+    CAT_DEBUG_ASSERT(
+        (destination.Compatible != nullptr) !=
+            (destination.Owned != nullptr));
+    if (destination.Owned)
+    {
+        SolveValueStorage committed;
+        committed.swap(source);
+        destination.Owned->swap(committed);
+        return;
+    }
+
+    // Compatibility callers retain std::vector in their internal API.  Build
+    // the replacement completely before the swap so allocation failure leaves
+    // their prior output unchanged.  Stateful codec callers use Owned and
+    // avoid this copy.
+    std::vector<uint8_t> committed(source.begin(), source.end());
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    stats.SolveValueArenaCommitCopyBytes = source.size();
+#else
+    (void)stats;
+#endif
+    destination.Compatible->swap(committed);
+}
+
+static void InitializeDeferredCheckpointValues(
+    SolveValueStorage& values,
+    const std::vector<uint32_t>& inactive_columns,
+    uint32_t block_bytes)
+{
+    // A published checkpoint remains an ordinary copyable value even though
+    // resume never reads inactive affine constants.  Materialize just those R
+    // zero blocks here; the successful hot path avoids this work entirely and
+    // the other L-R blocks were established during sparse projection.
+    for (uint32_t column : inactive_columns) {
+        std::memset(
+            values.data() + (size_t)column * block_bytes,
+            0,
+            block_bytes);
+    }
+}
+
 static WirehairResult SolvePrecodeSystemImpl(
     const PrecodeSystem& system,
     const PacketRowConfig& config,
     const PacketRowRuntime& runtime,
     const std::vector<SolvePacket>& packets,
     uint32_t block_bytes,
-    std::vector<uint8_t>& intermediate_blocks_out,
+    const SolveValueDestination& destination,
     PrecodeSolveStats* stats,
     PrecodeSolveResumeState* resume_state,
     bool validate_system)
@@ -2116,7 +2241,12 @@ static WirehairResult SolvePrecodeSystemImpl(
         }
         projection_words = (size_t)L * words;
         std::vector<uint64_t> projection(projection_words, 0u);
-        std::vector<uint8_t> values;
+        SolveValueStorage values;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        if (FailSolveValueArenaAllocation) {
+            throw std::bad_alloc();
+        }
+#endif
         values.reserve(value_bytes);
 #if defined(__linux__) && defined(MADV_HUGEPAGE)
         // Request transparent huge pages before the first touch.  The value
@@ -2164,11 +2294,28 @@ static WirehairResult SolvePrecodeSystemImpl(
             }
         }
 #endif
-        values.resize(value_bytes, 0u);
+        values.resize(value_bytes);
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        st.SolveValueArenaBytes = value_bytes;
+        st.SolveValueArenaEagerZeroBytes = 0u;
+        if (PoisonSolveValueArena)
+        {
+            // Deliberately make every deferred byte nonzero.  Exact solve and
+            // resume oracles then detect any accidental dependence on the old
+            // vector value-initialization, including SIMD-width reads.
+            std::memset(values.data(), 0xa5, value_bytes);
+#if defined(WIREHAIR_V2_MEMORY_SANITIZER)
+            __msan_poison(values.data(), value_bytes);
+#endif
+        }
+#endif
         std::vector<uint64_t> accumulator(words, 0u);
         const bool enable_fused_block_initialization =
-            K >= kFusedBlockXorInitMinBlockCount &&
-            block_bytes >= kFusedBlockXorInitMinBlockBytes;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            ForceFusedBlockInitialization ||
+#endif
+            (K >= kFusedBlockXorInitMinBlockCount &&
+             block_bytes >= kFusedBlockXorInitMinBlockBytes);
 
         // Affine projection of peeled columns onto inactive variables.  The
         // block stored in values[column] is the constant term.
@@ -2191,10 +2338,10 @@ static WirehairResult SolvePrecodeSystemImpl(
                 initialization_sources <= 16u)
             {
                 BatchedBlockXorInitializer constant_xor(
-                    constant, block_bytes, equation.Data, true);
+                    constant, block_bytes, equation.Data);
                 solve_column_offset = AccumulatePeeledProjectionConstant(
                     column, equation, inactive_index, words, projection,
-                    values, block_bytes, accumulator, constant_xor, st);
+                    values.data(), block_bytes, accumulator, constant_xor, st);
                 constant_xor.Flush();
             }
             else
@@ -2202,11 +2349,14 @@ static WirehairResult SolvePrecodeSystemImpl(
                 if (equation.Data) {
                     std::memcpy(constant, equation.Data, block_bytes);
                 }
+                else {
+                    std::memset(constant, 0, block_bytes);
+                }
                 BatchedBlockXorAccumulator constant_xor(
                     constant, block_bytes);
                 solve_column_offset = AccumulatePeeledProjectionConstant(
                     column, equation, inactive_index, words, projection,
-                    values, block_bytes, accumulator, constant_xor, st);
+                    values.data(), block_bytes, accumulator, constant_xor, st);
                 constant_xor.Flush();
             }
             CAT_DEBUG_ASSERT(solve_column_offset != UINT32_MAX);
@@ -2257,9 +2407,7 @@ static WirehairResult SolvePrecodeSystemImpl(
             {
                 return terminal_error();
             }
-            std::vector<uint8_t> committed;
-            committed.swap(values);
-            intermediate_blocks_out.swap(committed);
+            PublishSolvedValues(values, destination, st);
             phase_end = SolveClock::now();
             st.ResidualNanoseconds = (uint64_t)
                 std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -2701,7 +2849,9 @@ static WirehairResult SolvePrecodeSystemImpl(
                 checkpoint.InactiveIndex.swap(inactive_index);
                 checkpoint.InactiveColumns.swap(peel.InactiveOrder);
                 checkpoint.Projection.swap(projection);
-                checkpoint.Values.swap(values);
+                InitializeDeferredCheckpointValues(
+                    values, checkpoint.InactiveColumns, block_bytes);
+                PublishCheckpointValues(values, checkpoint.Values);
                 checkpoint.PivotCoefficients.swap(pivot_coeff);
                 checkpoint.PivotRhs.swap(pivot_rhs);
                 checkpoint.HavePivot.swap(have_pivot);
@@ -2872,7 +3022,7 @@ static WirehairResult SolvePrecodeSystemImpl(
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 phase_end - phase_start).count();
 
-        intermediate_blocks_out.swap(values);
+        PublishSolvedValues(values, destination, st);
         if (stats) {
             *stats = st;
         }
@@ -2957,7 +3107,24 @@ WirehairResult SolvePrecodeSystemWithRuntime(
 {
     return SolvePrecodeSystemImpl(
         system, config, runtime, packets, block_bytes,
-        intermediate_blocks_out, stats, resume_state, true);
+        MakeSolveValueDestination(intermediate_blocks_out),
+        stats, resume_state, true);
+}
+
+WirehairResult SolvePrecodeSystemWithRuntime(
+    const PrecodeSystem& system,
+    const PacketRowConfig& config,
+    const PacketRowRuntime& runtime,
+    const std::vector<SolvePacket>& packets,
+    uint32_t block_bytes,
+    SolveValueStorage& intermediate_blocks_out,
+    PrecodeSolveStats* stats,
+    PrecodeSolveResumeState* resume_state)
+{
+    return SolvePrecodeSystemImpl(
+        system, config, runtime, packets, block_bytes,
+        MakeSolveValueDestination(intermediate_blocks_out),
+        stats, resume_state, true);
 }
 
 WirehairResult SolvePrecodeSystemForValidatedSystemWithRuntime(
@@ -2972,17 +3139,62 @@ WirehairResult SolvePrecodeSystemForValidatedSystemWithRuntime(
 {
     return SolvePrecodeSystemImpl(
         system, config, runtime, packets, block_bytes,
-        intermediate_blocks_out, stats, resume_state, false);
+        MakeSolveValueDestination(intermediate_blocks_out),
+        stats, resume_state, false);
 }
 
-WirehairResult ResumePrecodeSystem(
+WirehairResult SolvePrecodeSystemForValidatedSystemWithRuntime(
+    const PrecodeSystem& system,
+    const PacketRowConfig& config,
+    const PacketRowRuntime& runtime,
+    const std::vector<SolvePacket>& packets,
+    uint32_t block_bytes,
+    SolveValueStorage& intermediate_blocks_out,
+    PrecodeSolveStats* stats,
+    PrecodeSolveResumeState* resume_state)
+{
+    return SolvePrecodeSystemImpl(
+        system, config, runtime, packets, block_bytes,
+        MakeSolveValueDestination(intermediate_blocks_out),
+        stats, resume_state, false);
+}
+
+static void PublishResumedValues(
+    std::vector<uint8_t>& source,
+    SolveValueStorage& owned_storage,
+    const SolveValueDestination& destination,
+    PrecodeSolveStats& stats)
+{
+    CAT_DEBUG_ASSERT(
+        (destination.Compatible != nullptr) !=
+            (destination.Owned != nullptr));
+    if (destination.Owned)
+    {
+        CAT_DEBUG_ASSERT(owned_storage.size() == source.size());
+        std::memcpy(owned_storage.data(), source.data(), source.size());
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        stats.SolveValueArenaCommitCopyBytes = source.size();
+#else
+        (void)stats;
+#endif
+        destination.Owned->swap(owned_storage);
+        return;
+    }
+
+    // The public checkpoint retains its historical std::vector ownership.
+    // Resuming through the compatibility overload can therefore transfer the
+    // completed arena without allocation or copying.
+    destination.Compatible->swap(source);
+}
+
+static WirehairResult ResumePrecodeSystemImpl(
     const PrecodeSystem& system,
     const PacketRowConfig& config,
     uint32_t block_id,
     const uint8_t* block_data,
     uint32_t block_bytes,
     PrecodeSolveResumeState& state,
-    std::vector<uint8_t>& intermediate_blocks_out,
+    const SolveValueDestination& destination,
     PrecodeSolveStats* stats,
     bool allow_insert)
 {
@@ -3025,6 +3237,20 @@ WirehairResult ResumePrecodeSystem(
                 K, (uint32_t)P_wide, block_id, config, state.Runtime);
         if (columns.empty()) {
             return Wirehair_InvalidInput;
+        }
+
+        SolveValueStorage owned_output;
+        if (allow_insert && state.Rank + 1u == state.InactiveCount &&
+            destination.Owned)
+        {
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            if (FailSolveValueArenaAllocation) {
+                throw std::bad_alloc();
+            }
+#endif
+            // Complete this allocation before touching checkpoint scratch or
+            // rank so an OOM leaves the retryable state and output unchanged.
+            owned_output.resize(state.Values.size());
         }
 
         // Duplicate validation is contractually non-mutating.  In particular,
@@ -3074,11 +3300,14 @@ WirehairResult ResumePrecodeSystem(
                         word &= word - 1u;
                     }
                 }
+                // An inactive variable's affine constant is exactly zero.
+                // Its value slot is deliberately untouched until the residual
+                // solve succeeds, so only peeled columns contribute payload.
+                gf256_add_mem(
+                    rhs.data(),
+                    state.Values.data() + (size_t)column * block_bytes,
+                    (int)block_bytes);
             }
-            gf256_add_mem(
-                rhs.data(),
-                state.Values.data() + (size_t)column * block_bytes,
-                (int)block_bytes);
         }
         const SolveClock::time_point residual_start = SolveClock::now();
 
@@ -3180,8 +3409,9 @@ WirehairResult ResumePrecodeSystem(
         state.Stats.BackSubNanoseconds += (uint64_t)
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 SolveClock::now() - backsub_start).count();
+        PublishResumedValues(
+            state.Values, owned_output, destination, state.Stats);
         const PrecodeSolveStats completed_stats = state.Stats;
-        intermediate_blocks_out.swap(state.Values);
         state.Clear();
         if (stats) {
             *stats = completed_stats;
@@ -3200,6 +3430,40 @@ WirehairResult ResumePrecodeSystem(
         }
         return Wirehair_OOM;
     }
+}
+
+WirehairResult ResumePrecodeSystem(
+    const PrecodeSystem& system,
+    const PacketRowConfig& config,
+    uint32_t block_id,
+    const uint8_t* block_data,
+    uint32_t block_bytes,
+    PrecodeSolveResumeState& resume_state,
+    std::vector<uint8_t>& intermediate_blocks_out,
+    PrecodeSolveStats* stats,
+    bool allow_insert)
+{
+    return ResumePrecodeSystemImpl(
+        system, config, block_id, block_data, block_bytes,
+        resume_state, MakeSolveValueDestination(intermediate_blocks_out),
+        stats, allow_insert);
+}
+
+WirehairResult ResumePrecodeSystem(
+    const PrecodeSystem& system,
+    const PacketRowConfig& config,
+    uint32_t block_id,
+    const uint8_t* block_data,
+    uint32_t block_bytes,
+    PrecodeSolveResumeState& resume_state,
+    SolveValueStorage& intermediate_blocks_out,
+    PrecodeSolveStats* stats,
+    bool allow_insert)
+{
+    return ResumePrecodeSystemImpl(
+        system, config, block_id, block_data, block_bytes,
+        resume_state, MakeSolveValueDestination(intermediate_blocks_out),
+        stats, allow_insert);
 }
 
 WirehairResult SelectSystematicPacketConfig(

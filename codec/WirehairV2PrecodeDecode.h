@@ -140,7 +140,7 @@ private:
     PrecodeSolveResumeState ResumeState;
     std::vector<uint8_t> PendingPacketStorage;
     uint32_t PendingPacketId = 0u;
-    std::vector<uint8_t> IntermediateBlockStorage;
+    SolveValueStorage IntermediateBlockStorage;
     std::unique_ptr<uint8_t[]> SystematicPacketCache;
     size_t SystematicPacketCacheSize = 0u;
     std::vector<uint8_t> HaveSystematicPacket;
