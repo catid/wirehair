@@ -118,7 +118,8 @@ bool VerifyValues(
     for (uint32_t family = 0; family < 2u; ++family)
     {
         const std::vector<std::vector<uint32_t>>& rows =
-            family == 0u ? system.StaircaseRows : system.DenseRowColumns;
+            family == 0u ?
+                system.StaircaseRows : system.DenseBasisRowColumns;
         for (size_t r = 0; r < rows.size(); ++r)
         {
             std::memset(acc.data(), 0, block_bytes);
@@ -184,7 +185,7 @@ uint32_t DenseCornerRank(const wirehair_v2::PrecodeSystem& system)
     std::vector<uint64_t> masks(D2, 0);
     for (uint32_t r = 0; r < D2; ++r)
     {
-        for (const uint32_t col : system.DenseRowColumns[r])
+        for (const uint32_t col : system.DenseBasisRowColumns[r])
         {
             if (col >= dense_base) {
                 masks[r] ^= UINT64_C(1) << (col - dense_base);
@@ -573,14 +574,15 @@ bool TestMalformedDenseCorner()
     // to shift by 64 in DenseCornerInvertible before row validation.  Keep
     // a valid dense column at the tail so the test also catches validators
     // that only scan the sorted dense tail and miss malformed unsorted rows.
-    system.DenseRowColumns.push_back(std::vector<uint32_t>{67u, 0u, 3u});
+    system.DenseBasisRowColumns.push_back(
+        std::vector<uint32_t>{67u, 0u, 3u});
     if (wirehair_v2::DenseCornerInvertible(system)) {
         std::fprintf(stderr,
             "malformed dense corner should not be reported invertible\n");
         return false;
     }
 
-    system.DenseRowColumns[0] = std::vector<uint32_t>{3u, 3u};
+    system.DenseBasisRowColumns[0] = std::vector<uint32_t>{3u, 3u};
     if (wirehair_v2::DenseCornerInvertible(system)) {
         std::fprintf(stderr,
             "duplicate dense columns should cancel in GF(2)\n");
@@ -631,7 +633,7 @@ bool TestStrictSystemValidation()
     bad.StaircaseRows.pop_back();
     invalid.push_back(bad);
     bad = valid;
-    bad.DenseRowColumns.pop_back();
+    bad.DenseBasisRowColumns.pop_back();
     invalid.push_back(bad);
 
     const uint32_t K = valid.Params.BlockCount;
@@ -662,22 +664,27 @@ bool TestStrictSystemValidation()
     invalid.push_back(bad);
 
     bad = valid;
-    bad.DenseRowColumns[0].insert(
-        bad.DenseRowColumns[0].begin(), bad.DenseRowColumns[0][0]);
+    bad.DenseBasisRowColumns[0].insert(
+        bad.DenseBasisRowColumns[0].begin(),
+        bad.DenseBasisRowColumns[0][0]);
     invalid.push_back(bad);
     bad = valid;
-    std::swap(bad.DenseRowColumns[0][0], bad.DenseRowColumns[0][1]);
+    std::swap(
+        bad.DenseBasisRowColumns[0][0],
+        bad.DenseBasisRowColumns[0][1]);
     invalid.push_back(bad);
     bad = valid;
-    bad.DenseRowColumns[0].push_back(binary_span);
+    bad.DenseBasisRowColumns[0].push_back(binary_span);
     invalid.push_back(bad);
     bad = valid;
-    bad.DenseRowColumns[0].back() = dense_base + 1u;
+    bad.DenseBasisRowColumns[0].back() = dense_base + 1u;
     std::sort(
-        bad.DenseRowColumns[0].begin(), bad.DenseRowColumns[0].end());
+        bad.DenseBasisRowColumns[0].begin(),
+        bad.DenseBasisRowColumns[0].end());
     invalid.push_back(bad);
     bad = valid;
-    bad.DenseRowColumns[1].erase(bad.DenseRowColumns[1].begin());
+    bad.DenseBasisRowColumns[1].erase(
+        bad.DenseBasisRowColumns[1].begin());
     invalid.push_back(bad);
 
     wirehair::PCGRandom mutation_rng;
@@ -702,12 +709,13 @@ bool TestStrictSystemValidation()
                 bad.StaircaseRows[row][0]);
             break;
         case 3:
-            bad.DenseRowColumns[mutation_rng.Next() % valid.Params.DenseRows]
-                .push_back(binary_span);
+            bad.DenseBasisRowColumns[
+                mutation_rng.Next() % valid.Params.DenseRows]
+                    .push_back(binary_span);
             break;
         case 4:
         {
-            std::vector<uint32_t>& dense = bad.DenseRowColumns[
+            std::vector<uint32_t>& dense = bad.DenseBasisRowColumns[
                 mutation_rng.Next() % valid.Params.DenseRows];
             std::swap(dense[0], dense[1]);
             break;
@@ -716,7 +724,8 @@ bool TestStrictSystemValidation()
         {
             const uint32_t dense_row =
                 mutation_rng.Next() % valid.Params.DenseRows;
-            std::vector<uint32_t>& dense = bad.DenseRowColumns[dense_row];
+            std::vector<uint32_t>& dense =
+                bad.DenseBasisRowColumns[dense_row];
             dense.erase(std::find(
                 dense.begin(), dense.end(), dense_base + dense_row));
             break;
@@ -725,7 +734,7 @@ bool TestStrictSystemValidation()
             bad.Params.HeavyRows = 129u + mutation_rng.Next() % 100u;
             break;
         default:
-            bad.DenseRowColumns.pop_back();
+            bad.DenseBasisRowColumns.pop_back();
             break;
         }
         invalid.push_back(bad);
@@ -947,7 +956,6 @@ bool TestRecoveryBlockEncoding()
         !encoder_state.HasCompleteSystem() ||
         !wirehair_v2::ValidatePrecodeSystem(encoder_state.System()) ||
         encoder_state.System().StaircaseRows != system.StaircaseRows ||
-        encoder_state.System().DenseRowColumns != system.DenseRowColumns ||
         encoder_state.System().DenseBasisRowColumns !=
             system.DenseBasisRowColumns ||
         encoder_state.SourceBlockCount() != K ||
@@ -1274,7 +1282,6 @@ bool TestMessagePrecodeEncoder()
     packet_config.MixCount = blocks.RecoveryMixCount();
     if (!blocks.IntermediateBlocks() || blocks.HasCompleteSystem() ||
         !encoder_system.StaircaseRows.empty() ||
-        !encoder_system.DenseRowColumns.empty() ||
         !encoder_system.DenseBasisRowColumns.empty() ||
         encoder_system.Params.BlockCount != K ||
         encoder_system.Params.Staircase != encoder.Profile().V2StaircaseCount ||
@@ -1379,7 +1386,6 @@ bool TestMessagePrecodeEncoder()
         !encoder.IntermediateBlocks() ||
         encoder.BlockEncoder().HasCompleteSystem() ||
         !encoder.BlockEncoder().System().StaircaseRows.empty() ||
-        !encoder.BlockEncoder().System().DenseRowColumns.empty() ||
         !encoder.BlockEncoder().System().DenseBasisRowColumns.empty() ||
         encoder.SourceBlockCount() != K ||
         !encoder.BlockEncoder().IsInitialized())

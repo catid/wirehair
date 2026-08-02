@@ -4,8 +4,6 @@
 #include "../gf256.h"
 
 #include <algorithm>
-#include <iterator>
-#include <limits>
 
 namespace wirehair_v2 {
 namespace {
@@ -75,37 +73,6 @@ bool IsStrictlyIncreasingBelow(
         have_previous = true;
     }
     return true;
-}
-
-bool SymmetricDifferenceEquals(
-    const std::vector<uint32_t>& a,
-    const std::vector<uint32_t>& b,
-    const std::vector<uint32_t>& expected)
-{
-    size_t ai = 0, bi = 0, ei = 0;
-    while (ai < a.size() || bi < b.size())
-    {
-        uint32_t difference;
-        if (bi >= b.size() || (ai < a.size() && a[ai] < b[bi])) {
-            difference = a[ai];
-            ++ai;
-        }
-        else if (ai >= a.size() || b[bi] < a[ai]) {
-            difference = b[bi];
-            ++bi;
-        }
-        else
-        {
-            ++ai;
-            ++bi;
-            continue;
-        }
-        if (ei >= expected.size() || expected[ei] != difference) {
-            return false;
-        }
-        ++ei;
-    }
-    return ei == expected.size();
 }
 
 bool IsKnownDenseAnchorLayout(DenseAnchorLayout layout)
@@ -203,8 +170,7 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
 
     out.Params = params;
     out.StaircaseRows.assign(S, std::vector<uint32_t>());
-    out.DenseRowColumns.assign(D2, std::vector<uint32_t>());
-    out.DenseBasisRowColumns.clear();
+    out.DenseBasisRowColumns.assign(D2, std::vector<uint32_t>());
 
     wirehair::PCGRandom prng;
     prng.Seed(params.Seed, K);
@@ -265,6 +231,11 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
     //      deck[set_count + ii]}, ii = 0, 1, ...
     //   3. Reshuffle again; remaining floor(D2/2) - 1 + (D2 & 1) rows by
     //      the same flip rule, ii restarting at 0.
+    // Materialize that system directly in its row-equivalent sparse basis:
+    // anchors retain the balanced set-half, and every flip becomes its
+    // two-column adjacent-row delta.  The shuffle calls and deck indices stay
+    // identical to the documented construction; only redundant original-row
+    // materialization is skipped.
     if (D2 > 0u)
     {
         // Certified construction decks over all binary columns; the
@@ -274,16 +245,15 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
             params.DenseIdentityCorner ? (K + S) : span;
         const uint32_t set_count = (deck_span + 1u) >> 1;
         std::vector<uint16_t> deck(deck_span);
-        std::vector<uint8_t> bitmap(deck_span, 0);
-
-        UnbiasedShuffleDeck(prng, deck.data(), deck_span);
-        for (uint32_t i = 0; i < set_count; ++i) {
-            bitmap[deck[i]] = 1;
-        }
-
+        std::vector<uint8_t> bitmap(deck_span, 0u);
         uint32_t row_i = 0;
-        const auto emit_row = [&]() {
-            std::vector<uint32_t>& columns = out.DenseRowColumns[row_i];
+        const auto emit_anchor = [&]() {
+            std::fill(bitmap.begin(), bitmap.end(), uint8_t{0});
+            for (uint32_t i = 0; i < set_count; ++i) {
+                bitmap[deck[i]] = 1u;
+            }
+            std::vector<uint32_t>& columns =
+                out.DenseBasisRowColumns[row_i];
             columns.reserve(set_count + 8u);
             for (uint32_t col = 0; col < deck_span; ++col) {
                 if (bitmap[col]) {
@@ -296,7 +266,23 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
             }
             ++row_i;
         };
-        emit_row();
+        const auto emit_delta = [&](uint32_t first, uint32_t second) {
+            std::vector<uint32_t>& columns =
+                out.DenseBasisRowColumns[row_i];
+            columns.reserve(params.DenseIdentityCorner ? 4u : 2u);
+            columns.push_back(first);
+            columns.push_back(second);
+            if (params.DenseIdentityCorner)
+            {
+                columns.push_back(K + S + row_i - 1u);
+                columns.push_back(K + S + row_i);
+            }
+            std::sort(columns.begin(), columns.end());
+            ++row_i;
+        };
+
+        UnbiasedShuffleDeck(prng, deck.data(), deck_span);
+        emit_anchor();
 
         if (params.DenseAnchors != DenseAnchorLayout::Disabled)
         {
@@ -310,18 +296,13 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
                 if (IsAdditionalDenseAnchor(params.DenseAnchors, row_i))
                 {
                     UnbiasedShuffleDeck(prng, deck.data(), deck_span);
-                    std::fill(bitmap.begin(), bitmap.end(), uint8_t{0});
-                    for (uint32_t i = 0; i < set_count; ++i) {
-                        bitmap[deck[i]] = 1u;
-                    }
                     flip_index = 0u;
-                    emit_row();
+                    emit_anchor();
                     continue;
                 }
-                bitmap[deck[flip_index]] ^= 1u;
-                bitmap[deck[set_count + flip_index]] ^= 1u;
+                emit_delta(
+                    deck[flip_index], deck[set_count + flip_index]);
                 ++flip_index;
-                emit_row();
             }
         }
         else
@@ -337,16 +318,13 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
                 {
                     // Deck entries at distinct positions are distinct
                     // columns, so each flip pair changes exactly two columns.
-                    bitmap[deck[ii]] ^= 1u;
-                    bitmap[deck[set_count + ii]] ^= 1u;
-                    emit_row();
+                    emit_delta(deck[ii], deck[set_count + ii]);
                 }
             }
         }
     }
 
-    return BuildDenseEquationBasis(out, out.DenseBasisRowColumns) &&
-        ValidatePrecodeSystem(out);
+    return ValidatePrecodeSystem(out);
 }
 
 bool ValidatePrecodeSystem(const PrecodeSystem& system)
@@ -359,7 +337,6 @@ bool ValidatePrecodeSystem(const PrecodeSystem& system)
 
     if (!ValidatePrecodeParams(params) ||
         system.StaircaseRows.size() != S ||
-        system.DenseRowColumns.size() != D2 ||
         system.DenseBasisRowColumns.size() != D2)
     {
         return false;
@@ -416,40 +393,43 @@ bool ValidatePrecodeSystem(const PrecodeSystem& system)
         (known_span + 1u) / 2u : ((size_t)binary_span + 1u) / 2u;
     for (uint32_t row_index = 0; row_index < D2; ++row_index)
     {
-        const std::vector<uint32_t>& row = system.DenseRowColumns[row_index];
         const std::vector<uint32_t>& basis =
             system.DenseBasisRowColumns[row_index];
-        if (!IsStrictlyIncreasingBelow(row, binary_span) ||
-            !IsStrictlyIncreasingBelow(basis, binary_span))
+        if (!IsStrictlyIncreasingBelow(basis, binary_span))
         {
             return false;
         }
 
         size_t known_count = 0;
         size_t dense_count = 0;
-        bool have_own = false;
-        for (uint32_t column : row)
+        bool have_previous = false;
+        bool have_current = false;
+        for (uint32_t column : basis)
         {
             if (column < known_span) {
                 ++known_count;
             }
             else {
                 ++dense_count;
-                have_own = have_own || column == known_span + row_index;
+                have_previous = have_previous ||
+                    (row_index > 0u &&
+                     column == known_span + row_index - 1u);
+                have_current = have_current ||
+                    column == known_span + row_index;
             }
-        }
-        if (params.DenseIdentityCorner &&
-            (dense_count != 1u || !have_own))
-        {
-            return false;
         }
         const bool is_anchor = row_index == 0u ||
             IsAdditionalDenseAnchor(params.DenseAnchors, row_index);
         if (is_anchor)
         {
-            const size_t first_count = params.DenseIdentityCorner ?
-                known_count : row.size();
-            if (first_count != first_expected || basis != row) {
+            if (params.DenseIdentityCorner) {
+                if (known_count != first_expected || dense_count != 1u ||
+                    !have_current)
+                {
+                    return false;
+                }
+            }
+            else if (basis.size() != first_expected) {
                 return false;
             }
         }
@@ -457,52 +437,18 @@ bool ValidatePrecodeSystem(const PrecodeSystem& system)
         {
             const size_t expected_basis_size =
                 params.DenseIdentityCorner ? 4u : 2u;
-            if (basis.size() != expected_basis_size ||
-                !SymmetricDifferenceEquals(
-                    system.DenseRowColumns[row_index - 1u], row, basis))
+            if (basis.size() != expected_basis_size)
+            {
+                return false;
+            }
+            if (params.DenseIdentityCorner &&
+                (known_count != 2u || dense_count != 2u ||
+                 !have_previous || !have_current))
             {
                 return false;
             }
         }
     }
-    return true;
-}
-
-bool BuildDenseEquationBasis(
-    const PrecodeSystem& system,
-    std::vector<std::vector<uint32_t>>& basis_out)
-{
-    const uint32_t D2 = system.Params.DenseRows;
-    if (!IsKnownDenseAnchorLayout(system.Params.DenseAnchors) ||
-        system.DenseRowColumns.size() != D2)
-    {
-        return false;
-    }
-
-    std::vector<std::vector<uint32_t>> basis(D2);
-    for (uint32_t row = 0; row < D2; ++row)
-    {
-        if (row == 0u ||
-            IsAdditionalDenseAnchor(system.Params.DenseAnchors, row))
-        {
-            basis[row] = system.DenseRowColumns[row];
-            continue;
-        }
-        const std::vector<uint32_t>& previous =
-            system.DenseRowColumns[row - 1u];
-        const std::vector<uint32_t>& current =
-            system.DenseRowColumns[row];
-        // Valid Shuffle-2 non-anchor rows differ in two columns (four for
-        // the identity-corner variant's changing owned columns).  Reserving
-        // both half-dense inputs here would recreate the memory cost this
-        // sparse basis is intended to remove.
-        basis[row].reserve(4u);
-        std::set_symmetric_difference(
-            previous.begin(), previous.end(),
-            current.begin(), current.end(),
-            std::back_inserter(basis[row]));
-    }
-    basis_out.swap(basis);
     return true;
 }
 

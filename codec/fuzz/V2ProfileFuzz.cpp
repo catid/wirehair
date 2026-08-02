@@ -40,7 +40,6 @@ bool SameSystem(
 {
     return SameParams(a.Params, b.Params) &&
         a.StaircaseRows == b.StaircaseRows &&
-        a.DenseRowColumns == b.DenseRowColumns &&
         a.DenseBasisRowColumns == b.DenseBasisRowColumns;
 }
 
@@ -112,7 +111,6 @@ bool FuzzParams(wirehair_v2::fuzz::Input& input, std::string& failure)
     sentinel.Params.BlockCount = 7u;
     sentinel.Params.Staircase = 3u;
     sentinel.StaircaseRows.push_back(std::vector<uint32_t>{1u, 2u});
-    sentinel.DenseRowColumns.push_back(std::vector<uint32_t>{3u});
     sentinel.DenseBasisRowColumns.push_back(std::vector<uint32_t>{4u});
     wirehair_v2::PrecodeSystem output = sentinel;
     const bool built = wirehair_v2::BuildPrecodeSystem(params, output);
@@ -158,8 +156,8 @@ bool FuzzSystem(wirehair_v2::fuzz::Input& input, std::string& failure)
         break;
     case 5:
         std::reverse(
-            system.DenseRowColumns[0].begin(),
-            system.DenseRowColumns[0].end());
+            system.DenseBasisRowColumns[0].begin(),
+            system.DenseBasisRowColumns[0].end());
         break;
     case 6: ++system.Params.DenseRows; break;
     case 7: system.Params.HeavyRows = 129u; break;

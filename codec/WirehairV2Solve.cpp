@@ -3424,7 +3424,8 @@ bool VerifyPrecodeSolution(
             return false;
         }
     }
-    for (const std::vector<uint32_t>& row : system.DenseRowColumns) {
+    for (const std::vector<uint32_t>& row :
+            system.DenseBasisRowColumns) {
         if (!verify_binary(row, nullptr)) {
             return false;
         }

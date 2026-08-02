@@ -234,9 +234,8 @@ public:
 
     /**
         Returns the retained system descriptor.  Params are complete for every
-        initialized encoder; StaircaseRows, DenseRowColumns, and
-        DenseBasisRowColumns are complete only when HasCompleteSystem() is
-        true.
+        initialized encoder; StaircaseRows and DenseBasisRowColumns are
+        complete only when HasCompleteSystem() is true.
     */
     const PrecodeSystem& System() const;
 

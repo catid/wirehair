@@ -66,7 +66,6 @@ bool TestParams()
     wirehair_v2::PrecodeSystem sentinel;
     sentinel.Params.BlockCount = 7u;
     sentinel.StaircaseRows.push_back(std::vector<uint32_t>{1u, 2u});
-    sentinel.DenseRowColumns.push_back(std::vector<uint32_t>{3u});
     sentinel.DenseBasisRowColumns.push_back(std::vector<uint32_t>{4u});
 
     std::vector<wirehair_v2::PrecodeParams> invalid_params;
@@ -127,7 +126,6 @@ bool TestParams()
         if (wirehair_v2::BuildPrecodeSystem(invalid_params[i], out) ||
             out.Params.BlockCount != sentinel.Params.BlockCount ||
             out.StaircaseRows != sentinel.StaircaseRows ||
-            out.DenseRowColumns != sentinel.DenseRowColumns ||
             out.DenseBasisRowColumns != sentinel.DenseBasisRowColumns)
         {
             std::fprintf(stderr,
@@ -211,6 +209,45 @@ bool TestStaircase(const wirehair_v2::PrecodeSystem& system)
     return true;
 }
 
+bool IsAnchorRow(wirehair_v2::DenseAnchorLayout layout, uint32_t row)
+{
+    if (row == 0u) {
+        return true;
+    }
+    if (layout == wirehair_v2::DenseAnchorLayout::Two07) {
+        return row == 7u;
+    }
+    if (layout == wirehair_v2::DenseAnchorLayout::Four0369) {
+        return row == 3u || row == 6u || row == 9u;
+    }
+    return false;
+}
+
+bool ReconstructDenseRows(
+    const wirehair_v2::PrecodeSystem& system,
+    std::vector<std::vector<uint32_t>>& rows_out)
+{
+    const uint32_t D2 = system.Params.DenseRows;
+    if (system.DenseBasisRowColumns.size() != D2) {
+        return false;
+    }
+    std::vector<std::vector<uint32_t>> rows(D2);
+    for (uint32_t row = 0; row < D2; ++row)
+    {
+        if (IsAnchorRow(system.Params.DenseAnchors, row)) {
+            rows[row] = system.DenseBasisRowColumns[row];
+            continue;
+        }
+        std::set_symmetric_difference(
+            rows[row - 1u].begin(), rows[row - 1u].end(),
+            system.DenseBasisRowColumns[row].begin(),
+            system.DenseBasisRowColumns[row].end(),
+            std::back_inserter(rows[row]));
+    }
+    rows_out.swap(rows);
+    return true;
+}
+
 bool TestDenseRows(const wirehair_v2::PrecodeSystem& system)
 {
     const uint32_t K = system.Params.BlockCount;
@@ -219,14 +256,17 @@ bool TestDenseRows(const wirehair_v2::PrecodeSystem& system)
     const uint32_t span = K + S + D2;
     const uint32_t set_count = (span + 1u) >> 1;
 
-    if (system.DenseRowColumns.size() != D2) {
+    std::vector<std::vector<uint32_t>> dense_rows;
+    if (!ReconstructDenseRows(system, dense_rows) ||
+        dense_rows.size() != D2)
+    {
         std::fprintf(stderr, "K=%u: dense row count\n", K);
         return false;
     }
 
     for (uint32_t r = 0; r < D2; ++r)
     {
-        const std::vector<uint32_t>& row = system.DenseRowColumns[r];
+        const std::vector<uint32_t>& row = dense_rows[r];
         for (size_t i = 0; i < row.size(); ++i)
         {
             if (row[i] >= span ||
@@ -240,11 +280,11 @@ bool TestDenseRows(const wirehair_v2::PrecodeSystem& system)
     }
 
     // First row is exactly the set half of the deck
-    if (system.DenseRowColumns[0].size() != set_count)
+    if (dense_rows[0].size() != set_count)
     {
         std::fprintf(stderr,
             "K=%u: dense row 0 has %zu columns, want %u\n",
-            K, system.DenseRowColumns[0].size(), set_count);
+            K, dense_rows[0].size(), set_count);
         return false;
     }
 
@@ -257,8 +297,8 @@ bool TestDenseRows(const wirehair_v2::PrecodeSystem& system)
     std::vector<std::vector<uint32_t>> flips(D2);
     for (uint32_t r = 1; r < D2; ++r)
     {
-        const std::vector<uint32_t>& prev = system.DenseRowColumns[r - 1u];
-        const std::vector<uint32_t>& cur = system.DenseRowColumns[r];
+        const std::vector<uint32_t>& prev = dense_rows[r - 1u];
+        const std::vector<uint32_t>& cur = dense_rows[r];
         std::vector<uint32_t>& sym = flips[r];
         std::set_symmetric_difference(
             prev.begin(), prev.end(),
@@ -304,14 +344,13 @@ bool TestDeterminism(uint32_t K)
         return false;
     }
     if (a.StaircaseRows != b.StaircaseRows ||
-        a.DenseRowColumns != b.DenseRowColumns ||
         a.DenseBasisRowColumns != b.DenseBasisRowColumns)
     {
         std::fprintf(stderr, "K=%u: same seed produced different systems\n", K);
         return false;
     }
     if (a.StaircaseRows == c.StaircaseRows ||
-        a.DenseRowColumns == c.DenseRowColumns)
+        a.DenseBasisRowColumns == c.DenseBasisRowColumns)
     {
         std::fprintf(stderr, "K=%u: different seed produced same system\n", K);
         return false;
@@ -322,6 +361,10 @@ bool TestDeterminism(uint32_t K)
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 uint64_t DenseRowsFingerprint(const wirehair_v2::PrecodeSystem& system)
 {
+    std::vector<std::vector<uint32_t>> dense_rows;
+    if (!ReconstructDenseRows(system, dense_rows)) {
+        return 0u;
+    }
     uint64_t hash = UINT64_C(14695981039346656037);
     const auto mix_u32 = [&](uint32_t value) {
         for (uint32_t shift = 0u; shift < 32u; shift += 8u) {
@@ -330,30 +373,16 @@ uint64_t DenseRowsFingerprint(const wirehair_v2::PrecodeSystem& system)
         }
     };
     mix_u32(system.Params.BlockCount);
-    mix_u32((uint32_t)system.DenseRowColumns.size());
-    for (size_t row = 0u; row < system.DenseRowColumns.size(); ++row)
+    mix_u32((uint32_t)dense_rows.size());
+    for (size_t row = 0u; row < dense_rows.size(); ++row)
     {
         mix_u32((uint32_t)row);
-        mix_u32((uint32_t)system.DenseRowColumns[row].size());
-        for (uint32_t column : system.DenseRowColumns[row]) {
+        mix_u32((uint32_t)dense_rows[row].size());
+        for (uint32_t column : dense_rows[row]) {
             mix_u32(column);
         }
     }
     return hash;
-}
-
-bool IsAnchorRow(wirehair_v2::DenseAnchorLayout layout, uint32_t row)
-{
-    if (row == 0u) {
-        return true;
-    }
-    if (layout == wirehair_v2::DenseAnchorLayout::Two07) {
-        return row == 7u;
-    }
-    if (layout == wirehair_v2::DenseAnchorLayout::Four0369) {
-        return row == 3u || row == 6u || row == 9u;
-    }
-    return false;
 }
 
 bool TestDenseAnchorLayout(
@@ -368,7 +397,6 @@ bool TestDenseAnchorLayout(
     if (!BuildPrecodeSystem(params, system) ||
         !BuildPrecodeSystem(params, repeat) ||
         !wirehair_v2::ValidatePrecodeSystem(system) ||
-        system.DenseRowColumns != repeat.DenseRowColumns ||
         system.DenseBasisRowColumns != repeat.DenseBasisRowColumns ||
         system.StaircaseRows != repeat.StaircaseRows)
     {
@@ -380,10 +408,11 @@ bool TestDenseAnchorLayout(
 
     const uint32_t span = K + params.Staircase + params.DenseRows;
     const size_t anchor_size = (span + 1u) / 2u;
-    std::vector<std::vector<uint32_t>> basis;
-    if (!wirehair_v2::BuildDenseEquationBasis(system, basis) ||
-        basis.size() != params.DenseRows ||
-        basis != system.DenseBasisRowColumns)
+    const std::vector<std::vector<uint32_t>>& basis =
+        system.DenseBasisRowColumns;
+    std::vector<std::vector<uint32_t>> dense_rows;
+    if (basis.size() != params.DenseRows ||
+        !ReconstructDenseRows(system, dense_rows))
     {
         std::fprintf(stderr,
             "K=%u layout=%u: dense basis build failed\n",
@@ -394,6 +423,7 @@ bool TestDenseAnchorLayout(
     size_t expected_references = 0u;
     size_t actual_references = 0u;
     std::vector<uint32_t> reconstructed;
+    std::vector<uint32_t> segment_columns;
     for (uint32_t row = 0; row < params.DenseRows; ++row)
     {
         const bool anchor = IsAnchorRow(layout, row);
@@ -411,9 +441,27 @@ bool TestDenseAnchorLayout(
 
         if (anchor) {
             reconstructed = basis[row];
+            segment_columns.clear();
         }
         else
         {
+            if (layout == wirehair_v2::DenseAnchorLayout::Disabled &&
+                row == 1u + (params.DenseRows >> 1))
+            {
+                segment_columns.clear();
+            }
+            segment_columns.insert(
+                segment_columns.end(), basis[row].begin(), basis[row].end());
+            std::sort(segment_columns.begin(), segment_columns.end());
+            if (std::adjacent_find(
+                    segment_columns.begin(), segment_columns.end()) !=
+                segment_columns.end())
+            {
+                std::fprintf(stderr,
+                    "K=%u layout=%u row=%u: repeated segment delta column\n",
+                    K, (unsigned)layout, row);
+                return false;
+            }
             std::vector<uint32_t> next;
             std::set_symmetric_difference(
                 reconstructed.begin(), reconstructed.end(),
@@ -421,7 +469,7 @@ bool TestDenseAnchorLayout(
                 std::back_inserter(next));
             reconstructed.swap(next);
         }
-        if (reconstructed != system.DenseRowColumns[row])
+        if (reconstructed != dense_rows[row])
         {
             std::fprintf(stderr,
                 "K=%u layout=%u row=%u: basis reconstruction mismatch\n",
@@ -438,7 +486,7 @@ bool TestDenseAnchorLayout(
         bad.DenseBasisRowColumns[1u].clear();
         if (wirehair_v2::ValidatePrecodeSystem(bad)) {
             std::fprintf(stderr,
-                "layout=%u: validator accepted missing cached delta\n",
+                "layout=%u: validator accepted missing direct delta\n",
                 (unsigned)layout);
             return false;
         }
@@ -446,7 +494,7 @@ bool TestDenseAnchorLayout(
         bad.DenseBasisRowColumns[0u].pop_back();
         if (wirehair_v2::ValidatePrecodeSystem(bad)) {
             std::fprintf(stderr,
-                "layout=%u: validator accepted damaged cached anchor\n",
+                "layout=%u: validator accepted damaged direct anchor\n",
                 (unsigned)layout);
             return false;
         }
@@ -690,12 +738,18 @@ int main()
         wirehair_v2::DenseAnchorLayout::Four0369
     };
     static const uint32_t kAnchorKs[] = {2u, 64u, 1001u, 64000u};
+    static const uint64_t kAnchorSeeds[] = {
+        UINT64_C(0),
+        UINT64_C(1),
+        UINT64_C(0x616e63686f727331)
+    };
     for (uint32_t K : kAnchorKs) {
-        for (wirehair_v2::DenseAnchorLayout layout : kAnchorLayouts) {
-            if (!TestDenseAnchorLayout(
-                    K, UINT64_C(0x616e63686f727331) ^ K, layout))
-            {
-                return 1;
+        for (uint64_t seed : kAnchorSeeds) {
+            for (wirehair_v2::DenseAnchorLayout layout : kAnchorLayouts) {
+                if (!TestDenseAnchorLayout(K, seed ^ K, layout))
+                {
+                    return 1;
+                }
             }
         }
     }
@@ -733,9 +787,14 @@ int main()
         const uint32_t S = params.Staircase;
         const uint32_t D2 = params.DenseRows;
         const uint32_t deck_span = K + S;
+        std::vector<std::vector<uint32_t>> dense_rows;
+        if (!ReconstructDenseRows(system, dense_rows)) {
+            std::fprintf(stderr, "K=%u: ic reconstruction failed\n", K);
+            return 1;
+        }
         for (uint32_t r = 0; r < D2; ++r)
         {
-            const std::vector<uint32_t>& row = system.DenseRowColumns[r];
+            const std::vector<uint32_t>& row = dense_rows[r];
             uint32_t own = 0;
             for (uint32_t col : row)
             {
@@ -756,7 +815,7 @@ int main()
                 return 1;
             }
         }
-        if (system.DenseRowColumns[0].size() != ((deck_span + 1u) >> 1) + 1u)
+        if (dense_rows[0].size() != ((deck_span + 1u) >> 1) + 1u)
         {
             std::fprintf(stderr, "K=%u: ic row 0 size wrong\n", K);
             return 1;
@@ -766,10 +825,10 @@ int main()
         {
             std::vector<uint32_t> sym;
             std::set_symmetric_difference(
-                system.DenseRowColumns[r - 1u].begin(),
-                system.DenseRowColumns[r - 1u].end(),
-                system.DenseRowColumns[r].begin(),
-                system.DenseRowColumns[r].end(),
+                dense_rows[r - 1u].begin(),
+                dense_rows[r - 1u].end(),
+                dense_rows[r].begin(),
+                dense_rows[r].end(),
                 std::back_inserter(sym));
             if (sym.size() != 4u) {
                 std::fprintf(stderr,

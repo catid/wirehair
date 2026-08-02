@@ -194,7 +194,7 @@ bool DenseCornerInvertible(const PrecodeSystem& system)
     std::vector<uint64_t> masks(D2);
     for (uint32_t r = 0; r < D2; ++r) {
         if (!DenseColumnMask(
-                system.DenseRowColumns[r], dense_base, D2, masks[r]))
+                system.DenseBasisRowColumns[r], dense_base, D2, masks[r]))
         {
             return false;
         }
@@ -274,11 +274,12 @@ bool ComputePrecodeValues(
     }
 
     // --- Shuffle-2 dense rows ---
-    // Transform each anchor segment to its equation-preserving sparse basis:
-    // the anchor remains original and every following row is the adjacent
-    // symmetric difference.  Non-anchor known parts therefore cost at most
-    // two block ops; dense-column flips only toggle the corner mask.  Then
-    // Gauss-Jordan solves the D2 x D2 GF(2) corner with block-valued RHS.
+    // Construction stores each anchor segment directly in its
+    // equation-preserving sparse basis: the anchor remains original and every
+    // following row is the adjacent symmetric difference.  Non-anchor known
+    // parts therefore cost at most two block ops; dense-column flips only
+    // toggle the corner mask.  Then Gauss-Jordan solves the D2 x D2 GF(2)
+    // corner with block-valued RHS.
     if (D2 > 0u)
     {
         std::vector<uint8_t> rhs((size_t)D2 * block_bytes);
@@ -289,7 +290,7 @@ bool ComputePrecodeValues(
         for (uint32_t r = 0; r < D2; ++r)
         {
             const std::vector<uint32_t>& row = dense_basis_rows[r];
-            uint64_t mask = 0; // dense bits of THIS transformed row only
+            uint64_t mask = 0; // dense bits of this basis row only
 
             BlockAccumulator acc(
                 rhs.data() + (size_t)r * block_bytes,
@@ -714,7 +715,6 @@ void PrecodeEncoder::Swap(PrecodeEncoder& other) noexcept
     using std::swap;
     swap(SystemValue.Params, other.SystemValue.Params);
     SystemValue.StaircaseRows.swap(other.SystemValue.StaircaseRows);
-    SystemValue.DenseRowColumns.swap(other.SystemValue.DenseRowColumns);
     SystemValue.DenseBasisRowColumns.swap(
         other.SystemValue.DenseBasisRowColumns);
     swap(CodecValue, other.CodecValue);

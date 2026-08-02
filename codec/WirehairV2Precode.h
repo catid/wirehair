@@ -116,32 +116,24 @@ struct PrecodeSystem
     std::vector<std::vector<uint32_t>> StaircaseRows;
 
     /**
-        Shuffle-2 dense rows.
+        Equation-preserving Shuffle-2 dense basis.
 
-        Row r (r in [0, D2)) is a GF(2) constraint over binary columns
-        [0, K + S + D2), stored as a sorted column list.  In the certified
-        construction, row 0 has exactly ceil((K+S+D2)/2) columns and every
-        row r > 0 differs from row r - 1 in exactly two columns.  In the
-        identity-corner variant, the deck spans only K+S known columns and
-        each row additionally owns dense column K+S+r; consecutive full rows
-        differ in four columns, but their known-column part still changes by
-        exactly two deck flips.
+        Each segment starts with its balanced half-dense anchor row.  Every
+        later entry is the sorted two-column delta from the preceding
+        equation rather than a stored copy of that half-dense equation.  In
+        the identity-corner variant, a delta additionally contains the old
+        and new owned dense columns, for four entries total.  Applying these
+        elementary row additions preserves the exact original equation span
+        while avoiding duplicate full-row construction and storage.
 
         Known limitation (inherited from the certified reference
         construction): at tiny EVEN spans (K=2 and K=4 with the certified
-        table) a later row's weight can walk down to exactly zero — a dead
-        constraint — at roughly 1e-4 systems.  Guarding would break the
+        table) a reconstructed later row can walk down to exactly zero — a
+        dead constraint — at roughly 1e-4 systems.  Guarding would break the
         exact-2-difference invariant.  Version-4 message initialization
         instead rejects rank-deficient attempts and deterministically selects
         a full-rank joint packet/precode seed; exhaustive tiny-K tests pin the
         selected attempts.
-    */
-    std::vector<std::vector<uint32_t>> DenseRowColumns;
-
-    /**
-        Precomputed equation-preserving dense basis used by the hot solver
-        and direct parity encoder.  Anchor entries equal DenseRowColumns;
-        non-anchor entries are adjacent symmetric differences.
     */
     std::vector<std::vector<uint32_t>> DenseBasisRowColumns;
 };
@@ -161,18 +153,6 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out);
     uses widened arithmetic and performs no writes to block data.
 */
 bool ValidatePrecodeSystem(const PrecodeSystem& system);
-
-/**
-    Build an invertible row basis for the dense binary equations.
-
-    Each segment starts with its original anchor row.  Every later basis row
-    is the symmetric difference of the current and previous original rows.
-    This preserves the exact equation span while reducing non-anchor rows to
-    their two-column Shuffle-2 delta.  The returned rows are sorted.
-*/
-bool BuildDenseEquationBasis(
-    const PrecodeSystem& system,
-    std::vector<std::vector<uint32_t>>& basis_out);
 
 /**
     GF(256) coefficient of heavy row r at GE column c.

@@ -118,7 +118,8 @@ WirehairResult SolvePrecodeSystemTinyDenseOracle(
                 return Wirehair_InvalidInput;
             }
         }
-        for (const std::vector<uint32_t>& columns : system.DenseRowColumns) {
+        for (const std::vector<uint32_t>& columns :
+                system.DenseBasisRowColumns) {
             if (!add_binary(columns, nullptr)) {
                 return Wirehair_InvalidInput;
             }

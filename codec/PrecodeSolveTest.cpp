@@ -2501,7 +2501,7 @@ int main(int argc, char** argv)
                 add_mask(row);
             }
             for (const std::vector<uint32_t>& row :
-                    diagnostic_system.DenseRowColumns) {
+                    diagnostic_system.DenseBasisRowColumns) {
                 add_mask(row);
             }
             for (uint32_t id = 0; id < K; ++id) {
