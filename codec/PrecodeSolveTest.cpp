@@ -341,6 +341,166 @@ bool CheckPacketEvaluationCase(
     return true;
 }
 
+enum PacketEvaluatorKind
+{
+    PacketEvaluatorGeneric,
+    PacketEvaluatorValidated,
+    PacketEvaluatorRuntime
+};
+
+bool CallPacketEvaluator(
+    PacketEvaluatorKind kind,
+    const wirehair_v2::PrecodeSystem& system,
+    const wirehair_v2::PacketRowConfig& config,
+    const wirehair_v2::PacketRowRuntime& runtime,
+    const uint8_t* intermediate,
+    uint32_t block_bytes,
+    uint32_t block_id,
+    uint8_t* output,
+    uint64_t* operations)
+{
+    switch (kind)
+    {
+    case PacketEvaluatorGeneric:
+        return wirehair_v2::EvaluatePacketBlock(
+            system, config, intermediate, block_bytes, block_id,
+            output, operations);
+    case PacketEvaluatorValidated:
+        return wirehair_v2::EvaluatePacketBlockForValidatedSystem(
+            system, config, intermediate, block_bytes, block_id,
+            output, operations);
+    case PacketEvaluatorRuntime:
+        return wirehair_v2::EvaluatePacketBlockForValidatedSystemWithRuntime(
+            system, config, runtime, intermediate, block_bytes, block_id,
+            output, operations);
+    }
+    return true;
+}
+
+bool CheckPacketOperationAliases(
+    const wirehair_v2::PrecodeSystem& system,
+    const wirehair_v2::PacketRowConfig& config,
+    uint32_t block_id,
+    uint32_t block_bytes,
+    bool all_entry_points)
+{
+    const uint32_t K = system.Params.BlockCount;
+    const uint32_t P = system.Params.Staircase +
+        system.Params.DenseRows + system.Params.HeavyRows;
+    const size_t intermediate_bytes = (size_t)(K + P) * block_bytes;
+    wirehair_v2::PacketRowRuntime runtime;
+    if (!runtime.Initialize(K, P, config.MixCount)) {
+        return false;
+    }
+    const unsigned entry_point_count = all_entry_points ? 3u : 1u;
+    for (unsigned entry_point = 0u;
+         entry_point < entry_point_count;
+         ++entry_point)
+    {
+        const PacketEvaluatorKind kind =
+            (PacketEvaluatorKind)entry_point;
+
+        // Exact counter/output overlap.  Both views begin at an aligned,
+        // live uint64_t object so the rejected call itself is sanitizer-safe.
+        std::vector<uint64_t> input_words(
+            (intermediate_bytes + 7u) / 8u, UINT64_C(0x4b4b4b4b4b4b4b4b));
+        std::vector<uint64_t> output_words(
+            (block_bytes + 15u) / 8u, UINT64_C(0xa5a5a5a5a5a5a5a5));
+        uint8_t* const input =
+            reinterpret_cast<uint8_t*>(input_words.data());
+        uint8_t* const output =
+            reinterpret_cast<uint8_t*>(output_words.data());
+        for (size_t i = 0u; i < intermediate_bytes; ++i) {
+            input[i] = (uint8_t)(i * 29u + block_id * 7u + 3u);
+        }
+        const std::vector<uint64_t> input_before = input_words;
+        const std::vector<uint64_t> output_before = output_words;
+        if (CallPacketEvaluator(
+                kind, system, config, runtime, input, block_bytes, block_id,
+                output, output_words.data()) ||
+            input_words != input_before || output_words != output_before)
+        {
+            std::fprintf(stderr,
+                "solve: exact packet counter/output alias wrote kind=%u "
+                "mix=%u bb=%u\n",
+                entry_point, config.MixCount, block_bytes);
+            return false;
+        }
+
+        // Move the byte output one byte past the aligned allocation start.
+        // The last aligned counter object before its end then crosses the
+        // output boundary by one to seven bytes.
+        output_words = std::vector<uint64_t>(
+            (block_bytes + 23u) / 8u, UINT64_C(0x9696969696969696));
+        uint8_t* const partial_output =
+            reinterpret_cast<uint8_t*>(output_words.data()) + 1u;
+        const size_t partial_output_end = 1u + block_bytes;
+        uint64_t* const partial_output_ops = output_words.data() +
+            ((partial_output_end - 1u) / 8u);
+        const std::vector<uint64_t> partial_output_before = output_words;
+        if (CallPacketEvaluator(
+                kind, system, config, runtime, input, block_bytes, block_id,
+                partial_output, partial_output_ops) ||
+            input_words != input_before ||
+            output_words != partial_output_before)
+        {
+            std::fprintf(stderr,
+                "solve: partial packet counter/output alias wrote kind=%u "
+                "mix=%u bb=%u\n",
+                entry_point, config.MixCount, block_bytes);
+            return false;
+        }
+
+        output_words = std::vector<uint64_t>(
+            (block_bytes + 15u) / 8u, UINT64_C(0x8787878787878787));
+        uint8_t* const disjoint_output =
+            reinterpret_cast<uint8_t*>(output_words.data());
+        const std::vector<uint64_t> disjoint_output_before = output_words;
+
+        // Exact counter/intermediate overlap.
+        if (CallPacketEvaluator(
+                kind, system, config, runtime, input, block_bytes, block_id,
+                disjoint_output, input_words.data()) ||
+            input_words != input_before ||
+            output_words != disjoint_output_before)
+        {
+            std::fprintf(stderr,
+                "solve: exact packet counter/input alias wrote kind=%u "
+                "mix=%u bb=%u\n",
+                entry_point, config.MixCount, block_bytes);
+            return false;
+        }
+
+        // As above, offset the byte input by one so an aligned counter object
+        // straddles its final byte without ever forming a misaligned uint64_t*.
+        std::vector<uint64_t> partial_input_words(
+            (intermediate_bytes + 16u) / 8u,
+            UINT64_C(0x7878787878787878));
+        uint8_t* const partial_input =
+            reinterpret_cast<uint8_t*>(partial_input_words.data()) + 1u;
+        for (size_t i = 0u; i < intermediate_bytes; ++i) {
+            partial_input[i] = (uint8_t)(i * 31u + block_id * 5u + 9u);
+        }
+        const size_t partial_input_end = 1u + intermediate_bytes;
+        uint64_t* const partial_input_ops = partial_input_words.data() +
+            ((partial_input_end - 1u) / 8u);
+        const std::vector<uint64_t> partial_input_before = partial_input_words;
+        if (CallPacketEvaluator(
+                kind, system, config, runtime, partial_input, block_bytes,
+                block_id, disjoint_output, partial_input_ops) ||
+            partial_input_words != partial_input_before ||
+            output_words != disjoint_output_before)
+        {
+            std::fprintf(stderr,
+                "solve: partial packet counter/input alias wrote kind=%u "
+                "mix=%u bb=%u\n",
+                entry_point, config.MixCount, block_bytes);
+            return false;
+        }
+    }
+    return true;
+}
+
 bool CheckPacketEvaluationFusion()
 {
     const uint32_t K = 128u;
@@ -434,6 +594,22 @@ bool CheckPacketEvaluationFusion()
                     return false;
                 }
             }
+        }
+    }
+
+    // The normal schedule uses fewer than six terms; the paired schedule uses
+    // the same small-block domain above the crossover.  Test all three entry
+    // points and all supported mix counts because they share one preflight.
+    for (uint32_t mix_count : kFusedMixCounts)
+    {
+        wirehair_v2::PacketRowConfig fused = config;
+        fused.MixCount = mix_count;
+        if (!CheckPacketOperationAliases(
+                system, fused, ids[0], 17u, true) ||
+            !CheckPacketOperationAliases(
+                system, fused, ids[5], 17u, true))
+        {
+            return false;
         }
     }
 
@@ -537,6 +713,14 @@ bool CheckPacketEvaluationFusion()
         {
             std::fprintf(stderr,
                 "solve: 16-term packet set-XOR fixture failed\n");
+            return false;
+        }
+        if (!CheckPacketOperationAliases(
+                set_xor_system, set_xor_config, set_xor_id,
+                set_xor_block_bytes, false))
+        {
+            std::fprintf(stderr,
+                "solve: set-XOR packet operation alias guard failed\n");
             return false;
         }
     }

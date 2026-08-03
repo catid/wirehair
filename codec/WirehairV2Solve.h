@@ -213,8 +213,9 @@ PrecodeParams PrecodeParamsForAttempt(
     Evaluate one packet row over all intermediate blocks.
 
     `block_out[0, block_bytes)` must not overlap any byte in the complete
-    `(K + P) * block_bytes` intermediate-block array.  Overlap is rejected
-    before writing either `block_out` or `block_ops_out`.
+    `(K + P) * block_bytes` intermediate-block array.  When non-null, the
+    `block_ops_out` object must not overlap either range.  Overlap is rejected
+    before writing `block_out`, `block_ops_out`, or intermediate storage.
 */
 bool EvaluatePacketBlock(
     const PrecodeSystem& system,

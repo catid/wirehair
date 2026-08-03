@@ -1633,6 +1633,20 @@ static bool EvaluatePacketBlockImpl(
     {
         return false;
     }
+    if (block_ops_out &&
+        (MemoryRangesOverlap(
+             block_ops_out,
+             sizeof(*block_ops_out),
+             block_out,
+             block_bytes) ||
+         MemoryRangesOverlap(
+             block_ops_out,
+             sizeof(*block_ops_out),
+             intermediate_blocks,
+             (size_t)intermediate_bytes_wide)))
+    {
+        return false;
+    }
     if (validate_system && !ValidatePrecodeSystem(system)) {
         return false;
     }
