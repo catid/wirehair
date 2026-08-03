@@ -37,6 +37,24 @@ thread_local bool PacketRowSeedAvalanche = false;
 thread_local bool PoisonSolveValueArena = false;
 thread_local bool ForceFusedBlockInitialization = false;
 thread_local bool FailSolveValueArenaAllocation = false;
+thread_local bool PoisonProjectionArena = false;
+thread_local int ProjectionArenaAllocationFailureCountdown = -1;
+#endif
+
+typedef std::vector<uint64_t, SolveNoInitAllocator<uint64_t> >
+    SolveProjectionStorage;
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+static void MaybeFailProjectionArenaAllocation()
+{
+    if (ProjectionArenaAllocationFailureCountdown < 0) {
+        return;
+    }
+    if (ProjectionArenaAllocationFailureCountdown == 0) {
+        throw std::bad_alloc();
+    }
+    --ProjectionArenaAllocationFailureCountdown;
+}
 #endif
 
 constexpr uint32_t PackedWordCount(uint32_t bit_count)
@@ -658,7 +676,7 @@ static GF256_FORCE_INLINE uint32_t AccumulatePeeledProjectionConstant(
     const BinaryEquationView& equation,
     const std::vector<uint32_t>& inactive_index,
     uint32_t words,
-    const std::vector<uint64_t>& projection,
+    const uint64_t* projection,
     const uint8_t* values,
     uint32_t block_bytes,
     std::vector<uint64_t>& accumulator,
@@ -666,7 +684,7 @@ static GF256_FORCE_INLINE uint32_t AccumulatePeeledProjectionConstant(
     PrecodeSolveStats& stats)
 {
     BatchedProjectionXorAccumulator projection_xor(
-        accumulator.data(), projection.data(), words);
+        accumulator.data(), projection, words);
     uint32_t solve_column_offset = UINT32_MAX;
     for (const uint32_t* current = equation.Columns.begin();
          current != equation.Columns.end();
@@ -1327,6 +1345,16 @@ void SetFusedBlockInitializationForTesting(bool enabled)
 void SetSolveValueArenaAllocationFailureForTesting(bool enabled)
 {
     FailSolveValueArenaAllocation = enabled;
+}
+
+void SetProjectionArenaPoisonForTesting(bool enabled)
+{
+    PoisonProjectionArena = enabled;
+}
+
+void SetProjectionArenaAllocationFailureCountdownForTesting(int countdown)
+{
+    ProjectionArenaAllocationFailureCountdown = countdown;
 }
 #endif
 
@@ -2060,6 +2088,41 @@ static void InitializeDeferredCheckpointValues(
     }
 }
 
+static void PublishCheckpointProjection(
+    const SolveProjectionStorage& source,
+    const std::vector<uint32_t>& peeled_columns,
+    uint32_t words,
+    std::vector<uint64_t>& destination,
+    PrecodeSolveStats& stats)
+{
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    if (!source.empty()) {
+        MaybeFailProjectionArenaAllocation();
+    }
+#endif
+    // Transient inactive rows were deliberately never initialized because
+    // the cold solve represents them directly in inactive_index.  A resume
+    // checkpoint retains the historical, copyable std::vector ABI, so create
+    // its fully defined zero rows only on this rare publication path and copy
+    // exactly the peeled rows that the cold projection established.
+    destination.assign(source.size(), uint64_t{0});
+    for (uint32_t column : peeled_columns)
+    {
+        std::memcpy(
+            destination.data() + (size_t)column * words,
+            source.data() + (size_t)column * words,
+            (size_t)words * sizeof(uint64_t));
+    }
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    stats.ProjectionArenaCheckpointInitializeBytes =
+        (uint64_t)source.size() * sizeof(uint64_t);
+    stats.ProjectionArenaCheckpointCopyBytes =
+        (uint64_t)peeled_columns.size() * words * sizeof(uint64_t);
+#else
+    (void)stats;
+#endif
+}
+
 static WirehairResult SolvePrecodeSystemImpl(
     const PrecodeSystem& system,
     const PacketRowConfig& config,
@@ -2240,7 +2303,28 @@ static WirehairResult SolvePrecodeSystemImpl(
             return Wirehair_OOM;
         }
         projection_words = (size_t)L * words;
-        std::vector<uint64_t> projection(projection_words, 0u);
+        SolveProjectionStorage projection;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        if (projection_words != 0u) {
+            MaybeFailProjectionArenaAllocation();
+        }
+#endif
+        projection.resize(projection_words);
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        const size_t projection_bytes =
+            projection_words * sizeof(uint64_t);
+        st.ProjectionArenaBytes = projection_bytes;
+        st.ProjectionArenaEagerZeroBytes = 0u;
+        if (PoisonProjectionArena && projection_bytes != 0u)
+        {
+            // A numerical pattern catches scalar misuse in ordinary test
+            // builds; MSan poisoning additionally catches SIMD-width reads.
+            std::memset(projection.data(), 0xa5, projection_bytes);
+#if defined(WIREHAIR_V2_MEMORY_SANITIZER)
+            __msan_poison(projection.data(), projection_bytes);
+#endif
+        }
+#endif
         SolveValueStorage values;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
         if (FailSolveValueArenaAllocation) {
@@ -2340,7 +2424,8 @@ static WirehairResult SolvePrecodeSystemImpl(
                 BatchedBlockXorInitializer constant_xor(
                     constant, block_bytes, equation.Data);
                 solve_column_offset = AccumulatePeeledProjectionConstant(
-                    column, equation, inactive_index, words, projection,
+                    column, equation, inactive_index, words,
+                    projection.data(),
                     values.data(), block_bytes, accumulator, constant_xor, st);
                 constant_xor.Flush();
             }
@@ -2355,7 +2440,8 @@ static WirehairResult SolvePrecodeSystemImpl(
                 BatchedBlockXorAccumulator constant_xor(
                     constant, block_bytes);
                 solve_column_offset = AccumulatePeeledProjectionConstant(
-                    column, equation, inactive_index, words, projection,
+                    column, equation, inactive_index, words,
+                    projection.data(),
                     values.data(), block_bytes, accumulator, constant_xor, st);
                 constant_xor.Flush();
             }
@@ -2845,10 +2931,12 @@ static WirehairResult SolvePrecodeSystemImpl(
                 checkpoint.Rank = rank;
                 checkpoint.Config = config;
                 checkpoint.Runtime = runtime;
+                PublishCheckpointProjection(
+                    projection, peel.PeelOrder, words,
+                    checkpoint.Projection, st);
                 checkpoint.Stats = st;
                 checkpoint.InactiveIndex.swap(inactive_index);
                 checkpoint.InactiveColumns.swap(peel.InactiveOrder);
-                checkpoint.Projection.swap(projection);
                 InitializeDeferredCheckpointValues(
                     values, checkpoint.InactiveColumns, block_bytes);
                 PublishCheckpointValues(values, checkpoint.Values);

@@ -856,14 +856,27 @@ void CheckIsolatedSolveFixture()
         const uint64_t expected_arena_bytes =
             ((uint64_t)result.Stats.PeeledColumns +
                 result.Stats.InactivatedColumns) * block_bytes;
+        const uint64_t projection_words =
+            result.Stats.InactivatedColumns / 64u +
+            ((result.Stats.InactivatedColumns & 63u) != 0u ? 1u : 0u);
+        const uint64_t expected_projection_bytes =
+            ((uint64_t)result.Stats.PeeledColumns +
+                result.Stats.InactivatedColumns) *
+            projection_words * sizeof(uint64_t);
         Check(result.Result == Wirehair_Success &&
                   result.BytesVerified &&
                   result.ElapsedNanoseconds > 0u &&
                   result.Stats.PacketRows == K + 4u &&
                   result.Stats.SolveValueArenaBytes == expected_arena_bytes &&
                   result.Stats.SolveValueArenaEagerZeroBytes == 0u &&
-                  result.Stats.SolveValueArenaCommitCopyBytes == 0u,
-            "isolated solve did not use the owned no-init arena exactly");
+                  result.Stats.SolveValueArenaCommitCopyBytes == 0u &&
+                  result.Stats.ProjectionArenaBytes ==
+                      expected_projection_bytes &&
+                  result.Stats.ProjectionArenaEagerZeroBytes == 0u &&
+                  result.Stats.ProjectionArenaCheckpointInitializeBytes ==
+                      0u &&
+                  result.Stats.ProjectionArenaCheckpointCopyBytes == 0u,
+            "isolated solve did not use the no-init arenas exactly");
     }
 
     // A solve fixture consumes only the frozen K+4 prefix of the shared K+64

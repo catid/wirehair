@@ -48,6 +48,20 @@ public:
     }
 };
 
+class ProjectionArenaPoisonScope
+{
+public:
+    ProjectionArenaPoisonScope()
+    {
+        wirehair_v2::SetProjectionArenaPoisonForTesting(true);
+    }
+
+    ~ProjectionArenaPoisonScope()
+    {
+        wirehair_v2::SetProjectionArenaPoisonForTesting(false);
+    }
+};
+
 class FusedBlockInitializationScope
 {
 public:
@@ -73,6 +87,22 @@ public:
     ~SolveValueArenaAllocationFailureScope()
     {
         wirehair_v2::SetSolveValueArenaAllocationFailureForTesting(false);
+    }
+};
+
+class ProjectionArenaAllocationFailureScope
+{
+public:
+    explicit ProjectionArenaAllocationFailureScope(int countdown)
+    {
+        wirehair_v2::
+            SetProjectionArenaAllocationFailureCountdownForTesting(countdown);
+    }
+
+    ~ProjectionArenaAllocationFailureScope()
+    {
+        wirehair_v2::
+            SetProjectionArenaAllocationFailureCountdownForTesting(-1);
     }
 };
 
@@ -104,7 +134,14 @@ bool SameSolveStats(
         a.SolveValueArenaEagerZeroBytes ==
             b.SolveValueArenaEagerZeroBytes &&
         a.SolveValueArenaCommitCopyBytes ==
-            b.SolveValueArenaCommitCopyBytes;
+            b.SolveValueArenaCommitCopyBytes &&
+        a.ProjectionArenaBytes == b.ProjectionArenaBytes &&
+        a.ProjectionArenaEagerZeroBytes ==
+            b.ProjectionArenaEagerZeroBytes &&
+        a.ProjectionArenaCheckpointInitializeBytes ==
+            b.ProjectionArenaCheckpointInitializeBytes &&
+        a.ProjectionArenaCheckpointCopyBytes ==
+            b.ProjectionArenaCheckpointCopyBytes;
 }
 
 bool SameDeterministicSolveStats(
@@ -144,6 +181,51 @@ bool SameResumeState(
         a.Runtime.SourcePrime() == b.Runtime.SourcePrime() &&
         a.Runtime.PrecodePrime() == b.Runtime.PrecodePrime() &&
         SameSolveStats(a.Stats, b.Stats) &&
+        a.InactiveIndex == b.InactiveIndex &&
+        a.InactiveColumns == b.InactiveColumns &&
+        a.Projection == b.Projection &&
+        a.Values == b.Values &&
+        a.PivotCoefficients == b.PivotCoefficients &&
+        a.PivotRhs == b.PivotRhs &&
+        a.HavePivot == b.HavePivot &&
+        a.CoefficientScratch == b.CoefficientScratch &&
+        a.RhsScratch == b.RhsScratch &&
+        a.Active == b.Active;
+}
+
+uint64_t ExpectedProjectionArenaBytes(
+    uint32_t column_count,
+    uint32_t inactive_count)
+{
+    const uint64_t words = inactive_count / 64u +
+        ((inactive_count & 63u) != 0u ? 1u : 0u);
+    return (uint64_t)column_count * words * sizeof(uint64_t);
+}
+
+uint64_t ExpectedProjectionCheckpointCopyBytes(
+    const wirehair_v2::PrecodeSolveStats& stats)
+{
+    const uint64_t words = stats.InactivatedColumns / 64u +
+        ((stats.InactivatedColumns & 63u) != 0u ? 1u : 0u);
+    return (uint64_t)stats.PeeledColumns * words * sizeof(uint64_t);
+}
+
+bool SameResumeAlgebra(
+    const wirehair_v2::PrecodeSolveResumeState& a,
+    const wirehair_v2::PrecodeSolveResumeState& b)
+{
+    return a.SourceCount == b.SourceCount &&
+        a.PrecodeCount == b.PrecodeCount &&
+        a.ColumnCount == b.ColumnCount &&
+        a.BlockBytes == b.BlockBytes &&
+        a.InactiveCount == b.InactiveCount &&
+        a.ProjectionWords == b.ProjectionWords &&
+        a.Rank == b.Rank &&
+        a.Config.PeelSeed == b.Config.PeelSeed &&
+        a.Config.MixCount == b.Config.MixCount &&
+        a.Runtime.SourcePrime() == b.Runtime.SourcePrime() &&
+        a.Runtime.PrecodePrime() == b.Runtime.PrecodePrime() &&
+        SameDeterministicSolveStats(a.Stats, b.Stats) &&
         a.InactiveIndex == b.InactiveIndex &&
         a.InactiveColumns == b.InactiveColumns &&
         a.Projection == b.Projection &&
@@ -1612,7 +1694,14 @@ bool CheckIncrementalResumeCase(uint32_t block_bytes)
             (uint64_t)L * block_bytes ||
         compatible_stats.SolveValueArenaEagerZeroBytes != 0u ||
         compatible_stats.SolveValueArenaCommitCopyBytes !=
-            (uint64_t)L * block_bytes)
+            (uint64_t)L * block_bytes ||
+        compatible_stats.ProjectionArenaBytes == 0u ||
+        compatible_stats.ProjectionArenaBytes !=
+            ExpectedProjectionArenaBytes(
+                L, compatible_stats.InactivatedColumns) ||
+        compatible_stats.ProjectionArenaEagerZeroBytes != 0u ||
+        compatible_stats.ProjectionArenaCheckpointInitializeBytes != 0u ||
+        compatible_stats.ProjectionArenaCheckpointCopyBytes != 0u)
     {
         std::fprintf(stderr,
             "solve: compatibility arena publication failed bb=%u\n",
@@ -1626,6 +1715,7 @@ bool CheckIncrementalResumeCase(uint32_t block_bytes)
     WirehairResult lazy_full_result = Wirehair_Error;
     {
         SolveValueArenaPoisonScope poison;
+        ProjectionArenaPoisonScope projection_poison;
         FusedBlockInitializationScope fused;
         lazy_full_result = wirehair_v2::SolvePrecodeSystem(
             system, config, systematic, block_bytes,
@@ -1639,7 +1729,14 @@ bool CheckIncrementalResumeCase(uint32_t block_bytes)
         lazy_full_stats.SolveValueArenaBytes !=
             (uint64_t)L * block_bytes ||
         lazy_full_stats.SolveValueArenaEagerZeroBytes != 0u ||
-        lazy_full_stats.SolveValueArenaCommitCopyBytes != 0u)
+        lazy_full_stats.SolveValueArenaCommitCopyBytes != 0u ||
+        lazy_full_stats.ProjectionArenaBytes == 0u ||
+        lazy_full_stats.ProjectionArenaBytes !=
+            ExpectedProjectionArenaBytes(
+                L, lazy_full_stats.InactivatedColumns) ||
+        lazy_full_stats.ProjectionArenaEagerZeroBytes != 0u ||
+        lazy_full_stats.ProjectionArenaCheckpointInitializeBytes != 0u ||
+        lazy_full_stats.ProjectionArenaCheckpointCopyBytes != 0u)
     {
         std::fprintf(stderr,
             "solve: poisoned no-init full solve failed bb=%u\n", block_bytes);
@@ -1673,6 +1770,9 @@ bool CheckIncrementalResumeCase(uint32_t block_bytes)
     oom_resume.SourceCount = UINT32_C(0x13579bdf);
     wirehair_v2::PrecodeSolveStats oom_stats;
     oom_stats.PacketRows = UINT32_C(0x2468ace0);
+    const wirehair_v2::PrecodeSolveResumeState oom_resume_sentinel =
+        oom_resume;
+    const wirehair_v2::PrecodeSolveStats oom_stats_sentinel = oom_stats;
     WirehairResult oom_result = Wirehair_Error;
     {
         SolveValueArenaAllocationFailureScope fail_arena;
@@ -1684,12 +1784,31 @@ bool CheckIncrementalResumeCase(uint32_t block_bytes)
         oom_output.size() != oom_sentinel.size() ||
         !std::equal(
             oom_output.begin(), oom_output.end(), oom_sentinel.begin()) ||
-        !oom_resume.Active ||
-        oom_resume.SourceCount != UINT32_C(0x13579bdf) ||
-        oom_stats.PacketRows != UINT32_C(0x2468ace0))
+        !SameResumeState(oom_resume, oom_resume_sentinel) ||
+        !SameSolveStats(oom_stats, oom_stats_sentinel))
     {
         std::fprintf(stderr,
             "solve: no-init arena OOM was not transactional bb=%u\n",
+            block_bytes);
+        return false;
+    }
+
+    oom_result = Wirehair_Error;
+    {
+        ProjectionArenaAllocationFailureScope fail_projection(0);
+        oom_result = wirehair_v2::SolvePrecodeSystem(
+            system, config, systematic, block_bytes,
+            oom_output, &oom_stats, &oom_resume);
+    }
+    if (oom_result != Wirehair_OOM ||
+        oom_output.size() != oom_sentinel.size() ||
+        !std::equal(
+            oom_output.begin(), oom_output.end(), oom_sentinel.begin()) ||
+        !SameResumeState(oom_resume, oom_resume_sentinel) ||
+        !SameSolveStats(oom_stats, oom_stats_sentinel))
+    {
+        std::fprintf(stderr,
+            "solve: projection arena OOM was not transactional bb=%u\n",
             block_bytes);
         return false;
     }
@@ -1698,6 +1817,26 @@ bool CheckIncrementalResumeCase(uint32_t block_bytes)
     for (wirehair_v2::SolvePacket& packet : deficient) {
         packet.BlockId = 0u;
         packet.Data = message.data();
+    }
+
+    oom_result = Wirehair_Error;
+    {
+        ProjectionArenaAllocationFailureScope fail_checkpoint(1);
+        oom_result = wirehair_v2::SolvePrecodeSystem(
+            system, config, deficient, block_bytes,
+            oom_output, &oom_stats, &oom_resume);
+    }
+    if (oom_result != Wirehair_OOM ||
+        oom_output.size() != oom_sentinel.size() ||
+        !std::equal(
+            oom_output.begin(), oom_output.end(), oom_sentinel.begin()) ||
+        !SameResumeState(oom_resume, oom_resume_sentinel) ||
+        !SameSolveStats(oom_stats, oom_stats_sentinel))
+    {
+        std::fprintf(stderr,
+            "solve: projection checkpoint OOM was not transactional bb=%u\n",
+            block_bytes);
+        return false;
     }
 
     wirehair_v2::SolveValueStorage lazy_output;
@@ -1709,6 +1848,7 @@ bool CheckIncrementalResumeCase(uint32_t block_bytes)
     WirehairResult lazy_deficient_result = Wirehair_Error;
     {
         SolveValueArenaPoisonScope poison;
+        ProjectionArenaPoisonScope projection_poison;
         FusedBlockInitializationScope fused;
         lazy_deficient_result = wirehair_v2::SolvePrecodeSystem(
             system, config, deficient, block_bytes,
@@ -1722,7 +1862,17 @@ bool CheckIncrementalResumeCase(uint32_t block_bytes)
         lazy_resume_stats.SolveValueArenaBytes !=
             (uint64_t)L * block_bytes ||
         lazy_resume_stats.SolveValueArenaEagerZeroBytes != 0u ||
-        lazy_resume_stats.SolveValueArenaCommitCopyBytes != 0u)
+        lazy_resume_stats.SolveValueArenaCommitCopyBytes != 0u ||
+        lazy_resume_stats.ProjectionArenaBytes !=
+            ExpectedProjectionArenaBytes(
+                L, lazy_resume_stats.InactivatedColumns) ||
+        lazy_resume_stats.ProjectionArenaEagerZeroBytes != 0u ||
+        lazy_resume_stats.ProjectionArenaCheckpointInitializeBytes !=
+            lazy_resume_stats.ProjectionArenaBytes ||
+        lazy_resume_stats.ProjectionArenaCheckpointCopyBytes >=
+            lazy_resume_stats.ProjectionArenaBytes ||
+        lazy_resume_stats.ProjectionArenaCheckpointCopyBytes !=
+            ExpectedProjectionCheckpointCopyBytes(lazy_resume_stats))
     {
         std::fprintf(stderr,
             "solve: poisoned no-init checkpoint failed bb=%u\n", block_bytes);
@@ -1730,6 +1880,17 @@ bool CheckIncrementalResumeCase(uint32_t block_bytes)
     }
     for (uint32_t column : lazy_resume.InactiveColumns)
     {
+        const uint64_t* relation = lazy_resume.Projection.data() +
+            (size_t)column * lazy_resume.ProjectionWords;
+        if (!std::all_of(
+                relation, relation + lazy_resume.ProjectionWords,
+                [](uint64_t word) { return word == 0u; }))
+        {
+            std::fprintf(stderr,
+                "solve: checkpoint projection zero missing bb=%u column=%u\n",
+                block_bytes, column);
+            return false;
+        }
         const uint8_t* value = lazy_resume.Values.data() +
             (size_t)column * block_bytes;
         if (!std::all_of(
@@ -1851,7 +2012,11 @@ bool CheckIncrementalResumeCase(uint32_t block_bytes)
         !std::equal(
             lazy_output.begin(), lazy_output.end(), expected.begin()) ||
         lazy_resume_stats.SolveValueArenaCommitCopyBytes !=
-            (uint64_t)L * block_bytes)
+            (uint64_t)L * block_bytes ||
+        lazy_resume_stats.ProjectionArenaCheckpointInitializeBytes !=
+            lazy_resume_stats.ProjectionArenaBytes ||
+        lazy_resume_stats.ProjectionArenaCheckpointCopyBytes !=
+            ExpectedProjectionCheckpointCopyBytes(lazy_resume_stats))
     {
         std::fprintf(stderr,
             "solve: poisoned no-init resume failed bb=%u\n", block_bytes);
@@ -1869,9 +2034,25 @@ bool CheckIncrementalResumeCase(uint32_t block_bytes)
         resume.Rank >= resume.InactiveCount ||
         stats.SolveValueArenaBytes != (uint64_t)L * block_bytes ||
         stats.SolveValueArenaEagerZeroBytes != 0u ||
-        stats.SolveValueArenaCommitCopyBytes != 0u)
+        stats.SolveValueArenaCommitCopyBytes != 0u ||
+        stats.ProjectionArenaBytes !=
+            ExpectedProjectionArenaBytes(L, stats.InactivatedColumns) ||
+        stats.ProjectionArenaEagerZeroBytes != 0u ||
+        stats.ProjectionArenaCheckpointInitializeBytes !=
+            stats.ProjectionArenaBytes ||
+        stats.ProjectionArenaCheckpointCopyBytes >=
+            stats.ProjectionArenaBytes ||
+        stats.ProjectionArenaCheckpointCopyBytes !=
+            ExpectedProjectionCheckpointCopyBytes(stats))
     {
         std::fprintf(stderr, "solve: rank-deficient checkpoint missing\n");
+        return false;
+    }
+    if (!SameResumeAlgebra(resume, lazy_resume_copy))
+    {
+        std::fprintf(stderr,
+            "solve: no-init checkpoint equation mismatch bb=%u\n",
+            block_bytes);
         return false;
     }
 
@@ -1940,6 +2121,10 @@ bool CheckIncrementalResumeCase(uint32_t block_bytes)
     if (result != Wirehair_Success || resume.Active || output != expected ||
         !SameDeterministicSolveStats(stats, lazy_resume_stats) ||
         stats.SolveValueArenaCommitCopyBytes != 0u ||
+        stats.ProjectionArenaCheckpointInitializeBytes !=
+            stats.ProjectionArenaBytes ||
+        stats.ProjectionArenaCheckpointCopyBytes !=
+            ExpectedProjectionCheckpointCopyBytes(stats) ||
         !wirehair_v2::VerifyPrecodeSolution(
             system, config, systematic,
             output.data(), block_bytes))
@@ -1948,7 +2133,14 @@ bool CheckIncrementalResumeCase(uint32_t block_bytes)
         return false;
     }
     std::printf(
-        "incremental rank-deficient resume bb=%u: PASS\n", block_bytes);
+        "incremental rank-deficient resume bb=%u projection=%" PRIu64
+        " eager_zero=%" PRIu64 " checkpoint_init=%" PRIu64
+        " checkpoint_copy=%" PRIu64 ": PASS\n",
+        block_bytes,
+        stats.ProjectionArenaBytes,
+        stats.ProjectionArenaEagerZeroBytes,
+        stats.ProjectionArenaCheckpointInitializeBytes,
+        stats.ProjectionArenaCheckpointCopyBytes);
     return true;
 }
 

@@ -15,15 +15,16 @@
 namespace wirehair_v2 {
 
 /**
-    Allocator used only by the owned solve-value arena.
+    Allocator used by transient solve arenas that are fully overwritten.
 
     std::vector value-initializes newly resized byte elements, which writes the
     complete L * block_bytes arena before the solver immediately overwrites its
-    live blocks.  This allocator instead default-initializes new scalar
-    elements, starting their lifetime without writing their value.  Callers
-    must establish every byte before reading it.  The stateful codec adopts this
-    storage directly; compatibility std::vector overloads publish a
-    transactional copy only after the solve has succeeded.
+    live blocks; it likewise zeroes every packed projection row even though
+    inactive rows are represented separately and never read by the cold solve.
+    This allocator instead default-initializes new scalar elements, starting
+    their lifetime without writing their value.  Callers must fully establish
+    each element before reading it.  Persistent/publication paths materialize
+    ordinary initialized std::vectors transactionally.
 */
 template<class T>
 class SolveNoInitAllocator
@@ -181,6 +182,10 @@ struct PrecodeSolveStats
     uint64_t SolveValueArenaBytes = 0;
     uint64_t SolveValueArenaEagerZeroBytes = 0;
     uint64_t SolveValueArenaCommitCopyBytes = 0;
+    uint64_t ProjectionArenaBytes = 0;
+    uint64_t ProjectionArenaEagerZeroBytes = 0;
+    uint64_t ProjectionArenaCheckpointInitializeBytes = 0;
+    uint64_t ProjectionArenaCheckpointCopyBytes = 0;
 };
 
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
@@ -221,6 +226,16 @@ void SetFusedBlockInitializationForTesting(bool enabled);
 
 /** Fail immediately before the owned solve arena allocation. */
 void SetSolveValueArenaAllocationFailureForTesting(bool enabled);
+
+/** Poison transient projection words to expose any read-before-write. */
+void SetProjectionArenaPoisonForTesting(bool enabled);
+
+/**
+    Fail a transient/checkpoint projection allocation by zero-based ordinal.
+    Minus one disables the hook; zero selects the transient arena and one the
+    later checkpoint publication allocation on a deficient solve.
+*/
+void SetProjectionArenaAllocationFailureCountdownForTesting(int countdown);
 
 #endif
 
