@@ -3075,8 +3075,11 @@ WirehairResult ResumePrecodeSystem(
             state.CoefficientScratch : checked_coeff;
         std::vector<uint8_t>& rhs = allow_insert ?
             state.RhsScratch : checked_rhs;
+        // Consume the caller's packet before reusing checkpoint scratch:
+        // block_data may be a valid range inside CoefficientScratch.  Use
+        // overlap-safe copying for the exact RhsScratch retry alias as well.
+        std::memmove(rhs.data(), block_data, block_bytes);
         std::fill(coeff.begin(), coeff.end(), uint8_t{0});
-        std::memcpy(rhs.data(), block_data, block_bytes);
         for (uint32_t column : columns)
         {
             if (column >= state.ColumnCount) {

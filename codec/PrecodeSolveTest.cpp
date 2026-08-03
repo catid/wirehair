@@ -60,6 +60,24 @@ bool SameSolveStats(
         a.PacketSeedAttempt == b.PacketSeedAttempt;
 }
 
+void ClearSolveTiming(wirehair_v2::PrecodeSolveStats& stats)
+{
+    stats.BuildNanoseconds = 0u;
+    stats.PeelNanoseconds = 0u;
+    stats.ProjectNanoseconds = 0u;
+    stats.ResidualNanoseconds = 0u;
+    stats.BackSubNanoseconds = 0u;
+}
+
+bool SameSolveStatsIgnoringTiming(
+    wirehair_v2::PrecodeSolveStats a,
+    wirehair_v2::PrecodeSolveStats b)
+{
+    ClearSolveTiming(a);
+    ClearSolveTiming(b);
+    return SameSolveStats(a, b);
+}
+
 bool SameResumeState(
     const wirehair_v2::PrecodeSolveResumeState& a,
     const wirehair_v2::PrecodeSolveResumeState& b)
@@ -86,6 +104,15 @@ bool SameResumeState(
         a.CoefficientScratch == b.CoefficientScratch &&
         a.RhsScratch == b.RhsScratch &&
         a.Active == b.Active;
+}
+
+bool SameResumeStateIgnoringTiming(
+    wirehair_v2::PrecodeSolveResumeState a,
+    wirehair_v2::PrecodeSolveResumeState b)
+{
+    ClearSolveTiming(a.Stats);
+    ClearSolveTiming(b.Stats);
+    return SameResumeState(a, b);
 }
 
 struct ResumeStorageIdentity
@@ -1658,6 +1685,213 @@ bool CheckBinaryQuotientBoundary()
     return true;
 }
 
+enum class ResumePacketAliasTarget
+{
+    CoefficientScratch,
+    RhsScratch
+};
+
+struct ResumePacketAliasCase
+{
+    const char* Name;
+    ResumePacketAliasTarget Target;
+    size_t Offset;
+};
+
+bool CheckResumePacketAliasCall(
+    const wirehair_v2::PrecodeSystem& system,
+    const wirehair_v2::PacketRowConfig& config,
+    const wirehair_v2::PrecodeSolveResumeState& initial_state,
+    uint32_t block_id,
+    const uint8_t* packet_data,
+    uint32_t block_bytes,
+    const ResumePacketAliasCase& alias_case,
+    bool allow_insert,
+    WirehairResult expected_result,
+    const std::vector<uint8_t>& expected_output)
+{
+    wirehair_v2::PrecodeSolveResumeState control = initial_state;
+    wirehair_v2::PrecodeSolveResumeState aliased = initial_state;
+    const auto stage_packet = [&](
+        wirehair_v2::PrecodeSolveResumeState& state,
+        const uint8_t** aliased_data) -> bool
+    {
+        std::vector<uint8_t>& storage =
+            alias_case.Target == ResumePacketAliasTarget::CoefficientScratch ?
+                state.CoefficientScratch : state.RhsScratch;
+        if (alias_case.Offset > storage.size() ||
+            block_bytes > storage.size() - alias_case.Offset)
+        {
+            return false;
+        }
+        std::memcpy(
+            storage.data() + alias_case.Offset,
+            packet_data,
+            block_bytes);
+        if (aliased_data) {
+            *aliased_data = storage.data() + alias_case.Offset;
+        }
+        return true;
+    };
+
+    const uint8_t* aliased_data = nullptr;
+    if (!stage_packet(control, nullptr) ||
+        !stage_packet(aliased, &aliased_data))
+    {
+        std::fprintf(stderr,
+            "solve: resume packet alias fixture too small bb=%u case=%s\n",
+            block_bytes, alias_case.Name);
+        return false;
+    }
+    const wirehair_v2::PrecodeSolveResumeState aliased_before = aliased;
+    const ResumeStorageIdentity storage_before =
+        CaptureResumeStorageIdentity(aliased);
+    const size_t persistent_before = aliased.PersistentBytes();
+
+    std::vector<uint8_t> control_output(11u, 0xa5u);
+    std::vector<uint8_t> aliased_output = control_output;
+    wirehair_v2::PrecodeSolveStats initial_stats = initial_state.Stats;
+    initial_stats.PacketRows ^= UINT32_C(0x86b39a27);
+    initial_stats.BlockXors ^= UINT64_C(0xc1d2e3f405162738);
+    wirehair_v2::PrecodeSolveStats control_stats = initial_stats;
+    wirehair_v2::PrecodeSolveStats aliased_stats = initial_stats;
+    const WirehairResult control_result =
+        wirehair_v2::ResumePrecodeSystem(
+            system, config, block_id, packet_data, block_bytes,
+            control, control_output, &control_stats, allow_insert);
+    const WirehairResult aliased_result =
+        wirehair_v2::ResumePrecodeSystem(
+            system, config, block_id, aliased_data, block_bytes,
+            aliased, aliased_output, &aliased_stats, allow_insert);
+
+    if (control_result != expected_result ||
+        aliased_result != control_result ||
+        control_output != expected_output ||
+        aliased_output != control_output ||
+        !SameResumeStateIgnoringTiming(control, aliased) ||
+        !SameSolveStatsIgnoringTiming(control_stats, aliased_stats))
+    {
+        std::fprintf(stderr,
+            "solve: resume packet alias mismatch bb=%u case=%s "
+            "insert=%u expected=%d control=%d alias=%d "
+            "control_rank=%u alias_rank=%u\n",
+            block_bytes, alias_case.Name, allow_insert ? 1u : 0u,
+            (int)expected_result, (int)control_result,
+            (int)aliased_result, control.Rank, aliased.Rank);
+        return false;
+    }
+    if (!allow_insert &&
+        (!SameResumeState(aliased, aliased_before) ||
+         !SameResumeStorageIdentity(aliased, storage_before) ||
+         aliased.PersistentBytes() != persistent_before ||
+         !SameSolveStats(aliased_stats, initial_stats)))
+    {
+        std::fprintf(stderr,
+            "solve: checked resume packet alias changed checkpoint "
+            "bb=%u case=%s result=%d\n",
+            block_bytes, alias_case.Name, (int)aliased_result);
+        return false;
+    }
+    return true;
+}
+
+bool CheckResumePacketInputAliases(
+    const wirehair_v2::PrecodeSystem& system,
+    const wirehair_v2::PacketRowConfig& config,
+    const std::vector<uint8_t>& message,
+    uint32_t block_bytes,
+    const wirehair_v2::PrecodeSolveResumeState& initial_state,
+    const std::vector<uint8_t>& expected)
+{
+    if (initial_state.RhsScratch.size() != block_bytes)
+    {
+        std::fprintf(stderr,
+            "solve: resume packet alias fixture dimensions bb=%u R=%zu\n",
+            block_bytes, initial_state.CoefficientScratch.size());
+        return false;
+    }
+    std::vector<ResumePacketAliasCase> alias_cases;
+    if (initial_state.CoefficientScratch.size() >=
+        (size_t)block_bytes + 2u)
+    {
+        const size_t right_boundary =
+            initial_state.CoefficientScratch.size() - block_bytes;
+        alias_cases.push_back({
+            "coeff-exact",
+            ResumePacketAliasTarget::CoefficientScratch,
+            0u });
+        alias_cases.push_back({
+            "coeff-left-offset",
+            ResumePacketAliasTarget::CoefficientScratch,
+            1u });
+        alias_cases.push_back({
+            "coeff-right-boundary",
+            ResumePacketAliasTarget::CoefficientScratch,
+            right_boundary });
+    }
+    alias_cases.push_back({
+        "rhs-exact", ResumePacketAliasTarget::RhsScratch, 0u });
+    const std::vector<uint8_t> sentinel(11u, 0xa5u);
+    std::vector<uint8_t> conflicting(
+        message.begin(), message.begin() + block_bytes);
+    conflicting[0] ^= 1u;
+
+    for (const ResumePacketAliasCase& alias_case : alias_cases)
+    {
+        if (!CheckResumePacketAliasCall(
+                system, config, initial_state,
+                1u, message.data() + block_bytes, block_bytes,
+                alias_case, true, Wirehair_NeedMore, sentinel) ||
+            !CheckResumePacketAliasCall(
+                system, config, initial_state,
+                0u, message.data(), block_bytes,
+                alias_case, false, Wirehair_NeedMore, sentinel) ||
+            !CheckResumePacketAliasCall(
+                system, config, initial_state,
+                0u, conflicting.data(), block_bytes,
+                alias_case, false, Wirehair_Error, sentinel))
+        {
+            return false;
+        }
+    }
+
+    wirehair_v2::PrecodeSolveResumeState near_complete = initial_state;
+    std::vector<uint8_t> output = sentinel;
+    wirehair_v2::PrecodeSolveStats stats = initial_state.Stats;
+    for (uint32_t id = 1u; id + 1u < initial_state.SourceCount; ++id)
+    {
+        if (wirehair_v2::ResumePrecodeSystem(
+                system, config, id,
+                message.data() + (size_t)id * block_bytes,
+                block_bytes, near_complete, output, &stats, true) !=
+                Wirehair_NeedMore ||
+            output != sentinel)
+        {
+            std::fprintf(stderr,
+                "solve: resume packet alias completion fixture failed "
+                "bb=%u id=%u\n",
+                block_bytes, id);
+            return false;
+        }
+    }
+    const uint32_t final_id = initial_state.SourceCount - 1u;
+    for (const ResumePacketAliasCase& alias_case : alias_cases)
+    {
+        if (!CheckResumePacketAliasCall(
+                system, config, near_complete,
+                final_id,
+                message.data() + (size_t)final_id * block_bytes,
+                block_bytes, alias_case, true,
+                Wirehair_Success, expected))
+        {
+            return false;
+        }
+    }
+    std::printf(
+        "resume packet scratch aliases bb=%u: PASS\n", block_bytes);
+    return true;
+}
+
 bool CheckIncrementalResumeCase(uint32_t block_bytes)
 {
     const uint32_t K = 64u;
@@ -1808,6 +2042,12 @@ bool CheckIncrementalResumeCase(uint32_t block_bytes)
                 block_bytes, resume_byte_vector_names[alias_i]);
             return false;
         }
+    }
+
+    if (!CheckResumePacketInputAliases(
+            system, config, message, block_bytes, resume, expected))
+    {
+        return false;
     }
 
     const uint32_t rank_before = resume.Rank;

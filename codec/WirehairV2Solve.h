@@ -320,6 +320,9 @@ WirehairResult SolvePrecodeSystemForValidatedSystemWithRuntime(
     Allocations finish before an inserting call changes the algebraic state, so
     OOM is retryable.  On OOM, stats receives the unchanged checkpoint counters
     when non-null.  Output remains unchanged on NeedMore and every failure.
+    A valid block-sized `block_data` range may reference CoefficientScratch, or
+    exactly RhsScratch, in resume_state; the packet is consumed before either
+    reusable scratch vector is modified.
     The output vector must not alias Values, PivotCoefficients, PivotRhs,
     HavePivot, CoefficientScratch, or RhsScratch in resume_state; such an alias
     returns InvalidInput without changing output, state, or stats.
