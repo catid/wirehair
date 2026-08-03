@@ -23,6 +23,7 @@ from pathlib import Path
 import platform
 import re
 import selectors
+import secrets
 import signal
 import socket
 import stat
@@ -76,17 +77,67 @@ SUMMARY_FIELDS = frozenset((
 ))
 MAX_WALL_SECONDS = 7200.0
 MAX_RESPONSE_BYTES = 1024 * 1024
-# The 25,344-row native timing envelope can exceed 64 MiB even though the
-# logical timing receipt remains smaller.  Keep a finite, fail-closed ceiling
-# with enough headroom for the frozen schema's canonical field names/hashes.
-MAX_COMPLETED_ARTIFACT_BYTES = 256 * 1024 * 1024
-MAX_COMPLETED_BUNDLE_BYTES = 512 * 1024 * 1024
 TIMING_WORKER_COUNT = 8
 ZERO_SHA256 = "0" * 64
 CPU_TOKEN = re.compile(r"(?:0|[1-9][0-9]*)\Z")
 CACHE_INDEX_TOKEN = re.compile(r"index(?:0|[1-9][0-9]*)\Z")
 POSITIVE_TOKEN = re.compile(r"[1-9][0-9]*\Z")
 CPU_SYSFS_ROOT = Path("/sys/devices/system/cpu")
+
+# The producer admits every retry offset in [0,255] independently for all
+# 2,304 frozen qualification base cells.  Bound each canonical record before
+# publication, then derive the completed-file limits from that exact maximum
+# cardinality.  This keeps the producer and strict reopener in agreement even
+# for the 589,824-row qualification envelope instead of relying on the much
+# smaller common case (one row per base cell).
+FROZEN_TIMING_BASE_CELLS = 2304
+MAX_QUALIFICATION_ATTEMPTS_PER_CELL = 256
+MAX_QUALIFICATION_ATTEMPTS = (
+    FROZEN_TIMING_BASE_CELLS * MAX_QUALIFICATION_ATTEMPTS_PER_CELL)
+FROZEN_TIMING_PANEL_COUNT = 11
+FROZEN_TIMING_RECORDS = FROZEN_TIMING_BASE_CELLS * FROZEN_TIMING_PANEL_COUNT
+MAX_QUALIFICATION_NATIVE_RECORD_BYTES = 2048
+MAX_QUALIFICATION_AUDIT_RECORD_BYTES = 1024
+MAX_TIMING_NATIVE_RECORD_BYTES = 4096
+MAX_TIMING_RESULT_RECORD_BYTES = 4096
+MAX_SMALL_COMPLETED_ARTIFACT_BYTES = 16 * 1024 * 1024
+COMPLETED_ARTIFACT_BYTE_LIMITS = {
+    "run-summary.json": MAX_SMALL_COMPLETED_ARTIFACT_BYTES,
+    "timing-freeze.json": MAX_SMALL_COMPLETED_ARTIFACT_BYTES,
+    "timing-traces.jsonl":
+        FROZEN_TIMING_BASE_CELLS * MAX_QUALIFICATION_AUDIT_RECORD_BYTES,
+    "timing-native-results.jsonl":
+        FROZEN_TIMING_RECORDS * MAX_TIMING_NATIVE_RECORD_BYTES,
+    "timing-results.jsonl":
+        FROZEN_TIMING_RECORDS * MAX_TIMING_RESULT_RECORD_BYTES,
+    "timing-execution.json": MAX_SMALL_COMPLETED_ARTIFACT_BYTES,
+    "sampler-attestation.json": MAX_SMALL_COMPLETED_ARTIFACT_BYTES,
+    "timing-qualification-map.json": MAX_SMALL_COMPLETED_ARTIFACT_BYTES,
+    "timing-qualification-audit.jsonl":
+        MAX_QUALIFICATION_ATTEMPTS * MAX_QUALIFICATION_AUDIT_RECORD_BYTES,
+    "timing-qualification-native.jsonl":
+        MAX_QUALIFICATION_ATTEMPTS * MAX_QUALIFICATION_NATIVE_RECORD_BYTES,
+    "qualification-sampler-attestation.json":
+        MAX_SMALL_COMPLETED_ARTIFACT_BYTES,
+    "timing-qualification-execution.json":
+        MAX_SMALL_COMPLETED_ARTIFACT_BYTES,
+}
+MAX_COMPLETED_ARTIFACT_BYTES = max(COMPLETED_ARTIFACT_BYTE_LIMITS.values())
+MAX_COMPLETED_BUNDLE_BYTES = sum(COMPLETED_ARTIFACT_BYTE_LIMITS.values())
+COMPLETED_SOURCE_NAMES = {
+    "summary": "run-summary.json",
+    "freeze": "timing-freeze.json",
+    "trace": "timing-traces.jsonl",
+    "native": "timing-native-results.jsonl",
+    "result": "timing-results.jsonl",
+    "receipt": "timing-execution.json",
+    "sampler": "sampler-attestation.json",
+    "qualification_map": "timing-qualification-map.json",
+    "qualification_audit": "timing-qualification-audit.jsonl",
+    "qualification_native": "timing-qualification-native.jsonl",
+    "qualification_sampler": "qualification-sampler-attestation.json",
+    "qualification_receipt": "timing-qualification-execution.json",
+}
 
 
 class RunnerError(RuntimeError):
@@ -106,7 +157,7 @@ def _remaining(deadline: float, context: str) -> float:
 
 @contextmanager
 def _hard_wall(seconds: float):
-    """Interrupt synchronous validation too, not just subprocess/select waits."""
+    """Interrupt synchronous work and expose one pre-commit teardown hook."""
     if not hasattr(signal, "setitimer") or not hasattr(signal, "ITIMER_REAL"):
         fail("native short-screen hard wall requires POSIX setitimer")
     started = time.monotonic()
@@ -126,15 +177,25 @@ def _hard_wall(seconds: float):
     except (OSError, ValueError) as exc:
         signal.signal(signal.SIGALRM, old_handler)
         fail("cannot install native short-screen hard wall: {}".format(exc))
-    try:
-        yield
-    finally:
+    finished = False
+
+    def finish() -> None:
+        nonlocal finished
+        if finished:
+            return
         signal.setitimer(signal.ITIMER_REAL, 0.0)
         signal.signal(signal.SIGALRM, old_handler)
         if old_timer[0] > 0.0:
             remaining = max(0.000001,
                             old_timer[0] - (time.monotonic() - started))
             signal.setitimer(signal.ITIMER_REAL, remaining, old_timer[1])
+        finished = True
+
+    try:
+        yield finish
+    finally:
+        if not finished:
+            finish()
 
 
 def _is_sha256(value: Any) -> bool:
@@ -324,10 +385,252 @@ def _atomic_write_object(path: Path, value: Mapping[str, Any]) -> None:
         path, (contract_api.canonical_json(value) + "\n").encode("utf-8"))
 
 
+def _open_completion_parent(path: Path) -> Tuple[int, Tuple[int, int]]:
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    directory = getattr(os, "O_DIRECTORY", 0)
+    if nofollow == 0 or directory == 0:
+        fail("completion-marker publication requires O_NOFOLLOW/O_DIRECTORY")
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            str(path.parent), os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) |
+            nofollow | directory)
+        info = os.fstat(descriptor)
+        if not stat.S_ISDIR(info.st_mode):
+            fail("completion-marker parent must be a real directory")
+        identity = (info.st_dev, info.st_ino)
+        _verify_completed_directory_path(path.parent, identity)
+        return descriptor, identity
+    except OSError as exc:
+        if descriptor >= 0:
+            os.close(descriptor)
+        fail("cannot open completion-marker parent {}: {}".format(
+            path.parent, exc))
+    except BaseException:
+        if descriptor >= 0:
+            os.close(descriptor)
+        raise
+    raise AssertionError("unreachable")
+
+
+def _require_completion_parent_descriptor(
+        descriptor: int, identity: Tuple[int, int]) -> None:
+    try:
+        info = os.fstat(descriptor)
+    except OSError as exc:
+        fail("completion-marker parent descriptor is invalid: {}".format(exc))
+    if (not stat.S_ISDIR(info.st_mode) or
+            (info.st_dev, info.st_ino) != identity):
+        fail("completion-marker parent descriptor identity changed")
+
+
+def _publish_completion_marker(
+        path: Path, value: Mapping[str, Any], *,
+        parent_fd: Optional[int] = None,
+        parent_identity: Optional[Tuple[int, int]] = None,
+        ) -> Tuple[int, int]:
+    """Install one summary inode, rolling it back on every late failure."""
+    path = Path(path)
+    data = (contract_api.canonical_json(value) + "\n").encode("utf-8")
+    limit = COMPLETED_ARTIFACT_BYTE_LIMITS["run-summary.json"]
+    if not data or len(data) > limit:
+        fail("completion marker exceeds its publication byte cap")
+    owns_parent = parent_fd is None
+    if owns_parent:
+        if parent_identity is not None:
+            fail("completion-marker parent guard is incomplete")
+        parent_fd, parent_identity = _open_completion_parent(path)
+    elif (type(parent_fd) is not int or parent_fd < 0 or
+            not isinstance(parent_identity, tuple) or
+            len(parent_identity) != 2):
+        fail("completion-marker parent guard is invalid")
+    assert parent_fd is not None
+    assert parent_identity is not None
+    staged_name: Optional[str] = None
+    descriptor = -1
+    staged_identity: Optional[Tuple[int, int]] = None
+    published_identity: Optional[Tuple[int, int]] = None
+    committed = False
+    try:
+        _require_completion_parent_descriptor(parent_fd, parent_identity)
+        _verify_completed_directory_path(path.parent, parent_identity)
+        for _attempt in range(32):
+            candidate = ".{}.{}.tmp".format(
+                path.name, secrets.token_hex(12))
+            try:
+                descriptor = os.open(
+                    candidate,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                    getattr(os, "O_CLOEXEC", 0) |
+                    getattr(os, "O_NOFOLLOW", 0),
+                    0o600, dir_fd=parent_fd)
+                staged_name = candidate
+                break
+            except FileExistsError:
+                continue
+        if descriptor < 0 or staged_name is None:
+            fail("cannot allocate a unique staged completion marker")
+        created = os.fstat(descriptor)
+        if not stat.S_ISREG(created.st_mode):
+            fail("staged completion marker is not a regular file")
+        staged_identity = (created.st_dev, created.st_ino)
+        offset = 0
+        while offset < len(data):
+            written = os.write(descriptor, data[offset:])
+            if written <= 0:
+                fail("short write while staging completion marker")
+            offset += written
+        os.fsync(descriptor)
+        staged = os.fstat(descriptor)
+        if (not stat.S_ISREG(staged.st_mode) or
+                (staged.st_dev, staged.st_ino) != staged_identity or
+                staged.st_size != len(data)):
+            fail("staged completion marker is not the written regular file")
+        published_identity = staged_identity
+        try:
+            os.link(
+                "/proc/self/fd/{}".format(descriptor), path.name,
+                dst_dir_fd=parent_fd, follow_symlinks=True)
+        except FileExistsError:
+            fail("refusing to replace existing artifact {}".format(path))
+        published = os.stat(
+            path.name, dir_fd=parent_fd, follow_symlinks=False)
+        if (not stat.S_ISREG(published.st_mode) or
+                (published.st_dev, published.st_ino) != published_identity):
+            fail("published completion-marker identity changed")
+        os.fsync(parent_fd)
+        staged_entry = os.stat(
+            staged_name, dir_fd=parent_fd, follow_symlinks=False)
+        if (staged_entry.st_dev, staged_entry.st_ino) != published_identity:
+            fail("staged completion-marker name changed during publication")
+        os.unlink(staged_name, dir_fd=parent_fd)
+        staged_name = None
+        os.fsync(parent_fd)
+        _verify_completed_directory_path(path.parent, parent_identity)
+        committed = True
+        return published_identity
+    except OSError as exc:
+        fail("cannot publish completion marker {}: {}".format(path, exc))
+    finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except BaseException:
+                pass
+        if staged_name is not None:
+            try:
+                staged_entry = os.stat(
+                    staged_name, dir_fd=parent_fd, follow_symlinks=False)
+                if (staged_identity is not None and
+                        (staged_entry.st_dev, staged_entry.st_ino) ==
+                        staged_identity):
+                    os.unlink(staged_name, dir_fd=parent_fd)
+            except OSError:
+                pass
+        if not committed and published_identity is not None:
+            try:
+                visible = os.stat(
+                    path.name, dir_fd=parent_fd, follow_symlinks=False)
+                if (visible.st_dev, visible.st_ino) == published_identity:
+                    os.unlink(path.name, dir_fd=parent_fd)
+                    try:
+                        os.fsync(parent_fd)
+                    except OSError:
+                        pass
+            except OSError:
+                pass
+        if owns_parent:
+            try:
+                os.close(parent_fd)
+            except BaseException:
+                # All durability and identity checks precede committed=True.
+                # A close error cannot invalidate an already committed marker.
+                pass
+    raise AssertionError("unreachable")
+
+
+def _rollback_completion_marker(
+        path: Path, identity: Tuple[int, int], *,
+        parent_fd: Optional[int] = None,
+        parent_identity: Optional[Tuple[int, int]] = None) -> None:
+    """Remove only the exact summary inode installed by this transaction."""
+    path = Path(path)
+    owns_parent = parent_fd is None
+    if owns_parent:
+        if parent_identity is not None:
+            fail("completion-marker rollback guard is incomplete")
+        parent_fd, parent_identity = _open_completion_parent(path)
+    elif (type(parent_fd) is not int or parent_fd < 0 or
+            not isinstance(parent_identity, tuple) or
+            len(parent_identity) != 2):
+        fail("completion-marker rollback guard is invalid")
+    assert parent_fd is not None
+    assert parent_identity is not None
+    try:
+        _require_completion_parent_descriptor(parent_fd, parent_identity)
+        try:
+            visible = os.stat(
+                path.name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        if (visible.st_dev, visible.st_ino) != identity:
+            return
+        os.unlink(path.name, dir_fd=parent_fd)
+        os.fsync(parent_fd)
+        if owns_parent:
+            _verify_completed_directory_path(path.parent, parent_identity)
+    except OSError as exc:
+        fail("cannot roll back completion marker {}: {}".format(path, exc))
+    finally:
+        if owns_parent:
+            try:
+                os.close(parent_fd)
+            except BaseException:
+                pass
+
+
+def _require_completion_marker(
+        path: Path, identity: Tuple[int, int], expected_bytes: bytes, *,
+        parent_fd: Optional[int] = None,
+        parent_identity: Optional[Tuple[int, int]] = None) -> None:
+    path = Path(path)
+    owns_parent = parent_fd is None
+    if owns_parent:
+        if parent_identity is not None:
+            fail("completion-marker read guard is incomplete")
+        parent_fd, parent_identity = _open_completion_parent(path)
+    elif (type(parent_fd) is not int or parent_fd < 0 or
+            not isinstance(parent_identity, tuple) or
+            len(parent_identity) != 2):
+        fail("completion-marker read guard is invalid")
+    assert parent_fd is not None
+    assert parent_identity is not None
+    try:
+        _require_completion_parent_descriptor(parent_fd, parent_identity)
+        observed, fingerprint = _read_completed_regular_bytes(
+            Path(path.name), "published completion marker", parent_fd,
+            COMPLETED_ARTIFACT_BYTE_LIMITS["run-summary.json"])
+        if ((fingerprint[0], fingerprint[1]) != identity or
+                observed != expected_bytes):
+            fail("published completion marker changed before commit")
+        _verify_completed_directory_path(path.parent, parent_identity)
+    finally:
+        if owns_parent:
+            try:
+                os.close(parent_fd)
+            except BaseException:
+                pass
+
+
 class AtomicLineSink:
     """A result stream that is visible only after every row is complete."""
 
-    def __init__(self, destination: Path) -> None:
+    def __init__(
+            self, destination: Path,
+            maximum_bytes: Optional[int] = None) -> None:
+        if maximum_bytes is not None and (
+                type(maximum_bytes) is not int or maximum_bytes <= 0):
+            fail("native result stream has an invalid byte cap")
         digest = hashlib.sha256()
         descriptor, raw = tempfile.mkstemp(
             prefix="." + destination.name + ".", suffix=".tmp",
@@ -345,6 +648,8 @@ class AtomicLineSink:
             self.output = output
             self.staged_identity = staged_identity
             self.sha256 = digest
+            self.maximum_bytes = maximum_bytes
+            self.bytes_written = 0
             self.published = False
         except BaseException:
             if output is not None:
@@ -374,8 +679,12 @@ class AtomicLineSink:
     def write(self, line: bytes) -> None:
         if self.output.closed or not line.endswith(b"\n"):
             fail("cannot write an invalid native result line")
+        if (self.maximum_bytes is not None and
+                len(line) > self.maximum_bytes - self.bytes_written):
+            fail("native result stream exceeds its completed-artifact byte cap")
         self.output.write(line)
         self.sha256.update(line)
+        self.bytes_written += len(line)
 
     def publish(self) -> None:
         if self.published:
@@ -1340,7 +1649,10 @@ def run_timing_qualification(
         _write_worker(worker, worker.pending.command())
 
     try:
-        sink = AtomicLineSink(output_path)
+        sink = AtomicLineSink(
+            output_path,
+            COMPLETED_ARTIFACT_BYTE_LIMITS[
+                "timing-qualification-native.jsonl"])
         selector = selectors.DefaultSelector()
         for worker in workers:
             selector.register(
@@ -1379,6 +1691,8 @@ def run_timing_qualification(
                 if remainder:
                     fail("qualification worker emitted multiple responses")
                 line = logical + b"\n"
+                if len(line) > MAX_QUALIFICATION_NATIVE_RECORD_BYTES:
+                    fail("qualification response exceeds its canonical row cap")
                 worker.buffer = b""
                 job = worker.pending
                 if job is None:
@@ -1465,6 +1779,8 @@ def _strict_response_validator(
 
     def validate(value: Mapping[str, Any], _line: bytes,
                  worker: PersistentWorker, job: Job) -> int:
+        if kind == "timing" and len(_line) > MAX_TIMING_NATIVE_RECORD_BYTES:
+            fail("native timing response exceeds its canonical row cap")
         payload = value.get("payload")
         if kind == "recovery":
             if not isinstance(payload, dict):
@@ -1577,16 +1893,21 @@ def _development_timing_shape(
     if (type(independent_rounds) is not int or independent_rounds <= 0 or
             independent_rounds * TIMING_WORKER_COUNT != repetitions):
         fail("development timing rounds must exactly partition the repetitions")
-    if (type(expected_cells) is not int or expected_cells <= 0 or
+    if (type(expected_cells) is not int or
+            expected_cells != FROZEN_TIMING_BASE_CELLS or
             expected_cells % repetitions != 0):
-        fail("development timing cell cardinality is invalid")
+        fail("development timing cell cardinality differs from the "
+             "completed-artifact bound")
     try:
         expected_panels = len(contract_api.timing_panels(
             contract, [value[0] for value in EXPECTED_ARMS]))
     except contract_api.ContractError as exc:
         fail(str(exc))
-    if type(panel_count) is not int or panel_count != expected_panels:
-        fail("development timing panel cardinality is invalid")
+    if (expected_panels != FROZEN_TIMING_PANEL_COUNT or
+            type(panel_count) is not int or
+            panel_count != FROZEN_TIMING_PANEL_COUNT):
+        fail("development timing panel cardinality differs from the "
+             "completed-artifact bound")
     return repetitions, independent_rounds, expected_cells
 
 
@@ -1742,7 +2063,9 @@ def _run_timing_jobs(
     timing_sink: Optional[AtomicLineSink] = None
     maximum_end = 0
     try:
-        timing_sink = AtomicLineSink(path)
+        timing_sink = AtomicLineSink(
+            path,
+            COMPLETED_ARTIFACT_BYTE_LIMITS["timing-native-results.jsonl"])
         expected_timing_cpus = set(worker.cpu for worker in workers)
         timing_validator = _strict_response_validator(
             contract, freeze, "timing", description,
@@ -1780,9 +2103,22 @@ def _create_output_dir(path: Path) -> Path:
     return path
 
 
+CompletedFingerprint = Tuple[int, int, int, int, int, int, int]
+
+
+def _completed_fingerprint(info: os.stat_result) -> CompletedFingerprint:
+    return (
+        info.st_dev, info.st_ino, info.st_mode, info.st_nlink, info.st_size,
+        info.st_mtime_ns, info.st_ctime_ns,
+    )
+
+
 def _read_completed_regular_bytes(
-        path: Path, context: str, directory_fd: int) -> bytes:
+        path: Path, context: str, directory_fd: int,
+        byte_limit: int) -> Tuple[bytes, CompletedFingerprint]:
     """Read one bounded regular file through an already-pinned directory."""
+    if type(byte_limit) is not int or byte_limit <= 0:
+        fail("{} has an invalid completed-artifact byte cap".format(context))
     descriptor = -1
     try:
         nofollow = getattr(os, "O_NOFOLLOW", 0)
@@ -1795,7 +2131,7 @@ def _read_completed_regular_bytes(
         before = os.fstat(descriptor)
         if not stat.S_ISREG(before.st_mode):
             fail("{} must be a regular non-symlink file".format(context))
-        if before.st_size > MAX_COMPLETED_ARTIFACT_BYTES:
+        if before.st_size > byte_limit:
             fail("{} exceeds the bounded artifact size".format(context))
         chunks = []
         size = 0
@@ -1804,30 +2140,166 @@ def _read_completed_regular_bytes(
             if not block:
                 break
             size += len(block)
-            if size > MAX_COMPLETED_ARTIFACT_BYTES:
+            if size > byte_limit:
                 fail("{} exceeds the bounded artifact size".format(context))
             chunks.append(block)
         after = os.fstat(descriptor)
-        stable_before = (
-            before.st_dev, before.st_ino, before.st_size,
-            getattr(before, "st_mtime_ns", None),
-            getattr(before, "st_ctime_ns", None),
-        )
-        stable_after = (
-            after.st_dev, after.st_ino, after.st_size,
-            getattr(after, "st_mtime_ns", None),
-            getattr(after, "st_ctime_ns", None),
-        )
+        stable_before = _completed_fingerprint(before)
+        stable_after = _completed_fingerprint(after)
+        named = os.stat(
+            str(path), dir_fd=directory_fd, follow_symlinks=False)
+        stable_named = _completed_fingerprint(named)
         data = b"".join(chunks)
-        if stable_before != stable_after or len(data) != before.st_size:
+        if (not stat.S_ISREG(named.st_mode) or
+                stable_before != stable_after or
+                stable_named != stable_after or
+                len(data) != before.st_size):
             fail("{} changed while it was being read".format(context))
-        return data
+        return data, stable_after
     except OSError as exc:
         fail("cannot read {} {}: {}".format(context, path, exc))
     finally:
         if descriptor >= 0:
             os.close(descriptor)
-    return b""
+    return b"", (0, 0, 0, 0, 0, 0, 0)
+
+
+def _read_completed_bundle(
+        source_names: Mapping[str, str], directory_fd: int,
+        ) -> Tuple[Dict[str, bytes], Dict[str, CompletedFingerprint]]:
+    snapshots: Dict[str, bytes] = {}
+    identities: Dict[str, CompletedFingerprint] = {}
+    total_bytes = 0
+    for key, name in source_names.items():
+        limit = COMPLETED_ARTIFACT_BYTE_LIMITS.get(name)
+        if type(limit) is not int or limit <= 0:
+            fail("completed timing bundle names an unbounded artifact")
+        data, identity = _read_completed_regular_bytes(
+            Path(name), "completed timing " + key.replace("_", " "),
+            directory_fd, limit)
+        total_bytes += len(data)
+        if total_bytes > MAX_COMPLETED_BUNDLE_BYTES:
+            fail("completed timing evidence exceeds the bounded bundle size")
+        snapshots[key] = data
+        identities[key] = identity
+    return snapshots, identities
+
+
+def _require_completed_dependency_bounds(
+        output_dir: Path, prospective_summary: bytes) -> None:
+    """Apply the strict loader's exact per-file and bundle caps pre-commit."""
+    total_bytes = len(prospective_summary)
+    if total_bytes > COMPLETED_ARTIFACT_BYTE_LIMITS["run-summary.json"]:
+        fail("prospective completion marker exceeds its loader byte cap")
+    for name in COMPLETED_SOURCE_NAMES.values():
+        if name == "run-summary.json":
+            continue
+        path = output_dir / name
+        try:
+            info = os.stat(str(path), follow_symlinks=False)
+        except OSError as exc:
+            fail("cannot bound completed dependency {}: {}".format(path, exc))
+        limit = COMPLETED_ARTIFACT_BYTE_LIMITS[name]
+        if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+            fail("completed dependency {} exceeds its producer byte cap".format(
+                path))
+        total_bytes += info.st_size
+        if total_bytes > MAX_COMPLETED_BUNDLE_BYTES:
+            fail("completed timing dependencies exceed the bundle byte cap")
+
+
+def _verify_completed_directory_path(
+        path: Path, expected_identity: Tuple[int, int]) -> None:
+    try:
+        info = os.stat(str(path), follow_symlinks=False)
+    except OSError as exc:
+        fail("cannot recheck completed timing directory {}: {}".format(
+            path, exc))
+    if (not stat.S_ISDIR(info.st_mode) or
+            (info.st_dev, info.st_ino) != expected_identity):
+        fail("completed timing directory identity changed during validation")
+
+
+def _commit_completed_timing_screen(
+        contract: Mapping[str, Any], output_dir: Path,
+        summary: Mapping[str, Any], freeze: Mapping[str, Any],
+        timing_summary: Mapping[str, Any],
+        execution_receipt: Mapping[str, Any],
+        timing_qualification: contract_api.TimingQualification,
+        finish_hard_wall: Optional[Callable[[], None]] = None) -> None:
+    """Publish, strictly reopen, and terminally pin the completion marker."""
+    summary_path = output_dir / "run-summary.json"
+    summary_bytes = (
+        contract_api.canonical_json(summary) + "\n").encode("utf-8")
+    _require_completed_dependency_bounds(output_dir, summary_bytes)
+    parent_fd = -1
+    parent_identity: Optional[Tuple[int, int]] = None
+    published_identity: Optional[Tuple[int, int]] = None
+    committed = False
+    try:
+        parent_fd, parent_identity = _open_completion_parent(summary_path)
+        published_identity = _publish_completion_marker(
+            summary_path, summary, parent_fd=parent_fd,
+            parent_identity=parent_identity)
+        trusted_snapshots, trusted_fingerprints = _read_completed_bundle(
+            COMPLETED_SOURCE_NAMES, parent_fd)
+        reopened = load_completed_timing_screen(contract, output_dir)
+        if (not isinstance(reopened, dict) or set(reopened) != {
+                "directory", "directory_identity", "run_summary", "freeze",
+                "summary", "execution_receipt", "timing_qualification",
+                } or
+                reopened["directory_identity"] != parent_identity or
+                contract_api.canonical_json(reopened["run_summary"]) !=
+                contract_api.canonical_json(summary) or
+                contract_api.canonical_json(reopened["freeze"]) !=
+                contract_api.canonical_json(freeze) or
+                contract_api.canonical_json(reopened["summary"]) !=
+                contract_api.canonical_json(timing_summary) or
+                contract_api.canonical_json(reopened["execution_receipt"]) !=
+                contract_api.canonical_json(execution_receipt) or
+                reopened["timing_qualification"].map_sha256 !=
+                timing_qualification.map_sha256 or
+                reopened["timing_qualification"].qualified_domain_sha256 !=
+                timing_qualification.qualified_domain_sha256):
+            fail("post-publication timing reopen differs from terminal evidence")
+        _require_completion_marker(
+            summary_path, published_identity, summary_bytes,
+            parent_fd=parent_fd, parent_identity=parent_identity)
+        final_snapshots, final_fingerprints = _read_completed_bundle(
+            COMPLETED_SOURCE_NAMES, parent_fd)
+        if (final_snapshots != trusted_snapshots or
+                final_fingerprints != trusted_fingerprints):
+            fail("completed timing evidence changed after strict reopen")
+        # The path must still name the exact parent inode held for publication.
+        # Keep the descriptor live until no fallible commit work remains.  The
+        # hard-wall teardown is inside this rollback boundary: afterward no WH2
+        # SIGALRM or context-manager teardown can report failure with a marker.
+        _verify_completed_directory_path(output_dir, parent_identity)
+        if finish_hard_wall is not None:
+            finish_hard_wall()
+        committed = True
+    except BaseException as primary:
+        if published_identity is not None:
+            try:
+                _rollback_completion_marker(
+                    summary_path, published_identity, parent_fd=parent_fd,
+                    parent_identity=parent_identity)
+            except RunnerError as rollback:
+                raise RunnerError(
+                    "{}; completion-marker rollback also failed: {}".format(
+                        primary, rollback)) from primary
+        raise
+    finally:
+        if parent_fd >= 0:
+            try:
+                os.close(parent_fd)
+            except BaseException:
+                # A successful close is not part of the on-disk transaction.
+                # On success every durability/path check already passed; on
+                # failure the exact published inode has already been rolled back.
+                pass
+    if not committed:
+        raise AssertionError("unreachable")
 
 
 def _write_completed_snapshot(path: Path, data: bytes) -> None:
@@ -1875,31 +2347,10 @@ def load_completed_timing_screen(
             os.close(directory_fd)
             directory_fd = -1
         raise
-    source_names = {
-        "summary": "run-summary.json",
-        "freeze": "timing-freeze.json",
-        "trace": "timing-traces.jsonl",
-        "native": "timing-native-results.jsonl",
-        "result": "timing-results.jsonl",
-        "receipt": "timing-execution.json",
-        "sampler": "sampler-attestation.json",
-        "qualification_map": "timing-qualification-map.json",
-        "qualification_audit": "timing-qualification-audit.jsonl",
-        "qualification_native": "timing-qualification-native.jsonl",
-        "qualification_sampler": "qualification-sampler-attestation.json",
-        "qualification_receipt": "timing-qualification-execution.json",
-    }
+    source_names = COMPLETED_SOURCE_NAMES
     try:
-        snapshots = {}
-        total_bytes = 0
-        for key, name in source_names.items():
-            data = _read_completed_regular_bytes(
-                Path(name), "completed timing " + key.replace("_", " "),
-                directory_fd)
-            total_bytes += len(data)
-            if total_bytes > MAX_COMPLETED_BUNDLE_BYTES:
-                fail("completed timing evidence exceeds the bounded bundle size")
-            snapshots[key] = data
+        snapshots, snapshot_identities = _read_completed_bundle(
+            source_names, directory_fd)
     finally:
         if directory_fd >= 0:
             os.close(directory_fd)
@@ -2046,9 +2497,44 @@ def load_completed_timing_screen(
                 qualification.source_git_commit !=
                     freeze["source_git_commit"]):
             fail("completed timing summary differs from reopened evidence")
+
+        # Semantic validation may be expensive.  Reopen the exact directory
+        # inode, reread every dependency through that pinned descriptor, and
+        # require both bytes and directory-entry fingerprints to match the
+        # initial snapshot before returning an authoritative bundle.
+        terminal_directory_fd = -1
+        expected_directory_identity = (
+            opened_info.st_dev, opened_info.st_ino)
+        try:
+            terminal_directory_fd = os.open(
+                str(resolved),
+                os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) |
+                getattr(os, "O_NOFOLLOW", 0) |
+                getattr(os, "O_DIRECTORY", 0))
+            terminal_directory_info = os.fstat(terminal_directory_fd)
+            if (not stat.S_ISDIR(terminal_directory_info.st_mode) or
+                    (terminal_directory_info.st_dev,
+                     terminal_directory_info.st_ino) !=
+                    expected_directory_identity):
+                fail("completed timing directory changed before terminal reread")
+            _verify_completed_directory_path(
+                resolved, expected_directory_identity)
+            terminal_snapshots, terminal_identities = _read_completed_bundle(
+                source_names, terminal_directory_fd)
+            _verify_completed_directory_path(
+                resolved, expected_directory_identity)
+        except OSError as exc:
+            fail("cannot terminally reopen completed timing directory: {}".
+                 format(exc))
+        finally:
+            if terminal_directory_fd >= 0:
+                os.close(terminal_directory_fd)
+        if (terminal_snapshots != snapshots or
+                terminal_identities != snapshot_identities):
+            fail("completed timing evidence changed during semantic validation")
         return {
             "directory": str(resolved),
-            "directory_identity": (opened_info.st_dev, opened_info.st_ino),
+            "directory_identity": expected_directory_identity,
             "run_summary": run_summary,
             "freeze": freeze,
             "summary": timing_summary,
@@ -2057,7 +2543,10 @@ def load_completed_timing_screen(
         }
 
 
-def run_short_screen(args: argparse.Namespace) -> Mapping[str, Any]:
+def run_short_screen(
+        args: argparse.Namespace,
+        finish_hard_wall: Optional[Callable[[], None]] = None,
+        ) -> Mapping[str, Any]:
     if (not math.isfinite(args.deadline_seconds) or
             not 0.0 < args.deadline_seconds <= MAX_WALL_SECONDS):
         fail("--deadline-seconds must be in (0,7200]")
@@ -2259,8 +2748,43 @@ def run_short_screen(args: argparse.Namespace) -> Mapping[str, Any]:
             _restore_controller_affinity(original_affinity)
             controller_pinned = False
 
-        timing_receipt = assembled["execution_receipt"]
-        timing_validator_summary = assembled["summary"]
+        # Q/reap and affinity restoration are part of the evidence boundary.
+        # Revalidate every bound dependency after both have completed so a
+        # mutation in that interval cannot be covered by a complete marker.
+        if _git_head(deadline) != source_commit:
+            fail("codec source commit changed before terminal publication")
+        try:
+            post_shutdown = native_api.validate_execution_receipt(
+                contract, "timing", "development", freeze_path,
+                timing_trace_path, native_path, result_path,
+                receipt_path, verify_live_sampler=False,
+                sampler_path=sampler_path,
+                timing_qualification_map_path=qualification_map_path,
+                timing_qualification_audit_path=qualification_audit_path,
+                timing_qualification_map_sha256=qualification_map_sha256,
+                timing_qualification_native_path=qualification_native_path,
+                timing_qualification_sampler_path=qualification_sampler_path,
+                timing_qualification_execution_receipt_path=
+                    qualification_execution_receipt_path,
+                timing_qualification_execution_receipt_sha256=
+                    qualification_execution_receipt_sha256)
+            post_shutdown_freeze = contract_api.load_freeze_manifest(
+                contract, "development", freeze_path, "timing",
+                timing_qualification)
+            _remaining(deadline, "post-shutdown timing validation")
+        except (native_api.NativeEvidenceError,
+                contract_api.ContractError) as exc:
+            fail(str(exc))
+        if (contract_api.canonical_json(post_shutdown) !=
+                contract_api.canonical_json(assembled) or
+                contract_api.canonical_json(post_shutdown_freeze) !=
+                contract_api.canonical_json(freeze)):
+            fail("post-shutdown timing evidence differs from assembled evidence")
+        if _git_head(deadline) != source_commit:
+            fail("codec source commit changed during terminal validation")
+
+        timing_receipt = post_shutdown["execution_receipt"]
+        timing_validator_summary = post_shutdown["summary"]
         thermal = timing_receipt["thermal"]
         qualification_thermal = timing_receipt["qualification_thermal"]
         qualification_retry_offsets = list(
@@ -2324,7 +2848,13 @@ def run_short_screen(args: argparse.Namespace) -> Mapping[str, Any]:
                 summary["timing_validator_summary_sha256"] !=
                     contract_api.sha256_json(timing_validator_summary)):
             fail("internal timing run summary schema mismatch")
-        _atomic_write_object(output_dir / "run-summary.json", summary)
+        _commit_completed_timing_screen(
+            contract, output_dir, summary, post_shutdown_freeze,
+            timing_validator_summary, timing_receipt, timing_qualification,
+            finish_hard_wall)
+        # The successful transaction is the final fallible action.  Do not add
+        # a deadline/provenance check after it without extending its rollback
+        # boundary around that check.
         return summary
     finally:
         primary = sys.exc_info()[1]
@@ -2373,8 +2903,8 @@ def main(argv: Sequence[str] = ()) -> int:
         if (not math.isfinite(args.deadline_seconds) or
                 not 0.0 < args.deadline_seconds <= MAX_WALL_SECONDS):
             fail("--deadline-seconds must be in (0,7200]")
-        with _hard_wall(args.deadline_seconds):
-            summary = run_short_screen(args)
+        with _hard_wall(args.deadline_seconds) as finish_hard_wall:
+            summary = run_short_screen(args, finish_hard_wall)
     except (RunnerError, native_api.NativeEvidenceError,
             contract_api.ContractError, OSError, UnicodeError) as exc:
         print("wh2 native short screen: {}".format(exc), file=sys.stderr)

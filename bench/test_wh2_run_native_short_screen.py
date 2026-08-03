@@ -8,10 +8,13 @@ from contextlib import ExitStack, redirect_stderr
 import csv
 import errno
 import hashlib
+import inspect
 from io import StringIO
 import json
 import os
 from pathlib import Path
+import signal
+import shutil
 import stat
 import subprocess
 import sys
@@ -419,6 +422,38 @@ class NativeRunnerTests(unittest.TestCase):
                 time.sleep(2.0)
         self.assertLess(time.monotonic() - started, 1.0)
 
+    def test_hard_wall_finish_leaves_no_fallible_context_teardown(self) -> None:
+        marker = self.root / "finished-marker"
+        timer_calls = []
+
+        def set_timer(which, seconds, interval=0.0):
+            timer_calls.append((which, seconds, interval))
+            if len(timer_calls) > 2:
+                raise OSError(errno.EIO, "injected post-finish teardown")
+            return (0.0, 0.0)
+
+        def finish_inside_commit(_args, finish_hard_wall):
+            marker.write_bytes(b"complete\n")
+            finish_hard_wall()
+            return {"status": "complete"}
+
+        argv = [
+            "--output-dir", str(self.root / "run"),
+            "--sampler-pid", "1", "--sampler-cpu", "2",
+            "--sampler-script", "s.py", "--sampler-csv", "s.csv",
+        ]
+        with mock.patch.object(
+                subject.signal, "getsignal", return_value=signal.SIG_DFL), \
+                mock.patch.object(subject.signal, "signal"), \
+                mock.patch.object(
+                    subject.signal, "setitimer", side_effect=set_timer), \
+                mock.patch.object(
+                    subject, "run_short_screen", side_effect=finish_inside_commit), \
+                mock.patch("builtins.print"):
+            self.assertEqual(subject.main(argv), 0)
+        self.assertTrue(marker.exists())
+        self.assertEqual(len(timer_calls), 2)
+
     def test_cpu_parser_and_physical_core_selection(self) -> None:
         topology = self._topology({
             0: (0, 0, 0),
@@ -755,6 +790,430 @@ class NativeRunnerTests(unittest.TestCase):
                 subject.RunnerError, "cannot read completed timing result"):
             subject.load_completed_timing_screen(contract, directory)
 
+    def test_completed_read_rejects_named_entry_replacement(self) -> None:
+        directory = self.root / "entry-replacement"
+        directory.mkdir()
+        artifact = directory / "artifact.json"
+        replacement = directory / "replacement.json"
+        artifact.write_bytes(b"old-bytes\n")
+        replacement.write_bytes(b"new-bytes\n")
+        directory_fd = os.open(
+            str(directory), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        real_open = os.open
+        replaced = False
+
+        def replace_after_open(path, *args, **kwargs):
+            nonlocal replaced
+            descriptor = real_open(path, *args, **kwargs)
+            if (path == artifact.name and kwargs.get("dir_fd") == directory_fd
+                    and not replaced):
+                os.replace(str(replacement), str(artifact))
+                replaced = True
+            return descriptor
+
+        try:
+            with mock.patch.object(
+                    subject.os, "open", side_effect=replace_after_open), \
+                    self.assertRaisesRegex(
+                        subject.RunnerError, "changed while it was being read"):
+                subject._read_completed_regular_bytes(
+                    Path(artifact.name), "replacement artifact", directory_fd,
+                    1024)
+        finally:
+            os.close(directory_fd)
+        self.assertTrue(replaced)
+
+    def test_completed_loader_rejects_mutation_during_semantic_validation(
+            self) -> None:
+        (contract, qualification, directory, freeze, _run_summary,
+         validated) = self._completed_timing_fixture("semantic-mutation")
+        replacement = self.root / "replacement-results.jsonl"
+        replacement.write_bytes(b'{"mutated":true}\n')
+
+        def mutate(*_args, **_kwargs):
+            os.replace(
+                str(replacement), str(directory / "timing-results.jsonl"))
+            return validated
+
+        with mock.patch.object(
+                contract_api, "load_timing_qualification_map",
+                return_value=qualification), mock.patch.object(
+                native_api, "validate_execution_receipt",
+                side_effect=mutate), mock.patch.object(
+                contract_api, "load_freeze_manifest", return_value=freeze), \
+                self.assertRaisesRegex(
+                    subject.RunnerError, "changed during semantic validation"):
+            subject.load_completed_timing_screen(contract, directory)
+
+    def test_completed_loader_rejects_parent_replacement_during_validation(
+            self) -> None:
+        (contract, qualification, directory, freeze, _run_summary,
+         validated) = self._completed_timing_fixture("parent-replacement")
+        moved = self.root / "moved-parent-replacement"
+
+        def replace_parent(*_args, **_kwargs):
+            directory.rename(moved)
+            directory.mkdir()
+            return validated
+
+        with mock.patch.object(
+                contract_api, "load_timing_qualification_map",
+                return_value=qualification), mock.patch.object(
+                native_api, "validate_execution_receipt",
+                side_effect=replace_parent), mock.patch.object(
+                contract_api, "load_freeze_manifest", return_value=freeze), \
+                self.assertRaisesRegex(
+                    subject.RunnerError, "directory changed before terminal"):
+            subject.load_completed_timing_screen(contract, directory)
+
+    def test_completed_bounds_cover_full_qualification_retry_envelope(
+            self) -> None:
+        self.assertEqual(
+            subject.MAX_QUALIFICATION_ATTEMPTS, 2304 * 256)
+        self.assertEqual(
+            subject.COMPLETED_ARTIFACT_BYTE_LIMITS[
+                "timing-qualification-native.jsonl"],
+            2304 * 256 * subject.MAX_QUALIFICATION_NATIVE_RECORD_BYTES)
+        self.assertGreater(
+            subject.COMPLETED_ARTIFACT_BYTE_LIMITS[
+                "timing-qualification-native.jsonl"],
+            int(540.6 * 1024 * 1024))
+        self.assertEqual(
+            subject.MAX_COMPLETED_BUNDLE_BYTES,
+            sum(subject.COMPLETED_ARTIFACT_BYTE_LIMITS.values()))
+
+    def test_producer_applies_loader_cap_to_every_dependency(self) -> None:
+        (_contract, _qualification, directory, _freeze, _run_summary,
+         _validated) = self._completed_timing_fixture("producer-bounds")
+        summary = (directory / "run-summary.json").read_bytes()
+        real_stat = os.stat
+        for name, limit in subject.COMPLETED_ARTIFACT_BYTE_LIMITS.items():
+            if name == "run-summary.json":
+                continue
+
+            def oversized(path, *args, _name=name, _limit=limit, **kwargs):
+                info = real_stat(path, *args, **kwargs)
+                if Path(path).name == _name:
+                    return mock.Mock(
+                        st_mode=info.st_mode, st_size=_limit + 1)
+                return info
+
+            with self.subTest(name=name), mock.patch.object(
+                    subject.os, "stat", side_effect=oversized), \
+                    self.assertRaisesRegex(
+                        subject.RunnerError, "producer byte cap"):
+                subject._require_completed_dependency_bounds(
+                    directory, summary)
+
+        with self.assertRaisesRegex(subject.RunnerError, "loader byte cap"):
+            subject._require_completed_dependency_bounds(
+                directory,
+                b"x" * (
+                    subject.COMPLETED_ARTIFACT_BYTE_LIMITS[
+                        "run-summary.json"] + 1))
+
+    def test_completion_marker_parent_fsync_failure_rolls_back(self) -> None:
+        directory = self.root / "marker-fsync"
+        directory.mkdir()
+        marker = directory / "run-summary.json"
+        real_fsync = os.fsync
+        failed = False
+
+        def fail_first_directory_fsync(descriptor: int) -> None:
+            nonlocal failed
+            if stat.S_ISDIR(os.fstat(descriptor).st_mode) and not failed:
+                failed = True
+                raise OSError(errno.EIO, "injected marker parent fsync failure")
+            real_fsync(descriptor)
+
+        with mock.patch.object(
+                subject.os, "fsync", side_effect=fail_first_directory_fsync), \
+                self.assertRaisesRegex(
+                    subject.RunnerError, "injected marker parent fsync failure"):
+            subject._publish_completion_marker(marker, {"status": "complete"})
+        self.assertTrue(failed)
+        self.assertFalse(marker.exists())
+
+    def test_completion_marker_post_commit_close_error_is_success(self) -> None:
+        directory = self.root / "marker-close"
+        directory.mkdir()
+        marker = directory / "run-summary.json"
+        real_close = os.close
+        failed = False
+
+        def close_then_fail_directory(descriptor: int) -> None:
+            nonlocal failed
+            is_directory = stat.S_ISDIR(os.fstat(descriptor).st_mode)
+            real_close(descriptor)
+            if is_directory and not failed:
+                failed = True
+                raise OSError(errno.EIO, "injected post-commit close failure")
+
+        with mock.patch.object(
+                subject.os, "close", side_effect=close_then_fail_directory):
+            identity = subject._publish_completion_marker(
+                marker, {"status": "complete"})
+        self.assertTrue(failed)
+        self.assertEqual(
+            (marker.stat().st_dev, marker.stat().st_ino), identity)
+
+    def test_completion_marker_staging_replacement_cannot_survive(self) -> None:
+        directory = self.root / "marker-stage-replacement"
+        directory.mkdir()
+        marker = directory / "run-summary.json"
+        attacker = directory / "attacker.tmp"
+        attacker.write_bytes(b"attacker\n")
+        real_link = os.link
+        replaced = False
+
+        def replace_staging_then_link(source, destination, *args, **kwargs):
+            nonlocal replaced
+            staged = next(directory.glob(".run-summary.json.*.tmp"))
+            os.replace(str(attacker), str(staged))
+            replaced = True
+            return real_link(source, destination, *args, **kwargs)
+
+        with mock.patch.object(
+                subject.os, "link", side_effect=replace_staging_then_link), \
+                self.assertRaisesRegex(
+                    subject.RunnerError,
+                    "staged completion-marker name changed|"
+                    "cannot publish completion marker"):
+            subject._publish_completion_marker(marker, {"status": "complete"})
+        self.assertTrue(replaced)
+        self.assertFalse(marker.exists())
+
+    def test_post_publication_reopen_failure_rolls_back_marker(self) -> None:
+        directory = self.root / "marker-reopen"
+        directory.mkdir()
+        marker = directory / "run-summary.json"
+        qualification = mock.Mock(
+            map_sha256="a" * 64, qualified_domain_sha256="b" * 64)
+        with mock.patch.object(
+                subject, "_require_completed_dependency_bounds"), \
+                mock.patch.object(
+                    subject, "_read_completed_bundle", return_value=({}, {})), \
+                mock.patch.object(
+                    subject, "load_completed_timing_screen",
+                    side_effect=subject.RunnerError("injected strict reopen")), \
+                self.assertRaisesRegex(subject.RunnerError, "strict reopen"):
+            subject._commit_completed_timing_screen(
+                {}, directory, {"status": "complete"}, {}, {}, {},
+                qualification)
+        self.assertFalse(marker.exists())
+
+    def test_malformed_post_publication_reopen_rolls_back_marker(self) -> None:
+        qualification = mock.Mock(
+            map_sha256="a" * 64, qualified_domain_sha256="b" * 64)
+        for index, malformed in enumerate((None, [], "invalid")):
+            directory = self.root / "marker-malformed-{}".format(index)
+            directory.mkdir()
+            marker = directory / "run-summary.json"
+            with self.subTest(value=malformed), mock.patch.object(
+                    subject, "_require_completed_dependency_bounds"), \
+                    mock.patch.object(
+                        subject, "_read_completed_bundle",
+                        return_value=({}, {})), mock.patch.object(
+                        subject, "load_completed_timing_screen",
+                        return_value=malformed), self.assertRaisesRegex(
+                        subject.RunnerError, "reopen differs"):
+                subject._commit_completed_timing_screen(
+                    {}, directory, {"status": "complete"}, {}, {}, {},
+                    qualification)
+            self.assertFalse(marker.exists())
+
+    def test_hard_wall_finish_failure_rolls_back_marker(self) -> None:
+        directory = self.root / "marker-hard-wall-finish"
+        directory.mkdir()
+        marker = directory / "run-summary.json"
+        qualification = mock.Mock(
+            map_sha256="a" * 64, qualified_domain_sha256="b" * 64)
+        summary = {"status": "complete"}
+        artifact_snapshots = {
+            key: key.encode("ascii") for key in subject.COMPLETED_SOURCE_NAMES
+        }
+        artifact_fingerprints = {
+            key: (1, index + 1, stat.S_IFREG, 1, len(value), 1, 1)
+            for index, (key, value) in enumerate(artifact_snapshots.items())
+        }
+        directory_info = directory.stat()
+        reopened = {
+            "directory": str(directory.resolve()),
+            "directory_identity": (
+                directory_info.st_dev, directory_info.st_ino),
+            "run_summary": summary,
+            "freeze": {},
+            "summary": {},
+            "execution_receipt": {},
+            "timing_qualification": qualification,
+        }
+
+        def fail_finish() -> None:
+            raise OSError(errno.EIO, "injected hard-wall finish failure")
+
+        with mock.patch.object(
+                subject, "_require_completed_dependency_bounds"), \
+                mock.patch.object(
+                    subject, "load_completed_timing_screen",
+                    return_value=reopened), \
+                mock.patch.object(
+                    subject, "_read_completed_bundle",
+                    return_value=(artifact_snapshots,
+                                  artifact_fingerprints)), \
+                self.assertRaisesRegex(OSError, "hard-wall finish failure"):
+            subject._commit_completed_timing_screen(
+                {}, directory, summary, {}, {}, {}, qualification,
+                fail_finish)
+        self.assertFalse(marker.exists())
+
+    def test_post_publication_parent_replacement_rolls_back_pinned_marker(
+            self) -> None:
+        (_contract, _qualification, directory, _freeze, run_summary,
+         _validated) = self._completed_timing_fixture(
+             "marker-parent-replacement")
+        marker = directory / "run-summary.json"
+        marker.unlink()
+        moved = self.root / "moved-marker-parent-replacement"
+
+        def replace_parent_then_fail(*_args, **_kwargs):
+            directory.rename(moved)
+            directory.mkdir()
+            raise subject.RunnerError("injected parent replacement")
+
+        with mock.patch.object(
+                subject, "load_completed_timing_screen",
+                side_effect=replace_parent_then_fail), \
+                self.assertRaisesRegex(
+                    subject.RunnerError, "injected parent replacement"):
+            subject._commit_completed_timing_screen(
+                {}, directory, run_summary, {}, {}, {}, mock.Mock())
+        self.assertFalse(marker.exists())
+        self.assertFalse((moved / "run-summary.json").exists())
+
+    def test_parent_copy_substitution_rejects_and_rolls_back_only_installed_marker(
+            self) -> None:
+        (contract, qualification, directory, freeze, run_summary,
+         validated) = self._completed_timing_fixture("marker-parent-copy")
+        marker = directory / "run-summary.json"
+        marker.unlink()
+        moved = self.root / "moved-marker-parent-copy"
+        replacement = self.root / "replacement-marker-parent-copy"
+        copied_marker_identity = []
+        real_loader = subject.load_completed_timing_screen
+
+        def substitute_parent_then_load(input_contract, input_directory):
+            shutil.copytree(str(directory), str(replacement))
+            copied = replacement / "run-summary.json"
+            copied_info = copied.stat()
+            copied_marker_identity.append(
+                (copied_info.st_dev, copied_info.st_ino))
+            directory.rename(moved)
+            replacement.rename(directory)
+            loaded = real_loader(input_contract, input_directory)
+            directory.rename(replacement)
+            moved.rename(directory)
+            return loaded
+
+        with mock.patch.object(
+                contract_api, "load_timing_qualification_map",
+                return_value=qualification), mock.patch.object(
+                native_api, "validate_execution_receipt",
+                return_value=validated), mock.patch.object(
+                contract_api, "load_freeze_manifest", return_value=freeze), \
+                mock.patch.object(
+                    subject, "load_completed_timing_screen",
+                    side_effect=substitute_parent_then_load), \
+                self.assertRaisesRegex(
+                    subject.RunnerError,
+                    "reopen differs|changed after strict reopen"):
+            subject._commit_completed_timing_screen(
+                contract, directory, run_summary, freeze,
+                validated["summary"], validated["execution_receipt"],
+                qualification)
+        self.assertEqual(len(copied_marker_identity), 1)
+        self.assertFalse(marker.exists())
+        self.assertFalse(moved.exists())
+        visible = (replacement / "run-summary.json").stat()
+        self.assertEqual(
+            (visible.st_dev, visible.st_ino), copied_marker_identity[0])
+
+    def test_post_validation_dependency_mutation_rolls_back_marker(self) \
+            -> None:
+        (contract, qualification, directory, freeze, run_summary,
+         validated) = self._completed_timing_fixture("marker-dependency-race")
+        marker = directory / "run-summary.json"
+        marker.unlink()
+        replacement = self.root / "late-results-replacement.jsonl"
+        replacement.write_bytes(b'{"late_mutation":true}\n')
+        mutated = False
+
+        def mutate_during_reopen(*_args, **_kwargs):
+            nonlocal mutated
+            if not mutated:
+                os.replace(
+                    str(replacement), str(directory / "timing-results.jsonl"))
+                mutated = True
+            return validated
+
+        with mock.patch.object(
+                contract_api, "load_timing_qualification_map",
+                return_value=qualification), mock.patch.object(
+                native_api, "validate_execution_receipt",
+                side_effect=mutate_during_reopen), mock.patch.object(
+                contract_api, "load_freeze_manifest", return_value=freeze), \
+                self.assertRaisesRegex(
+                    subject.RunnerError, "changed during semantic validation"):
+            subject._commit_completed_timing_screen(
+                contract, directory, run_summary, freeze,
+                validated["summary"], validated["execution_receipt"],
+                qualification)
+        self.assertTrue(mutated)
+        self.assertFalse(marker.exists())
+
+    def test_post_loader_dependency_mutation_rolls_back_marker(self) -> None:
+        (contract, qualification, directory, freeze, run_summary,
+         validated) = self._completed_timing_fixture("marker-post-loader-race")
+        marker = directory / "run-summary.json"
+        marker.unlink()
+        result_path = directory / "timing-results.jsonl"
+        replacement = self.root / "post-loader-results-replacement.jsonl"
+        replacement.write_bytes(b'{"post_loader_mutation":true}\n')
+        real_require = subject._require_completion_marker
+        mutated = False
+
+        def require_then_mutate(*args, **kwargs):
+            nonlocal mutated
+            real_require(*args, **kwargs)
+            os.replace(str(replacement), str(result_path))
+            mutated = True
+
+        with mock.patch.object(
+                contract_api, "load_timing_qualification_map",
+                return_value=qualification), mock.patch.object(
+                native_api, "validate_execution_receipt",
+                return_value=validated), mock.patch.object(
+                contract_api, "load_freeze_manifest", return_value=freeze), \
+                mock.patch.object(
+                    subject, "_require_completion_marker",
+                    side_effect=require_then_mutate), \
+                self.assertRaisesRegex(
+                    subject.RunnerError, "changed after strict reopen"):
+            subject._commit_completed_timing_screen(
+                contract, directory, run_summary, freeze,
+                validated["summary"], validated["execution_receipt"],
+                qualification)
+        self.assertTrue(mutated)
+        self.assertFalse(marker.exists())
+
+    def test_runner_has_no_explicit_failure_point_after_summary_commit(
+            self) -> None:
+        source = inspect.getsource(subject.run_short_screen)
+        tail = source.split("_commit_completed_timing_screen(", 1)[1]
+        before_return = tail.split("return summary", 1)[0]
+        self.assertNotIn("_remaining(", before_return)
+        self.assertNotIn("_git_head(", before_return)
+        self.assertNotIn("fail(", before_return)
+
     def test_qualification_pool_is_quit_and_reaped_before_exact_eight_spawn(
             self) -> None:
         contract = contract_api.load_contract()
@@ -813,13 +1272,18 @@ class NativeRunnerTests(unittest.TestCase):
         def restore_affinity(_affinity):
             lifecycle.append("affinity_restored")
 
-        def publish_summary(path, value):
+        published_summary = {}
+
+        def publish_summary(path, value, **_kwargs):
             if path.name == "run-summary.json":
                 self.assertTrue(all(
                     worker.process.poll() is not None
                     for worker in qualification_workers + timing_workers))
                 self.assertIn("affinity_restored", lifecycle)
                 lifecycle.append("summary_published")
+                published_summary.update(value)
+                return (123, 456)
+            raise AssertionError("unexpected completion marker path")
 
         description = {
             "binary_sha256": "a" * 64,
@@ -843,6 +1307,14 @@ class NativeRunnerTests(unittest.TestCase):
                 "dimm_max_millic": 40000,
             },
         }
+        frozen = {"trace_manifest_sha256": "e" * 64}
+        artifact_snapshots = {
+            key: key.encode("ascii") for key in subject.COMPLETED_SOURCE_NAMES
+        }
+        artifact_fingerprints = {
+            key: (1, index + 1, stat.S_IFREG, 1, len(value), 1, 1)
+            for index, (key, value) in enumerate(artifact_snapshots.items())
+        }
 
         def assembled(_contract, kind, *_args, **_kwargs):
             self.assertEqual(kind, "timing")
@@ -855,6 +1327,31 @@ class NativeRunnerTests(unittest.TestCase):
             return {
                 "summary": {"validated": True},
                 "execution_receipt": value,
+            }
+
+        validation_modes = []
+
+        def validate(*args, **kwargs):
+            live = kwargs.get("verify_live_sampler")
+            validation_modes.append(live)
+            if live is False:
+                self.assertIn("timing_reaped", lifecycle)
+                self.assertIn("affinity_restored", lifecycle)
+                lifecycle.append("post_shutdown_validation")
+            return assembled(*args, **kwargs)
+
+        def reopen(_contract, _directory):
+            value = assembled(contract, "timing")
+            directory_info = _directory.stat()
+            return {
+                "directory": str(_directory.resolve()),
+                "directory_identity": (
+                    directory_info.st_dev, directory_info.st_ino),
+                "run_summary": dict(published_summary),
+                "freeze": frozen,
+                "summary": value["summary"],
+                "execution_receipt": value["execution_receipt"],
+                "timing_qualification": qualification,
             }
 
         args = mock.Mock(
@@ -905,7 +1402,7 @@ class NativeRunnerTests(unittest.TestCase):
                 return_value="e" * 64),
             mock.patch.object(
                 subject, "write_development_timing_freeze",
-                return_value={"trace_manifest_sha256": "e" * 64}),
+                return_value=frozen),
             mock.patch.object(subject, "_pin_controller"),
             mock.patch.object(
                 subject, "_restore_controller_affinity",
@@ -918,12 +1415,23 @@ class NativeRunnerTests(unittest.TestCase):
                 native_api, "assemble_results", side_effect=assembled),
             mock.patch.object(
                 native_api, "validate_execution_receipt",
-                side_effect=assembled),
+                side_effect=validate),
+            mock.patch.object(
+                contract_api, "load_freeze_manifest", return_value=frozen),
             mock.patch.object(
                 contract_api, "architecture_artifact_sha256",
                 return_value="9" * 64),
             mock.patch.object(
-                subject, "_atomic_write_object", side_effect=publish_summary),
+                subject, "_require_completed_dependency_bounds"),
+            mock.patch.object(
+                subject, "_publish_completion_marker",
+                side_effect=publish_summary),
+            mock.patch.object(
+                subject, "load_completed_timing_screen", side_effect=reopen),
+            mock.patch.object(subject, "_require_completion_marker"),
+            mock.patch.object(
+                subject, "_read_completed_bundle",
+                return_value=(artifact_snapshots, artifact_fingerprints)),
         )
         with ExitStack() as stack:
             for patcher in patches:
@@ -943,6 +1451,7 @@ class NativeRunnerTests(unittest.TestCase):
         self.assertEqual(result["qualification_max_retry_offset"], 2)
         self.assertEqual(result["qualification_sum_retry_offsets"], 3)
         self.assertEqual(spawn_count, 2)
+        self.assertEqual(validation_modes, [True, False])
         self.assertTrue(all(
             worker.process.poll() is not None for worker in timing_workers))
         self.assertLess(
@@ -953,6 +1462,9 @@ class NativeRunnerTests(unittest.TestCase):
             lifecycle.index("affinity_restored"))
         self.assertLess(
             lifecycle.index("affinity_restored"),
+            lifecycle.index("post_shutdown_validation"))
+        self.assertLess(
+            lifecycle.index("post_shutdown_validation"),
             lifecycle.index("summary_published"))
 
     def test_affinity_restore_failure_never_publishes_complete_summary(
@@ -1276,8 +1788,12 @@ class NativeRunnerTests(unittest.TestCase):
             with self.subTest(repetitions=repetitions):
                 candidate = self._timing_contract(repetitions)
                 qualification = self._qualification(candidate)
-                waves = subject._timing_job_waves(
-                    candidate, len(panels), qualification)
+                bounded_cells = candidate["timing"]["domains"][
+                    "development"]["expected_cells"]
+                with mock.patch.object(
+                        subject, "FROZEN_TIMING_BASE_CELLS", bounded_cells):
+                    waves = subject._timing_job_waves(
+                        candidate, len(panels), qualification)
                 cells = list(contract_api.iter_timing_cells(
                     candidate, "development", qualification))
                 round_count = repetitions // subject.TIMING_WORKER_COUNT
@@ -1341,8 +1857,10 @@ class NativeRunnerTests(unittest.TestCase):
                     counts == [33] * subject.TIMING_WORKER_COUNT
                     for counts in worker_counts.values()))
 
-                rebuilt = subject._timing_job_waves(
-                    candidate, len(panels), qualification)
+                with mock.patch.object(
+                        subject, "FROZEN_TIMING_BASE_CELLS", bounded_cells):
+                    rebuilt = subject._timing_job_waves(
+                        candidate, len(panels), qualification)
                 self.assertEqual(
                     [(rotation, [job.command() for job in jobs])
                      for rotation, jobs in waves],
@@ -1377,8 +1895,12 @@ class NativeRunnerTests(unittest.TestCase):
             contract, [value[0] for value in subject.EXPECTED_ARMS])
         cells = list(contract_api.iter_timing_cells(
             contract, "development", qualification))
-        waves = subject._timing_job_waves(
-            contract, len(panels), qualification)
+        with mock.patch.object(
+                subject, "FROZEN_TIMING_BASE_CELLS",
+                contract["timing"]["domains"]["development"][
+                    "expected_cells"]):
+            waves = subject._timing_job_waves(
+                contract, len(panels), qualification)
         first_wave = waves[0][1]
         self.assertEqual(
             [job.retry_offset for job in first_wave], expected_first)
@@ -1416,22 +1938,25 @@ class NativeRunnerTests(unittest.TestCase):
         mutations["bad_replicate"] = bad_replicate
         for name, cells in mutations.items():
             with self.subTest(name=name), mock.patch.object(
-                    contract_api, "iter_timing_cells",
-                    side_effect=lambda _contract, _phase, _qualification,
-                    values=cells:
-                        iter(values)):
+                    subject, "FROZEN_TIMING_BASE_CELLS", len(original)), \
+                    mock.patch.object(
+                        contract_api, "iter_timing_cells",
+                        side_effect=lambda _contract, _phase, _qualification,
+                        values=cells:
+                            iter(values)):
                 with self.assertRaises(subject.RunnerError):
                     subject._timing_job_waves(
                         contract, panel_count, qualification)
         for bad_panel_count in (True, panel_count - 1, panel_count + 1):
-            with self.subTest(panel_count=bad_panel_count):
+            with self.subTest(panel_count=bad_panel_count), mock.patch.object(
+                    subject, "FROZEN_TIMING_BASE_CELLS", len(original)):
                 with self.assertRaises(subject.RunnerError):
                     subject._timing_job_waves(
                         contract, bad_panel_count, qualification)
 
-    def test_timing_wave_builder_derives_multi_candidate_cohort_count(self) \
+    def test_timing_wave_builder_rejects_multi_candidate_panel_drift(self) \
             -> None:
-        contract = self._timing_contract(16)
+        contract = contract_api.load_contract()
         qualification = self._qualification(contract)
         expanded_arms = subject.EXPECTED_ARMS + (
             ("candidate_two", "wirehair2_experiment"),
@@ -1440,14 +1965,36 @@ class NativeRunnerTests(unittest.TestCase):
             roster = [value[0] for value in expanded_arms]
             panel_count = len(contract_api.timing_panels(contract, roster))
             self.assertEqual(panel_count, 18)
-            waves = subject._timing_job_waves(
-                contract, panel_count, qualification)
-            self.assertEqual(
-                len(waves),
-                contract_api.timing_cohort_count(
-                    contract, "development", roster) * 2)
-            self.assertEqual(
-                sum(len(jobs) for _, jobs in waves), 384 * panel_count)
+            with self.assertRaisesRegex(
+                    subject.RunnerError, "panel cardinality differs"):
+                subject._timing_job_waves(
+                    contract, panel_count, qualification)
+
+    def test_development_timing_shape_rejects_artifact_bound_drift(
+            self) -> None:
+        contract = contract_api.load_contract()
+        panel_count = len(contract_api.timing_panels(
+            contract, [value[0] for value in subject.EXPECTED_ARMS]))
+        self.assertEqual(
+            subject._development_timing_shape(contract, panel_count)[2],
+            subject.FROZEN_TIMING_BASE_CELLS)
+        for expected_cells in (
+                subject.FROZEN_TIMING_BASE_CELLS - 1,
+                subject.FROZEN_TIMING_BASE_CELLS + 1):
+            candidate = copy.deepcopy(contract)
+            candidate["timing"]["domains"]["development"][
+                "expected_cells"] = expected_cells
+            with self.subTest(expected_cells=expected_cells), \
+                    self.assertRaisesRegex(
+                        subject.RunnerError, "cell cardinality differs"):
+                subject._development_timing_shape(candidate, panel_count)
+        for candidate_panels in (
+                subject.FROZEN_TIMING_PANEL_COUNT - 1,
+                subject.FROZEN_TIMING_PANEL_COUNT + 1):
+            with self.subTest(panel_count=candidate_panels), \
+                    self.assertRaisesRegex(
+                        subject.RunnerError, "panel cardinality differs"):
+                subject._development_timing_shape(contract, candidate_panels)
 
     def test_timing_worker_count_rejects_before_native_dispatch(self) -> None:
         contract = self._timing_contract(16)
@@ -1717,7 +2264,7 @@ class NativeRunnerTests(unittest.TestCase):
             -> None:
         construction_paths = []
 
-        def construct(path):
+        def construct(path, *_args):
             construction_paths.append(path)
             raise OSError("injected timing sink construction failure")
 
