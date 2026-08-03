@@ -213,8 +213,9 @@ PrecodeParams PrecodeParamsForAttempt(
     Evaluate one packet row over all intermediate blocks.
 
     `block_out[0, block_bytes)` must not overlap any byte in the complete
-    `(K + P) * block_bytes` intermediate-block array.  Overlap is rejected
-    before writing either `block_out` or `block_ops_out`.
+    `(K + P) * block_bytes` intermediate-block array.  When non-null, the
+    `block_ops_out` object must not overlap either range.  Overlap is rejected
+    before writing `block_out`, `block_ops_out`, or intermediate storage.
 */
 bool EvaluatePacketBlock(
     const PrecodeSystem& system,
@@ -266,6 +267,13 @@ bool EvaluatePacketBlockForValidatedSystemWithRuntime(
     every failure.  When resume_state is non-null, a rank-deficient residual
     within the cap atomically replaces it with an active affine/pivot
     checkpoint; cap failures leave it unchanged and require a cold retry.
+    The output vector must not alias Values, PivotCoefficients, PivotRhs,
+    HavePivot, CoefficientScratch, or RhsScratch in that same resume_state;
+    such an alias returns InvalidInput without changing output, state, or stats.
+    When resume_state is non-null, stats must not point to that state's Stats
+    member; this exact alias likewise returns InvalidInput before allocation or
+    mutation because diagnostic publication and checkpoint transactionality
+    cannot both be honored through the same object.
     `stats` is diagnostic rather than transactional output: completed algebraic
     outcomes publish their counters, while validation failures and allocation
     failures before a resumable checkpoint may leave the caller's prior value
@@ -316,6 +324,15 @@ WirehairResult SolvePrecodeSystemForValidatedSystemWithRuntime(
     Allocations finish before an inserting call changes the algebraic state, so
     OOM is retryable.  On OOM, stats receives the unchanged checkpoint counters
     when non-null.  Output remains unchanged on NeedMore and every failure.
+    A valid block-sized `block_data` range may reference CoefficientScratch, or
+    exactly RhsScratch, in resume_state; the packet is consumed before either
+    reusable scratch vector is modified.
+    The output vector must not alias Values, PivotCoefficients, PivotRhs,
+    HavePivot, CoefficientScratch, or RhsScratch in resume_state; such an alias
+    returns InvalidInput without changing output, state, or stats.
+    `stats` likewise must not point to resume_state.Stats; this exact alias is
+    rejected before row generation, allocation, or mutation so successful
+    checkpoint clearing cannot repopulate part of the cleared state.
 */
 WirehairResult ResumePrecodeSystem(
     const PrecodeSystem& system,

@@ -213,6 +213,82 @@ bool MemoryRangesOverlap(
     return firstBegin < secondEnd && secondBegin < firstEnd;
 }
 
+bool OutputOverlapsMessageInput(
+    const void* message,
+    uint64_t messageBytes,
+    const void* output,
+    size_t outputBytes)
+{
+    if (!message || !output || messageBytes == 0u || outputBytes == 0u) {
+        return false;
+    }
+    if (messageBytes >
+        (uint64_t)std::numeric_limits<size_t>::max())
+    {
+        // Defer unrepresentable inputs to the constructor's established
+        // dimension/platform validation rather than changing result priority.
+        return false;
+    }
+    const uintptr_t messageBegin = reinterpret_cast<uintptr_t>(message);
+    if ((size_t)messageBytes >
+        std::numeric_limits<uintptr_t>::max() - messageBegin)
+    {
+        // Likewise, a wrapping input is invalid independently of aliasing.
+        return false;
+    }
+    return MemoryRangesOverlap(
+        message, (size_t)messageBytes, output, outputBytes);
+}
+
+bool EncoderConstructorRangesOverlap(
+    const void* message,
+    uint64_t messageBytes,
+    void* serializedProfileOut,
+    uint32_t* serializedProfileBytesOut,
+    WirehairV2Codec* codecOut)
+{
+    if ((serializedProfileOut && serializedProfileBytesOut &&
+            MemoryRangesOverlap(
+                serializedProfileOut,
+                WIREHAIR_V2_PROFILE_SERIALIZED_BYTES,
+                serializedProfileBytesOut,
+                sizeof(*serializedProfileBytesOut))) ||
+        (serializedProfileOut && codecOut &&
+            MemoryRangesOverlap(
+                serializedProfileOut,
+                WIREHAIR_V2_PROFILE_SERIALIZED_BYTES,
+                codecOut,
+                sizeof(*codecOut))) ||
+        (serializedProfileBytesOut && codecOut &&
+            MemoryRangesOverlap(
+                serializedProfileBytesOut,
+                sizeof(*serializedProfileBytesOut),
+                codecOut,
+                sizeof(*codecOut))) ||
+        OutputOverlapsMessageInput(
+            message, messageBytes,
+            serializedProfileBytesOut,
+            sizeof(*serializedProfileBytesOut)) ||
+        OutputOverlapsMessageInput(
+            message, messageBytes,
+            codecOut, sizeof(*codecOut)))
+    {
+        return true;
+    }
+    return false;
+}
+
+bool CodecOutputOverlapsCanonicalProfile(
+    const void* serializedProfile,
+    WirehairV2Codec* codecOut)
+{
+    return serializedProfile && codecOut && MemoryRangesOverlap(
+        serializedProfile,
+        WIREHAIR_V2_PROFILE_SERIALIZED_BYTES,
+        codecOut,
+        sizeof(*codecOut));
+}
+
 wirehair_v2::SeedProfile ExpandProfile(const WirehairV2Profile& profile)
 {
     if (!IsSupportedProfileId(profile.profile_id)) {
@@ -378,6 +454,15 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_profile_serialize(
     uint32_t outputCapacity,
     uint32_t* bytesOut)
 {
+    if (bytesOut &&
+        ((profile && MemoryRangesOverlap(
+            profile, sizeof(*profile), bytesOut, sizeof(*bytesOut))) ||
+         (output && MemoryRangesOverlap(
+            output, WIREHAIR_V2_PROFILE_SERIALIZED_BYTES,
+            bytesOut, sizeof(*bytesOut)))))
+    {
+        return WirehairV2_InvalidInput;
+    }
     if (bytesOut) {
         *bytesOut = WIREHAIR_V2_PROFILE_SERIALIZED_BYTES;
     }
@@ -485,6 +570,12 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create(
     uint32_t* serializedProfileBytesOut,
     WirehairV2Codec* codecOut)
 {
+    if (EncoderConstructorRangesOverlap(
+            message, messageBytes,
+            serializedProfileOut, serializedProfileBytesOut, codecOut))
+    {
+        return WirehairV2_InvalidInput;
+    }
     if (serializedProfileBytesOut) {
         *serializedProfileBytesOut = WIREHAIR_V2_PROFILE_SERIALIZED_BYTES;
     }
@@ -561,6 +652,12 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create_profile_id(
     uint32_t* serializedProfileBytesOut,
     WirehairV2Codec* codecOut)
 {
+    if (EncoderConstructorRangesOverlap(
+            message, messageBytes,
+            serializedProfileOut, serializedProfileBytesOut, codecOut))
+    {
+        return WirehairV2_InvalidInput;
+    }
     if (serializedProfileBytesOut) {
         *serializedProfileBytesOut = WIREHAIR_V2_PROFILE_SERIALIZED_BYTES;
     }
@@ -646,13 +743,25 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create_profile(
     if (!codecOut) {
         return WirehairV2_InvalidInput;
     }
-    *codecOut = nullptr;
+    if (CodecOutputOverlapsCanonicalProfile(serializedProfile, codecOut)) {
+        return WirehairV2_InvalidInput;
+    }
+    // Parse into a local before touching codecOut.  A valid descriptor
+    // establishes the message range for the second alias check, while an
+    // ordinary descriptor failure retains the clear-on-failure contract.
     WirehairV2Profile profile = {};
     const WirehairV2Result parse_result = wirehair_v2_profile_deserialize(
         serializedProfile, serializedProfileBytes, &profile);
     if (parse_result != WirehairV2_Success) {
+        *codecOut = nullptr;
         return parse_result;
     }
+    if (OutputOverlapsMessageInput(
+            message, profile.message_bytes, codecOut, sizeof(*codecOut)))
+    {
+        return WirehairV2_InvalidInput;
+    }
+    *codecOut = nullptr;
     PublicCodec* codec = nullptr;
     const WirehairV2Result create_result =
         CreateEncoderForProfile(message, profile, codec);
@@ -668,6 +777,9 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_decoder_create(
     WirehairV2Codec* codecOut)
 {
     if (!codecOut) {
+        return WirehairV2_InvalidInput;
+    }
+    if (CodecOutputOverlapsCanonicalProfile(serializedProfile, codecOut)) {
         return WirehairV2_InvalidInput;
     }
     *codecOut = nullptr;
@@ -709,13 +821,13 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encode(
     uint32_t outputCapacity,
     uint32_t* dataBytesOut)
 {
-    if (dataBytesOut) {
-        *dataBytesOut = 0u;
-    }
     PublicCodec* impl = FromHandle(codec);
     if (!impl || impl->Mode != CodecMode::Encoder ||
         !blockDataOut || !dataBytesOut)
     {
+        if (dataBytesOut) {
+            *dataBytesOut = 0u;
+        }
         return WirehairV2_InvalidInput;
     }
     const uint64_t block_count = BlockCountWide(
@@ -724,6 +836,11 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encode(
     if (block_count != 0u && blockId == block_count - 1u) {
         required = (uint32_t)(impl->MessageBytes -
             (block_count - 1u) * impl->BlockBytes);
+    }
+    if (MemoryRangesOverlap(
+            blockDataOut, required, dataBytesOut, sizeof(*dataBytesOut)))
+    {
+        return WirehairV2_InvalidInput;
     }
     *dataBytesOut = required;
     if (outputCapacity < required) {

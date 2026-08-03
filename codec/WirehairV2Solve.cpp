@@ -1633,6 +1633,20 @@ static bool EvaluatePacketBlockImpl(
     {
         return false;
     }
+    if (block_ops_out &&
+        (MemoryRangesOverlap(
+             block_ops_out,
+             sizeof(*block_ops_out),
+             block_out,
+             block_bytes) ||
+         MemoryRangesOverlap(
+             block_ops_out,
+             sizeof(*block_ops_out),
+             intermediate_blocks,
+             (size_t)intermediate_bytes_wide)))
+    {
+        return false;
+    }
     if (validate_system && !ValidatePrecodeSystem(system)) {
         return false;
     }
@@ -1919,6 +1933,9 @@ WirehairResult SolvePrecodeSystem(
     PrecodeSolveStats* stats,
     PrecodeSolveResumeState* resume_state)
 {
+    if (resume_state && stats == &resume_state->Stats) {
+        return Wirehair_InvalidInput;
+    }
     const uint64_t P_wide = (uint64_t)system.Params.Staircase +
         system.Params.DenseRows + system.Params.HeavyRows;
     PacketRowRuntime runtime;
@@ -1935,6 +1952,18 @@ WirehairResult SolvePrecodeSystem(
         intermediate_blocks_out, stats, resume_state);
 }
 
+static bool SolveOutputAliasesResumeState(
+    const std::vector<uint8_t>& output,
+    const PrecodeSolveResumeState& state)
+{
+    return &output == &state.Values ||
+        &output == &state.PivotCoefficients ||
+        &output == &state.PivotRhs ||
+        &output == &state.HavePivot ||
+        &output == &state.CoefficientScratch ||
+        &output == &state.RhsScratch;
+}
+
 static WirehairResult SolvePrecodeSystemImpl(
     const PrecodeSystem& system,
     const PacketRowConfig& config,
@@ -1946,6 +1975,13 @@ static WirehairResult SolvePrecodeSystemImpl(
     PrecodeSolveResumeState* resume_state,
     bool validate_system)
 {
+    if (resume_state &&
+        (stats == &resume_state->Stats ||
+         SolveOutputAliasesResumeState(
+             intermediate_blocks_out, *resume_state)))
+    {
+        return Wirehair_InvalidInput;
+    }
     PrecodeSolveStats st = {};
     const uint32_t K = system.Params.BlockCount;
     const uint32_t S = system.Params.Staircase;
@@ -2986,6 +3022,11 @@ WirehairResult ResumePrecodeSystem(
     PrecodeSolveStats* stats,
     bool allow_insert)
 {
+    if (stats == &state.Stats ||
+        SolveOutputAliasesResumeState(intermediate_blocks_out, state))
+    {
+        return Wirehair_InvalidInput;
+    }
     const uint32_t K = system.Params.BlockCount;
     const uint64_t P_wide = (uint64_t)system.Params.Staircase +
         system.Params.DenseRows + system.Params.HeavyRows;
@@ -3043,8 +3084,11 @@ WirehairResult ResumePrecodeSystem(
             state.CoefficientScratch : checked_coeff;
         std::vector<uint8_t>& rhs = allow_insert ?
             state.RhsScratch : checked_rhs;
+        // Consume the caller's packet before reusing checkpoint scratch:
+        // block_data may be a valid range inside CoefficientScratch.  Use
+        // overlap-safe copying for the exact RhsScratch retry alias as well.
+        std::memmove(rhs.data(), block_data, block_bytes);
         std::fill(coeff.begin(), coeff.end(), uint8_t{0});
-        std::memcpy(rhs.data(), block_data, block_bytes);
         for (uint32_t column : columns)
         {
             if (column >= state.ColumnCount) {

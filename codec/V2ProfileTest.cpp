@@ -46,6 +46,492 @@ void FillMessage(std::vector<uint8_t>& message)
     }
 }
 
+WirehairV2Result CallSelectingEncoderConstructor(
+    bool explicit_profile,
+    const void* message,
+    uint64_t message_bytes,
+    uint32_t block_bytes,
+    void* serialized_profile_out,
+    uint32_t serialized_profile_capacity,
+    uint32_t* serialized_profile_bytes_out,
+    WirehairV2Codec* codec_out)
+{
+    if (explicit_profile)
+    {
+        return wirehair_v2_encoder_create_profile_id(
+            WIREHAIR_V2_PROFILE_CURRENT,
+            message, message_bytes, block_bytes,
+            serialized_profile_out, serialized_profile_capacity,
+            serialized_profile_bytes_out, codec_out);
+    }
+    return wirehair_v2_encoder_create(
+        message, message_bytes, block_bytes,
+        serialized_profile_out, serialized_profile_capacity,
+        serialized_profile_bytes_out, codec_out);
+}
+
+bool CheckSelectingConstructorOverlapGuards(
+    const std::vector<uint8_t>& disjoint_message)
+{
+    static const uint32_t kProfileBytes =
+        WIREHAIR_V2_PROFILE_SERIALIZED_BYTES;
+    enum OverlapCase
+    {
+        DescriptorSize,
+        DescriptorCodec,
+        SizeCodec,
+        SizeMessage,
+        CodecMessage,
+        OverlapCaseCount
+    };
+    enum RequestCase
+    {
+        FullRequest,
+        ShortRequest,
+        InvalidRequest,
+        RequestCaseCount
+    };
+
+    const std::vector<uint8_t> message_before = disjoint_message;
+    for (unsigned explicit_profile = 0u;
+         explicit_profile < 2u;
+         ++explicit_profile)
+    {
+        for (unsigned request_case = 0u;
+             request_case < RequestCaseCount;
+             ++request_case)
+        {
+            for (unsigned overlap_case = 0u;
+                 overlap_case < OverlapCaseCount;
+                 ++overlap_case)
+            {
+                for (unsigned partial = 0u; partial < 2u; ++partial)
+                {
+                    if (overlap_case == SizeCodec && partial != 0u &&
+                        sizeof(WirehairV2Codec) == sizeof(uint32_t))
+                    {
+                        // Two naturally aligned four-byte output objects can
+                        // only have identical or disjoint ranges.
+                        continue;
+                    }
+                    alignas(std::max_align_t) uint8_t storage[512];
+                    std::memset(storage, 0xa5, sizeof(storage));
+                    uint8_t storage_before[sizeof(storage)];
+                    std::memcpy(
+                        storage_before, storage, sizeof(storage_before));
+
+                    const void* message = disjoint_message.data();
+                    void* descriptor = storage + 256u;
+                    uint32_t* size_out =
+                        reinterpret_cast<uint32_t*>(storage + 320u);
+                    WirehairV2Codec* codec_out =
+                        reinterpret_cast<WirehairV2Codec*>(storage + 336u);
+
+                    switch ((OverlapCase)overlap_case)
+                    {
+                    case DescriptorSize:
+                        descriptor = storage + (partial ? 66u : 64u);
+                        size_out = reinterpret_cast<uint32_t*>(storage + 64u);
+                        break;
+                    case DescriptorCodec:
+                        descriptor = storage + (partial ? 66u : 64u);
+                        codec_out = reinterpret_cast<WirehairV2Codec*>(
+                            storage + 64u);
+                        break;
+                    case SizeCodec:
+                        size_out = reinterpret_cast<uint32_t*>(
+                            storage + (partial ? 68u : 64u));
+                        codec_out = reinterpret_cast<WirehairV2Codec*>(
+                            storage + 64u);
+                        break;
+                    case SizeMessage:
+                        message = storage + (partial ? 66u : 64u);
+                        size_out = reinterpret_cast<uint32_t*>(storage + 64u);
+                        break;
+                    case CodecMessage:
+                        message = storage + (partial ? 66u : 64u);
+                        codec_out = reinterpret_cast<WirehairV2Codec*>(
+                            storage + 64u);
+                        break;
+                    default:
+                        return false;
+                    }
+
+                    const uint32_t capacity =
+                        request_case == ShortRequest ?
+                            kProfileBytes - 1u : kProfileBytes;
+                    const uint32_t block_bytes =
+                        request_case == InvalidRequest ? 0u : 16u;
+                    const WirehairV2Result result =
+                        CallSelectingEncoderConstructor(
+                            explicit_profile != 0u,
+                            message, disjoint_message.size(), block_bytes,
+                            descriptor, capacity, size_out, codec_out);
+                    if (result != WirehairV2_InvalidInput ||
+                        std::memcmp(
+                            storage, storage_before, sizeof(storage)) != 0 ||
+                        disjoint_message != message_before)
+                    {
+                        std::fprintf(stderr,
+                            "V2 constructor overlap changed storage: "
+                            "explicit=%u request=%u overlap=%u partial=%u "
+                            "result=%d\n",
+                            explicit_profile, request_case, overlap_case,
+                            partial, (int)result);
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+
+    for (unsigned explicit_profile = 0u;
+         explicit_profile < 2u;
+         ++explicit_profile)
+    {
+        uint8_t descriptor[kProfileBytes];
+        std::memset(descriptor, 0x5a, sizeof(descriptor));
+        uint8_t descriptor_before[sizeof(descriptor)];
+        std::memcpy(
+            descriptor_before, descriptor, sizeof(descriptor_before));
+        uint32_t profile_bytes = UINT32_C(0xa5a5a5a5);
+        const WirehairV2Codec codec_sentinel =
+            reinterpret_cast<WirehairV2Codec>(uintptr_t(1));
+        WirehairV2Codec codec = codec_sentinel;
+        const WirehairV2Result result = CallSelectingEncoderConstructor(
+            explicit_profile != 0u,
+            disjoint_message.data(), UINT64_MAX, 16u,
+            descriptor, sizeof(descriptor), &profile_bytes, &codec);
+        if (result != WirehairV2_InvalidDimensions ||
+            profile_bytes != kProfileBytes || codec != nullptr ||
+            std::memcmp(
+                descriptor, descriptor_before, sizeof(descriptor)) != 0 ||
+            disjoint_message != message_before)
+        {
+            std::fprintf(stderr,
+                "V2 constructor UINT64_MAX precedence changed: "
+                "explicit=%u result=%d\n",
+                explicit_profile, (int)result);
+            if (result == WirehairV2_Success &&
+                codec != codec_sentinel)
+            {
+                wirehair_v2_free(codec);
+            }
+            return false;
+        }
+
+        std::memset(descriptor, 0x5a, sizeof(descriptor));
+        std::memcpy(
+            descriptor_before, descriptor, sizeof(descriptor_before));
+        codec = codec_sentinel;
+        const WirehairV2Result missing_size =
+            CallSelectingEncoderConstructor(
+                explicit_profile != 0u,
+                disjoint_message.data(), disjoint_message.size(), 16u,
+                descriptor, sizeof(descriptor), nullptr, &codec);
+        if (missing_size != WirehairV2_InvalidInput || codec != nullptr ||
+            std::memcmp(
+                descriptor, descriptor_before, sizeof(descriptor)) != 0 ||
+            disjoint_message != message_before)
+        {
+            std::fprintf(stderr,
+                "V2 constructor missing size-output behavior changed: "
+                "explicit=%u result=%d\n",
+                explicit_profile, (int)missing_size);
+            if (missing_size == WirehairV2_Success &&
+                codec != codec_sentinel)
+            {
+                wirehair_v2_free(codec);
+            }
+            return false;
+        }
+
+        std::memset(descriptor, 0x5a, sizeof(descriptor));
+        std::memcpy(
+            descriptor_before, descriptor, sizeof(descriptor_before));
+        profile_bytes = UINT32_C(0xa5a5a5a5);
+        const WirehairV2Result missing_codec =
+            CallSelectingEncoderConstructor(
+                explicit_profile != 0u,
+                disjoint_message.data(), disjoint_message.size(), 16u,
+                descriptor, sizeof(descriptor), &profile_bytes, nullptr);
+        if (missing_codec != WirehairV2_InvalidInput ||
+            profile_bytes != kProfileBytes ||
+            std::memcmp(
+                descriptor, descriptor_before, sizeof(descriptor)) != 0 ||
+            disjoint_message != message_before)
+        {
+            std::fprintf(stderr,
+                "V2 constructor missing codec-output behavior changed: "
+                "explicit=%u result=%d\n",
+                explicit_profile, (int)missing_codec);
+            return false;
+        }
+    }
+    return true;
+}
+
+bool CheckStagedDescriptorMessageAliases(
+    const std::vector<uint8_t>& message,
+    const uint8_t* expected_profile)
+{
+    static const uint32_t kProfileBytes =
+        WIREHAIR_V2_PROFILE_SERIALIZED_BYTES;
+    for (unsigned explicit_profile = 0u;
+         explicit_profile < 2u;
+         ++explicit_profile)
+    {
+        for (unsigned boundary = 0u; boundary < 2u; ++boundary)
+        {
+            for (unsigned short_output = 0u;
+                 short_output < 2u;
+                 ++short_output)
+            {
+                alignas(std::max_align_t) uint8_t storage[256];
+                std::memset(storage, 0x5a, sizeof(storage));
+                uint8_t* const message_in = storage + 64u;
+                std::memcpy(message_in, message.data(), message.size());
+                void* const descriptor_out = boundary ?
+                    message_in + message.size() - 2u : message_in;
+                uint8_t storage_before[sizeof(storage)];
+                std::memcpy(storage_before, storage, sizeof(storage_before));
+                uint32_t profile_bytes = UINT32_C(0xa5a5a5a5);
+                const WirehairV2Codec codec_sentinel =
+                    reinterpret_cast<WirehairV2Codec>(uintptr_t(1));
+                WirehairV2Codec codec = codec_sentinel;
+
+                const uint32_t capacity = short_output ?
+                    kProfileBytes - 1u : kProfileBytes;
+                const WirehairV2Result result =
+                    CallSelectingEncoderConstructor(
+                        explicit_profile != 0u,
+                        message_in, message.size(), 16u,
+                        descriptor_out, capacity, &profile_bytes, &codec);
+                if (short_output)
+                {
+                    if (result != WirehairV2_BufferTooSmall ||
+                        profile_bytes != kProfileBytes || codec != nullptr ||
+                        std::memcmp(
+                            storage, storage_before, sizeof(storage)) != 0)
+                    {
+                        std::fprintf(stderr,
+                            "V2 staged short descriptor/message alias failed: "
+                            "explicit=%u boundary=%u result=%d\n",
+                            explicit_profile, boundary, (int)result);
+                        if (result == WirehairV2_Success &&
+                            codec != codec_sentinel)
+                        {
+                            wirehair_v2_free(codec);
+                        }
+                        return false;
+                    }
+                    continue;
+                }
+
+                WirehairV2Result encode_result = WirehairV2_Error;
+                bool payload_ok =
+                    result == WirehairV2_Success && codec &&
+                    codec != codec_sentinel;
+                for (uint32_t block_id = 0u;
+                     payload_ok && block_id < 8u;
+                     ++block_id)
+                {
+                    const uint32_t expected_bytes =
+                        block_id == 7u ? 5u : 16u;
+                    uint8_t encoded[16] = {};
+                    uint32_t encoded_bytes = 0u;
+                    encode_result = wirehair_v2_encode(
+                        codec, block_id, encoded, sizeof(encoded),
+                        &encoded_bytes);
+                    payload_ok = encode_result == WirehairV2_Success &&
+                        encoded_bytes == expected_bytes &&
+                        std::memcmp(
+                            encoded,
+                            message.data() + (size_t)block_id * 16u,
+                            expected_bytes) == 0;
+                }
+                const bool ok =
+                    result == WirehairV2_Success &&
+                    profile_bytes == kProfileBytes && codec != nullptr &&
+                    std::memcmp(
+                        descriptor_out, expected_profile, kProfileBytes) == 0 &&
+                    payload_ok;
+                if (codec != codec_sentinel) {
+                    wirehair_v2_free(codec);
+                }
+                if (!ok)
+                {
+                    std::fprintf(stderr,
+                        "V2 staged descriptor/message alias failed: "
+                        "explicit=%u boundary=%u result=%d encode=%d\n",
+                        explicit_profile, boundary,
+                        (int)result, (int)encode_result);
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+bool CheckDescriptorConstructorOverlapGuards(
+    const std::vector<uint8_t>& message,
+    const uint8_t* canonical_profile)
+{
+    static const uint32_t kProfileBytes =
+        WIREHAIR_V2_PROFILE_SERIALIZED_BYTES;
+    enum DescriptorRequest
+    {
+        FullDescriptor,
+        ShortDescriptor,
+        InvalidDescriptor,
+        DescriptorRequestCount
+    };
+
+    const std::vector<uint8_t> message_before = message;
+    for (unsigned decoder = 0u; decoder < 2u; ++decoder)
+    {
+        for (unsigned request = 0u;
+             request < DescriptorRequestCount;
+             ++request)
+        {
+            for (unsigned partial = 0u; partial < 2u; ++partial)
+            {
+                alignas(std::max_align_t) uint8_t storage[128];
+                std::memset(storage, 0xa5, sizeof(storage));
+                uint8_t* const descriptor =
+                    storage + (partial ? 66u : 64u);
+                std::memcpy(
+                    descriptor, canonical_profile, kProfileBytes);
+                if (request == InvalidDescriptor) {
+                    descriptor[kProfileBytes - 1u] = 1u;
+                }
+                WirehairV2Codec* const codec_out =
+                    reinterpret_cast<WirehairV2Codec*>(storage + 64u);
+                uint8_t storage_before[sizeof(storage)];
+                std::memcpy(
+                    storage_before, storage, sizeof(storage_before));
+                const uint32_t descriptor_bytes =
+                    request == ShortDescriptor ?
+                        kProfileBytes - 1u : kProfileBytes;
+                const WirehairV2Result result = decoder ?
+                    wirehair_v2_decoder_create(
+                        descriptor, descriptor_bytes, codec_out) :
+                    wirehair_v2_encoder_create_profile(
+                        message.data(), descriptor, descriptor_bytes,
+                        codec_out);
+                if (result != WirehairV2_InvalidInput ||
+                    std::memcmp(
+                        storage, storage_before, sizeof(storage)) != 0 ||
+                    message != message_before)
+                {
+                    std::fprintf(stderr,
+                        "V2 descriptor/codec alias changed storage: "
+                        "decoder=%u request=%u partial=%u result=%d\n",
+                        decoder, request, partial, (int)result);
+                    return false;
+                }
+            }
+        }
+    }
+
+    for (unsigned partial = 0u; partial < 2u; ++partial)
+    {
+        alignas(std::max_align_t) uint8_t storage[256];
+        std::memset(storage, 0xa5, sizeof(storage));
+        uint8_t* const message_in = storage + (partial ? 66u : 64u);
+        std::memcpy(message_in, message.data(), message.size());
+        WirehairV2Codec* const codec_out =
+            reinterpret_cast<WirehairV2Codec*>(storage + 64u);
+        uint8_t storage_before[sizeof(storage)];
+        std::memcpy(storage_before, storage, sizeof(storage_before));
+        const WirehairV2Result result = wirehair_v2_encoder_create_profile(
+            message_in, canonical_profile, kProfileBytes, codec_out);
+        if (result != WirehairV2_InvalidInput ||
+            std::memcmp(storage, storage_before, sizeof(storage)) != 0)
+        {
+            std::fprintf(stderr,
+                "V2 profile encoder message/codec alias changed storage: "
+                "partial=%u result=%d\n",
+                partial, (int)result);
+            return false;
+        }
+    }
+
+    for (unsigned decoder = 0u; decoder < 2u; ++decoder)
+    {
+        for (unsigned request = ShortDescriptor;
+             request <= InvalidDescriptor;
+             ++request)
+        {
+            uint8_t descriptor[kProfileBytes];
+            std::memcpy(
+                descriptor, canonical_profile, sizeof(descriptor));
+            if (request == InvalidDescriptor) {
+                descriptor[kProfileBytes - 1u] = 1u;
+            }
+            uint8_t descriptor_before[sizeof(descriptor)];
+            std::memcpy(
+                descriptor_before, descriptor, sizeof(descriptor_before));
+            const WirehairV2Codec codec_sentinel =
+                reinterpret_cast<WirehairV2Codec>(uintptr_t(1));
+            WirehairV2Codec codec = codec_sentinel;
+            const uint32_t descriptor_bytes =
+                request == ShortDescriptor ?
+                    kProfileBytes - 1u : kProfileBytes;
+            const WirehairV2Result expected =
+                request == ShortDescriptor ?
+                    WirehairV2_InvalidSize : WirehairV2_ReservedNonzero;
+            const WirehairV2Result result = decoder ?
+                wirehair_v2_decoder_create(
+                    descriptor, descriptor_bytes, &codec) :
+                wirehair_v2_encoder_create_profile(
+                    message.data(), descriptor, descriptor_bytes, &codec);
+            if (result != expected || codec != nullptr ||
+                std::memcmp(
+                    descriptor, descriptor_before,
+                    sizeof(descriptor)) != 0 ||
+                message != message_before)
+            {
+                std::fprintf(stderr,
+                    "V2 disjoint descriptor failure changed: "
+                    "decoder=%u request=%u result=%d\n",
+                    decoder, request, (int)result);
+                if (result == WirehairV2_Success &&
+                    codec != codec_sentinel)
+                {
+                    wirehair_v2_free(codec);
+                }
+                return false;
+            }
+        }
+
+        const WirehairV2Codec codec_sentinel =
+            reinterpret_cast<WirehairV2Codec>(uintptr_t(1));
+        WirehairV2Codec codec = codec_sentinel;
+        const WirehairV2Result result = decoder ?
+            wirehair_v2_decoder_create(
+                nullptr, kProfileBytes, &codec) :
+            wirehair_v2_encoder_create_profile(
+                message.data(), nullptr, kProfileBytes, &codec);
+        if (result != WirehairV2_InvalidInput || codec != nullptr ||
+            message != message_before)
+        {
+            std::fprintf(stderr,
+                "V2 null descriptor behavior changed: "
+                "decoder=%u result=%d\n",
+                decoder, (int)result);
+            if (result == WirehairV2_Success &&
+                codec != codec_sentinel)
+            {
+                wirehair_v2_free(codec);
+            }
+            return false;
+        }
+    }
+    return true;
+}
+
 bool CheckMalformedProfiles(const uint8_t* golden)
 {
     WirehairV2Profile parsed;
@@ -616,6 +1102,22 @@ int main()
         return 1;
     }
 
+    if (!CheckSelectingConstructorOverlapGuards(message) ||
+        !CheckStagedDescriptorMessageAliases(message, ExpectedProfile) ||
+        !CheckDescriptorConstructorOverlapGuards(message, serialized) ||
+        !Check(wirehair_v2_encoder_create_profile(
+            message.data(), serialized, sizeof(serialized), nullptr) ==
+                WirehairV2_InvalidInput,
+            "profile encoder still rejects a null codec output") ||
+        !Check(wirehair_v2_decoder_create(
+            serialized, sizeof(serialized), nullptr) ==
+                WirehairV2_InvalidInput,
+            "profile decoder still rejects a null codec output"))
+    {
+        wirehair_v2_free(encoder);
+        return 1;
+    }
+
     WirehairV2Profile in_place_profile;
     std::memcpy(&in_place_profile, serialized, sizeof(in_place_profile));
     if (!Check(wirehair_v2_profile_deserialize(
@@ -656,6 +1158,87 @@ int main()
         return 1;
     }
 
+    const auto check_profile_output_alias = [
+        &profile](uint32_t capacity, bool partial, const char* what)
+    {
+        std::vector<uint32_t> alias_words(
+            (WIREHAIR_V2_PROFILE_SERIALIZED_BYTES + 2u +
+                sizeof(uint32_t) - 1u) / sizeof(uint32_t),
+            UINT32_C(0xa5a5a5a5));
+        const std::vector<uint32_t> before = alias_words;
+        uint8_t* const base =
+            reinterpret_cast<uint8_t*>(alias_words.data());
+        void* const output = base + (partial ? 2u : 0u);
+        return Check(wirehair_v2_profile_serialize(
+                &profile, output, capacity, alias_words.data()) ==
+                    WirehairV2_InvalidInput &&
+                alias_words == before,
+            what);
+    };
+    if (!check_profile_output_alias(
+            sizeof(reserialized), false,
+            "exact profile size/output alias is rejected transactionally") ||
+        !check_profile_output_alias(
+            sizeof(reserialized) - 1u, false,
+            "short exact profile size/output alias is transactional") ||
+        !check_profile_output_alias(
+            sizeof(reserialized), true,
+            "partial profile size/output alias is rejected transactionally") ||
+        !check_profile_output_alias(
+            sizeof(reserialized) - 1u, true,
+            "short partial profile size/output alias is transactional"))
+    {
+        wirehair_v2_free(encoder);
+        return 1;
+    }
+
+    WirehairV2Profile profile_size_alias = profile;
+    const WirehairV2Profile profile_size_alias_before = profile_size_alias;
+    uint8_t profile_alias_output[WIREHAIR_V2_PROFILE_SERIALIZED_BYTES];
+    std::memset(profile_alias_output, 0xa5, sizeof(profile_alias_output));
+    uint8_t profile_alias_output_before[sizeof(profile_alias_output)];
+    std::memcpy(
+        profile_alias_output_before,
+        profile_alias_output,
+        sizeof(profile_alias_output));
+    if (!Check(wirehair_v2_profile_serialize(
+            &profile_size_alias,
+            profile_alias_output,
+            sizeof(profile_alias_output),
+            &profile_size_alias.profile_version) ==
+                WirehairV2_InvalidInput &&
+            std::memcmp(
+                &profile_size_alias,
+                &profile_size_alias_before,
+                sizeof(profile_size_alias)) == 0 &&
+            std::memcmp(
+                profile_alias_output,
+                profile_alias_output_before,
+                sizeof(profile_alias_output)) == 0,
+            "profile size/input alias is rejected transactionally"))
+    {
+        wirehair_v2_free(encoder);
+        return 1;
+    }
+
+    WirehairV2Profile staged_profile_output = profile;
+    uint32_t staged_profile_bytes = 0u;
+    if (!Check(wirehair_v2_profile_serialize(
+            &staged_profile_output,
+            &staged_profile_output,
+            sizeof(staged_profile_output),
+            &staged_profile_bytes) == WirehairV2_Success &&
+            staged_profile_bytes == sizeof(staged_profile_output) &&
+            std::memcmp(
+                &staged_profile_output,
+                serialized,
+                sizeof(staged_profile_output)) == 0,
+            "staged profile input/output alias remains supported"))
+    {
+        wirehair_v2_free(encoder);
+        return 1;
+    }
+
     if (!CheckMalformedProfiles(ExpectedProfile)) {
         wirehair_v2_free(encoder);
         return 1;
@@ -686,6 +1269,51 @@ int main()
         wirehair_v2_free(decoder);
         return 1;
     };
+
+    const auto check_encode_output_alias = [
+        encoder](uint32_t capacity, bool partial, const char* what)
+    {
+        std::vector<uint32_t> alias_words(
+            (BlockBytes + 2u + sizeof(uint32_t) - 1u) /
+                sizeof(uint32_t),
+            UINT32_C(0xa5a5a5a5));
+        const std::vector<uint32_t> before = alias_words;
+        uint8_t* const base =
+            reinterpret_cast<uint8_t*>(alias_words.data());
+        void* const output = base + (partial ? 2u : 0u);
+        return Check(wirehair_v2_encode(
+                encoder, BlockCount, output, capacity,
+                alias_words.data()) == WirehairV2_InvalidInput &&
+                alias_words == before,
+            what);
+    };
+    if (!check_encode_output_alias(
+            BlockBytes, false,
+            "exact encode size/output alias is rejected transactionally") ||
+        !check_encode_output_alias(
+            BlockBytes - 1u, false,
+            "short exact encode size/output alias is transactional") ||
+        !check_encode_output_alias(
+            BlockBytes, true,
+            "partial encode size/output alias is rejected transactionally") ||
+        !check_encode_output_alias(
+            BlockBytes - 1u, true,
+            "short partial encode size/output alias is transactional"))
+    {
+        return fail_after_create();
+    }
+
+    uint8_t disjoint_output[BlockBytes];
+    std::memset(disjoint_output, 0xa5, sizeof(disjoint_output));
+    uint32_t disjoint_bytes = UINT32_C(0xa5a5a5a5);
+    if (!Check(wirehair_v2_encode(
+            encoder, BlockCount,
+            disjoint_output, sizeof(disjoint_output), &disjoint_bytes) ==
+                WirehairV2_Success && disjoint_bytes == BlockBytes,
+            "disjoint encode size/output remains supported"))
+    {
+        return fail_after_create();
+    }
 
     uint8_t short_output[BlockBytes];
     uint8_t short_before[BlockBytes];

@@ -289,9 +289,14 @@ WIREHAIR_EXPORT const char* wirehair_v2_result_string(
     Validate and serialize a host-native profile.
 
     The canonical encoding is exactly 32 bytes and uses little-endian integer
-    fields.  bytesOut is set to WIREHAIR_V2_PROFILE_SERIALIZED_BYTES whenever
-    it is non-null, including BufferTooSmall.  A null output buffer is the
-    supported size-query form when outputCapacity is zero.
+    fields.  A disjoint non-null bytesOut is set to
+    WIREHAIR_V2_PROFILE_SERIALIZED_BYTES, including on BufferTooSmall.  A null
+    output buffer is the supported size-query form when outputCapacity is zero.
+    bytesOut must not overlap either the host profile input or the canonical
+    output range; exact or partial overlap returns WirehairV2_InvalidInput
+    without modifying any of those ranges.  The profile input and canonical
+    output may overlap each other because serialization stages the complete
+    record.
 */
 WIREHAIR_EXPORT WirehairV2Result wirehair_v2_profile_serialize(
     const WirehairV2Profile* profile,
@@ -326,7 +331,13 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_profile_validate(
     codec allocation.  message must point to at least messageBytes readable
     bytes.  serializedProfileBytesOut and codecOut are required; the former
     receives the required descriptor size and the latter is set to null on
-    every failure.
+    every ordinary failure.  The descriptor, size, and codec output ranges
+    must be pairwise disjoint, and neither size nor codec output may overlap
+    the message input.  A prohibited exact or partial overlap returns
+    WirehairV2_InvalidInput before allocation and without modifying any range;
+    this is the sole exception to clearing codecOut on failure.  The descriptor
+    output may overlap message because the complete message is copied before
+    the staged descriptor is published.
 */
 WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create(
     const void* message,
@@ -342,7 +353,9 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create(
 
     The current/default profile remains available through
     wirehair_v2_encoder_create().  Unknown and retired IDs are rejected before
-    codec allocation or serialized-profile output writes.
+    codec allocation or serialized-profile output writes.  The output-overlap,
+    message-overlap, no-write, and staged descriptor/message-alias contracts of
+    wirehair_v2_encoder_create() apply unchanged.
 */
 WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create_profile_id(
     uint64_t profileId,
@@ -359,7 +372,11 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create_profile_id(
 
     message must point to at least the descriptor's message_bytes readable
     bytes.  The message is copied before return.  codecOut is required and is
-    set to null on every failure.
+    set to null on every ordinary failure.  codecOut must not overlap either
+    the canonical serialized descriptor range or the message input range
+    described by that descriptor.  A prohibited exact or partial overlap
+    returns WirehairV2_InvalidInput before allocation and without modifying
+    either range; this is the sole exception to clearing codecOut on failure.
 */
 WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create_profile(
     const void* message,
@@ -370,6 +387,10 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create_profile(
 /**
     Create a decoder using only the serialized descriptor for dimensions and
     equation selection.  No out-of-band SeedProfile state is consulted.
+    codecOut must not overlap the canonical serialized descriptor range.  A
+    prohibited exact or partial overlap returns WirehairV2_InvalidInput before
+    allocation and without modifying either range; this is the sole exception
+    to clearing codecOut on failure.
 */
 WIREHAIR_EXPORT WirehairV2Result wirehair_v2_decoder_create(
     const void* serializedProfile,
@@ -382,7 +403,10 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_decoder_create(
     dataBytesOut is required.  On success it receives the bytes written.  A
     non-null output buffer shorter than the exact systematic or repair packet
     reports WirehairV2_BufferTooSmall, reports the required size through
-    dataBytesOut, and is not modified.
+    dataBytesOut, and is not modified.  dataBytesOut must not overlap the exact
+    packet output range; exact or partial overlap returns
+    WirehairV2_InvalidInput without modifying either range, including when the
+    packet buffer is too short.
 */
 WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encode(
     WirehairV2Codec codec,
