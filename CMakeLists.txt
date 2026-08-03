@@ -857,6 +857,15 @@ if(BUILD_TESTS)
             ENVIRONMENT "PYTHONWARNINGS=error"
             TIMEOUT 180
             LABELS "wh2;benchmark;contract;recovery;precodefail;runner")
+        add_test(
+            NAME wh2_select_development_architecture_test
+            COMMAND ${Python3_EXECUTABLE} -m unittest -v
+                bench/test_wh2_select_development_architecture.py)
+        set_tests_properties(wh2_select_development_architecture_test PROPERTIES
+            WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+            ENVIRONMENT "PYTHONWARNINGS=error"
+            TIMEOUT 120
+            LABELS "wh2;benchmark;contract;selection;recovery;timing")
     endif()
     add_test(
         NAME wh2_benchmark_contract_test

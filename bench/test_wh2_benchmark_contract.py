@@ -379,6 +379,10 @@ def write_raw_v3_freeze_manifest(
 def write_timing_qualification(
         root: Path, contract: Mapping[str, Any], phase: str = "development",
         retry_offsets: Optional[Sequence[int]] = None,
+        source_git_commit: str = "1" * 40,
+        binary_tag: str = "",
+        control_descriptor_tag: str = "",
+        control_descriptor_arm: Optional[str] = None,
         ) -> Tuple[subject.TimingQualification, Path, Path, str, List[str]]:
     base_cells = list(subject.iter_timing_base_cells(contract, phase))
     if retry_offsets is None:
@@ -421,8 +425,11 @@ def write_timing_qualification(
         controls.append({
             "arm": arm,
             "scope": scope,
-            "binary_sha256": digest("binary:" + arm),
-            "arm_descriptor_sha256": digest("descriptor:" + arm),
+            "binary_sha256": digest("binary:" + arm + binary_tag),
+            "arm_descriptor_sha256": digest(
+                "descriptor:" + arm + (
+                    control_descriptor_tag
+                    if control_descriptor_arm in (None, arm) else "")),
             "construction_policy":
                 "not_applicable" if arm == "wirehair1" else
                 "repair_map" if mapped else "raw_base",
@@ -433,7 +440,7 @@ def write_timing_qualification(
         "schema": subject.TIMING_QUALIFICATION_MAP_SCHEMA,
         "contract_sha256": subject.contract_sha256(contract),
         "phase": phase,
-        "source_git_commit": "1" * 40,
+        "source_git_commit": source_git_commit,
         "base_domain_sha256": contract["timing"]["domains"][phase][
             "base_domain_sha256"],
         "qualified_domain_sha256":
@@ -532,7 +539,12 @@ def write_timing_freeze_manifest(
 def write_final_freeze_manifests(
         root: Path, contract: Mapping[str, Any],
         timing_qualification: subject.TimingQualification,
-        arms: Sequence[str] = ("wirehair2_head", "wirehair1", "candidate"),
+        arms: Sequence[str] = (
+            "wirehair2_head", "wirehair1", TWO07_TEST_ARM),
+        source_git_commit: str = "1" * 40,
+        binary_tag: str = "",
+        control_descriptor_tag: str = "",
+        control_descriptor_arm: Optional[str] = None,
         ) -> Dict[Tuple[str, str], Path]:
     training_trace = digest("final repaired training traces")
     map_hashes = {
@@ -561,8 +573,13 @@ def write_final_freeze_manifests(
             records.append({
                 "arm": arm,
                 "codec": codec,
-                "binary_sha256": digest("binary:" + arm),
-                "arm_descriptor_sha256": digest("descriptor:" + arm),
+                "binary_sha256": digest("binary:" + arm + binary_tag),
+                "arm_descriptor_sha256":
+                    "9527f200ad38c7eec6502b2f768fdd67b92787fb227eed3d7616274ffc2df388"
+                    if arm == TWO07_TEST_ARM else digest(
+                        "descriptor:" + arm + (
+                            control_descriptor_tag
+                            if control_descriptor_arm in (None, arm) else "")),
                 "construction_policy":
                     "not_applicable" if codec == "wirehair1" else
                     "raw_base" if raw else "repair_map",
@@ -582,7 +599,7 @@ def write_final_freeze_manifests(
                 timing_qualification.qualified_domain_sha256
                 if evidence_kind == "timing" else
                 contract[evidence_kind]["domains"][phase]["domain_sha256"],
-            "source_git_commit": "1" * 40,
+            "source_git_commit": source_git_commit,
             "arm_roster": list(arms),
             "arm_roster_sha256": subject.arm_roster_sha256(arms),
             "trace_manifest_sha256": trace_sha256,
@@ -603,15 +620,26 @@ def write_final_freeze_manifests(
 def architecture_selection_receipt(
         contract: Mapping[str, Any],
         timing_qualification: subject.TimingQualification,
-        selected: str = "candidate",
+        selected: str = TWO07_TEST_ARM,
         ) -> Dict[str, Any]:
+    if selected != TWO07_TEST_ARM:
+        raise AssertionError("v2 selection fixture is closed to Two07")
     selected_artifact = {
         "codec": "wirehair2_experiment",
-        "arm_descriptor_sha256": digest("descriptor:" + selected),
+        "arm_descriptor_sha256":
+            "9527f200ad38c7eec6502b2f768fdd67b92787fb227eed3d7616274ffc2df388",
     }
+    recovery_roster = [
+        "wirehair2_head", "wirehair1", RAW_TEST_ARM, TWO07_TEST_ARM]
+    timing_roster = ["wirehair2_head", "wirehair1", TWO07_TEST_ARM]
     result = {
-        "schema": subject.SCHEMA + ".architecture-selection.v1",
+        "schema": subject.SCHEMA + ".architecture-selection.v2",
         "contract_sha256": subject.contract_sha256(contract),
+        "source_git_commit": "1" * 40,
+        "architecture_roles": copy.deepcopy(
+            subject.EXPECTED_RAW_ARCHITECTURE_ROLES),
+        "recovery_arm_roster": recovery_roster,
+        "timing_arm_roster": timing_roster,
         "recovery_domain_sha256": contract["recovery"]["domains"]
             ["development"]["domain_sha256"],
         "timing_base_domain_sha256": contract["timing"]["domains"]
@@ -620,8 +648,41 @@ def architecture_selection_receipt(
             timing_qualification.qualified_domain_sha256,
         "timing_qualification_map_sha256": timing_qualification.map_sha256,
         "recovery_freeze_manifest_sha256": digest("recovery freeze"),
+        "recovery_architecture_artifact_sha256":
+            digest("recovery architecture artifacts"),
+        "recovery_run_summary_sha256": digest("recovery run summary"),
+        "recovery_result_stream_sha256": digest("recovery result stream"),
+        "recovery_execution_receipt_sha256":
+            digest("recovery execution receipt"),
         "timing_freeze_manifest_sha256": digest("timing freeze"),
-        "architecture_artifact_sha256": digest("architecture artifacts"),
+        "timing_architecture_artifact_sha256":
+            digest("timing architecture artifacts"),
+        "timing_run_summary_sha256": digest("timing run summary"),
+        "timing_result_stream_sha256": digest("timing result stream"),
+        "timing_execution_receipt_sha256":
+            digest("timing execution receipt"),
+        "timing_qualification_execution_receipt_sha256":
+            digest("timing qualification execution receipt"),
+        "timing_proxy_witness_sha256": digest("timing proxy witness"),
+        "work_rank_summary_sha256": digest("work rank summary"),
+        "work_rank_result_stream_sha256": digest("work rank result"),
+        "work_rank_domain_sha256": digest("work rank domain"),
+        "recovery_reference_arm": RAW_TEST_ARM,
+        "recovery_reference_codec": "wirehair2_experiment",
+        "recovery_reference_binary_sha256":
+            digest("binary:" + RAW_TEST_ARM),
+        "recovery_reference_arm_descriptor_sha256":
+            "739092a7824449e6168f08b46661dfbe8ad5495ea4166b36073c79cd3bacdd11",
+        "wirehair1_control_arm": "wirehair1",
+        "wirehair1_control_codec": "wirehair1",
+        "wirehair1_control_binary_sha256": digest("binary:wirehair1"),
+        "wirehair1_control_arm_descriptor_sha256":
+            digest("descriptor:wirehair1"),
+        "timing_proxy_arm": "wirehair2_head",
+        "timing_proxy_codec": "wirehair2_certified",
+        "timing_proxy_binary_sha256": digest("binary:wirehair2_head"),
+        "timing_proxy_arm_descriptor_sha256":
+            digest("descriptor:wirehair2_head"),
         "recovery_cells_per_arm": 360,
         "timing_rows": 25344,
         "candidate_roster": [selected],
@@ -647,6 +708,15 @@ def architecture_selection_receipt(
     }
     result["selection_sha256"] = subject.sha256_json(result)
     return result
+
+
+def architecture_selection_handle(
+        contract: Mapping[str, Any],
+        timing_qualification: subject.TimingQualification,
+        ) -> subject.ArchitectureSelection:
+    return subject._seal_validated_architecture_selection(
+        contract, architecture_selection_receipt(
+            contract, timing_qualification))
 
 
 def timing_receipt_rows(
@@ -1664,15 +1734,18 @@ class ContractTests(unittest.TestCase):
                     root, self.contract, self.final_qualification)
                 summary = subject.validate_final_freeze_continuity(
                     self.contract, paths,
-                    architecture_selection_receipt(
+                    architecture_selection_handle(
                         self.contract, self.development_qualification),
                     self.final_qualification, root / "timing-traces.jsonl")
-                self.assertEqual(summary["selected_candidate"], "candidate")
+                self.assertEqual(summary["selected_candidate"], TWO07_TEST_ARM)
+                self.assertEqual(
+                    summary["schema"],
+                    subject.SCHEMA + ".final-continuity-summary.v2")
                 path = paths[("recovery", "final_validation")]
                 value = json.loads(path.read_text(encoding="utf-8"))
                 candidate = next(
                     arm for arm in value["arms"]
-                    if arm["arm"] == "candidate")
+                    if arm["arm"] == TWO07_TEST_ARM)
                 if mutation == "binary":
                     candidate["binary_sha256"] = digest("substitute binary")
                 elif mutation == "map":
@@ -1685,7 +1758,7 @@ class ContractTests(unittest.TestCase):
                 with self.assertRaises(subject.ContractError):
                     subject.validate_final_freeze_continuity(
                         self.contract, paths,
-                        architecture_selection_receipt(
+                        architecture_selection_handle(
                             self.contract, self.development_qualification),
                         self.final_qualification,
                         root / "timing-traces.jsonl")
@@ -1694,19 +1767,29 @@ class ContractTests(unittest.TestCase):
             root = Path(temporary)
             paths = write_final_freeze_manifests(
                 root, self.contract, self.final_qualification)
+            wrong = paths[("recovery", "final_raw")]
+            wrong_value = json.loads(wrong.read_text(encoding="utf-8"))
+            wrong_value["arm_roster"][2] = "substitute"
+            wrong_value["arm_roster_sha256"] = subject.arm_roster_sha256(
+                wrong_value["arm_roster"])
+            wrong_value["arms"][2]["arm"] = "substitute"
+            wrong_value["arms"][2]["arm_descriptor_sha256"] = \
+                digest("descriptor:substitute")
+            wrong.write_bytes(
+                (subject.canonical_json(wrong_value) + "\n").encode("utf-8"))
             with self.assertRaises(subject.ContractError):
                 subject.validate_final_freeze_continuity(
                     self.contract, paths,
-                    architecture_selection_receipt(
-                        self.contract, self.development_qualification,
-                        "substitute"), self.final_qualification,
+                    architecture_selection_handle(
+                        self.contract, self.development_qualification),
+                    self.final_qualification,
                     root / "timing-traces.jsonl")
             substituted = architecture_selection_receipt(
                 self.contract, self.development_qualification)
             substituted["selected_arm_descriptor_sha256"] = \
                 digest("different selected equations")
             substituted["selected_architecture_sha256"] = \
-                subject.selected_architecture_sha256("candidate", {
+                subject.selected_architecture_sha256(TWO07_TEST_ARM, {
                     "codec": substituted["selected_codec"],
                     "arm_descriptor_sha256":
                         substituted["selected_arm_descriptor_sha256"],
@@ -1727,7 +1810,7 @@ class ContractTests(unittest.TestCase):
                 write_timing_qualification(root, self.contract, "final")
             paths = write_final_freeze_manifests(
                 root, self.contract, original)
-            selection = architecture_selection_receipt(
+            selection = architecture_selection_handle(
                 self.contract, self.development_qualification)
             trace_path = root / "timing-traces.jsonl"
             subject.validate_final_freeze_continuity(
@@ -1763,11 +1846,154 @@ class ContractTests(unittest.TestCase):
                 subject.validate_final_freeze_continuity(
                     self.contract, paths, selection, substitute, trace_path)
 
+    def test_final_continuity_allows_consistent_optimized_source_and_binaries(
+            self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            final_qualification = write_timing_qualification(
+                root, self.contract, "final",
+                source_git_commit="2" * 40,
+                binary_tag=":optimized")[0]
+            paths = write_final_freeze_manifests(
+                root, self.contract, final_qualification,
+                source_git_commit="2" * 40,
+                binary_tag=":optimized")
+            summary = subject.validate_final_freeze_continuity(
+                self.contract, paths,
+                architecture_selection_handle(
+                    self.contract, self.development_qualification),
+                final_qualification, root / "timing-traces.jsonl")
+            self.assertEqual(summary["development_source_git_commit"],
+                             "1" * 40)
+            self.assertEqual(summary["final_source_git_commit"], "2" * 40)
+
+    def test_final_continuity_rejects_one_phase_source_or_binary_drift(
+            self) -> None:
+        for mutation in ("source", "binary"):
+            with self.subTest(mutation=mutation), \
+                    tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                paths = write_final_freeze_manifests(
+                    root, self.contract, self.final_qualification)
+                path = paths[("recovery", "final_validation")]
+                value = json.loads(path.read_text(encoding="utf-8"))
+                if mutation == "source":
+                    value["source_git_commit"] = "2" * 40
+                else:
+                    for arm in value["arms"]:
+                        arm["binary_sha256"] = digest(
+                            "one-phase substitute:" + arm["arm"])
+                path.write_bytes(
+                    (subject.canonical_json(value) + "\n").encode("utf-8"))
+                with self.assertRaises(subject.ContractError):
+                    subject.validate_final_freeze_continuity(
+                        self.contract, paths,
+                        architecture_selection_handle(
+                            self.contract, self.development_qualification),
+                        self.final_qualification,
+                        root / "timing-traces.jsonl")
+
+    def test_final_continuity_rejects_exact_roster_substitutions(self) -> None:
+        for mutation in ("D12", "reorder", "extra"):
+            with self.subTest(mutation=mutation), \
+                    tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                paths = write_final_freeze_manifests(
+                    root, self.contract, self.final_qualification)
+                for key, path in paths.items():
+                    value = json.loads(path.read_text(encoding="utf-8"))
+                    raw = key == ("recovery", "final_raw")
+                    if mutation == "D12":
+                        value["arm_roster"][2] = RAW_TEST_ARM
+                        value["arms"][2].update({
+                            "arm": RAW_TEST_ARM,
+                            "binary_sha256": digest(
+                                "binary:" + RAW_TEST_ARM),
+                            "arm_descriptor_sha256":
+                                "739092a7824449e6168f08b46661dfbe8ad5495ea4166b36073c79cd3bacdd11",
+                            "repair_map_sha256": "0" * 64 if raw else
+                                digest("production map:" + RAW_TEST_ARM),
+                        })
+                    elif mutation == "reorder":
+                        value["arm_roster"] = [
+                            value["arm_roster"][1], value["arm_roster"][0],
+                            value["arm_roster"][2]]
+                        value["arms"] = [
+                            value["arms"][1], value["arms"][0],
+                            value["arms"][2]]
+                    else:
+                        value["arm_roster"].append("extra")
+                        value["arms"].append({
+                            "arm": "extra", "codec": "wirehair2_experiment",
+                            "binary_sha256": digest("binary:extra"),
+                            "arm_descriptor_sha256": digest(
+                                "descriptor:extra"),
+                            "construction_policy":
+                                "raw_base" if raw else "repair_map",
+                            "repair_map_sha256": "0" * 64 if raw else
+                                digest("production map:extra"),
+                        })
+                    value["arm_roster_sha256"] = subject.arm_roster_sha256(
+                        value["arm_roster"])
+                    path.write_bytes(
+                        (subject.canonical_json(value) + "\n").encode(
+                            "utf-8"))
+                with self.assertRaises(subject.ContractError):
+                    subject.validate_final_freeze_continuity(
+                        self.contract, paths,
+                        architecture_selection_handle(
+                            self.contract, self.development_qualification),
+                        self.final_qualification,
+                        root / "timing-traces.jsonl")
+
+    def test_final_continuity_rejects_consistent_semantic_substitutions(
+            self) -> None:
+        # Candidate descriptor drift is rejected even when every final phase
+        # consistently uses the same substituted descriptor.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = write_final_freeze_manifests(
+                root, self.contract, self.final_qualification)
+            for path in paths.values():
+                value = json.loads(path.read_text(encoding="utf-8"))
+                value["arms"][2]["arm_descriptor_sha256"] = digest(
+                    "substituted Two07 equations")
+                path.write_bytes(
+                    (subject.canonical_json(value) + "\n").encode("utf-8"))
+            with self.assertRaises(subject.ContractError):
+                subject.validate_final_freeze_continuity(
+                    self.contract, paths,
+                    architecture_selection_handle(
+                        self.contract, self.development_qualification),
+                    self.final_qualification, root / "timing-traces.jsonl")
+
+        # Head and Wirehair1 remain semantic baselines across optimization.
+        for control in ("wirehair2_head", "wirehair1"):
+            with self.subTest(control=control), \
+                    tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                tag = ":substitute-" + control
+                final_qualification = write_timing_qualification(
+                    root, self.contract, "final",
+                    control_descriptor_tag=tag,
+                    control_descriptor_arm=control)[0]
+                paths = write_final_freeze_manifests(
+                    root, self.contract, final_qualification,
+                    control_descriptor_tag=tag,
+                    control_descriptor_arm=control)
+                with self.assertRaises(subject.ContractError):
+                    subject.validate_final_freeze_continuity(
+                        self.contract, paths,
+                        architecture_selection_handle(
+                            self.contract, self.development_qualification),
+                        final_qualification,
+                        root / "timing-traces.jsonl")
+
     def test_reserved_codec_kinds_are_bijective_in_final_freezes(self) -> None:
         for codec, policy, map_hash in (
                 ("wirehair1", "not_applicable", "0" * 64),
                 ("wirehair2_certified", "repair_map",
-                 digest("production map:candidate"))):
+                 digest("production map:" + TWO07_TEST_ARM))):
             with self.subTest(codec=codec), \
                     tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
@@ -1777,7 +2003,7 @@ class ContractTests(unittest.TestCase):
                 value = json.loads(path.read_text(encoding="utf-8"))
                 candidate = next(
                     arm for arm in value["arms"]
-                    if arm["arm"] == "candidate")
+                    if arm["arm"] == TWO07_TEST_ARM)
                 candidate["codec"] = codec
                 candidate["construction_policy"] = policy
                 candidate["repair_map_sha256"] = map_hash
@@ -2799,54 +3025,127 @@ class SelectionTests(unittest.TestCase):
     def tearDownClass(cls) -> None:
         cls.qualification_temp.cleanup()
 
-    def test_recovery_equivalent_set_precedes_speed_ranking(self) -> None:
-        artifact = digest("one development architecture roster")
-        candidates = {
-            "fast_but_worse": (7, -0.40),
-            "reliable": (5, -0.05),
-            "selected": (6, -0.20),
+    def evidence(self) -> Tuple[Dict[str, Any], Dict[str, Any],
+                                Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
+        roles = copy.deepcopy(subject.EXPECTED_RAW_ARCHITECTURE_ROLES)
+        recovery_roster = [
+            "wirehair2_head", "wirehair1", RAW_TEST_ARM, TWO07_TEST_ARM]
+        timing_roster = ["wirehair2_head", "wirehair1", TWO07_TEST_ARM]
+        descriptors = {
+            "wirehair2_head": digest("descriptor:wirehair2_head"),
+            "wirehair1": digest("descriptor:wirehair1"),
+            RAW_TEST_ARM:
+                "739092a7824449e6168f08b46661dfbe8ad5495ea4166b36073c79cd3bacdd11",
+            TWO07_TEST_ARM:
+                "9527f200ad38c7eec6502b2f768fdd67b92787fb227eed3d7616274ffc2df388",
         }
-        controls = ("wirehair2_head", "wirehair1")
-        arm_failures = {
-            **{arm: 0 for arm in controls},
-            **{arm: value[0] for arm, value in candidates.items()},
-        }
-        arm_artifacts = {
-            arm: {
-                "codec": arm_codec(arm),
-                "binary_sha256": digest("binary:" + arm),
-                "arm_descriptor_sha256": digest("descriptor:" + arm),
+        binary = digest("shared development binary")
+
+        def arm(arm_name: str, raw: bool) -> Dict[str, Any]:
+            codec = arm_codec(arm_name)
+            value = {
+                "arm": arm_name, "codec": codec,
+                "binary_sha256": binary,
+                "arm_descriptor_sha256": descriptors[arm_name],
+                "construction_policy":
+                    "not_applicable" if codec == "wirehair1" else "raw_base",
+                "repair_map_sha256": "0" * 64,
             }
-            for arm in arm_failures
-        }
-        recovery: Dict[str, Any] = {
-            "schema": subject.SCHEMA + ".ledger-summary.v2",
-            "phase": "development",
-            "freeze_schema": subject.RAW_FREEZE_SCHEMA,
+            if raw:
+                value.update({
+                    "construction_seed_basis":
+                        subject.PRODUCTION_CONSTRUCTION_SEED_BASIS
+                        if arm_name == "wirehair2_head" else
+                        subject.NOT_APPLICABLE_CONSTRUCTION_SEED_BASIS
+                        if arm_name == "wirehair1" else
+                        subject.RAW_CONSTRUCTION_SEED_BASIS,
+                    "seed_schedule_sha256":
+                        subject.RAW_SEED_SCHEDULE_SHA256
+                        if arm_name in (RAW_TEST_ARM, TWO07_TEST_ARM) else
+                        "0" * 64,
+                    "dense_anchor_layout":
+                        "not-applicable" if arm_name == "wirehair1" else
+                        "two07" if arm_name == TWO07_TEST_ARM else "disabled",
+                })
+            return value
+
+        witness = digest("timing proxy witness")
+        work_summary = digest("work summary")
+        work_result = digest("work result")
+        work_domain = digest("work domain")
+        recovery_freeze: Dict[str, Any] = {
+            "schema": subject.RAW_FREEZE_SCHEMA,
             "contract_sha256": subject.contract_sha256(self.contract),
+            "evidence_kind": "recovery", "phase": "development",
             "domain_sha256": self.contract["recovery"]["domains"]
                 ["development"]["domain_sha256"],
-            "freeze_manifest_sha256": digest("recovery freeze"),
-            "architecture_artifact_sha256": artifact,
-            "arm_artifacts": copy.deepcopy(arm_artifacts),
-            "excluded_cells": 0,
-            "mandatory_controls_supported": True,
+            "source_git_commit": "1" * 40,
+            "arm_roster": recovery_roster,
+            "arm_roster_sha256": subject.arm_roster_sha256(recovery_roster),
+            "trace_manifest_sha256": digest("recovery trace"),
+            "repair_training_trace_manifest_sha256": "0" * 64,
+            "commands": [["worker", "recovery"]], "cpu_affinity": [0],
+            "host_identity": {"name": "test"},
+            "architecture_roles": roles,
+            "timing_proxy_witness_sha256": witness,
+            "work_rank_summary_sha256": work_summary,
+            "work_rank_result_stream_sha256": work_result,
+            "work_rank_domain_sha256": work_domain,
+            "arms": [arm(name, True) for name in recovery_roster],
+        }
+        timing_freeze: Dict[str, Any] = {
+            "schema": subject.FREEZE_SCHEMA,
+            "contract_sha256": subject.contract_sha256(self.contract),
+            "evidence_kind": "timing", "phase": "development",
+            "domain_sha256": self.qualification.qualified_domain_sha256,
+            "source_git_commit": "1" * 40,
+            "arm_roster": timing_roster,
+            "arm_roster_sha256": subject.arm_roster_sha256(timing_roster),
+            "trace_manifest_sha256": digest("timing trace"),
+            "repair_training_trace_manifest_sha256": "0" * 64,
+            "commands": [["worker", "timing"]], "cpu_affinity": [1],
+            "host_identity": {"name": "test"},
+            "arms": [arm(name, False) for name in timing_roster],
+        }
+        failure0 = {
+            "wirehair2_head": 30, "wirehair1": 35,
+            RAW_TEST_ARM: 40, TWO07_TEST_ARM: 25,
+        }
+        recovery: Dict[str, Any] = {
+            "schema": subject.SCHEMA + ".ledger-summary.v3",
+            "phase": "development", "freeze_schema": subject.RAW_FREEZE_SCHEMA,
+            "contract_sha256": subject.contract_sha256(self.contract),
+            "domain_sha256": recovery_freeze["domain_sha256"],
+            "freeze_manifest_sha256":
+                subject.freeze_manifest_sha256(recovery_freeze),
+            "architecture_artifact_sha256":
+                subject.architecture_artifact_sha256(recovery_freeze),
+            "arm_artifacts": subject.frozen_arm_artifacts(recovery_freeze),
+            "excluded_cells": 0, "mandatory_controls_supported": False,
+            "architecture_roles": roles,
+            "timing_proxy_witness_sha256": witness,
+            "work_rank_summary_sha256": work_summary,
+            "work_rank_result_stream_sha256": work_result,
+            "work_rank_domain_sha256": work_domain,
             "comparisons": {
-                arm: {
+                TWO07_TEST_ARM: {
+                    "recovery_reference": RAW_TEST_ARM,
+                    "reference_comparison": {},
+                    "descriptive_controls": {
+                        "wirehair2_head": {}, "wirehair1": {}},
+                    "reference_noninferior": True,
                     "architecture_eligible": True,
-                    "controls": {control: {} for control in controls},
-                }
-                for arm in candidates
+                },
             },
             "arms": {
-                arm: {
+                name: {
                     "cells": 360,
                     "failure_by_overhead": {
-                        "0": failure0, "1": max(0, failure0 - 2),
-                        "2": max(0, failure0 - 4), "4": 0,
+                        "0": count, "1": max(0, count - 5),
+                        "2": max(0, count - 10), "4": 0,
                     },
                 }
-                for arm, failure0 in arm_failures.items()
+                for name, count in failure0.items()
             },
         }
         timing: Dict[str, Any] = {
@@ -2857,90 +3156,125 @@ class SelectionTests(unittest.TestCase):
                 ["development"]["base_domain_sha256"],
             "domain_sha256": self.qualification.qualified_domain_sha256,
             "timing_qualification_map_sha256": self.qualification.map_sha256,
-            "freeze_manifest_sha256": digest("timing freeze"),
-            "architecture_artifact_sha256": artifact,
-            "arm_artifacts": copy.deepcopy(arm_artifacts),
-            "excluded_cells": 0,
-            "rows": 2304 * (4 + 7 * len(candidates)),
+            "freeze_manifest_sha256":
+                subject.freeze_manifest_sha256(timing_freeze),
+            "architecture_artifact_sha256":
+                subject.architecture_artifact_sha256(timing_freeze),
+            "arm_artifacts": subject.frozen_arm_artifacts(timing_freeze),
+            "excluded_cells": 0, "rows": 2304 * 11,
             "candidates": {
-                arm: {
+                TWO07_TEST_ARM: {
                     "phase_speed_gate_pass": True,
                     "panels": {
                         "decoder_solve|wirehair2_head": {
                             "aggregate": {
                                 "selectable": True,
-                                "mean_log_ratio": mean,
+                                "mean_log_ratio": -0.20,
                             },
                         },
                     },
-                }
-                for arm, (_failure0, mean) in candidates.items()
+                },
             },
         }
-        result = subject.select_development_architecture(
-            self.contract, recovery, timing, self.qualification)
-        subject.validate_selection_receipt(self.contract, result)
-        self.assertEqual(result["recovery_equivalence_allowance"], 1)
-        self.assertEqual(
-            result["recovery_equivalent_candidates"],
-            ["reliable", "selected"])
-        self.assertEqual(result["selected_arm"], "selected")
-        self.assertEqual(result["candidate_roster"], sorted(candidates))
-        tampered_receipt = copy.deepcopy(result)
-        tampered_receipt["recovery_freeze_manifest_sha256"] = \
-            digest("substituted after selection")
-        with self.assertRaises(subject.ContractError):
-            subject.validate_selection_receipt(
-                self.contract, tampered_receipt)
-        forged_minimum = copy.deepcopy(result)
-        forged_minimum["minimum_overhead0_failures"] = 0
-        unsigned = {key: value for key, value in forged_minimum.items()
-                    if key != "selection_sha256"}
-        forged_minimum["selection_sha256"] = subject.sha256_json(unsigned)
-        with self.assertRaises(subject.ContractError):
-            subject.validate_selection_receipt(
-                self.contract, forged_minimum)
-        with self.assertRaises(subject.ContractError):
-            subject.validate_selection_receipt(
-                self.contract,
-                architecture_selection_receipt(
-                    self.contract, self.qualification, "wirehair1"))
+        provenance = {
+            "recovery_run_summary_sha256": digest("recovery run"),
+            "recovery_result_stream_sha256": digest("recovery result"),
+            "recovery_execution_receipt_sha256": digest("recovery receipt"),
+            "timing_run_summary_sha256": digest("timing run"),
+            "timing_result_stream_sha256": digest("timing result"),
+            "timing_execution_receipt_sha256": digest("timing receipt"),
+            "timing_qualification_execution_receipt_sha256":
+                digest("qualification receipt"),
+            "timing_proxy_witness_sha256": witness,
+            "work_rank_summary_sha256": work_summary,
+            "work_rank_result_stream_sha256": work_result,
+            "work_rank_domain_sha256": work_domain,
+        }
+        return recovery, timing, recovery_freeze, timing_freeze, provenance
 
+    def calculate(self, values: Tuple[Dict[str, Any], Dict[str, Any],
+                                      Dict[str, Any], Dict[str, Any],
+                                      Dict[str, Any]]) -> Optional[Mapping[str, Any]]:
+        recovery, timing, recovery_freeze, timing_freeze, provenance = values
+        return subject._calculate_development_architecture_selection(
+            self.contract, recovery, timing, self.qualification,
+            recovery_freeze, timing_freeze, provenance)
+
+    def test_closed_raw_reference_selection_ignores_descriptive_controls(
+            self) -> None:
+        values = self.evidence()
+        result = self.calculate(values)
+        self.assertIsNotNone(result)
+        assert result is not None
+        subject.validate_selection_receipt(self.contract, result)
+        self.assertEqual(result["selected_arm"], TWO07_TEST_ARM)
+        self.assertEqual(result["recovery_reference_arm"], RAW_TEST_ARM)
+        self.assertEqual(result["recovery_equivalence_allowance"], 1)
+        self.assertNotEqual(
+            result["recovery_architecture_artifact_sha256"],
+            result["timing_architecture_artifact_sha256"])
+
+        recovery, timing, recovery_freeze, timing_freeze, provenance = \
+            self.evidence()
+        timing["candidates"][TWO07_TEST_ARM]["phase_speed_gate_pass"] = False
+        self.assertIsNone(self.calculate((
+            recovery, timing, recovery_freeze, timing_freeze, provenance)))
+
+    def test_recovery_projection_must_equal_timing_full_artifact(self) -> None:
+        recovery, timing, recovery_freeze, timing_freeze, provenance = \
+            self.evidence()
+        timing_freeze["arms"][2]["binary_sha256"] = digest(
+            "substituted timing candidate binary")
+        timing["freeze_manifest_sha256"] = \
+            subject.freeze_manifest_sha256(timing_freeze)
+        timing["architecture_artifact_sha256"] = \
+            subject.architecture_artifact_sha256(timing_freeze)
+        timing["arm_artifacts"] = subject.frozen_arm_artifacts(timing_freeze)
+        with self.assertRaises(subject.ContractError):
+            self.calculate((recovery, timing, recovery_freeze, timing_freeze,
+                            provenance))
+
+    def test_v2_receipt_rejects_aliases_legacy_and_forged_fields(self) -> None:
+        result = self.calculate(self.evidence())
+        assert result is not None
         mutations = []
-        changed = copy.deepcopy(recovery)
-        changed["schema"] = subject.SCHEMA + ".ledger-summary.v1"
-        del changed["freeze_schema"]
-        mutations.append(("legacy raw summary", changed, timing))
-        changed = copy.deepcopy(recovery)
-        changed["domain_sha256"] = digest("other recovery domain")
-        mutations.append(("recovery domain", changed, timing))
-        changed = copy.deepcopy(recovery)
-        changed["excluded_cells"] = 1
-        mutations.append(("recovery exclusion", changed, timing))
-        changed = copy.deepcopy(recovery)
-        changed["arms"]["selected"]["cells"] = 1
-        mutations.append(("recovery cardinality", changed, timing))
-        changed = copy.deepcopy(recovery)
-        changed["arms"]["selected"]["failure_by_overhead"]["1"] = 7
-        mutations.append(("nonnested tail", changed, timing))
-        changed_timing = copy.deepcopy(timing)
-        changed_timing["domain_sha256"] = digest("other timing domain")
-        mutations.append(("timing domain", recovery, changed_timing))
-        changed_timing = copy.deepcopy(timing)
-        changed_timing["rows"] = 1
-        mutations.append(("timing cardinality", recovery, changed_timing))
-        changed_timing = copy.deepcopy(timing)
-        changed_timing["freeze_manifest_sha256"] = "bad"
-        mutations.append(("timing freeze", recovery, changed_timing))
-        changed_timing = copy.deepcopy(timing)
-        changed_timing["architecture_artifact_sha256"] = digest("other binary")
-        mutations.append(("architecture", recovery, changed_timing))
-        for name, recovery_value, timing_value in mutations:
+        changed = copy.deepcopy(result)
+        changed["schema"] = subject.SCHEMA + ".architecture-selection.v1"
+        mutations.append(("v1", changed))
+        changed = copy.deepcopy(result)
+        changed["architecture_artifact_sha256"] = digest("singular old field")
+        mutations.append(("singular artifact hash", changed))
+        changed = copy.deepcopy(result)
+        changed["timing_result_stream_sha256"] = "0" * 64
+        mutations.append(("zero artifact hash", changed))
+        changed = copy.deepcopy(result)
+        changed["source_git_commit"] = "0" * 40
+        mutations.append(("zero source commit", changed))
+        changed = copy.deepcopy(result)
+        changed["timing_rows"] = float(changed["timing_rows"])
+        mutations.append(("integral float", changed))
+        changed = copy.deepcopy(result)
+        changed["eligible_candidates"] = [[]]
+        mutations.append(("unhashable roster member", changed))
+        changed = copy.deepcopy(result)
+        changed["eligible_overhead0_failures"] = {
+            TWO07_TEST_ARM: 25, 1: 25}
+        mutations.append(("mixed object key", changed))
+        changed = copy.deepcopy(result)
+        changed[1] = changed.pop("schema")
+        mutations.append(("mixed top-level key", changed))
+        changed = copy.deepcopy(result)
+        changed["selected_arm"] = RAW_TEST_ARM
+        mutations.append(("D12 candidate", changed))
+        for name, changed in mutations:
+            if (set(changed) == set(subject.SELECTION_FIELDS) and
+                    name != "mixed object key"):
+                unsigned = {key: value for key, value in changed.items()
+                            if key != "selection_sha256"}
+                changed["selection_sha256"] = subject.sha256_json(unsigned)
             with self.subTest(mutation=name), \
                     self.assertRaises(subject.ContractError):
-                subject.select_development_architecture(
-                    self.contract, recovery_value, timing_value,
-                    self.qualification)
+                subject.validate_selection_receipt(self.contract, changed)
 
 
 if __name__ == "__main__":
