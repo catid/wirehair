@@ -274,6 +274,128 @@ class NativeRunnerTests(unittest.TestCase):
         self.assertIs(type(value["finished_monotonic_ns"]), int)
         return value["finished_monotonic_ns"]
 
+    def _completed_timing_fixture(self, stem: str = "completed-timing"):
+        contract = contract_api.load_contract()
+        qualification = self._qualification(contract)
+        directory = self.root / stem
+        directory.mkdir()
+        binary = "a" * 64
+        trace_sha256 = "b" * 64
+        freeze = {
+            "source_git_commit": "1" * 40,
+            "arm_roster": [value[0] for value in subject.EXPECTED_ARMS],
+            "trace_manifest_sha256": trace_sha256,
+            "host_identity": {"controller_cpu": 8},
+            "arms": [
+                {
+                    "arm": arm,
+                    "codec": codec,
+                    "binary_sha256": binary,
+                    "arm_descriptor_sha256":
+                        subject.TIMING_CANDIDATE_DESCRIPTOR_SHA256
+                        if index == 2 else hashlib.sha256(
+                            arm.encode("ascii")).hexdigest(),
+                }
+                for index, (arm, codec) in enumerate(subject.EXPECTED_ARMS)
+            ],
+        }
+        timing_summary = {
+            "schema": contract_api.SCHEMA + ".timing-summary.v1",
+            "phase": "development",
+        }
+        thermal = {
+            "sample_count": 2,
+            "cpu_tctl_max_millic": 60000,
+            "dimm_max_millic": 40000,
+        }
+        qualification_thermal = {
+            "sample_count": 3,
+            "cpu_tctl_max_millic": 61000,
+            "dimm_max_millic": 41000,
+        }
+        execution_receipt = {
+            "record_count": 25344,
+            "worker_cpus": list(range(8)),
+            "qualification_worker_cpus": list(range(12)),
+            "freeze_manifest_sha256": "c" * 64,
+            "result_stream_sha256": "d" * 64,
+            "receipt_sha256": "e" * 64,
+            "validator_summary_sha256":
+                contract_api.sha256_json(timing_summary),
+            "timing_qualification_execution_receipt_sha256": "f" * 64,
+            "thermal": thermal,
+            "qualification_thermal": qualification_thermal,
+        }
+        offsets = list(qualification.retry_offsets)
+        run_summary = {
+            "schema": subject.SUMMARY_SCHEMA,
+            "status": "complete",
+            "output_dir": str(directory.resolve()),
+            "source_git_commit": freeze["source_git_commit"],
+            "contract_sha256": contract_api.contract_sha256(contract),
+            "worker_binary_sha256": binary,
+            "controller_cpu": 8,
+            "worker_cpus": execution_receipt["worker_cpus"],
+            "qualification_worker_cpus":
+                execution_receipt["qualification_worker_cpus"],
+            "timing_qualification_map_sha256": qualification.map_sha256,
+            "timing_qualification_execution_receipt_sha256": "f" * 64,
+            "timing_qualified_domain_sha256":
+                qualification.qualified_domain_sha256,
+            "qualification_attempt_count": len(offsets) + sum(offsets),
+            "qualification_retried_cell_count": 0,
+            "qualification_max_retry_offset": 0,
+            "qualification_sum_retry_offsets": 0,
+            "timing_records": execution_receipt["record_count"],
+            "timing_trace_manifest_sha256": trace_sha256,
+            "timing_freeze_sha256":
+                execution_receipt["freeze_manifest_sha256"],
+            "timing_architecture_artifact_sha256":
+                contract_api.architecture_artifact_sha256(freeze),
+            "timing_result_sha256":
+                execution_receipt["result_stream_sha256"],
+            "timing_execution_receipt_sha256":
+                execution_receipt["receipt_sha256"],
+            "timing_validator_summary_sha256":
+                execution_receipt["validator_summary_sha256"],
+            "thermal_samples": thermal["sample_count"],
+            "cpu_tctl_max_millic": thermal["cpu_tctl_max_millic"],
+            "dimm_max_millic": thermal["dimm_max_millic"],
+            "timing_thermal_samples": thermal["sample_count"],
+            "timing_cpu_tctl_max_millic": thermal["cpu_tctl_max_millic"],
+            "timing_dimm_max_millic": thermal["dimm_max_millic"],
+            "qualification_thermal_samples":
+                qualification_thermal["sample_count"],
+            "qualification_cpu_tctl_max_millic":
+                qualification_thermal["cpu_tctl_max_millic"],
+            "qualification_dimm_max_millic":
+                qualification_thermal["dimm_max_millic"],
+            "overall_cpu_tctl_max_millic": 61000,
+            "overall_dimm_max_millic": 41000,
+        }
+        run_summary["summary_sha256"] = \
+            contract_api.sha256_json(run_summary)
+        names = (
+            "run-summary.json", "timing-freeze.json",
+            "timing-traces.jsonl", "timing-native-results.jsonl",
+            "timing-results.jsonl", "timing-execution.json",
+            "sampler-attestation.json", "timing-qualification-map.json",
+            "timing-qualification-audit.jsonl",
+            "timing-qualification-native.jsonl",
+            "qualification-sampler-attestation.json",
+            "timing-qualification-execution.json",
+        )
+        for name in names:
+            (directory / name).write_bytes(b"{}\n")
+        (directory / "run-summary.json").write_bytes(
+            (contract_api.canonical_json(run_summary) + "\n").encode("utf-8"))
+        validated = {
+            "summary": timing_summary,
+            "execution_receipt": execution_receipt,
+        }
+        return (contract, qualification, directory, freeze, run_summary,
+                validated)
+
     def test_default_worker_name_matches_cmake_target(self) -> None:
         stderr = StringIO()
         with redirect_stderr(stderr):
@@ -496,41 +618,142 @@ class NativeRunnerTests(unittest.TestCase):
             subject._restore_controller_affinity(original)
         self.assertEqual(os.sched_getaffinity(0), original)
 
-    def test_freezes_are_published_before_result_sink(self) -> None:
+    def test_timing_freeze_is_published_before_result_sink(self) -> None:
         worker = self._fake_worker()
         description = self._description(worker)
         contract = contract_api.load_contract()
         output = self.root / "output"
         output.mkdir()
-        trace_hashes = {
-            "recovery": hashlib.sha256(b"recovery trace").hexdigest(),
-            "timing": hashlib.sha256(b"timing trace").hexdigest(),
-        }
+        trace_hash = hashlib.sha256(b"timing trace").hexdigest()
         qualification = self._qualification(contract, description=description)
-        freezes = subject.write_development_freezes(
-            contract, description, [0], 1, "1" * 40, trace_hashes, output,
+        freeze = subject.write_development_timing_freeze(
+            contract, description, [0], 1, "1" * 40, trace_hash, output,
             qualification)
-        for kind in ("recovery", "timing"):
-            path = output / "{}-freeze.json".format(kind)
-            self.assertTrue(path.is_file())
-            self.assertEqual(freezes[kind]["trace_manifest_sha256"],
-                             trace_hashes[kind])
-            self.assertEqual(freezes[kind]["arm_roster"], [
-                "wirehair2_head", "wirehair1",
-                "wirehair2_dense_two07_basis_v1"])
-            self.assertEqual(freezes[kind]["host_identity"]["controller_cpu"],
-                             1)
-            self.assertEqual(
-                [value["construction_policy"]
-                 for value in freezes[kind]["arms"]],
-                ["raw_base", "not_applicable", "raw_base"])
+        path = output / "timing-freeze.json"
+        self.assertTrue(path.is_file())
+        self.assertFalse((output / "recovery-freeze.json").exists())
+        self.assertEqual(freeze["trace_manifest_sha256"], trace_hash)
+        self.assertEqual(freeze["arm_roster"], [
+            "wirehair2_head", "wirehair1",
+            "wirehair2_dense_two07_basis_v1"])
+        self.assertEqual(freeze["host_identity"]["controller_cpu"], 1)
+        self.assertEqual(
+            [value["construction_policy"] for value in freeze["arms"]],
+            ["raw_base", "not_applicable", "raw_base"])
         sink = subject.AtomicLineSink(output / "later-native-results.jsonl")
         try:
-            self.assertTrue(all(
-                (output / "{}-freeze.json".format(kind)).exists()
-                for kind in ("recovery", "timing")))
+            self.assertTrue(path.exists())
         finally:
             sink.abort()
+
+    def test_completed_timing_loader_reopens_exact_terminal_bundle(self) \
+            -> None:
+        (contract, qualification, directory, freeze, run_summary,
+         validated) = self._completed_timing_fixture()
+        with mock.patch.object(
+                contract_api, "load_timing_qualification_map",
+                return_value=qualification), mock.patch.object(
+                native_api, "validate_execution_receipt",
+                return_value=validated) as validate, mock.patch.object(
+                contract_api, "load_freeze_manifest",
+                return_value=freeze):
+            loaded = subject.load_completed_timing_screen(
+                contract, directory)
+        self.assertEqual(set(loaded), {
+            "directory", "directory_identity", "run_summary", "freeze",
+            "summary", "execution_receipt", "timing_qualification",
+        })
+        self.assertEqual(loaded["run_summary"], run_summary)
+        self.assertEqual(loaded["freeze"], freeze)
+        self.assertEqual(loaded["summary"], validated["summary"])
+        self.assertEqual(
+            loaded["execution_receipt"], validated["execution_receipt"])
+        self.assertIs(loaded["timing_qualification"], qualification)
+        self.assertFalse(validate.call_args.kwargs["verify_live_sampler"])
+        self.assertEqual(validate.call_args.args[1:3], (
+            "timing", "development"))
+
+    def test_completed_timing_loader_rejects_provenance_substitution(self) \
+            -> None:
+        (contract, qualification, directory, freeze, run_summary,
+         validated) = self._completed_timing_fixture()
+
+        def publish(value):
+            unsigned = {
+                key: item for key, item in value.items()
+                if key != "summary_sha256"
+            }
+            value["summary_sha256"] = contract_api.sha256_json(unsigned)
+            (directory / "run-summary.json").write_bytes(
+                (contract_api.canonical_json(value) + "\n").encode("utf-8"))
+
+        mutations = (
+            ("result hash", "timing_result_sha256", "1" * 64),
+            ("execution hash", "timing_execution_receipt_sha256", "2" * 64),
+            ("qualification execution hash",
+             "timing_qualification_execution_receipt_sha256", "3" * 64),
+            ("validator hash", "timing_validator_summary_sha256", "4" * 64),
+            ("source commit", "source_git_commit", "2" * 40),
+        )
+        with mock.patch.object(
+                contract_api, "load_timing_qualification_map",
+                return_value=qualification), mock.patch.object(
+                native_api, "validate_execution_receipt",
+                return_value=validated), mock.patch.object(
+                contract_api, "load_freeze_manifest",
+                return_value=freeze):
+            for name, field, replacement in mutations:
+                changed = copy.deepcopy(run_summary)
+                changed[field] = replacement
+                publish(changed)
+                with self.subTest(name=name), self.assertRaises(
+                        subject.RunnerError):
+                    subject.load_completed_timing_screen(contract, directory)
+        publish(copy.deepcopy(run_summary))
+
+    def test_completed_timing_loader_fails_closed_on_host_and_symlink(self) \
+            -> None:
+        (contract, qualification, directory, freeze, _run_summary,
+         validated) = self._completed_timing_fixture()
+        invalid_freeze = copy.deepcopy(freeze)
+        invalid_freeze["host_identity"] = {"name": "missing controller"}
+        with mock.patch.object(
+                contract_api, "load_timing_qualification_map",
+                return_value=qualification), mock.patch.object(
+                native_api, "validate_execution_receipt",
+                return_value=validated), mock.patch.object(
+                contract_api, "load_freeze_manifest",
+                return_value=invalid_freeze), self.assertRaisesRegex(
+                    subject.RunnerError, "valid controller CPU"):
+            subject.load_completed_timing_screen(contract, directory)
+
+        d12_freeze = copy.deepcopy(freeze)
+        d12_freeze["arm_roster"].insert(
+            2, "wirehair2_raw_d12_h12_periodic")
+        d12_freeze["arms"].insert(2, {
+            "arm": "wirehair2_raw_d12_h12_periodic",
+            "codec": "wirehair2_experiment",
+            "binary_sha256": "a" * 64,
+            "arm_descriptor_sha256": "9" * 64,
+        })
+        with mock.patch.object(
+                contract_api, "load_timing_qualification_map",
+                return_value=qualification), mock.patch.object(
+                native_api, "validate_execution_receipt",
+                return_value=validated), mock.patch.object(
+                contract_api, "load_freeze_manifest",
+                return_value=d12_freeze), self.assertRaisesRegex(
+                    subject.RunnerError, "wrong exact arm roster"):
+            subject.load_completed_timing_screen(contract, directory)
+
+        target = directory / "timing-results-target.jsonl"
+        target.write_bytes(b"{}\n")
+        result = directory / "timing-results.jsonl"
+        result.unlink()
+        result.symlink_to(target.name)
+        with self.assertRaisesRegex(
+                subject.RunnerError, "cannot read completed timing result"):
+            subject.load_completed_timing_screen(contract, directory)
 
     def test_qualification_pool_is_quit_and_reaped_before_exact_eight_spawn(
             self) -> None:
@@ -611,6 +834,9 @@ class NativeRunnerTests(unittest.TestCase):
             "record_count": 1,
             "freeze_manifest_sha256": "b" * 64,
             "result_stream_sha256": "c" * 64,
+            "receipt_sha256": "d" * 64,
+            "validator_summary_sha256":
+                contract_api.sha256_json({"validated": True}),
             "thermal": {
                 "sample_count": 2,
                 "cpu_tctl_max_millic": 60000,
@@ -619,16 +845,17 @@ class NativeRunnerTests(unittest.TestCase):
         }
 
         def assembled(_contract, kind, *_args, **_kwargs):
+            self.assertEqual(kind, "timing")
             value = dict(receipt)
-            if kind == "recovery":
-                value["thermal"] = dict(receipt["thermal"])
-            else:
-                value["qualification_thermal"] = {
-                    "sample_count": 3,
-                    "cpu_tctl_max_millic": 70000,
-                    "dimm_max_millic": 50000,
-                }
-            return {"execution_receipt": value}
+            value["qualification_thermal"] = {
+                "sample_count": 3,
+                "cpu_tctl_max_millic": 70000,
+                "dimm_max_millic": 50000,
+            }
+            return {
+                "summary": {"validated": True},
+                "execution_receipt": value,
+            }
 
         args = mock.Mock(
             deadline_seconds=60.0, contract=None, worker=Path("worker"),
@@ -652,9 +879,6 @@ class NativeRunnerTests(unittest.TestCase):
             mock.patch.object(subject, "_preflight_sampler"),
             mock.patch.object(subject, "_git_head", return_value="1" * 40),
             mock.patch.object(subject, "_require_worker_source_commit"),
-            mock.patch.object(
-                subject, "_emit_and_assemble_trace",
-                return_value=(self.root / "recovery-traces.jsonl", "d" * 64)),
             mock.patch.object(
                 subject, "_timing_qualification_controls", return_value=[]),
             mock.patch.object(
@@ -680,20 +904,24 @@ class NativeRunnerTests(unittest.TestCase):
                 native_api, "publish_timing_trace_manifest",
                 return_value="e" * 64),
             mock.patch.object(
-                subject, "write_development_freezes", return_value={}),
+                subject, "write_development_timing_freeze",
+                return_value={"trace_manifest_sha256": "e" * 64}),
             mock.patch.object(subject, "_pin_controller"),
             mock.patch.object(
                 subject, "_restore_controller_affinity",
                 side_effect=restore_affinity),
             mock.patch.object(
-                subject, "_run_native_jobs",
-                return_value=({
-                    "recovery": self.root / "recovery-native.jsonl",
-                    "timing": self.root / "timing-native.jsonl",
-                }, 8000000000)),
+                subject, "_run_timing_jobs",
+                return_value=(self.root / "timing-native.jsonl",
+                              8000000000)),
             mock.patch.object(
                 native_api, "assemble_results", side_effect=assembled),
-            mock.patch.object(native_api, "validate_execution_receipt"),
+            mock.patch.object(
+                native_api, "validate_execution_receipt",
+                side_effect=assembled),
+            mock.patch.object(
+                contract_api, "architecture_artifact_sha256",
+                return_value="9" * 64),
             mock.patch.object(
                 subject, "_atomic_write_object", side_effect=publish_summary),
         )
@@ -760,6 +988,9 @@ class NativeRunnerTests(unittest.TestCase):
                 "record_count": 1,
                 "freeze_manifest_sha256": "b" * 64,
                 "result_stream_sha256": "c" * 64,
+                "receipt_sha256": "d" * 64,
+                "validator_summary_sha256":
+                    contract_api.sha256_json({"validated": True}),
                 "thermal": {
                     "sample_count": 2,
                     "cpu_tctl_max_millic": 60000,
@@ -770,6 +1001,10 @@ class NativeRunnerTests(unittest.TestCase):
                     "cpu_tctl_max_millic": 61000,
                     "dimm_max_millic": 41000,
                 },
+            }
+            assembled_evidence = {
+                "summary": {"validated": True},
+                "execution_receipt": receipt,
             }
             args = mock.Mock(
                 deadline_seconds=60.0, contract=None, worker=Path("worker"),
@@ -800,9 +1035,6 @@ class NativeRunnerTests(unittest.TestCase):
                 mock.patch.object(
                     subject, "_create_output_dir", return_value=args.output_dir),
                 mock.patch.object(
-                    subject, "_emit_and_assemble_trace",
-                    return_value=(Path("recovery-traces"), "d" * 64)),
-                mock.patch.object(
                     subject, "_timing_qualification_controls",
                     return_value=[]),
                 mock.patch.object(
@@ -830,19 +1062,21 @@ class NativeRunnerTests(unittest.TestCase):
                     native_api, "publish_timing_trace_manifest",
                     return_value="e" * 64),
                 mock.patch.object(
-                    subject, "write_development_freezes", return_value={}),
+                    subject, "write_development_timing_freeze",
+                    return_value={"trace_manifest_sha256": "e" * 64}),
                 mock.patch.object(subject, "_pin_controller"),
                 mock.patch.object(
                     subject, "_restore_controller_affinity",
                     side_effect=subject.RunnerError(message)),
                 mock.patch.object(
-                    subject, "_run_native_jobs",
-                    return_value=({"recovery": Path("r"), "timing": Path("t")},
-                                  8000000000)),
+                    subject, "_run_timing_jobs",
+                    return_value=(Path("t"), 8000000000)),
                 mock.patch.object(
                     native_api, "assemble_results",
-                    return_value={"execution_receipt": receipt}),
-                mock.patch.object(native_api, "validate_execution_receipt"),
+                    return_value=assembled_evidence),
+                mock.patch.object(
+                    native_api, "validate_execution_receipt",
+                    return_value=assembled_evidence),
                 mock.patch.object(
                     subject, "_atomic_write_object", summary_writer),
             )
@@ -860,15 +1094,15 @@ class NativeRunnerTests(unittest.TestCase):
         output = self.root / "output"
         output.mkdir()
         qualification = self._qualification(contract, description=description)
-        freezes = subject.write_development_freezes(
+        freeze = subject.write_development_timing_freeze(
             contract, description, [0], 1, "1" * 40,
-            {"recovery": "2" * 64, "timing": "3" * 64}, output,
+            "3" * 64, output,
             qualification)
         with mock.patch.object(
                 contract_api, "_timing_cell_indexes",
                 wraps=contract_api._timing_cell_indexes) as cell_indexes:
             validator = subject._strict_response_validator(
-                contract, freezes["timing"], "timing", description, 0,
+                contract, freeze, "timing", description, 0,
                 qualification)
             self.assertTrue(callable(validator))
             self.assertEqual(cell_indexes.call_count, 1)
@@ -1221,7 +1455,7 @@ class NativeRunnerTests(unittest.TestCase):
         for count in (0, 7, 9):
             with self.subTest(count=count), self.assertRaisesRegex(
                     subject.RunnerError, "exactly eight timing workers"):
-                subject._run_native_jobs(
+                subject._run_timing_jobs(
                     contract, {}, qualification, {}, [object()] * count,
                     self.root, 0, time.monotonic() + 1.0)
         for repetitions in (0, 7, 12):
@@ -1338,6 +1572,51 @@ class NativeRunnerTests(unittest.TestCase):
         self.assertEqual(len((self.root / "native.jsonl").read_text().splitlines()),
                          12)
 
+    def test_timing_runner_dispatches_only_t_commands_and_no_recovery_file(
+            self) -> None:
+        cpus = sorted(os.sched_getaffinity(0))[:subject.TIMING_WORKER_COUNT]
+        if len(cpus) != subject.TIMING_WORKER_COUNT:
+            self.skipTest("eight logical CPUs are required")
+        worker_path = self._fake_worker()
+        description = self._description(worker_path)
+        log = self.root / "timing-worker.log"
+        old = os.environ.get("WH2_FAKE_WORKER_LOG")
+        os.environ["WH2_FAKE_WORKER_LOG"] = str(log)
+        workers = []
+        jobs = [
+            subject.Job("timing", ordinal, 0, ordinal)
+            for ordinal in range(subject.TIMING_WORKER_COUNT)
+        ]
+        try:
+            workers = subject.spawn_workers(
+                description, cpus, time.monotonic() + 5.0)
+            with mock.patch.object(
+                    contract_api, "timing_panels", return_value=[]), \
+                    mock.patch.object(
+                        subject, "_timing_job_waves",
+                        return_value=[(0, jobs)]), \
+                    mock.patch.object(
+                        subject, "_strict_response_validator",
+                        return_value=self._validator):
+                path, _ = subject._run_timing_jobs(
+                    {}, {}, mock.Mock(), description, workers,
+                    self.root, 0, time.monotonic() + 5.0)
+            subject.quit_workers(workers, time.monotonic() + 5.0)
+            workers = []
+        finally:
+            subject.terminate_workers(workers)
+            if old is None:
+                os.environ.pop("WH2_FAKE_WORKER_LOG", None)
+            else:
+                os.environ["WH2_FAKE_WORKER_LOG"] = old
+        commands = [json.loads(line)["command"]
+                    for line in log.read_text().splitlines()]
+        self.assertTrue(commands)
+        self.assertTrue(all(command.startswith("T ") for command in commands))
+        self.assertEqual(path, self.root / "timing-native-results.jsonl")
+        self.assertFalse(
+            (self.root / "recovery-native-results.jsonl").exists())
+
     def test_qualification_adaptive_tail_retries_only_one_unresolved_cell(
             self) -> None:
         allowed = sorted(os.sched_getaffinity(0))
@@ -1434,15 +1713,12 @@ class NativeRunnerTests(unittest.TestCase):
         sink.abort.assert_called_once_with()
         sink.publish.assert_not_called()
 
-    def test_second_native_sink_constructor_failure_aborts_first(self) \
+    def test_timing_sink_constructor_failure_has_no_recovery_side_effect(self) \
             -> None:
-        recovery_sink = mock.Mock()
         construction_paths = []
 
         def construct(path):
             construction_paths.append(path)
-            if len(construction_paths) == 1:
-                return recovery_sink
             raise OSError("injected timing sink construction failure")
 
         workers = [mock.Mock(cpu=cpu) for cpu in range(8)]
@@ -1455,15 +1731,12 @@ class NativeRunnerTests(unittest.TestCase):
                     subject, "AtomicLineSink", side_effect=construct), \
                 self.assertRaisesRegex(
                     OSError, "timing sink construction failure"):
-            subject._run_native_jobs(
+            subject._run_timing_jobs(
                 {}, {}, qualification, {}, workers, self.root, 0,
                 time.monotonic() + 1.0)
-        self.assertEqual(construction_paths, [
-            self.root / "recovery-native-results.jsonl",
-            self.root / "timing-native-results.jsonl",
-        ])
-        recovery_sink.abort.assert_called_once_with()
-        recovery_sink.publish.assert_not_called()
+        self.assertEqual(
+            construction_paths,
+            [self.root / "timing-native-results.jsonl"])
 
     def test_worker_error_terminates_complete_pool(self) -> None:
         worker_path = self._fake_worker()

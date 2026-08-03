@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Run the fixed, native WH2 development short screen.
+"""Run the fixed, native WH2 development timing short screen.
 
 This is deliberately a narrow controller for the frozen development domain.
-It emits and freezes arm-free traces before starting any result job, keeps one
+It qualifies, emits, and freezes timing traces before any result job, keeps one
 persistent native worker on each selected physical core, traverses the full
 timing cohort domain once per independent round with one homogeneous eight-job
 wave and barrier at a time, and delegates publication to the fail-closed native
-evidence assembler.
+evidence assembler.  Raw-v3 recovery is produced only by the separate recovery
+campaign runner; this controller never emits recovery evidence.
 """
 
 from __future__ import annotations
@@ -53,9 +54,33 @@ TIMING_CANDIDATE_DESCRIPTOR_SHA256 = (
     "9527f200ad38c7eec6502b2f768fdd67"
     "b92787fb227eed3d7616274ffc2df388"
 )
-SUMMARY_SCHEMA = "wirehair.wh2.native-short-screen-run.v1"
+SUMMARY_SCHEMA = "wirehair.wh2.native-short-screen-run.v2"
+SUMMARY_FIELDS = frozenset((
+    "schema", "status", "output_dir", "source_git_commit",
+    "contract_sha256", "worker_binary_sha256", "controller_cpu",
+    "worker_cpus", "qualification_worker_cpus",
+    "timing_qualification_map_sha256",
+    "timing_qualification_execution_receipt_sha256",
+    "timing_qualified_domain_sha256", "qualification_attempt_count",
+    "qualification_retried_cell_count", "qualification_max_retry_offset",
+    "qualification_sum_retry_offsets", "timing_records",
+    "timing_trace_manifest_sha256", "timing_freeze_sha256",
+    "timing_architecture_artifact_sha256", "timing_result_sha256",
+    "timing_execution_receipt_sha256", "timing_validator_summary_sha256",
+    "thermal_samples", "cpu_tctl_max_millic", "dimm_max_millic",
+    "timing_thermal_samples", "timing_cpu_tctl_max_millic",
+    "timing_dimm_max_millic", "qualification_thermal_samples",
+    "qualification_cpu_tctl_max_millic", "qualification_dimm_max_millic",
+    "overall_cpu_tctl_max_millic", "overall_dimm_max_millic",
+    "summary_sha256",
+))
 MAX_WALL_SECONDS = 7200.0
 MAX_RESPONSE_BYTES = 1024 * 1024
+# The 25,344-row native timing envelope can exceed 64 MiB even though the
+# logical timing receipt remains smaller.  Keep a finite, fail-closed ceiling
+# with enough headroom for the frozen schema's canonical field names/hashes.
+MAX_COMPLETED_ARTIFACT_BYTES = 256 * 1024 * 1024
+MAX_COMPLETED_BUNDLE_BYTES = 512 * 1024 * 1024
 TIMING_WORKER_COUNT = 8
 ZERO_SHA256 = "0" * 64
 CPU_TOKEN = re.compile(r"(?:0|[1-9][0-9]*)\Z")
@@ -851,28 +876,23 @@ def _freeze_manifest(
     }
 
 
-def write_development_freezes(
+def write_development_timing_freeze(
         contract: Mapping[str, Any], description: Mapping[str, Any],
         cpus: Sequence[int], controller_cpu: int, source_commit: str,
-        trace_sha256s: Mapping[str, str], output_dir: Path,
+        trace_sha256: str, output_dir: Path,
         timing_qualification: contract_api.TimingQualification,
-        ) -> Mapping[str, Mapping[str, Any]]:
-    """Publish and re-open both freezes before a result process may start."""
-    loaded: Dict[str, Mapping[str, Any]] = {}
-    for kind in ("recovery", "timing"):
-        path = output_dir / "{}-freeze.json".format(kind)
-        value = _freeze_manifest(
-            contract, kind, trace_sha256s[kind], source_commit,
-            description, cpus, controller_cpu,
-            timing_qualification if kind == "timing" else None)
-        _atomic_write_object(path, value)
-        try:
-            loaded[kind] = contract_api.load_freeze_manifest(
-                contract, "development", path, kind,
-                timing_qualification if kind == "timing" else None)
-        except contract_api.ContractError as exc:
-            fail(str(exc))
-    return loaded
+        ) -> Mapping[str, Any]:
+    """Publish and strictly re-open the sole development timing freeze."""
+    path = output_dir / "timing-freeze.json"
+    value = _freeze_manifest(
+        contract, "timing", trace_sha256, source_commit,
+        description, cpus, controller_cpu, timing_qualification)
+    _atomic_write_object(path, value)
+    try:
+        return contract_api.load_freeze_manifest(
+            contract, "development", path, "timing", timing_qualification)
+    except contract_api.ContractError as exc:
+        fail(str(exc))
 
 
 def _valid_sampler_monotonic_ns(row: Sequence[str]) -> Optional[int]:
@@ -1517,6 +1537,7 @@ def _strict_response_validator(
 
 
 def _recovery_jobs(contract: Mapping[str, Any], arm_count: int) -> List[Job]:
+    """Shared recovery helper retained for the dedicated recovery runner/tests."""
     cells = contract["recovery"]["domains"]["development"][
         "expected_cells_per_arm"]
     jobs = [
@@ -1702,12 +1723,12 @@ def _timing_job_waves(
     return waves
 
 
-def _run_native_jobs(
-        contract: Mapping[str, Any], freezes: Mapping[str, Mapping[str, Any]],
+def _run_timing_jobs(
+        contract: Mapping[str, Any], freeze: Mapping[str, Any],
         timing_qualification: contract_api.TimingQualification,
         description: Mapping[str, Any], workers: Sequence[PersistentWorker],
         output_dir: Path, window_start_ns: int, deadline: float,
-        ) -> Tuple[Mapping[str, Path], int]:
+        ) -> Tuple[Path, int]:
     if len(workers) != TIMING_WORKER_COUNT:
         fail("native short screen requires exactly eight timing workers")
     try:
@@ -1717,29 +1738,14 @@ def _run_native_jobs(
         fail(str(exc))
     timing_waves = _timing_job_waves(
         contract, panel_count, timing_qualification)
-    paths = {
-        "recovery": output_dir / "recovery-native-results.jsonl",
-        "timing": output_dir / "timing-native-results.jsonl",
-    }
-    recovery_sink: Optional[AtomicLineSink] = None
+    path = output_dir / "timing-native-results.jsonl"
     timing_sink: Optional[AtomicLineSink] = None
     maximum_end = 0
     try:
-        recovery_sink = AtomicLineSink(paths["recovery"])
-        timing_sink = AtomicLineSink(paths["timing"])
-        recovery_end, recovery_cpus = run_job_batch(
-            workers, _recovery_jobs(contract, len(EXPECTED_ARMS)), 0,
-            recovery_sink, deadline, _strict_response_validator(
-                contract, freezes["recovery"], "recovery", description,
-                window_start_ns))
-        if recovery_cpus != set(worker.cpu for worker in workers):
-            fail("recovery did not exercise every frozen CPU")
-        recovery_sink.publish()
-        maximum_end = max(maximum_end, recovery_end)
-
+        timing_sink = AtomicLineSink(path)
         expected_timing_cpus = set(worker.cpu for worker in workers)
         timing_validator = _strict_response_validator(
-            contract, freezes["timing"], "timing", description,
+            contract, freeze, "timing", description,
             window_start_ns, timing_qualification)
         for wave_ordinal, (rotation, jobs) in enumerate(timing_waves):
             end, used = run_job_batch(
@@ -1750,14 +1756,10 @@ def _run_native_jobs(
                     wave_ordinal))
             maximum_end = max(maximum_end, end)
         timing_sink.publish()
-        return paths, maximum_end
+        return path, maximum_end
     finally:
-        try:
-            if timing_sink is not None:
-                timing_sink.abort()
-        finally:
-            if recovery_sink is not None:
-                recovery_sink.abort()
+        if timing_sink is not None:
+            timing_sink.abort()
 
 
 def _create_output_dir(path: Path) -> Path:
@@ -1776,6 +1778,283 @@ def _create_output_dir(path: Path) -> Path:
     except OSError as exc:
         fail("cannot create output directory {}: {}".format(path, exc))
     return path
+
+
+def _read_completed_regular_bytes(
+        path: Path, context: str, directory_fd: int) -> bytes:
+    """Read one bounded regular file through an already-pinned directory."""
+    descriptor = -1
+    try:
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        if nofollow == 0:
+            fail("{} cannot be opened fail-closed without O_NOFOLLOW".format(
+                context))
+        descriptor = os.open(
+            str(path), os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) |
+            nofollow | getattr(os, "O_NONBLOCK", 0), dir_fd=directory_fd)
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            fail("{} must be a regular non-symlink file".format(context))
+        if before.st_size > MAX_COMPLETED_ARTIFACT_BYTES:
+            fail("{} exceeds the bounded artifact size".format(context))
+        chunks = []
+        size = 0
+        while True:
+            block = os.read(descriptor, 1024 * 1024)
+            if not block:
+                break
+            size += len(block)
+            if size > MAX_COMPLETED_ARTIFACT_BYTES:
+                fail("{} exceeds the bounded artifact size".format(context))
+            chunks.append(block)
+        after = os.fstat(descriptor)
+        stable_before = (
+            before.st_dev, before.st_ino, before.st_size,
+            getattr(before, "st_mtime_ns", None),
+            getattr(before, "st_ctime_ns", None),
+        )
+        stable_after = (
+            after.st_dev, after.st_ino, after.st_size,
+            getattr(after, "st_mtime_ns", None),
+            getattr(after, "st_ctime_ns", None),
+        )
+        data = b"".join(chunks)
+        if stable_before != stable_after or len(data) != before.st_size:
+            fail("{} changed while it was being read".format(context))
+        return data
+    except OSError as exc:
+        fail("cannot read {} {}: {}".format(context, path, exc))
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    return b""
+
+
+def _write_completed_snapshot(path: Path, data: bytes) -> None:
+    try:
+        with path.open("xb") as output:
+            output.write(data)
+            output.flush()
+            os.fsync(output.fileno())
+    except OSError as exc:
+        fail("cannot write private timing snapshot {}: {}".format(path, exc))
+
+
+def load_completed_timing_screen(
+        contract: Mapping[str, Any], timing_screen_dir: Path,
+        ) -> Mapping[str, Any]:
+    """Strictly reopen one terminal timing-only development evidence bundle."""
+    if not isinstance(timing_screen_dir, Path):
+        fail("timing screen directory must be a pathlib Path")
+    directory_fd = -1
+    try:
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        directory_flag = getattr(os, "O_DIRECTORY", 0)
+        if nofollow == 0 or directory_flag == 0:
+            fail("timing screen directory cannot be opened fail-closed")
+        directory_fd = os.open(
+            str(timing_screen_dir),
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) |
+            nofollow | directory_flag)
+        opened_info = os.fstat(directory_fd)
+        if not stat.S_ISDIR(opened_info.st_mode):
+            fail("timing screen path must be a real directory, not a symlink")
+        resolved = timing_screen_dir.resolve(strict=True)
+        resolved_info = resolved.stat()
+        if (opened_info.st_dev, opened_info.st_ino) != \
+                (resolved_info.st_dev, resolved_info.st_ino):
+            fail("timing screen directory identity changed while opening")
+    except (OSError, RuntimeError) as exc:
+        if directory_fd >= 0:
+            os.close(directory_fd)
+            directory_fd = -1
+        fail("cannot open timing screen directory {}: {}".format(
+            timing_screen_dir, exc))
+    except BaseException:
+        if directory_fd >= 0:
+            os.close(directory_fd)
+            directory_fd = -1
+        raise
+    source_names = {
+        "summary": "run-summary.json",
+        "freeze": "timing-freeze.json",
+        "trace": "timing-traces.jsonl",
+        "native": "timing-native-results.jsonl",
+        "result": "timing-results.jsonl",
+        "receipt": "timing-execution.json",
+        "sampler": "sampler-attestation.json",
+        "qualification_map": "timing-qualification-map.json",
+        "qualification_audit": "timing-qualification-audit.jsonl",
+        "qualification_native": "timing-qualification-native.jsonl",
+        "qualification_sampler": "qualification-sampler-attestation.json",
+        "qualification_receipt": "timing-qualification-execution.json",
+    }
+    try:
+        snapshots = {}
+        total_bytes = 0
+        for key, name in source_names.items():
+            data = _read_completed_regular_bytes(
+                Path(name), "completed timing " + key.replace("_", " "),
+                directory_fd)
+            total_bytes += len(data)
+            if total_bytes > MAX_COMPLETED_BUNDLE_BYTES:
+                fail("completed timing evidence exceeds the bounded bundle size")
+            snapshots[key] = data
+    finally:
+        if directory_fd >= 0:
+            os.close(directory_fd)
+
+    with tempfile.TemporaryDirectory(prefix="wh2-timing-snapshot-") as raw:
+        snapshot_root = Path(raw)
+        paths = {key: snapshot_root / name
+                 for key, name in source_names.items()}
+        for key, path in paths.items():
+            _write_completed_snapshot(path, snapshots[key])
+
+        run_summary = _parse_canonical_line(
+            snapshots["summary"], "completed timing run summary")
+        if (set(run_summary) != SUMMARY_FIELDS or
+                run_summary.get("schema") != SUMMARY_SCHEMA or
+                run_summary.get("status") != "complete" or
+                run_summary.get("output_dir") != str(resolved)):
+            fail("completed timing run summary is incomplete or misplaced")
+        unsigned_summary = {
+            key: value for key, value in run_summary.items()
+            if key != "summary_sha256"
+        }
+        if (not _is_sha256(run_summary.get("summary_sha256")) or
+                run_summary["summary_sha256"] == ZERO_SHA256 or
+                run_summary["summary_sha256"] !=
+                    contract_api.sha256_json(unsigned_summary)):
+            fail("completed timing run summary self-hash is invalid")
+        qualification_map_sha256 = run_summary.get(
+            "timing_qualification_map_sha256")
+        qualification_execution_sha256 = run_summary.get(
+            "timing_qualification_execution_receipt_sha256")
+        if (not _is_sha256(qualification_map_sha256) or
+                qualification_map_sha256 == ZERO_SHA256 or
+                not _is_sha256(qualification_execution_sha256) or
+                qualification_execution_sha256 == ZERO_SHA256):
+            fail("completed timing qualification hashes are invalid")
+        try:
+            qualification = contract_api.load_timing_qualification_map(
+                contract, "development", paths["qualification_map"],
+                paths["qualification_audit"], qualification_map_sha256)
+            validated = native_api.validate_execution_receipt(
+                contract, "timing", "development", paths["freeze"],
+                paths["trace"], paths["native"], paths["result"],
+                paths["receipt"], verify_live_sampler=False,
+                sampler_path=paths["sampler"],
+                timing_qualification_map_path=paths["qualification_map"],
+                timing_qualification_audit_path=paths["qualification_audit"],
+                timing_qualification_map_sha256=qualification_map_sha256,
+                timing_qualification_native_path=
+                    paths["qualification_native"],
+                timing_qualification_sampler_path=
+                    paths["qualification_sampler"],
+                timing_qualification_execution_receipt_path=
+                    paths["qualification_receipt"],
+                timing_qualification_execution_receipt_sha256=
+                    qualification_execution_sha256)
+            freeze = contract_api.load_freeze_manifest(
+                contract, "development", paths["freeze"], "timing",
+                qualification)
+        except (native_api.NativeEvidenceError,
+                contract_api.ContractError) as exc:
+            fail(str(exc))
+
+        if freeze["arm_roster"] != [value[0] for value in EXPECTED_ARMS]:
+            fail("completed timing freeze has the wrong exact arm roster")
+        for index, (expected_arm, expected_codec) in enumerate(EXPECTED_ARMS):
+            arm = freeze["arms"][index]
+            if (arm["arm"] != expected_arm or
+                    arm["codec"] != expected_codec or
+                    arm["binary_sha256"] !=
+                        freeze["arms"][0]["binary_sha256"]):
+                fail("completed timing freeze substitutes an arm artifact")
+        if freeze["arms"][2]["arm_descriptor_sha256"] != \
+                TIMING_CANDIDATE_DESCRIPTOR_SHA256:
+            fail("completed timing freeze substitutes the Two07 descriptor")
+
+        timing_summary = validated["summary"]
+        execution_receipt = validated["execution_receipt"]
+        retry_offsets = list(qualification.retry_offsets)
+        thermal = execution_receipt["thermal"]
+        qualification_thermal = execution_receipt["qualification_thermal"]
+        host_identity = freeze.get("host_identity")
+        controller_cpu = host_identity.get("controller_cpu") \
+            if isinstance(host_identity, dict) else None
+        if type(controller_cpu) is not int or controller_cpu < 0:
+            fail("completed timing freeze lacks a valid controller CPU")
+        expected = {
+            "source_git_commit": freeze["source_git_commit"],
+            "contract_sha256": contract_api.contract_sha256(contract),
+            "worker_binary_sha256": freeze["arms"][0]["binary_sha256"],
+            "controller_cpu": controller_cpu,
+            "worker_cpus": execution_receipt["worker_cpus"],
+            "qualification_worker_cpus":
+                execution_receipt["qualification_worker_cpus"],
+            "timing_qualification_map_sha256": qualification.map_sha256,
+            "timing_qualification_execution_receipt_sha256":
+                execution_receipt[
+                    "timing_qualification_execution_receipt_sha256"],
+            "timing_qualified_domain_sha256":
+                qualification.qualified_domain_sha256,
+            "qualification_attempt_count":
+                len(retry_offsets) + sum(retry_offsets),
+            "qualification_retried_cell_count": sum(
+                1 for retry in retry_offsets if retry > 0),
+            "qualification_max_retry_offset": max(retry_offsets, default=0),
+            "qualification_sum_retry_offsets": sum(retry_offsets),
+            "timing_records": execution_receipt["record_count"],
+            "timing_trace_manifest_sha256":
+                freeze["trace_manifest_sha256"],
+            "timing_freeze_sha256":
+                execution_receipt["freeze_manifest_sha256"],
+            "timing_architecture_artifact_sha256":
+                contract_api.architecture_artifact_sha256(freeze),
+            "timing_result_sha256":
+                execution_receipt["result_stream_sha256"],
+            "timing_execution_receipt_sha256":
+                execution_receipt["receipt_sha256"],
+            "timing_validator_summary_sha256":
+                execution_receipt["validator_summary_sha256"],
+            "thermal_samples": thermal["sample_count"],
+            "cpu_tctl_max_millic": thermal["cpu_tctl_max_millic"],
+            "dimm_max_millic": thermal["dimm_max_millic"],
+            "timing_thermal_samples": thermal["sample_count"],
+            "timing_cpu_tctl_max_millic": thermal["cpu_tctl_max_millic"],
+            "timing_dimm_max_millic": thermal["dimm_max_millic"],
+            "qualification_thermal_samples":
+                qualification_thermal["sample_count"],
+            "qualification_cpu_tctl_max_millic":
+                qualification_thermal["cpu_tctl_max_millic"],
+            "qualification_dimm_max_millic":
+                qualification_thermal["dimm_max_millic"],
+            "overall_cpu_tctl_max_millic": max(
+                thermal["cpu_tctl_max_millic"],
+                qualification_thermal["cpu_tctl_max_millic"]),
+            "overall_dimm_max_millic": max(
+                thermal["dimm_max_millic"],
+                qualification_thermal["dimm_max_millic"]),
+        }
+        if (any(contract_api.canonical_json(run_summary.get(field)) !=
+                contract_api.canonical_json(value)
+                for field, value in expected.items()) or
+                run_summary["timing_validator_summary_sha256"] !=
+                    contract_api.sha256_json(timing_summary) or
+                qualification.source_git_commit !=
+                    freeze["source_git_commit"]):
+            fail("completed timing summary differs from reopened evidence")
+        return {
+            "directory": str(resolved),
+            "directory_identity": (opened_info.st_dev, opened_info.st_ino),
+            "run_summary": run_summary,
+            "freeze": freeze,
+            "summary": timing_summary,
+            "execution_receipt": execution_receipt,
+            "timing_qualification": qualification,
+        }
 
 
 def run_short_screen(args: argparse.Namespace) -> Mapping[str, Any]:
@@ -1810,8 +2089,6 @@ def run_short_screen(args: argparse.Namespace) -> Mapping[str, Any]:
     _require_worker_source_commit(description, source_commit)
     output_dir = _create_output_dir(args.output_dir)
 
-    recovery_trace_path, recovery_trace_sha256 = _emit_and_assemble_trace(
-        contract, "recovery", description, output_dir, deadline)
     controls = _timing_qualification_controls(contract, description)
     qualification_native_path = output_dir / \
         "timing-qualification-native.jsonl"
@@ -1903,36 +2180,25 @@ def run_short_screen(args: argparse.Namespace) -> Mapping[str, Any]:
     except (native_api.NativeEvidenceError,
             contract_api.ContractError) as exc:
         fail(str(exc))
-    trace_paths = {
-        "recovery": recovery_trace_path,
-        "timing": timing_trace_path,
-    }
-    trace_sha256s = {
-        "recovery": recovery_trace_sha256,
-        "timing": timing_trace_sha256,
-    }
     if _git_head(deadline) != source_commit:
         fail("codec source commit changed before the result freeze")
-    freezes = write_development_freezes(
+    freeze = write_development_timing_freeze(
         contract, description, cpus, controller_cpu, source_commit,
-        trace_sha256s, output_dir, timing_qualification)
-    freeze_paths = {
-        kind: output_dir / "{}-freeze.json".format(kind)
-        for kind in ("recovery", "timing")
-    }
+        timing_trace_sha256, output_dir, timing_qualification)
+    freeze_path = output_dir / "timing-freeze.json"
 
     workers: List[PersistentWorker] = []
     clean_shutdown = False
     controller_pinned = False
     try:
-        # Both validated freezes exist before the first R/T command.
+        # The validated timing freeze exists before the first T command.
         workers = spawn_workers(description, cpus, deadline)
         controller_pinned = True
         _pin_controller(controller_cpu)
         timing_window_start_ns = choose_new_sampler_start(
             args.sampler_csv, deadline)
-        native_paths, maximum_worker_end = _run_native_jobs(
-            contract, freezes, timing_qualification, description, workers,
+        native_path, maximum_worker_end = _run_timing_jobs(
+            contract, freeze, timing_qualification, description, workers,
             output_dir,
             timing_window_start_ns, deadline)
         window_end_ns = _wait_for_sampler_sample(
@@ -1949,65 +2215,52 @@ def run_short_screen(args: argparse.Namespace) -> Mapping[str, Any]:
         except native_api.NativeEvidenceError as exc:
             fail(str(exc))
 
-        assembled: Dict[str, Mapping[str, Any]] = {}
-        for kind in ("recovery", "timing"):
-            result_path = output_dir / "{}-results.jsonl".format(kind)
-            receipt_path = output_dir / "{}-execution.json".format(kind)
-            try:
-                assembled[kind] = native_api.assemble_results(
-                    contract, kind, "development", freeze_paths[kind],
-                    trace_paths[kind], native_paths[kind], sampler_path,
-                    result_path, receipt_path, verify_live_sampler=True,
-                    timing_qualification_map_path=
-                        qualification_map_path if kind == "timing" else None,
-                    timing_qualification_audit_path=
-                        qualification_audit_path if kind == "timing" else None,
-                    timing_qualification_map_sha256=
-                        qualification_map_sha256 if kind == "timing" else None,
-                    timing_qualification_native_path=
-                        qualification_native_path if kind == "timing" else None,
-                    timing_qualification_sampler_path=
-                        qualification_sampler_path if kind == "timing" else None,
-                    timing_qualification_execution_receipt_path=
-                        qualification_execution_receipt_path
-                        if kind == "timing" else None,
-                    timing_qualification_execution_receipt_sha256=
-                        qualification_execution_receipt_sha256
-                        if kind == "timing" else None)
-                _remaining(deadline, "assembling {} results".format(kind))
-                native_api.validate_execution_receipt(
-                    contract, kind, "development", freeze_paths[kind],
-                    trace_paths[kind], native_paths[kind], result_path,
-                    receipt_path, verify_live_sampler=True,
-                    sampler_path=sampler_path,
-                    timing_qualification_map_path=
-                        qualification_map_path if kind == "timing" else None,
-                    timing_qualification_audit_path=
-                        qualification_audit_path if kind == "timing" else None,
-                    timing_qualification_map_sha256=
-                        qualification_map_sha256 if kind == "timing" else None,
-                    timing_qualification_native_path=
-                        qualification_native_path if kind == "timing" else None,
-                    timing_qualification_sampler_path=
-                        qualification_sampler_path if kind == "timing" else None,
-                    timing_qualification_execution_receipt_path=
-                        qualification_execution_receipt_path
-                        if kind == "timing" else None,
-                    timing_qualification_execution_receipt_sha256=
-                        qualification_execution_receipt_sha256
-                        if kind == "timing" else None)
-                _remaining(deadline, "validating {} execution".format(kind))
-            except (native_api.NativeEvidenceError,
-                    contract_api.ContractError) as exc:
-                fail(str(exc))
+        result_path = output_dir / "timing-results.jsonl"
+        receipt_path = output_dir / "timing-execution.json"
+        try:
+            assembled = native_api.assemble_results(
+                contract, "timing", "development", freeze_path,
+                timing_trace_path, native_path, sampler_path,
+                result_path, receipt_path, verify_live_sampler=True,
+                timing_qualification_map_path=qualification_map_path,
+                timing_qualification_audit_path=qualification_audit_path,
+                timing_qualification_map_sha256=qualification_map_sha256,
+                timing_qualification_native_path=qualification_native_path,
+                timing_qualification_sampler_path=qualification_sampler_path,
+                timing_qualification_execution_receipt_path=
+                    qualification_execution_receipt_path,
+                timing_qualification_execution_receipt_sha256=
+                    qualification_execution_receipt_sha256)
+            _remaining(deadline, "assembling timing results")
+            terminal = native_api.validate_execution_receipt(
+                contract, "timing", "development", freeze_path,
+                timing_trace_path, native_path, result_path,
+                receipt_path, verify_live_sampler=True,
+                sampler_path=sampler_path,
+                timing_qualification_map_path=qualification_map_path,
+                timing_qualification_audit_path=qualification_audit_path,
+                timing_qualification_map_sha256=qualification_map_sha256,
+                timing_qualification_native_path=qualification_native_path,
+                timing_qualification_sampler_path=qualification_sampler_path,
+                timing_qualification_execution_receipt_path=
+                    qualification_execution_receipt_path,
+                timing_qualification_execution_receipt_sha256=
+                    qualification_execution_receipt_sha256)
+            _remaining(deadline, "validating timing execution")
+        except (native_api.NativeEvidenceError,
+                contract_api.ContractError) as exc:
+            fail(str(exc))
+        if contract_api.canonical_json(terminal) != \
+                contract_api.canonical_json(assembled):
+            fail("terminal timing execution differs from assembled evidence")
         quit_workers(workers, deadline)
         clean_shutdown = True
         if controller_pinned:
             _restore_controller_affinity(original_affinity)
             controller_pinned = False
 
-        recovery_receipt = assembled["recovery"]["execution_receipt"]
-        timing_receipt = assembled["timing"]["execution_receipt"]
+        timing_receipt = assembled["execution_receipt"]
+        timing_validator_summary = assembled["summary"]
         thermal = timing_receipt["thermal"]
         qualification_thermal = timing_receipt["qualification_thermal"]
         qualification_retry_offsets = list(
@@ -2035,14 +2288,17 @@ def run_short_screen(args: argparse.Namespace) -> Mapping[str, Any]:
                 qualification_retry_offsets, default=0),
             "qualification_sum_retry_offsets": sum(
                 qualification_retry_offsets),
-            "recovery_records": recovery_receipt["record_count"],
             "timing_records": timing_receipt["record_count"],
-            "recovery_freeze_sha256":
-                recovery_receipt["freeze_manifest_sha256"],
+            "timing_trace_manifest_sha256":
+                freeze["trace_manifest_sha256"],
             "timing_freeze_sha256": timing_receipt["freeze_manifest_sha256"],
-            "recovery_result_sha256":
-                recovery_receipt["result_stream_sha256"],
+            "timing_architecture_artifact_sha256":
+                contract_api.architecture_artifact_sha256(freeze),
             "timing_result_sha256": timing_receipt["result_stream_sha256"],
+            "timing_execution_receipt_sha256":
+                timing_receipt["receipt_sha256"],
+            "timing_validator_summary_sha256":
+                timing_receipt["validator_summary_sha256"],
             "thermal_samples": thermal["sample_count"],
             "cpu_tctl_max_millic": thermal["cpu_tctl_max_millic"],
             "dimm_max_millic": thermal["dimm_max_millic"],
@@ -2063,6 +2319,11 @@ def run_short_screen(args: argparse.Namespace) -> Mapping[str, Any]:
                 thermal["dimm_max_millic"],
                 qualification_thermal["dimm_max_millic"]),
         }
+        summary["summary_sha256"] = contract_api.sha256_json(summary)
+        if (set(summary) != SUMMARY_FIELDS or
+                summary["timing_validator_summary_sha256"] !=
+                    contract_api.sha256_json(timing_validator_summary)):
+            fail("internal timing run summary schema mismatch")
         _atomic_write_object(output_dir / "run-summary.json", summary)
         return summary
     finally:
