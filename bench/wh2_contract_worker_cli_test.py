@@ -20,6 +20,13 @@ TIMING_SCHEMA = "wirehair.wh2.native-timing-record.v4"
 TIMING_QUALIFICATION_SCHEMA = (
     "wirehair.wh2.native-timing-qualification-record.v1"
 )
+PHASE_ATTRIBUTION_SCHEMA = (
+    "wirehair.wh2.native-phase-attribution-record.v1"
+)
+PHASE_TRACE_SCHEMA = (
+    "wirehair.wh2.native-phase-attribution-trace-record.v1"
+)
+PHASE_CELL_SCHEMA = "wirehair.wh2.phase-attribution-cell.v1"
 NATIVE_WORK_SCHEMA = "wirehair.wh2.native-work.v1"
 TIMING_QUALIFICATION_MESSAGE_DOMAIN = (
     b"wirehair.wh2.timing-qualification-message.v1\0"
@@ -236,6 +243,18 @@ TIMING_BASE_CELL_ZERO_SHA256 = (
 TIMING_SOURCE_MESSAGE_SHA256 = (
     "359d10cd28719881523fd74723b803ac067830be9233c2f75325a6bd0a8324f3"
 )
+PHASE_TRACE_CELL_ZERO_SHA256 = (
+    "e85871b9c09ac946f6c8f6e0e077bd758d4862bfb5dddd73f6ee05e3ba35f2d7"
+)
+PHASE_TRACE_ZERO_SHA256 = (
+    "768c7e52d3bfc315b9d9eb44287766f9401904062a5595be439f8ba6b20c90aa"
+)
+PHASE_LEFT_REALIZED_K8_B64 = (
+    "9550709c050513fa266c0904cb2912a85c5dedfe11a78054413693737647d70d"
+)
+PHASE_RIGHT_REALIZED_K8_B64 = (
+    "ca6c4a450d9d0abfa024d354fe436590829bce1d0235a0ec97fb2faf3e3faf32"
+)
 
 
 def canonical_json(value):
@@ -264,6 +283,48 @@ def native_work_sha256(evidence_kind, ordinal, cell_sha256):
         "phase": "development",
         "schema": NATIVE_WORK_SCHEMA,
     })
+
+
+def phase_cell_zero(profile_ordinal):
+    profiles = (("n16", 16), ("n24", 24))
+    profile, invocations = profiles[profile_ordinal]
+    return {
+        "K": 8,
+        "band": "2-100",
+        "base_loss_seed": "0x2d0f28c7e7e786b2",
+        "block_bytes": 64,
+        "construction_attempt": 0,
+        "coordinate_ordinal": 0,
+        "diagnostic_phase": "development",
+        "fixed_received_overhead": 4,
+        "interleave_policy": "self-counterbalanced-repeat-major-v1",
+        "invocations_per_slot": invocations,
+        "left_arm": TIMING_CANDIDATE["arm"],
+        "left_arm_descriptor_sha256":
+            TIMING_CANDIDATE["arm_descriptor_sha256"],
+        "left_realized_construction_sha256": PHASE_LEFT_REALIZED_K8_B64,
+        "left_repair_map_sha256": ZERO_SHA256,
+        "loss_ppm": 100000,
+        "loss_retry_offset": 0,
+        "loss_seed": "0x2d0f28c7e7e786b2",
+        "order": "ABBA",
+        "panel_kind": "ab",
+        "profile": profile,
+        "profile_ordinal": profile_ordinal,
+        "receive_overhead_cap": 256,
+        "replicate": 0,
+        "right_arm": CONTROLS[0]["arm"],
+        "right_arm_descriptor_sha256":
+            CONTROLS[0]["arm_descriptor_sha256"],
+        "right_realized_construction_sha256": PHASE_RIGHT_REALIZED_K8_B64,
+        "right_repair_map_sha256": ZERO_SHA256,
+        "schedule": "iid",
+        "schema": PHASE_CELL_SCHEMA,
+        "scope": "decoder_solve",
+        "source_base_cell_sha256": TIMING_BASE_CELL_ZERO_SHA256,
+        "trace_qualified_timing_cell_sha256": PHASE_TRACE_CELL_ZERO_SHA256,
+        "trace_sha256": PHASE_TRACE_ZERO_SHA256,
+    }
 
 
 def generic_realized_sha256(arm, K, block_bytes, construction_attempt):
@@ -578,7 +639,7 @@ class ContractWorkerCliTest(unittest.TestCase):
         self.assertEqual(clean.stdout, "")
         self.assertEqual(clean.stderr, "")
 
-        for command in ("L 0 0\n", "T 0 0\n"):
+        for command in ("L 0 0\n", "T 0 0\n", "P 0 0\n"):
             with self.subTest(rejected_command=command.strip()):
                 rejected = self.run_worker(
                     "--recovery-candidate-worker",
@@ -1150,6 +1211,270 @@ class ContractWorkerCliTest(unittest.TestCase):
             self.assertTrue(all(
                 type(value) is int and value > 0
                 for value in payload["elapsed_ns"]))
+
+    @unittest.skipUnless(
+        hasattr(os, "sched_getaffinity"), "Linux CPU affinity is required")
+    def test_phase_attribution_traces_and_real_profiles_are_closed(self):
+        trace_result = self.run_worker("--emit-traces", "phase-attribution")
+        self.assertEqual(trace_result.returncode, 0, trace_result.stderr)
+        self.assertEqual(trace_result.stderr, "")
+        trace_lines = trace_result.stdout.splitlines()
+        self.assertEqual(len(trace_lines), 24)
+        traces = [json.loads(line) for line in trace_lines]
+        self.assertEqual(
+            trace_lines, [canonical_json(record) for record in traces])
+        expected_coordinates = [
+            (ordinal, K, block_bytes)
+            for ordinal, (block_bytes, K) in enumerate(
+                (block_bytes, K)
+                for block_bytes in (64, 1280)
+                for K in (8, 32, 100, 128, 512, 1000, 2048, 5000,
+                          8192, 20000, 32768, 64000))
+        ]
+        self.assertEqual(
+            [record["coordinate_ordinal"] for record in traces],
+            list(range(24)))
+        self.assertEqual(
+            [record["schema"] for record in traces],
+            [PHASE_TRACE_SCHEMA] * 24)
+        for record, (ordinal, K, _) in zip(traces, expected_coordinates):
+            self.assertEqual(record["coordinate_ordinal"], ordinal)
+            self.assertEqual(record["packet_count"], K + 256)
+            self.assertRegex(record["trace_sha256"], SHA256)
+            self.assertRegex(
+                record["source_base_cell_sha256"], SHA256)
+            self.assertRegex(
+                record["trace_qualified_timing_cell_sha256"], SHA256)
+            self.assertEqual(len(record["phase_cell_sha256_by_profile"]), 2)
+            self.assertTrue(all(
+                SHA256.fullmatch(value)
+                for value in record["phase_cell_sha256_by_profile"]))
+        all_phase_cells = [
+            digest
+            for record in traces
+            for digest in record["phase_cell_sha256_by_profile"]
+        ]
+        self.assertEqual(len(set(all_phase_cells)), 48)
+
+        phase_cell_hashes = [
+            sha256_json(phase_cell_zero(profile)) for profile in range(2)]
+        self.assertEqual(
+            traces[0],
+            {
+                "candidate_count": 305,
+                "coordinate_ordinal": 0,
+                "packet_count": 264,
+                "phase_cell_sha256_by_profile": phase_cell_hashes,
+                "schema": PHASE_TRACE_SCHEMA,
+                "source_base_cell_sha256": TIMING_BASE_CELL_ZERO_SHA256,
+                "trace_qualified_timing_cell_sha256":
+                    PHASE_TRACE_CELL_ZERO_SHA256,
+                "trace_sha256": PHASE_TRACE_ZERO_SHA256,
+            })
+
+        affinity = os.sched_getaffinity(0)
+        self.assertTrue(affinity)
+        cpu = str(min(affinity))
+        result = self.run_worker(
+            "--worker", cpu, stdin="P 0 0\nP 0 1\nQ\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        lines = result.stdout.splitlines()
+        self.assertEqual(len(lines), 2)
+        records = [json.loads(line) for line in lines]
+        self.assertEqual(lines, [canonical_json(record) for record in records])
+        executable_hash = hashlib.sha256(self.worker.read_bytes()).hexdigest()
+        counter_fields = {
+            "binary_adjacency_storage_allocations",
+            "binary_adjacency_storage_bytes",
+            "binary_residual_rank",
+            "binary_row_references",
+            "binary_row_storage_allocations",
+            "binary_row_storage_bytes",
+            "block_xors",
+            "full_block_gf256_multiply_add_divide_normalize_ops",
+            "inactivated_columns",
+            "packet_rows",
+            "packet_seed_attempt",
+            "peeled_columns",
+            "residual_rank",
+            "residual_rows",
+        }
+        expected_observations = (64, 96)
+        for profile, record in enumerate(records):
+            with self.subTest(profile=profile):
+                payload = record["payload"]
+                self.assertEqual(set(record), NATIVE_RECORD_FIELDS)
+                self.assertEqual(record["schema"], PHASE_ATTRIBUTION_SCHEMA)
+                self.assertEqual(record["ordinal"], profile)
+                self.assertEqual(record["cpu"], int(cpu))
+                self.assertEqual(record["worker_binary_sha256"], executable_hash)
+                self.assertEqual(
+                    record["message_sha256"], TIMING_SOURCE_MESSAGE_SHA256)
+                self.assertEqual(payload["binary_sha256"], executable_hash)
+                self.assertEqual(payload["cell_sha256"], phase_cell_hashes[profile])
+                self.assertEqual(
+                    record["work_sha256"],
+                    native_work_sha256(
+                        "phase_attribution", profile,
+                        phase_cell_hashes[profile]))
+                self.assertEqual(payload["profile_ordinal"], profile)
+                self.assertEqual(payload["profile"], ("n16", "n24")[profile])
+                self.assertEqual(
+                    payload["invocations_per_slot"], (16, 24)[profile])
+                self.assertEqual(payload["coordinate_ordinal"], 0)
+                self.assertEqual(payload["K"], 8)
+                self.assertEqual(payload["block_bytes"], 64)
+                self.assertEqual(payload["order"], "ABBA")
+                self.assertEqual(payload["panel_kind"], "ab")
+                self.assertEqual(payload["scope"], "decoder_solve")
+                self.assertEqual(
+                    payload["weak_ledger"],
+                    not payload["panel_comparable"])
+                self.assertEqual(payload["construction_attempt"], 0)
+                self.assertEqual(payload["loss_retry_offset"], 0)
+                self.assertEqual(payload["replicate"], 0)
+                self.assertEqual(payload["fixed_received_overhead"], 4)
+                self.assertEqual(payload["receive_overhead_cap"], 256)
+                self.assertEqual(payload["left_arm"], TIMING_CANDIDATE["arm"])
+                self.assertEqual(
+                    payload["left_arm_descriptor_sha256"],
+                    TIMING_CANDIDATE["arm_descriptor_sha256"])
+                self.assertEqual(payload["right_arm"], CONTROLS[0]["arm"])
+                self.assertEqual(
+                    payload["right_arm_descriptor_sha256"],
+                    CONTROLS[0]["arm_descriptor_sha256"])
+                self.assertEqual(payload["left_repair_map_sha256"], ZERO_SHA256)
+                self.assertEqual(payload["right_repair_map_sha256"], ZERO_SHA256)
+                self.assertEqual(
+                    payload["left_realized_construction_sha256"],
+                    PHASE_LEFT_REALIZED_K8_B64)
+                self.assertEqual(
+                    payload["right_realized_construction_sha256"],
+                    PHASE_RIGHT_REALIZED_K8_B64)
+                self.assertEqual(
+                    payload["trace_sha256"], PHASE_TRACE_ZERO_SHA256)
+                self.assertEqual(
+                    payload["source_base_cell_sha256"],
+                    TIMING_BASE_CELL_ZERO_SHA256)
+                self.assertEqual(
+                    payload["trace_qualified_timing_cell_sha256"],
+                    PHASE_TRACE_CELL_ZERO_SHA256)
+                self.assertEqual(
+                    payload["block_muladds_semantics"],
+                    "full-block-gf256-multiply-add-divide-normalize-operations")
+                self.assertEqual(
+                    set(payload["left_non_timing_counters"]), counter_fields)
+                self.assertEqual(
+                    set(payload["right_non_timing_counters"]), counter_fields)
+                counter_digests = {
+                    payload["left_arm"]:
+                        sha256_json(payload["left_non_timing_counters"]),
+                    payload["right_arm"]:
+                        sha256_json(payload["right_non_timing_counters"]),
+                }
+                self.assertEqual(
+                    len(payload["measured_observations"]),
+                    expected_observations[profile])
+                n = payload["invocations_per_slot"]
+                self.assertEqual(
+                    [(row["block"], row["repeat"], row["slot"])
+                     for row in payload["measured_observations"]],
+                    [(block, repeat, block * 4 + block_slot)
+                     for block in range(2)
+                     for repeat in range(n // 2)
+                     for block_slot in range(4)])
+                for row in payload["measured_observations"]:
+                    primary_left = row["slot"] % 4 in (0, 3)
+                    expected_left = (
+                        primary_left if row["block"] == 0
+                        else not primary_left)
+                    self.assertEqual(
+                        row["observation"]["arm"],
+                        payload["left_arm"] if expected_left
+                        else payload["right_arm"])
+                self.assertEqual(len(payload["slot_sums"]), 8)
+                self.assertEqual(set(payload["warmups"]), {"left", "right"})
+                for observation in (
+                        list(payload["warmups"].values()) +
+                        [row["observation"]
+                         for row in payload["measured_observations"]]):
+                    self.assertIn(observation["arm"], counter_digests)
+                    self.assertEqual(
+                        observation["counter_sha256"],
+                        counter_digests[observation["arm"]])
+                    self.assertRegex(observation["counter_sha256"], SHA256)
+                    if payload["panel_comparable"]:
+                        self.assertEqual(observation["outcome"], "success")
+                        self.assertTrue(observation["bytes_verified"])
+                        phase_keys = (
+                            "build_ns", "peel_ns", "project_ns",
+                            "residual_ns", "back_sub_ns")
+                        for key in ("outer_ns",) + phase_keys:
+                            self.assertIs(type(observation[key]), int)
+                            self.assertGreaterEqual(observation[key], 0)
+                        self.assertGreater(observation["outer_ns"], 0)
+                        self.assertLessEqual(
+                            sum(observation[key] for key in phase_keys),
+                            observation["outer_ns"])
+                    else:
+                        for key in ("outer_ns", "build_ns", "peel_ns",
+                                    "project_ns", "residual_ns", "back_sub_ns"):
+                            self.assertIsNone(observation[key])
+                for slot, totals in enumerate(payload["slot_sums"]):
+                    self.assertEqual(totals["slot"], slot)
+                    for key in ("outer_ns", "build_ns", "peel_ns",
+                                "project_ns", "residual_ns", "back_sub_ns"):
+                        if payload["panel_comparable"]:
+                            self.assertIs(type(totals[key]), int)
+                            self.assertGreaterEqual(totals[key], 0)
+                        else:
+                            self.assertIsNone(totals[key])
+                    if payload["panel_comparable"]:
+                        self.assertGreater(totals["outer_ns"], 0)
+                        self.assertLessEqual(
+                            sum(totals[key] for key in (
+                                "build_ns", "peel_ns", "project_ns",
+                                "residual_ns", "back_sub_ns")),
+                            totals["outer_ns"])
+                        rows = [
+                            row["observation"]
+                            for row in payload["measured_observations"]
+                            if row["slot"] == slot
+                        ]
+                        for key in (
+                                "outer_ns", "build_ns", "peel_ns",
+                                "project_ns", "residual_ns", "back_sub_ns"):
+                            self.assertEqual(
+                                totals[key], sum(row[key] for row in rows))
+
+    @unittest.skipUnless(
+        hasattr(os, "sched_getaffinity"), "Linux CPU affinity is required")
+    def test_phase_commands_reject_malformed_closed_domain_and_raw_worker(self):
+        affinity = os.sched_getaffinity(0)
+        self.assertTrue(affinity)
+        cpu = str(min(affinity))
+        cases = (
+            ("P 00 0\n", "malformed command"),
+            ("P 0 00\n", "malformed command"),
+            ("P 0 -1\n", "malformed command"),
+            ("P 0 0 extra\n", "malformed command"),
+            ("P 24 0\n", "coordinate/profile is outside"),
+            ("P 0 2\n", "coordinate/profile is outside"),
+        )
+        for command, diagnostic in cases:
+            with self.subTest(command=command.strip()):
+                result = self.run_worker("--worker", cpu, stdin=command)
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(result.stdout, "")
+                self.assertIn(diagnostic, result.stderr)
+
+        raw = self.run_worker(
+            "--recovery-candidate-worker", "two07", cpu,
+            stdin="P 0 0\n")
+        self.assertEqual(raw.returncode, 1)
+        self.assertEqual(raw.stdout, "")
+        self.assertIn("rejects qualification/timing jobs", raw.stderr)
 
     @unittest.skipUnless(
         hasattr(os, "sched_getaffinity"), "Linux CPU affinity is required")

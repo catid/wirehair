@@ -6,6 +6,7 @@
 #include "Wh2FrozenTrace.h"
 #include "Wh2NativeCodec.h"
 #include "Wh2NativePanel.h"
+#include "Wh2PhaseAttribution.h"
 
 #include "../codec/WirehairV2RawSeed.h"
 
@@ -20,7 +21,9 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <new>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -64,6 +67,13 @@ using wirehair_wh2_bench::NativeSolveFixture;
 using wirehair_wh2_bench::NativeTimingControlProbe;
 using wirehair_wh2_bench::NativeTimingControlQualification;
 using wirehair_wh2_bench::NativeTimingControlQualificationResult;
+using wirehair_wh2_bench::PhaseMeasuredObservation;
+using wirehair_wh2_bench::PhaseObservationCollector;
+using wirehair_wh2_bench::PhasePanelAssembly;
+using wirehair_wh2_bench::PhaseSlotTotals;
+using wirehair_wh2_bench::PhaseSolveArm;
+using wirehair_wh2_bench::PhaseSolveInvocation;
+using wirehair_wh2_bench::PhaseSolveObservation;
 using wirehair_wh2_bench::RecoveryCellResult;
 using wirehair_wh2_bench::RecoveryOutcome;
 
@@ -77,6 +87,12 @@ static const char kTimingSchema[] =
     "wirehair.wh2.native-timing-record.v4";
 static const char kTimingQualificationSchema[] =
     "wirehair.wh2.native-timing-qualification-record.v1";
+static const char kPhaseAttributionSchema[] =
+    "wirehair.wh2.native-phase-attribution-record.v1";
+static const char kPhaseTraceSchema[] =
+    "wirehair.wh2.native-phase-attribution-trace-record.v1";
+static const char kPhaseCellSchema[] =
+    "wirehair.wh2.phase-attribution-cell.v1";
 static const char kDescriptionSchema[] =
     "wirehair.wh2.native-worker-description.v1";
 static const char kRawDescriptionSchema[] =
@@ -109,6 +125,8 @@ static const uint64_t kWh2ProfileId = UINT64_C(0x4b295bbb47f4f9c9);
 static const uint16_t kWh2ProfileEncodingVersion = 1u;
 static const uint32_t kRecoveryOverheadCap = 4u;
 static const uint32_t kTimingReceiveOverheadCap = 256u;
+static const uint32_t kPhaseCoordinateCount = 24u;
+static const uint32_t kPhaseProfileCount = 2u;
 static const char kRawControlArm[] =
     "wirehair2_raw_d12_h12_periodic";
 static const char kRawControlDescriptorSha256[] =
@@ -1509,6 +1527,325 @@ bool RealizedConstructionSha256(
     return IsLowerSha256(digest);
 }
 
+struct PhaseCoordinate
+{
+    std::size_t Ordinal;
+    FrozenTimingBaseCell Base;
+    FrozenTimingCell Qualified;
+};
+
+bool SameArmDescriptor(
+    const ArmDescriptor& actual,
+    const ArmDescriptor& expected)
+{
+    if (!actual.Arm || !actual.Codec || !actual.ConstructionSeedBasis ||
+        !actual.SeedScheduleSha256 || !actual.DenseAnchorLayout ||
+        !expected.Arm || !expected.Codec ||
+        !expected.ConstructionSeedBasis || !expected.SeedScheduleSha256 ||
+        !expected.DenseAnchorLayout)
+    {
+        return false;
+    }
+    return std::string(actual.Arm) == expected.Arm &&
+        std::string(actual.Codec) == expected.Codec &&
+        actual.CanonicalDescriptor == expected.CanonicalDescriptor &&
+        actual.DescriptorSha256 == expected.DescriptorSha256 &&
+        std::string(actual.ConstructionSeedBasis) ==
+            expected.ConstructionSeedBasis &&
+        std::string(actual.SeedScheduleSha256) ==
+            expected.SeedScheduleSha256 &&
+        std::string(actual.DenseAnchorLayout) == expected.DenseAnchorLayout;
+}
+
+bool ExactPhaseArmRoster(const std::vector<ArmDescriptor>& arms)
+{
+    std::vector<ArmDescriptor> expected;
+    if (arms.size() != 3u || !BuildArmDescriptors(expected) ||
+        expected.size() != arms.size())
+    {
+        return false;
+    }
+    for (std::size_t i = 0u; i < arms.size(); ++i) {
+        if (!SameArmDescriptor(arms[i], expected[i])) return false;
+    }
+    return true;
+}
+
+bool PhaseProfile(
+    std::size_t profile_ordinal,
+    const char*& name,
+    uint32_t& invocations_per_slot)
+{
+    if (profile_ordinal == 0u)
+    {
+        name = "n16";
+        invocations_per_slot = 16u;
+        return true;
+    }
+    if (profile_ordinal == 1u)
+    {
+        name = "n24";
+        invocations_per_slot = 24u;
+        return true;
+    }
+    name = nullptr;
+    invocations_per_slot = 0u;
+    return false;
+}
+
+bool BuildPhaseCoordinates(std::vector<PhaseCoordinate>& coordinates)
+{
+    static const uint32_t expected_k[] = {
+        8u, 32u, 100u, 128u, 512u, 1000u,
+        2048u, 5000u, 8192u, 20000u, 32768u, 64000u
+    };
+    static const uint32_t expected_widths[] = { 64u, 1280u };
+    const std::vector<FrozenTimingBaseCell> bases =
+        wirehair::wh2_benchmark::EnumerateDevelopmentTimingBaseCells();
+    if (bases.size() != 2304u) {
+        return false;
+    }
+
+    std::vector<PhaseCoordinate> built;
+    built.reserve(kPhaseCoordinateCount);
+    for (std::size_t width = 0u; width < 2u; ++width)
+    {
+        for (std::size_t k_index = 0u; k_index < 12u; ++k_index)
+        {
+            // Round zero, then width-major/K-major, lane zero.  This is the
+            // strict natural-order projection of the existing timing domain.
+            const std::size_t source_ordinal =
+                width * 96u + k_index * 8u;
+            const FrozenTimingBaseCell& base = bases[source_ordinal];
+            FrozenTimingCell qualified;
+            if (base.ordinal != source_ordinal ||
+                base.K != expected_k[k_index] ||
+                base.block_bytes != expected_widths[width] ||
+                base.phase != "development" ||
+                base.band.empty() ||
+                base.loss_ppm != 100000u ||
+                base.schedule != wirehair::wh2_benchmark::FrozenSchedule::Iid ||
+                base.replicate != 0u || base.base_seed_attempt != 0u ||
+                base.fixed_received_overhead != kRecoveryOverheadCap ||
+                base.receive_overhead_cap != kTimingReceiveOverheadCap ||
+                base.interleave_policy !=
+                    "self-counterbalanced-repeat-major-v1" ||
+                !wirehair::wh2_benchmark::QualifyDevelopmentTimingCell(
+                    base, 0u, qualified) ||
+                qualified.ordinal != source_ordinal ||
+                qualified.loss_retry_offset != 0u ||
+                qualified.loss_seed != qualified.base_loss_seed ||
+                qualified.base_cell_sha256 !=
+                    wirehair::wh2_benchmark::TimingBaseCellSha256(base) ||
+                wirehair::wh2_benchmark::TimingSourceIdentitySha256(
+                    qualified) != qualified.base_cell_sha256 ||
+                !IsLowerSha256(
+                    wirehair::wh2_benchmark::TimingCellSha256(qualified)))
+            {
+                return false;
+            }
+            PhaseCoordinate coordinate;
+            coordinate.Ordinal = built.size();
+            coordinate.Base = base;
+            coordinate.Qualified = qualified;
+            built.push_back(coordinate);
+        }
+    }
+    if (built.size() != kPhaseCoordinateCount) {
+        return false;
+    }
+    coordinates.swap(built);
+    return true;
+}
+
+bool GeneratePhaseTrace(
+    const PhaseCoordinate& coordinate,
+    FrozenPacketTrace& trace,
+    wirehair::wh2_benchmark::FrozenTimingTraceReceipt& receipt)
+{
+    return coordinate.Ordinal < kPhaseCoordinateCount &&
+        wirehair::wh2_benchmark::GenerateDevelopmentTimingTrace(
+            coordinate.Qualified, trace, receipt) ==
+            FrozenTraceStatus::Complete &&
+        trace.delivered_ids.size() ==
+            static_cast<std::size_t>(coordinate.Qualified.K) +
+                kTimingReceiveOverheadCap &&
+        receipt.cell_sha256 ==
+            wirehair::wh2_benchmark::TimingCellSha256(
+                coordinate.Qualified) &&
+        receipt.trace_sha256 == trace.trace_sha256 &&
+        IsLowerSha256(trace.trace_sha256);
+}
+
+std::string CanonicalPhaseCellJson(
+    const PhaseCoordinate& coordinate,
+    std::size_t profile_ordinal,
+    const std::vector<ArmDescriptor>& arms,
+    const std::string& trace_sha256,
+    const std::string& left_realized_sha256,
+    const std::string& right_realized_sha256)
+{
+    const char* profile = nullptr;
+    uint32_t invocations_per_slot = 0u;
+    const FrozenTimingCell& cell = coordinate.Qualified;
+    const std::string qualified_sha256 =
+        wirehair::wh2_benchmark::TimingCellSha256(cell);
+    if (!PhaseProfile(
+            profile_ordinal, profile, invocations_per_slot) ||
+        coordinate.Ordinal >= kPhaseCoordinateCount ||
+        !ExactPhaseArmRoster(arms) ||
+        !IsLowerSha256(trace_sha256) ||
+        !IsLowerSha256(left_realized_sha256) ||
+        !IsLowerSha256(right_realized_sha256) ||
+        cell.base_seed_attempt != 0u || cell.loss_retry_offset != 0u ||
+        cell.fixed_received_overhead != kRecoveryOverheadCap ||
+        cell.receive_overhead_cap != kTimingReceiveOverheadCap ||
+        !IsLowerSha256(cell.base_cell_sha256) ||
+        !IsLowerSha256(qualified_sha256))
+    {
+        return std::string();
+    }
+
+    std::string json;
+    json.reserve(1500u);
+    json += "{\"K\":";
+    json += std::to_string(cell.K);
+    json += ",\"band\":\"";
+    json += cell.band;
+    json += "\",\"base_loss_seed\":\"";
+    json += HexSeed(cell.base_loss_seed);
+    json += "\",\"block_bytes\":";
+    json += std::to_string(cell.block_bytes);
+    json += ",\"construction_attempt\":0,\"coordinate_ordinal\":";
+    json += std::to_string(coordinate.Ordinal);
+    json += ",\"diagnostic_phase\":\"development\"";
+    json += ",\"fixed_received_overhead\":4";
+    json +=
+        ",\"interleave_policy\":\"self-counterbalanced-repeat-major-v1\"";
+    json += ",\"invocations_per_slot\":";
+    json += std::to_string(invocations_per_slot);
+    json += ",\"left_arm\":\"";
+    json += arms[2].Arm;
+    json += "\",\"left_arm_descriptor_sha256\":\"";
+    json += arms[2].DescriptorSha256;
+    json += "\",\"left_realized_construction_sha256\":\"";
+    json += left_realized_sha256;
+    json += "\",\"left_repair_map_sha256\":\"";
+    json += kZeroSha256;
+    json += "\",\"loss_ppm\":";
+    json += std::to_string(cell.loss_ppm);
+    json += ",\"loss_retry_offset\":0,\"loss_seed\":\"";
+    json += HexSeed(cell.loss_seed);
+    json += "\",\"order\":\"ABBA\",\"panel_kind\":\"ab\"";
+    json += ",\"profile\":\"";
+    json += profile;
+    json += "\",\"profile_ordinal\":";
+    json += std::to_string(profile_ordinal);
+    json += ",\"receive_overhead_cap\":256,\"replicate\":0";
+    json += ",\"right_arm\":\"";
+    json += arms[0].Arm;
+    json += "\",\"right_arm_descriptor_sha256\":\"";
+    json += arms[0].DescriptorSha256;
+    json += "\",\"right_realized_construction_sha256\":\"";
+    json += right_realized_sha256;
+    json += "\",\"right_repair_map_sha256\":\"";
+    json += kZeroSha256;
+    json += "\",\"schedule\":\"iid\",\"schema\":\"";
+    json += kPhaseCellSchema;
+    json += "\",\"scope\":\"decoder_solve\"";
+    json += ",\"source_base_cell_sha256\":\"";
+    json += cell.base_cell_sha256;
+    json += "\",\"trace_qualified_timing_cell_sha256\":\"";
+    json += qualified_sha256;
+    json += "\",\"trace_sha256\":\"";
+    json += trace_sha256;
+    json += "\"}";
+    return json;
+}
+
+std::string PhaseCellSha256(
+    const PhaseCoordinate& coordinate,
+    std::size_t profile_ordinal,
+    const std::vector<ArmDescriptor>& arms,
+    const std::string& trace_sha256,
+    const std::string& left_realized_sha256,
+    const std::string& right_realized_sha256)
+{
+    const std::string json = CanonicalPhaseCellJson(
+        coordinate, profile_ordinal, arms, trace_sha256,
+        left_realized_sha256, right_realized_sha256);
+    return json.empty() ? std::string() :
+        wirehair::wh2_benchmark::Sha256Hex(json);
+}
+
+bool EmitPhaseAttributionTraces(const std::vector<ArmDescriptor>& arms)
+{
+    std::vector<PhaseCoordinate> coordinates;
+    if (!ExactPhaseArmRoster(arms) ||
+        !BuildPhaseCoordinates(coordinates) ||
+        coordinates.size() != kPhaseCoordinateCount)
+    {
+        return false;
+    }
+    for (const PhaseCoordinate& coordinate : coordinates)
+    {
+        FrozenPacketTrace trace;
+        wirehair::wh2_benchmark::FrozenTimingTraceReceipt receipt;
+        std::string left_realized;
+        std::string right_realized;
+        if (!GeneratePhaseTrace(coordinate, trace, receipt) ||
+            !RealizedConstructionSha256(
+                arms[2], coordinate.Qualified.K,
+                coordinate.Qualified.block_bytes, 0u, left_realized) ||
+            !RealizedConstructionSha256(
+                arms[0], coordinate.Qualified.K,
+                coordinate.Qualified.block_bytes, 0u, right_realized))
+        {
+            return false;
+        }
+        std::string phase_cells[2];
+        for (std::size_t profile = 0u;
+             profile < kPhaseProfileCount;
+             ++profile)
+        {
+            phase_cells[profile] = PhaseCellSha256(
+                coordinate, profile, arms, trace.trace_sha256,
+                left_realized, right_realized);
+            if (!IsLowerSha256(phase_cells[profile])) {
+                return false;
+            }
+        }
+        const std::string qualified_sha256 =
+            wirehair::wh2_benchmark::TimingCellSha256(
+                coordinate.Qualified);
+        std::string json;
+        json.reserve(800u);
+        json += "{\"candidate_count\":";
+        json += std::to_string(trace.attempted_candidates);
+        json += ",\"coordinate_ordinal\":";
+        json += std::to_string(coordinate.Ordinal);
+        json += ",\"packet_count\":";
+        json += std::to_string(trace.delivered_ids.size());
+        json += ",\"phase_cell_sha256_by_profile\":[\"";
+        json += phase_cells[0];
+        json += "\",\"";
+        json += phase_cells[1];
+        json += "\"],\"schema\":\"";
+        json += kPhaseTraceSchema;
+        json += "\",\"source_base_cell_sha256\":\"";
+        json += coordinate.Qualified.base_cell_sha256;
+        json += "\",\"trace_qualified_timing_cell_sha256\":\"";
+        json += qualified_sha256;
+        json += "\",\"trace_sha256\":\"";
+        json += trace.trace_sha256;
+        json += "\"}";
+        if (!EmitLine(json)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool RawRealizedConstructionSha256(
     const ArmDescriptor& arm,
     uint32_t K,
@@ -1761,7 +2098,8 @@ bool ParseJobLine(
     std::size_t& item_index)
 {
     if (line.size() < 5u ||
-        (line[0] != 'R' && line[0] != 'L' && line[0] != 'T') ||
+        (line[0] != 'R' && line[0] != 'L' && line[0] != 'T' &&
+         line[0] != 'P') ||
         line[1] != ' ')
     {
         return false;
@@ -1978,6 +2316,21 @@ std::string TimingQualificationWorkSha256(
     json += cell_sha256;
     json +=
         "\",\"evidence_kind\":\"timing_qualification\",\"ordinal\":";
+    json += std::to_string(ordinal);
+    json += ",\"phase\":\"development\",\"schema\":\"";
+    json += kWorkSchema;
+    json += "\"}";
+    return wirehair::wh2_benchmark::Sha256Hex(json);
+}
+
+std::string PhaseAttributionWorkSha256(
+    const std::string& cell_sha256,
+    std::size_t ordinal)
+{
+    std::string json;
+    json += "{\"cell_sha256\":\"";
+    json += cell_sha256;
+    json += "\",\"evidence_kind\":\"phase_attribution\",\"ordinal\":";
     json += std::to_string(ordinal);
     json += ",\"phase\":\"development\",\"schema\":\"";
     json += kWorkSchema;
@@ -2956,6 +3309,542 @@ std::string TimingPayload(
     return json;
 }
 
+const char* PhaseOutcomeName(WirehairResult result)
+{
+    switch (result)
+    {
+    case Wirehair_Success: return "success";
+    case Wirehair_NeedMore: return "need_more_at_cap";
+    case Wirehair_BadDenseSeed:
+    case Wirehair_BadPeelSeed: return "construct_failed";
+    default: return nullptr;
+    }
+}
+
+std::string PhaseCountersJson(
+    const wirehair_v2::PrecodeSolveStats& stats)
+{
+    std::string json;
+    json.reserve(720u);
+    json += "{\"binary_adjacency_storage_allocations\":";
+    json += std::to_string(stats.BinaryAdjacencyStorageAllocations);
+    json += ",\"binary_adjacency_storage_bytes\":";
+    json += std::to_string(stats.BinaryAdjacencyStorageBytes);
+    json += ",\"binary_residual_rank\":";
+    json += std::to_string(stats.BinaryResidualRank);
+    json += ",\"binary_row_references\":";
+    json += std::to_string(stats.BinaryRowReferences);
+    json += ",\"binary_row_storage_allocations\":";
+    json += std::to_string(stats.BinaryRowStorageAllocations);
+    json += ",\"binary_row_storage_bytes\":";
+    json += std::to_string(stats.BinaryRowStorageBytes);
+    json += ",\"block_xors\":";
+    json += std::to_string(stats.BlockXors);
+    json +=
+        ",\"full_block_gf256_multiply_add_divide_normalize_ops\":";
+    json += std::to_string(stats.BlockMulAdds);
+    json += ",\"inactivated_columns\":";
+    json += std::to_string(stats.InactivatedColumns);
+    json += ",\"packet_rows\":";
+    json += std::to_string(stats.PacketRows);
+    json += ",\"packet_seed_attempt\":";
+    json += std::to_string(stats.PacketSeedAttempt);
+    json += ",\"peeled_columns\":";
+    json += std::to_string(stats.PeeledColumns);
+    json += ",\"residual_rank\":";
+    json += std::to_string(stats.ResidualRank);
+    json += ",\"residual_rows\":";
+    json += std::to_string(stats.ResidualRows);
+    json += "}";
+    return json;
+}
+
+std::string PhaseCounterSha256(
+    const wirehair_v2::PrecodeSolveStats& stats)
+{
+    return wirehair::wh2_benchmark::Sha256Hex(PhaseCountersJson(stats));
+}
+
+bool AppendPhaseObservationJson(
+    const PhaseSolveObservation& observation,
+    bool timing_visible,
+    std::string& json)
+{
+    const char* const outcome = PhaseOutcomeName(observation.Result);
+    const std::string counter_sha256 = PhaseCounterSha256(observation.Stats);
+    if ((observation.Arm != PhaseSolveArm::Two07 &&
+         observation.Arm != PhaseSolveArm::Head) ||
+        !outcome || !IsLowerSha256(counter_sha256))
+    {
+        return false;
+    }
+    json += "{\"arm\":\"";
+    json += observation.Arm == PhaseSolveArm::Two07 ?
+        kTimingCandidateArm : "wirehair2_head";
+    json += "\",\"back_sub_ns\":";
+    json += timing_visible ?
+        std::to_string(observation.Stats.BackSubNanoseconds) : "null";
+    json += ",\"build_ns\":";
+    json += timing_visible ?
+        std::to_string(observation.Stats.BuildNanoseconds) : "null";
+    json += ",\"bytes_verified\":";
+    json += observation.BytesVerified ? "true" : "false";
+    json += ",\"counter_sha256\":\"";
+    json += counter_sha256;
+    json += "\",\"outcome\":\"";
+    json += outcome;
+    json += "\",\"outer_ns\":";
+    json += timing_visible ?
+        std::to_string(observation.ElapsedNanoseconds) : "null";
+    json += ",\"peel_ns\":";
+    json += timing_visible ?
+        std::to_string(observation.Stats.PeelNanoseconds) : "null";
+    json += ",\"project_ns\":";
+    json += timing_visible ?
+        std::to_string(observation.Stats.ProjectNanoseconds) : "null";
+    json += ",\"residual_ns\":";
+    json += timing_visible ?
+        std::to_string(observation.Stats.ResidualNanoseconds) : "null";
+    json += ",\"wirehair_result\":";
+    json += std::to_string(static_cast<int>(observation.Result));
+    json += "}";
+    return true;
+}
+
+void AppendNullablePhaseTotal(
+    bool present,
+    uint64_t value,
+    std::string& json)
+{
+    if (present) json += std::to_string(value);
+    else json += "null";
+}
+
+std::string PhaseAttributionPayload(
+    const PhaseCoordinate& coordinate,
+    std::size_t profile_ordinal,
+    const WorkerContext& context,
+    const std::string& phase_cell_sha256,
+    const std::string& trace_sha256,
+    const std::string& left_realized,
+    const std::string& right_realized,
+    const PhasePanelAssembly& assembly)
+{
+    const char* profile = nullptr;
+    uint32_t invocations_per_slot = 0u;
+    const FrozenTimingCell& cell = coordinate.Qualified;
+    const std::string qualified_sha256 =
+        wirehair::wh2_benchmark::TimingCellSha256(cell);
+    if (!PhaseProfile(
+            profile_ordinal, profile, invocations_per_slot) ||
+        !ExactPhaseArmRoster(context.Arms) ||
+        !IsLowerSha256(phase_cell_sha256) ||
+        !IsLowerSha256(trace_sha256) ||
+        !IsLowerSha256(left_realized) ||
+        !IsLowerSha256(right_realized) ||
+        assembly.Measured.size() !=
+            static_cast<std::size_t>(invocations_per_slot) * 4u)
+    {
+        return std::string();
+    }
+
+    const std::string left_counters =
+        PhaseCountersJson(assembly.LeftCounters);
+    const std::string right_counters =
+        PhaseCountersJson(assembly.RightCounters);
+    std::string json;
+    json.reserve(assembly.Measured.size() * 600u + 6000u);
+    json += "{\"K\":";
+    json += std::to_string(cell.K);
+    json += ",\"band\":\"";
+    json += cell.band;
+    json += "\",\"base_loss_seed\":\"";
+    json += HexSeed(cell.base_loss_seed);
+    json += "\",\"binary_sha256\":\"";
+    json += context.BinarySha256;
+    json += "\",\"block_bytes\":";
+    json += std::to_string(cell.block_bytes);
+    json +=
+        ",\"block_muladds_semantics\":\"full-block-gf256-multiply-add-divide-normalize-operations\"";
+    json += ",\"cell_sha256\":\"";
+    json += phase_cell_sha256;
+    json += "\",\"construction_attempt\":0,\"coordinate_ordinal\":";
+    json += std::to_string(coordinate.Ordinal);
+    json += ",\"fixed_received_overhead\":4";
+    json +=
+        ",\"interleave_policy\":\"self-counterbalanced-repeat-major-v1\"";
+    json += ",\"invocations_per_slot\":";
+    json += std::to_string(invocations_per_slot);
+    json += ",\"left_arm\":\"";
+    json += context.Arms[2].Arm;
+    json += "\",\"left_arm_descriptor_sha256\":\"";
+    json += context.Arms[2].DescriptorSha256;
+    json += "\",\"left_non_timing_counters\":";
+    json += left_counters;
+    json += ",\"left_realized_construction_sha256\":\"";
+    json += left_realized;
+    json += "\",\"left_repair_map_sha256\":\"";
+    json += kZeroSha256;
+    json += "\",\"loss_ppm\":";
+    json += std::to_string(cell.loss_ppm);
+    json += ",\"loss_retry_offset\":0,\"loss_seed\":\"";
+    json += HexSeed(cell.loss_seed);
+    json += "\",\"measured_observations\":[";
+    for (std::size_t i = 0u; i < assembly.Measured.size(); ++i)
+    {
+        const PhaseMeasuredObservation& measured = assembly.Measured[i];
+        if (i != 0u) json += ',';
+        json += "{\"block\":";
+        json += std::to_string(measured.Block);
+        json += ",\"observation\":";
+        if (!AppendPhaseObservationJson(
+                measured.Observation, assembly.Comparable, json))
+        {
+            return std::string();
+        }
+        json += ",\"repeat\":";
+        json += std::to_string(measured.Repeat);
+        json += ",\"slot\":";
+        json += std::to_string(measured.Slot);
+        json += "}";
+    }
+    json += "],\"order\":\"ABBA\",\"panel_comparable\":";
+    json += assembly.Comparable ? "true" : "false";
+    json += ",\"panel_kind\":\"ab\",\"profile\":\"";
+    json += profile;
+    json += "\",\"profile_ordinal\":";
+    json += std::to_string(profile_ordinal);
+    json += ",\"receive_overhead_cap\":256,\"replicate\":0";
+    json += ",\"right_arm\":\"";
+    json += context.Arms[0].Arm;
+    json += "\",\"right_arm_descriptor_sha256\":\"";
+    json += context.Arms[0].DescriptorSha256;
+    json += "\",\"right_non_timing_counters\":";
+    json += right_counters;
+    json += ",\"right_realized_construction_sha256\":\"";
+    json += right_realized;
+    json += "\",\"right_repair_map_sha256\":\"";
+    json += kZeroSha256;
+    json += "\",\"schedule\":\"iid\",\"scope\":\"decoder_solve\"";
+    json += ",\"slot_sums\":[";
+    for (std::size_t slot = 0u; slot < assembly.Slots.size(); ++slot)
+    {
+        if (slot != 0u) json += ',';
+        const PhaseSlotTotals& totals = assembly.Slots[slot];
+        json += "{\"back_sub_ns\":";
+        AppendNullablePhaseTotal(
+            totals.HasElapsed, totals.BackSubNanoseconds, json);
+        json += ",\"build_ns\":";
+        AppendNullablePhaseTotal(
+            totals.HasElapsed, totals.BuildNanoseconds, json);
+        json += ",\"outer_ns\":";
+        AppendNullablePhaseTotal(
+            totals.HasElapsed, totals.OuterNanoseconds, json);
+        json += ",\"peel_ns\":";
+        AppendNullablePhaseTotal(
+            totals.HasElapsed, totals.PeelNanoseconds, json);
+        json += ",\"project_ns\":";
+        AppendNullablePhaseTotal(
+            totals.HasElapsed, totals.ProjectNanoseconds, json);
+        json += ",\"residual_ns\":";
+        AppendNullablePhaseTotal(
+            totals.HasElapsed, totals.ResidualNanoseconds, json);
+        json += ",\"slot\":";
+        json += std::to_string(slot);
+        json += "}";
+    }
+    json += "],\"source_base_cell_sha256\":\"";
+    json += cell.base_cell_sha256;
+    json += "\",\"trace_qualified_timing_cell_sha256\":\"";
+    json += qualified_sha256;
+    json += "\",\"trace_sha256\":\"";
+    json += trace_sha256;
+    json += "\",\"warmups\":{\"left\":";
+    if (!AppendPhaseObservationJson(
+            assembly.LeftWarmup, assembly.Comparable, json))
+    {
+        return std::string();
+    }
+    json += ",\"right\":";
+    if (!AppendPhaseObservationJson(
+            assembly.RightWarmup, assembly.Comparable, json))
+    {
+        return std::string();
+    }
+    json += "},\"weak_ledger\":";
+    json += assembly.Comparable ? "false" : "true";
+    json += "}";
+    return json;
+}
+
+WirehairResult PreparePhaseSolveFixture(
+    const NativeArmSpec& spec,
+    uint32_t K,
+    uint32_t block_bytes,
+    const std::vector<uint8_t>& source,
+    const std::vector<uint32_t>& packet_ids,
+    std::shared_ptr<const NativeSolveFixture>& fixture_out)
+{
+    fixture_out.reset();
+    NativeArm arm;
+    const WirehairResult arm_result =
+        arm.Initialize(spec, K, block_bytes, source);
+    if (arm_result != Wirehair_Success) {
+        return arm_result;
+    }
+    try
+    {
+        const std::shared_ptr<NativeSolveFixture> fixture(
+            new NativeSolveFixture);
+        const WirehairResult fixture_result = fixture->Initialize(
+            arm, packet_ids, kRecoveryOverheadCap);
+        if (fixture_result == Wirehair_Success) {
+            fixture_out = fixture;
+        }
+        return fixture_result;
+    }
+    catch (const std::bad_alloc&) {
+        return Wirehair_OOM;
+    }
+    catch (const std::length_error&) {
+        return Wirehair_OOM;
+    }
+}
+
+bool RunPhaseAttributionJobImpl(
+    const WorkerContext& context,
+    std::size_t coordinate_ordinal,
+    std::size_t profile_ordinal,
+    std::string& envelope,
+    std::string& error)
+{
+    std::vector<PhaseCoordinate> coordinates;
+    const char* profile = nullptr;
+    uint32_t invocations_per_slot = 0u;
+    if (context.Candidate ||
+        !ExactPhaseArmRoster(context.Arms) ||
+        !BuildPhaseCoordinates(coordinates) ||
+        coordinates.size() != kPhaseCoordinateCount ||
+        coordinate_ordinal >= coordinates.size() ||
+        !PhaseProfile(
+            profile_ordinal, profile, invocations_per_slot) ||
+        !profile)
+    {
+        error = "phase-attribution coordinate/profile is outside the frozen domain";
+        return false;
+    }
+    const PhaseCoordinate& coordinate = coordinates[coordinate_ordinal];
+    const FrozenTimingCell& cell = coordinate.Qualified;
+    if (coordinate.Ordinal != coordinate_ordinal ||
+        cell.base_seed_attempt != 0u ||
+        cell.fixed_received_overhead != kRecoveryOverheadCap ||
+        cell.receive_overhead_cap != kTimingReceiveOverheadCap ||
+        invocations_per_slot != (profile_ordinal == 0u ? 16u : 24u))
+    {
+        error = "phase-attribution protocol/profile closure failed";
+        return false;
+    }
+
+    int actual_cpu = -1;
+    if (!VerifySingletonCpu(context.Cpu, actual_cpu, error)) {
+        return false;
+    }
+    uint64_t started_ns = 0u;
+    if (!MonotonicNanoseconds(started_ns)) {
+        error = "cannot read CLOCK_MONOTONIC before phase attribution";
+        return false;
+    }
+
+    FrozenPacketTrace trace;
+    wirehair::wh2_benchmark::FrozenTimingTraceReceipt receipt;
+    if (!GeneratePhaseTrace(coordinate, trace, receipt))
+    {
+        error = "cannot regenerate complete phase-attribution trace";
+        return false;
+    }
+    const std::string source_json =
+        wirehair::wh2_benchmark::CanonicalTimingSourceJson(cell);
+    const std::string qualified_sha256 =
+        wirehair::wh2_benchmark::TimingCellSha256(cell);
+    uint64_t source_seed = 0u;
+    std::vector<uint8_t> source;
+    if (source_json.empty() ||
+        source_json !=
+            wirehair::wh2_benchmark::CanonicalTimingBaseCellJson(
+                coordinate.Base) ||
+        !IsLowerSha256(qualified_sha256) ||
+        receipt.cell_sha256 != qualified_sha256 ||
+        receipt.trace_sha256 != trace.trace_sha256 ||
+        !SourceSeedFromCellJson(source_json, source_seed) ||
+        !wirehair_wh2_bench::MakeDeterministicSource(
+            cell.K, cell.block_bytes, source_seed, source))
+    {
+        error = "cannot construct phase-attribution source/provenance";
+        return false;
+    }
+    const std::string message_sha256 = wirehair::wh2_benchmark::Sha256Hex(
+        source.data(), source.size());
+    if (!IsLowerSha256(message_sha256)) {
+        error = "cannot hash phase-attribution source";
+        return false;
+    }
+
+    NativeArmSpec left_spec;
+    NativeArmSpec right_spec;
+    std::string left_realized;
+    std::string right_realized;
+    if (!ArmSpecFor(2u, 0u, nullptr, left_spec) ||
+        !ArmSpecFor(0u, 0u, nullptr, right_spec) ||
+        !ValidateResolvedProductionArm(
+            2u, left_spec, cell.K, cell.block_bytes, 0u) ||
+        !ValidateResolvedProductionArm(
+            0u, right_spec, cell.K, cell.block_bytes, 0u) ||
+        !RealizedConstructionSha256(
+            context.Arms[2], cell.K, cell.block_bytes,
+            0u, left_realized) ||
+        !RealizedConstructionSha256(
+            context.Arms[0], cell.K, cell.block_bytes,
+            0u, right_realized))
+    {
+        error = "phase-attribution arms differ from production descriptors";
+        return false;
+    }
+    const std::string phase_cell_sha256 = PhaseCellSha256(
+        coordinate, profile_ordinal, context.Arms, trace.trace_sha256,
+        left_realized, right_realized);
+    if (!IsLowerSha256(phase_cell_sha256)) {
+        error = "cannot hash phase-attribution cell";
+        return false;
+    }
+
+    const std::shared_ptr<PhaseObservationCollector> collector(
+        new PhaseObservationCollector);
+    std::shared_ptr<const NativeSolveFixture> left_fixture;
+    std::shared_ptr<const NativeSolveFixture> right_fixture;
+    const WirehairResult left_preparation = PreparePhaseSolveFixture(
+        left_spec, cell.K, cell.block_bytes, source,
+        trace.delivered_ids, left_fixture);
+    const WirehairResult right_preparation = PreparePhaseSolveFixture(
+        right_spec, cell.K, cell.block_bytes, source,
+        trace.delivered_ids, right_fixture);
+    const auto valid_preparation = [](
+        WirehairResult result,
+        const std::shared_ptr<const NativeSolveFixture>& fixture) -> bool
+    {
+        const bool weak = result == Wirehair_NeedMore ||
+            result == Wirehair_BadDenseSeed ||
+            result == Wirehair_BadPeelSeed;
+        return (result == Wirehair_Success && fixture &&
+                fixture->IsInitialized()) ||
+            (weak && !fixture);
+    };
+    if (!valid_preparation(left_preparation, left_fixture) ||
+        !valid_preparation(right_preparation, right_fixture))
+    {
+        error = "fatal phase-attribution fixture preparation";
+        return false;
+    }
+    const std::string left_identity = TimingInvocationIdentity(
+        context.Arms[2], left_realized, FrozenTimingScope::DecoderSolve) +
+        ":phase-attribution-v1";
+    const std::string right_identity = TimingInvocationIdentity(
+        context.Arms[0], right_realized, FrozenTimingScope::DecoderSolve) +
+        ":phase-attribution-v1";
+    const NativePanelArm left_arm(
+        left_identity,
+        [left_identity, left_preparation, left_fixture, collector]() {
+            return std::unique_ptr<NativePanelInvocation>(
+                new PhaseSolveInvocation(
+                    left_identity, PhaseSolveArm::Two07,
+                    left_preparation, left_fixture,
+                    kRecoveryOverheadCap, collector));
+        });
+    const NativePanelArm right_arm(
+        right_identity,
+        [right_identity, right_preparation, right_fixture, collector]() {
+            return std::unique_ptr<NativePanelInvocation>(
+                new PhaseSolveInvocation(
+                    right_identity, PhaseSolveArm::Head,
+                    right_preparation, right_fixture,
+                    kRecoveryOverheadCap, collector));
+        });
+    const NativePanelResult panel =
+        wirehair_wh2_bench::ExecuteNativeTimingPanel(
+            context.Cpu, NativePanelOrder::ABBA,
+            invocations_per_slot, left_arm, right_arm);
+    if (panel.Status != NativePanelStatus::Complete ||
+        panel.TargetCpu != context.Cpu ||
+        panel.Order != NativePanelOrder::ABBA ||
+        panel.InvocationsPerSlot != invocations_per_slot ||
+        !panel.HasLeftPreflight || !panel.HasRightPreflight)
+    {
+        error = std::string("fatal phase-attribution panel: ") +
+            wirehair_wh2_bench::NativePanelStatusName(panel.Status) +
+            (panel.Diagnostic.empty() ? "" : ": " + panel.Diagnostic);
+        return false;
+    }
+    PhasePanelAssembly assembly;
+    std::string assembly_error;
+    if (!wirehair_wh2_bench::ValidateAndAssemblePhasePanel(
+            panel, NativePanelOrder::ABBA, invocations_per_slot,
+            collector->Observations(), assembly, assembly_error))
+    {
+        error = "phase-attribution reconstruction failed: " +
+            assembly_error;
+        return false;
+    }
+    if (!VerifySingletonCpu(context.Cpu, actual_cpu, error)) {
+        return false;
+    }
+    uint64_t finished_ns = 0u;
+    if (!MonotonicNanoseconds(finished_ns) || finished_ns < started_ns) {
+        error = "cannot read CLOCK_MONOTONIC after phase attribution";
+        return false;
+    }
+
+    const std::string payload = PhaseAttributionPayload(
+        coordinate, profile_ordinal, context, phase_cell_sha256,
+        trace.trace_sha256, left_realized, right_realized, assembly);
+    const std::size_t ordinal =
+        coordinate_ordinal * kPhaseProfileCount + profile_ordinal;
+    const std::string work_sha256 =
+        PhaseAttributionWorkSha256(phase_cell_sha256, ordinal);
+    if (payload.empty() || !IsLowerSha256(work_sha256))
+    {
+        error = "cannot bind phase-attribution evidence";
+        return false;
+    }
+    envelope = Envelope(
+        kPhaseAttributionSchema, ordinal, actual_cpu, context.Pid,
+        started_ns, finished_ns, context.ProcessStartTicks,
+        context.BinarySha256, message_sha256, work_sha256, payload);
+    return true;
+}
+
+bool RunPhaseAttributionJob(
+    const WorkerContext& context,
+    std::size_t coordinate_ordinal,
+    std::size_t profile_ordinal,
+    std::string& envelope,
+    std::string& error)
+{
+    try {
+        return RunPhaseAttributionJobImpl(
+            context, coordinate_ordinal, profile_ordinal, envelope, error);
+    }
+    catch (const std::bad_alloc&) {
+        error = "phase-attribution allocation failed";
+    }
+    catch (const std::length_error&) {
+        error = "phase-attribution allocation length is invalid";
+    }
+    catch (...) {
+        error = "phase-attribution internal failure";
+    }
+    envelope.clear();
+    return false;
+}
+
 bool RunTimingJob(
     const WorkerContext& context,
     std::size_t cell_ordinal,
@@ -3323,6 +4212,10 @@ bool RunWorker(
                 context, cell_ordinal, panel_index, retry_offset,
                 output, error);
         }
+        else if (kind == 'P') {
+            ok = RunPhaseAttributionJob(
+                context, cell_ordinal, item_index, output, error);
+        }
         else {
             error = "native command kind is unsupported";
             ok = false;
@@ -3350,7 +4243,8 @@ bool RunWorker(
 int Usage()
 {
     std::cerr << "usage: wirehair_wh2_contract_worker --describe | "
-        "--emit-traces recovery | --emit-timing-proxy-witness | "
+        "--emit-traces recovery|phase-attribution | "
+        "--emit-timing-proxy-witness | "
         "--worker CPU | "
         "--describe-recovery-candidate ID | "
         "--recovery-candidate-worker ID CPU\n";
@@ -3383,6 +4277,9 @@ int main(int argc, char** argv)
     {
         const std::string kind(argv[2]);
         if (kind == "recovery") return EmitRecoveryTraces() ? 0 : 1;
+        if (kind == "phase-attribution") {
+            return EmitPhaseAttributionTraces(arms) ? 0 : 1;
+        }
         return Usage();
     }
     if (argc == 2 &&

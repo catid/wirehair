@@ -808,6 +808,23 @@ if(BUILD_TESTS)
         set_tests_properties(wirehair_wh2_native_codec_test PROPERTIES
             TIMEOUT 180
             LABELS "wh2;benchmark;contract;native;codec")
+        add_executable(wirehair_wh2_phase_attribution_test
+            bench/Wh2NativeCodec.cpp
+            bench/Wh2NativeCodec.h
+            bench/Wh2NativePanel.cpp
+            bench/Wh2NativePanel.h
+            bench/Wh2PhaseAttribution.cpp
+            bench/Wh2PhaseAttribution.h
+            bench/Wh2PhaseAttributionTest.cpp)
+        target_link_libraries(wirehair_wh2_phase_attribution_test PRIVATE
+            wirehair_v2_policy)
+        wirehair_apply_project_options(wirehair_wh2_phase_attribution_test)
+        add_test(
+            NAME wirehair_wh2_phase_attribution_test
+            COMMAND wirehair_wh2_phase_attribution_test)
+        set_tests_properties(wirehair_wh2_phase_attribution_test PROPERTIES
+            TIMEOUT 180
+            LABELS "wh2;benchmark;contract;native;timing;phase")
         add_executable(wirehair_wh2_contract_worker
             bench/Wh2ContractWorker.cpp
             bench/Wh2FrozenTrace.cpp
@@ -817,7 +834,9 @@ if(BUILD_TESTS)
             bench/Wh2NativeCodec.cpp
             bench/Wh2NativeCodec.h
             bench/Wh2NativePanel.cpp
-            bench/Wh2NativePanel.h)
+            bench/Wh2NativePanel.h
+            bench/Wh2PhaseAttribution.cpp
+            bench/Wh2PhaseAttribution.h)
         target_compile_definitions(wirehair_wh2_contract_worker PRIVATE
             "WIREHAIR_WH2_SOURCE_GIT_COMMIT=\"${WIREHAIR_WH2_SOURCE_GIT_COMMIT}\"")
         target_link_libraries(wirehair_wh2_contract_worker PRIVATE
