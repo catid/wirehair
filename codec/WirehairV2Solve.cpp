@@ -1933,6 +1933,9 @@ WirehairResult SolvePrecodeSystem(
     PrecodeSolveStats* stats,
     PrecodeSolveResumeState* resume_state)
 {
+    if (resume_state && stats == &resume_state->Stats) {
+        return Wirehair_InvalidInput;
+    }
     const uint64_t P_wide = (uint64_t)system.Params.Staircase +
         system.Params.DenseRows + system.Params.HeavyRows;
     PacketRowRuntime runtime;
@@ -1972,8 +1975,10 @@ static WirehairResult SolvePrecodeSystemImpl(
     PrecodeSolveResumeState* resume_state,
     bool validate_system)
 {
-    if (resume_state && SolveOutputAliasesResumeState(
-            intermediate_blocks_out, *resume_state))
+    if (resume_state &&
+        (stats == &resume_state->Stats ||
+         SolveOutputAliasesResumeState(
+             intermediate_blocks_out, *resume_state)))
     {
         return Wirehair_InvalidInput;
     }
@@ -3015,7 +3020,9 @@ WirehairResult ResumePrecodeSystem(
     PrecodeSolveStats* stats,
     bool allow_insert)
 {
-    if (SolveOutputAliasesResumeState(intermediate_blocks_out, state)) {
+    if (stats == &state.Stats ||
+        SolveOutputAliasesResumeState(intermediate_blocks_out, state))
+    {
         return Wirehair_InvalidInput;
     }
     const uint32_t K = system.Params.BlockCount;

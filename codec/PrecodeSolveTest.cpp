@@ -191,6 +191,169 @@ bool SameResumeStorageIdentity(
         state.RhsScratch.capacity() == identity.RhsScratchCapacity;
 }
 
+enum class ColdSolveEntryPoint
+{
+    Public,
+    Runtime,
+    ValidatedRuntime
+};
+
+const char* ColdSolveEntryPointName(ColdSolveEntryPoint entry_point)
+{
+    switch (entry_point)
+    {
+    case ColdSolveEntryPoint::Public:
+        return "public";
+    case ColdSolveEntryPoint::Runtime:
+        return "runtime";
+    case ColdSolveEntryPoint::ValidatedRuntime:
+        return "validated-runtime";
+    }
+    return "unknown";
+}
+
+WirehairResult CallColdSolve(
+    ColdSolveEntryPoint entry_point,
+    const wirehair_v2::PrecodeSystem& system,
+    const wirehair_v2::PacketRowConfig& config,
+    const wirehair_v2::PacketRowRuntime& runtime,
+    const std::vector<wirehair_v2::SolvePacket>& packets,
+    uint32_t block_bytes,
+    std::vector<uint8_t>& output,
+    wirehair_v2::PrecodeSolveStats* stats,
+    wirehair_v2::PrecodeSolveResumeState* resume_state)
+{
+    switch (entry_point)
+    {
+    case ColdSolveEntryPoint::Public:
+        return wirehair_v2::SolvePrecodeSystem(
+            system, config, packets, block_bytes,
+            output, stats, resume_state);
+    case ColdSolveEntryPoint::Runtime:
+        return wirehair_v2::SolvePrecodeSystemWithRuntime(
+            system, config, runtime, packets, block_bytes,
+            output, stats, resume_state);
+    case ColdSolveEntryPoint::ValidatedRuntime:
+        return wirehair_v2::SolvePrecodeSystemForValidatedSystemWithRuntime(
+            system, config, runtime, packets, block_bytes,
+            output, stats, resume_state);
+    }
+    return Wirehair_Error;
+}
+
+wirehair_v2::PrecodeSolveResumeState MakeStatsAliasSentinel(uint32_t tag)
+{
+    wirehair_v2::PrecodeSolveResumeState state;
+    state.SourceCount = UINT32_C(0x10203040) ^ tag;
+    state.PrecodeCount = UINT32_C(0x21314151) ^ tag;
+    state.ColumnCount = UINT32_C(0x32425262) ^ tag;
+    state.BlockBytes = UINT32_C(0x43536373) ^ tag;
+    state.InactiveCount = UINT32_C(0x54647484) ^ tag;
+    state.ProjectionWords = UINT32_C(0x65758595) ^ tag;
+    state.Rank = UINT32_C(0x768696a6) ^ tag;
+    state.Config.PeelSeed = UINT32_C(0x8797a7b7) ^ tag;
+    state.Config.MixCount = 2u;
+    state.Stats.PacketRows = UINT32_C(0x98a8b8c8) ^ tag;
+    state.Stats.PeeledColumns = UINT32_C(0xa9b9c9d9) ^ tag;
+    state.Stats.InactivatedColumns = UINT32_C(0xbacadbea) ^ tag;
+    state.Stats.ResidualRows = UINT32_C(0xcbdcedfb) ^ tag;
+    state.Stats.BlockXors = UINT64_C(0x123456789abcdef0) ^ tag;
+    state.Stats.BlockMulAdds = UINT64_C(0xfedcba9876543210) ^ tag;
+    state.Stats.PacketSeedAttempt = UINT32_C(0xdcedfe0f) ^ tag;
+    state.InactiveIndex.assign(5u, UINT32_C(0x11111111) ^ tag);
+    state.InactiveColumns.assign(6u, UINT32_C(0x22222222) ^ tag);
+    state.Projection.assign(7u, UINT64_C(0x3333333333333333) ^ tag);
+    state.Values.assign(8u, (uint8_t)(0x40u ^ tag));
+    state.PivotCoefficients.assign(9u, (uint8_t)(0x50u ^ tag));
+    state.PivotRhs.assign(10u, (uint8_t)(0x60u ^ tag));
+    state.HavePivot.assign(11u, (uint8_t)(0x70u ^ tag));
+    state.CoefficientScratch.assign(12u, (uint8_t)(0x80u ^ tag));
+    state.RhsScratch.assign(13u, (uint8_t)(0x90u ^ tag));
+    state.Active = (tag & 1u) != 0u;
+    return state;
+}
+
+bool ExpectColdSolveStatsAliasRejected(
+    const char* scenario,
+    ColdSolveEntryPoint entry_point,
+    const wirehair_v2::PrecodeSystem& system,
+    const wirehair_v2::PacketRowConfig& config,
+    const wirehair_v2::PacketRowRuntime& runtime,
+    const std::vector<wirehair_v2::SolvePacket>& packets,
+    uint32_t block_bytes,
+    uint32_t tag)
+{
+    wirehair_v2::PrecodeSolveResumeState state =
+        MakeStatsAliasSentinel(tag);
+    const wirehair_v2::PrecodeSolveResumeState state_before = state;
+    const ResumeStorageIdentity storage_before =
+        CaptureResumeStorageIdentity(state);
+    const size_t persistent_before = state.PersistentBytes();
+    std::vector<uint8_t> output(15u, (uint8_t)(0xa0u ^ tag));
+    const std::vector<uint8_t> output_before = output;
+    const uint8_t* const output_data_before = output.data();
+    const size_t output_capacity_before = output.capacity();
+
+    const WirehairResult result = CallColdSolve(
+        entry_point, system, config, runtime, packets, block_bytes,
+        output, &state.Stats, &state);
+    if (result != Wirehair_InvalidInput ||
+        !SameResumeState(state, state_before) ||
+        !SameResumeStorageIdentity(state, storage_before) ||
+        state.PersistentBytes() != persistent_before ||
+        output != output_before ||
+        output.data() != output_data_before ||
+        output.capacity() != output_capacity_before)
+    {
+        std::fprintf(stderr,
+            "solve: cold stats/checkpoint alias changed state "
+            "scenario=%s entry=%s result=%d\n",
+            scenario, ColdSolveEntryPointName(entry_point), (int)result);
+        return false;
+    }
+    return true;
+}
+
+bool ExpectResumeStatsAliasRejected(
+    const char* scenario,
+    const wirehair_v2::PrecodeSystem& system,
+    const wirehair_v2::PacketRowConfig& config,
+    uint32_t block_id,
+    const uint8_t* block_data,
+    uint32_t block_bytes,
+    const wirehair_v2::PrecodeSolveResumeState& prototype,
+    bool allow_insert)
+{
+    wirehair_v2::PrecodeSolveResumeState state = prototype;
+    const wirehair_v2::PrecodeSolveResumeState state_before = state;
+    const ResumeStorageIdentity storage_before =
+        CaptureResumeStorageIdentity(state);
+    const size_t persistent_before = state.PersistentBytes();
+    std::vector<uint8_t> output(16u, 0xb3u);
+    const std::vector<uint8_t> output_before = output;
+    const uint8_t* const output_data_before = output.data();
+    const size_t output_capacity_before = output.capacity();
+
+    const WirehairResult result = wirehair_v2::ResumePrecodeSystem(
+        system, config, block_id, block_data, block_bytes,
+        state, output, &state.Stats, allow_insert);
+    if (result != Wirehair_InvalidInput ||
+        !SameResumeState(state, state_before) ||
+        !SameResumeStorageIdentity(state, storage_before) ||
+        state.PersistentBytes() != persistent_before ||
+        output != output_before ||
+        output.data() != output_data_before ||
+        output.capacity() != output_capacity_before)
+    {
+        std::fprintf(stderr,
+            "solve: resume stats/checkpoint alias changed state "
+            "scenario=%s allow_insert=%u result=%d\n",
+            scenario, allow_insert ? 1u : 0u, (int)result);
+        return false;
+    }
+    return true;
+}
+
 bool CheckLowestBitIndex()
 {
     for (unsigned bit = 0u; bit < 64u; ++bit)
@@ -2050,6 +2213,57 @@ bool CheckIncrementalResumeCase(uint32_t block_bytes)
         return false;
     }
 
+    // A diagnostic pointer into the checkpoint itself cannot satisfy the
+    // resume output contract.  Exercise paths that would otherwise validate a
+    // dependent row, reject a conflicting row, insert an independent row, or
+    // fail validation.  Every one must reject before row generation, scratch
+    // allocation, or state mutation.
+    std::vector<uint8_t> alias_corrupt(
+        message.begin(), message.begin() + block_bytes);
+    alias_corrupt[0] ^= 1u;
+    wirehair_v2::PrecodeSolveResumeState independent_control = resume;
+    wirehair_v2::PrecodeSolveStats independent_stats = {};
+    std::vector<uint8_t> independent_output(5u, 0xc4u);
+    const std::vector<uint8_t> independent_output_before =
+        independent_output;
+    if (wirehair_v2::ResumePrecodeSystem(
+            system, config, 1u, message.data() + block_bytes, block_bytes,
+            independent_control, independent_output, &independent_stats,
+            true) != Wirehair_NeedMore ||
+        independent_control.Rank <= resume.Rank ||
+        !SameSolveStats(independent_stats, independent_control.Stats) ||
+        independent_output != independent_output_before)
+    {
+        std::fprintf(stderr,
+            "solve: independent resume control did not advance rank bb=%u\n",
+            block_bytes);
+        return false;
+    }
+    if (!ExpectResumeStatsAliasRejected(
+            "dependent-check", system, config, 0u, message.data(),
+            block_bytes, resume, false) ||
+        !ExpectResumeStatsAliasRejected(
+            "conflicting-check", system, config, 0u,
+            alias_corrupt.data(), block_bytes, resume, false) ||
+        !ExpectResumeStatsAliasRejected(
+            "dependent-insert", system, config, 0u, message.data(),
+            block_bytes, resume, true) ||
+        !ExpectResumeStatsAliasRejected(
+            "independent-insert", system, config, 1u,
+            message.data() + block_bytes, block_bytes, resume, true))
+    {
+        return false;
+    }
+    wirehair_v2::PrecodeSolveResumeState invalid_resume = resume;
+    invalid_resume.Active = false;
+    if (!ExpectResumeStatsAliasRejected(
+            "invalid-checkpoint", system, config, 1u,
+            message.data() + block_bytes, block_bytes,
+            invalid_resume, true))
+    {
+        return false;
+    }
+
     const uint32_t rank_before = resume.Rank;
     const size_t bytes_before = resume.PersistentBytes();
     const std::vector<uint8_t> coefficient_scratch_before =
@@ -2093,8 +2307,14 @@ bool CheckIncrementalResumeCase(uint32_t block_bytes)
     }
 
     WirehairResult result = Wirehair_NeedMore;
+    wirehair_v2::PrecodeSolveResumeState success_alias_state;
+    uint32_t success_alias_id = UINT32_MAX;
     for (uint32_t id = 1u; id < K; ++id)
     {
+        wirehair_v2::PrecodeSolveResumeState state_before_success;
+        if (block_bytes == 17u) {
+            state_before_success = resume;
+        }
         result = wirehair_v2::ResumePrecodeSystem(
             system,
             config,
@@ -2105,6 +2325,11 @@ bool CheckIncrementalResumeCase(uint32_t block_bytes)
             output,
             &stats,
             true);
+        if (block_bytes == 17u && result == Wirehair_Success)
+        {
+            success_alias_state.Swap(state_before_success);
+            success_alias_id = id;
+        }
         if (id + 1u < K && result != Wirehair_NeedMore) {
             std::fprintf(stderr,
                 "solve: checkpoint completed early id=%u result=%d\n",
@@ -2120,6 +2345,15 @@ bool CheckIncrementalResumeCase(uint32_t block_bytes)
         std::fprintf(stderr, "solve: resumed solution mismatch\n");
         return false;
     }
+    if (block_bytes == 17u &&
+        (success_alias_id == UINT32_MAX ||
+         !ExpectResumeStatsAliasRejected(
+             "success", system, config, success_alias_id,
+             message.data() + (size_t)success_alias_id * block_bytes,
+             block_bytes, success_alias_state, true)))
+    {
+        return false;
+    }
     std::printf(
         "incremental rank-deficient resume bb=%u: PASS\n", block_bytes);
     return true;
@@ -2130,6 +2364,235 @@ bool CheckIncrementalResume()
     return CheckIncrementalResumeCase(17u) &&
         CheckIncrementalResumeCase(
             wirehair_v2::kBinaryQuotientMinBlockBytes);
+}
+
+bool CheckColdSolveStatsAlias()
+{
+    const uint32_t K = 64u;
+    const uint32_t block_bytes = 17u;
+    wirehair_v2::PrecodeParams params =
+        wirehair_v2::MakeCertifiedParams(
+            K, UINT64_C(0x5354415453414c49));
+    wirehair_v2::PacketRowConfig base_config;
+    base_config.PeelSeed = UINT32_C(0x5a17c0de);
+    base_config.MixCount = wirehair_v2::kCertifiedPacketMixCount;
+    wirehair_v2::PrecodeSystem system;
+    wirehair_v2::PacketRowConfig config;
+    if (wirehair_v2::SelectSystematicConfiguration(
+            params, base_config, system, config) != Wirehair_Success)
+    {
+        std::fprintf(stderr,
+            "solve: cold stats-alias configuration failed\n");
+        return false;
+    }
+    const uint32_t P = system.Params.Staircase +
+        system.Params.DenseRows + system.Params.HeavyRows;
+    wirehair_v2::PacketRowRuntime runtime;
+    if (!runtime.Initialize(K, P, config.MixCount)) {
+        return false;
+    }
+
+    std::vector<uint8_t> message((size_t)K * block_bytes);
+    for (size_t i = 0u; i < message.size(); ++i) {
+        message[i] = (uint8_t)(i * 181u + (i >> 4) + 37u);
+    }
+    std::vector<wirehair_v2::SolvePacket> systematic(K);
+    for (uint32_t id = 0u; id < K; ++id) {
+        systematic[id].BlockId = id;
+        systematic[id].Data =
+            message.data() + (size_t)id * block_bytes;
+    }
+    std::vector<wirehair_v2::SolvePacket> deficient(K);
+    for (wirehair_v2::SolvePacket& packet : deficient) {
+        packet.BlockId = 0u;
+        packet.Data = message.data();
+    }
+    std::vector<wirehair_v2::SolvePacket> too_few(
+        systematic.begin(), systematic.end() - 1);
+
+    static const ColdSolveEntryPoint entry_points[] = {
+        ColdSolveEntryPoint::Public,
+        ColdSolveEntryPoint::Runtime,
+        ColdSolveEntryPoint::ValidatedRuntime
+    };
+    for (size_t entry_i = 0u;
+         entry_i < sizeof(entry_points) / sizeof(entry_points[0]);
+         ++entry_i)
+    {
+        const ColdSolveEntryPoint entry_point = entry_points[entry_i];
+        const uint32_t tag = (uint32_t)entry_i + 1u;
+
+        // A disjoint diagnostic object retains the ordinary successful path,
+        // while an unused checkpoint remains byte-for-byte and allocation-
+        // identity stable.
+        wirehair_v2::PrecodeSolveResumeState success_state =
+            MakeStatsAliasSentinel(UINT32_C(0x100) + tag);
+        const wirehair_v2::PrecodeSolveResumeState success_before =
+            success_state;
+        const ResumeStorageIdentity success_storage_before =
+            CaptureResumeStorageIdentity(success_state);
+        const size_t success_persistent_before =
+            success_state.PersistentBytes();
+        wirehair_v2::PrecodeSolveStats success_stats = {};
+        std::vector<uint8_t> success_output(9u, 0x6du);
+        if (CallColdSolve(
+                entry_point, system, config, runtime, systematic,
+                block_bytes, success_output, &success_stats,
+                &success_state) != Wirehair_Success ||
+            !wirehair_v2::VerifyPrecodeSolution(
+                system, config, systematic,
+                success_output.data(), block_bytes) ||
+            success_stats.PacketRows != K ||
+            !SameResumeState(success_state, success_before) ||
+            !SameResumeStorageIdentity(
+                success_state, success_storage_before) ||
+            success_state.PersistentBytes() != success_persistent_before)
+        {
+            std::fprintf(stderr,
+                "solve: disjoint cold success changed checkpoint entry=%s\n",
+                ColdSolveEntryPointName(entry_point));
+            return false;
+        }
+        if (!ExpectColdSolveStatsAliasRejected(
+                "success", entry_point, system, config, runtime,
+                systematic, block_bytes, UINT32_C(0x200) + tag))
+        {
+            return false;
+        }
+
+        // Rank deficiency may publish a new checkpoint and the same counters
+        // to two distinct objects.  The output remains exactly untouched.
+        wirehair_v2::PrecodeSolveResumeState deficient_state =
+            MakeStatsAliasSentinel(UINT32_C(0x300) + tag);
+        wirehair_v2::PrecodeSolveStats deficient_stats = {};
+        std::vector<uint8_t> deficient_output(10u, 0x7eu);
+        const std::vector<uint8_t> deficient_output_before =
+            deficient_output;
+        const uint8_t* const deficient_output_data_before =
+            deficient_output.data();
+        const size_t deficient_output_capacity_before =
+            deficient_output.capacity();
+        if (CallColdSolve(
+                entry_point, system, config, runtime, deficient,
+                block_bytes, deficient_output, &deficient_stats,
+                &deficient_state) != Wirehair_NeedMore ||
+            !deficient_state.Active ||
+            deficient_state.Rank >= deficient_state.InactiveCount ||
+            !SameSolveStats(deficient_stats, deficient_state.Stats) ||
+            deficient_output != deficient_output_before ||
+            deficient_output.data() != deficient_output_data_before ||
+            deficient_output.capacity() !=
+                deficient_output_capacity_before)
+        {
+            std::fprintf(stderr,
+                "solve: disjoint deficient checkpoint mismatch entry=%s\n",
+                ColdSolveEntryPointName(entry_point));
+            return false;
+        }
+        if (!ExpectColdSolveStatsAliasRejected(
+                "deficient", entry_point, system, config, runtime,
+                deficient, block_bytes, UINT32_C(0x400) + tag))
+        {
+            return false;
+        }
+
+        // The pre-allocation too-few-packets result leaves disjoint
+        // diagnostics and checkpoint state alone; alias rejection has higher
+        // precedence because that output contract is impossible to honor.
+        wirehair_v2::PrecodeSolveResumeState short_state =
+            MakeStatsAliasSentinel(UINT32_C(0x500) + tag);
+        const wirehair_v2::PrecodeSolveResumeState short_before = short_state;
+        const ResumeStorageIdentity short_storage_before =
+            CaptureResumeStorageIdentity(short_state);
+        const size_t short_persistent_before = short_state.PersistentBytes();
+        wirehair_v2::PrecodeSolveStats short_stats = short_state.Stats;
+        const wirehair_v2::PrecodeSolveStats short_stats_before = short_stats;
+        std::vector<uint8_t> short_output(11u, 0x8fu);
+        const std::vector<uint8_t> short_output_before = short_output;
+        if (CallColdSolve(
+                entry_point, system, config, runtime, too_few,
+                block_bytes, short_output, &short_stats,
+                &short_state) != Wirehair_NeedMore ||
+            !SameResumeState(short_state, short_before) ||
+            !SameResumeStorageIdentity(short_state, short_storage_before) ||
+            short_state.PersistentBytes() != short_persistent_before ||
+            !SameSolveStats(short_stats, short_stats_before) ||
+            short_output != short_output_before)
+        {
+            std::fprintf(stderr,
+                "solve: disjoint pre-allocation NeedMore mutated output "
+                "entry=%s\n", ColdSolveEntryPointName(entry_point));
+            return false;
+        }
+        if (!ExpectColdSolveStatsAliasRejected(
+                "pre-allocation-need-more", entry_point,
+                system, config, runtime, too_few, block_bytes,
+                UINT32_C(0x600) + tag))
+        {
+            return false;
+        }
+    }
+
+    // Public and validating-runtime entry points preserve all caller outputs
+    // on stored-graph validation failures.  The trusted overload deliberately
+    // skips this validation and is covered only by its alias fast rejection.
+    wirehair_v2::PrecodeSystem invalid_system = system;
+    if (invalid_system.StaircaseRows.empty()) {
+        return false;
+    }
+    invalid_system.StaircaseRows.pop_back();
+    static const ColdSolveEntryPoint validating_entry_points[] = {
+        ColdSolveEntryPoint::Public,
+        ColdSolveEntryPoint::Runtime
+    };
+    for (size_t entry_i = 0u;
+         entry_i < sizeof(validating_entry_points) /
+             sizeof(validating_entry_points[0]);
+         ++entry_i)
+    {
+        const ColdSolveEntryPoint entry_point =
+            validating_entry_points[entry_i];
+        wirehair_v2::PrecodeSolveResumeState state =
+            MakeStatsAliasSentinel(UINT32_C(0x700) + (uint32_t)entry_i);
+        const wirehair_v2::PrecodeSolveResumeState state_before = state;
+        const ResumeStorageIdentity storage_before =
+            CaptureResumeStorageIdentity(state);
+        const size_t persistent_before = state.PersistentBytes();
+        wirehair_v2::PrecodeSolveStats stats = state.Stats;
+        const wirehair_v2::PrecodeSolveStats stats_before = stats;
+        std::vector<uint8_t> output(12u, 0x91u);
+        const std::vector<uint8_t> output_before = output;
+        if (CallColdSolve(
+                entry_point, invalid_system, config, runtime, systematic,
+                block_bytes, output, &stats, &state) !=
+                Wirehair_InvalidInput ||
+            !SameResumeState(state, state_before) ||
+            !SameResumeStorageIdentity(state, storage_before) ||
+            state.PersistentBytes() != persistent_before ||
+            !SameSolveStats(stats, stats_before) || output != output_before)
+        {
+            std::fprintf(stderr,
+                "solve: validation failure mutated outputs entry=%s\n",
+                ColdSolveEntryPointName(entry_point));
+            return false;
+        }
+    }
+    for (size_t entry_i = 0u;
+         entry_i < sizeof(entry_points) / sizeof(entry_points[0]);
+         ++entry_i)
+    {
+        if (!ExpectColdSolveStatsAliasRejected(
+                "invalid-system", entry_points[entry_i],
+                invalid_system, config, runtime, systematic, block_bytes,
+                UINT32_C(0x800) + (uint32_t)entry_i))
+        {
+            return false;
+        }
+    }
+
+    std::printf(
+        "cold solve stats/checkpoint alias across all entry points: PASS\n");
+    return true;
 }
 
 bool CheckBinaryPeelLowDegreeXorOracle()
@@ -2962,10 +3425,23 @@ bool CheckInactiveResidualCap()
     }
     std::vector<uint8_t> output(7u, 0xccu);
     const std::vector<uint8_t> before = output;
-    wirehair_v2::PrecodeSolveStats stats;
+    const uint8_t* const output_data_before = output.data();
+    const size_t output_capacity_before = output.capacity();
+    wirehair_v2::PrecodeSolveResumeState resume =
+        MakeStatsAliasSentinel(UINT32_C(0x900));
+    const wirehair_v2::PrecodeSolveResumeState resume_before = resume;
+    const ResumeStorageIdentity storage_before =
+        CaptureResumeStorageIdentity(resume);
+    const size_t persistent_before = resume.PersistentBytes();
+    wirehair_v2::PrecodeSolveStats stats = {};
     const WirehairResult result = wirehair_v2::SolvePrecodeSystem(
-        system, config, packets, 1u, output, &stats);
+        system, config, packets, 1u, output, &stats, &resume);
     if (result != Wirehair_NeedMore || output != before ||
+        output.data() != output_data_before ||
+        output.capacity() != output_capacity_before ||
+        !SameResumeState(resume, resume_before) ||
+        !SameResumeStorageIdentity(resume, storage_before) ||
+        resume.PersistentBytes() != persistent_before ||
         stats.InactivatedColumns <= wirehair_v2::kMaxInactiveColumns ||
         stats.PeelNanoseconds == 0u)
     {
@@ -2973,6 +3449,30 @@ bool CheckInactiveResidualCap()
             "solve: inactive cap failed result=%d inact=%u\n",
             (int)result, stats.InactivatedColumns);
         return false;
+    }
+
+    const uint32_t P = system.Params.Staircase +
+        system.Params.DenseRows + system.Params.HeavyRows;
+    wirehair_v2::PacketRowRuntime runtime;
+    if (!runtime.Initialize(K, P, config.MixCount)) {
+        return false;
+    }
+    static const ColdSolveEntryPoint entry_points[] = {
+        ColdSolveEntryPoint::Public,
+        ColdSolveEntryPoint::Runtime,
+        ColdSolveEntryPoint::ValidatedRuntime
+    };
+    for (size_t entry_i = 0u;
+         entry_i < sizeof(entry_points) / sizeof(entry_points[0]);
+         ++entry_i)
+    {
+        if (!ExpectColdSolveStatsAliasRejected(
+                "inactive-cap", entry_points[entry_i],
+                system, config, runtime, packets, 1u,
+                UINT32_C(0xa00) + (uint32_t)entry_i))
+        {
+            return false;
+        }
     }
     return true;
 }
@@ -3185,6 +3685,7 @@ int main(int argc, char** argv)
     ok = CheckBinaryQuotientBoundary() && ok;
     ok = CheckConcurrentCoefficientCaches() && ok;
     ok = CheckIncrementalResume() && ok;
+    ok = CheckColdSolveStatsAlias() && ok;
     ok = CheckBinaryPeelLowDegreeXorOracle() && ok;
     ok = CheckMixDomainValidation() && ok;
     ok = CheckPacketRowDomainBoundaries() && ok;

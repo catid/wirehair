@@ -270,6 +270,10 @@ bool EvaluatePacketBlockForValidatedSystemWithRuntime(
     The output vector must not alias Values, PivotCoefficients, PivotRhs,
     HavePivot, CoefficientScratch, or RhsScratch in that same resume_state;
     such an alias returns InvalidInput without changing output, state, or stats.
+    When resume_state is non-null, stats must not point to that state's Stats
+    member; this exact alias likewise returns InvalidInput before allocation or
+    mutation because diagnostic publication and checkpoint transactionality
+    cannot both be honored through the same object.
     `stats` is diagnostic rather than transactional output: completed algebraic
     outcomes publish their counters, while validation failures and allocation
     failures before a resumable checkpoint may leave the caller's prior value
@@ -326,6 +330,9 @@ WirehairResult SolvePrecodeSystemForValidatedSystemWithRuntime(
     The output vector must not alias Values, PivotCoefficients, PivotRhs,
     HavePivot, CoefficientScratch, or RhsScratch in resume_state; such an alias
     returns InvalidInput without changing output, state, or stats.
+    `stats` likewise must not point to resume_state.Stats; this exact alias is
+    rejected before row generation, allocation, or mutation so successful
+    checkpoint clearing cannot repopulate part of the cleared state.
 */
 WirehairResult ResumePrecodeSystem(
     const PrecodeSystem& system,
