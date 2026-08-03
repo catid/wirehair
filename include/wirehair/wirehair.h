@@ -289,9 +289,14 @@ WIREHAIR_EXPORT const char* wirehair_v2_result_string(
     Validate and serialize a host-native profile.
 
     The canonical encoding is exactly 32 bytes and uses little-endian integer
-    fields.  bytesOut is set to WIREHAIR_V2_PROFILE_SERIALIZED_BYTES whenever
-    it is non-null, including BufferTooSmall.  A null output buffer is the
-    supported size-query form when outputCapacity is zero.
+    fields.  A disjoint non-null bytesOut is set to
+    WIREHAIR_V2_PROFILE_SERIALIZED_BYTES, including on BufferTooSmall.  A null
+    output buffer is the supported size-query form when outputCapacity is zero.
+    bytesOut must not overlap either the host profile input or the canonical
+    output range; exact or partial overlap returns WirehairV2_InvalidInput
+    without modifying any of those ranges.  The profile input and canonical
+    output may overlap each other because serialization stages the complete
+    record.
 */
 WIREHAIR_EXPORT WirehairV2Result wirehair_v2_profile_serialize(
     const WirehairV2Profile* profile,
@@ -382,7 +387,10 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_decoder_create(
     dataBytesOut is required.  On success it receives the bytes written.  A
     non-null output buffer shorter than the exact systematic or repair packet
     reports WirehairV2_BufferTooSmall, reports the required size through
-    dataBytesOut, and is not modified.
+    dataBytesOut, and is not modified.  dataBytesOut must not overlap the exact
+    packet output range; exact or partial overlap returns
+    WirehairV2_InvalidInput without modifying either range, including when the
+    packet buffer is too short.
 */
 WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encode(
     WirehairV2Codec codec,

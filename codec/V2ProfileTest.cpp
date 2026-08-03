@@ -656,6 +656,87 @@ int main()
         return 1;
     }
 
+    const auto check_profile_output_alias = [
+        &profile](uint32_t capacity, bool partial, const char* what)
+    {
+        std::vector<uint32_t> alias_words(
+            (WIREHAIR_V2_PROFILE_SERIALIZED_BYTES + 2u +
+                sizeof(uint32_t) - 1u) / sizeof(uint32_t),
+            UINT32_C(0xa5a5a5a5));
+        const std::vector<uint32_t> before = alias_words;
+        uint8_t* const base =
+            reinterpret_cast<uint8_t*>(alias_words.data());
+        void* const output = base + (partial ? 2u : 0u);
+        return Check(wirehair_v2_profile_serialize(
+                &profile, output, capacity, alias_words.data()) ==
+                    WirehairV2_InvalidInput &&
+                alias_words == before,
+            what);
+    };
+    if (!check_profile_output_alias(
+            sizeof(reserialized), false,
+            "exact profile size/output alias is rejected transactionally") ||
+        !check_profile_output_alias(
+            sizeof(reserialized) - 1u, false,
+            "short exact profile size/output alias is transactional") ||
+        !check_profile_output_alias(
+            sizeof(reserialized), true,
+            "partial profile size/output alias is rejected transactionally") ||
+        !check_profile_output_alias(
+            sizeof(reserialized) - 1u, true,
+            "short partial profile size/output alias is transactional"))
+    {
+        wirehair_v2_free(encoder);
+        return 1;
+    }
+
+    WirehairV2Profile profile_size_alias = profile;
+    const WirehairV2Profile profile_size_alias_before = profile_size_alias;
+    uint8_t profile_alias_output[WIREHAIR_V2_PROFILE_SERIALIZED_BYTES];
+    std::memset(profile_alias_output, 0xa5, sizeof(profile_alias_output));
+    uint8_t profile_alias_output_before[sizeof(profile_alias_output)];
+    std::memcpy(
+        profile_alias_output_before,
+        profile_alias_output,
+        sizeof(profile_alias_output));
+    if (!Check(wirehair_v2_profile_serialize(
+            &profile_size_alias,
+            profile_alias_output,
+            sizeof(profile_alias_output),
+            &profile_size_alias.profile_version) ==
+                WirehairV2_InvalidInput &&
+            std::memcmp(
+                &profile_size_alias,
+                &profile_size_alias_before,
+                sizeof(profile_size_alias)) == 0 &&
+            std::memcmp(
+                profile_alias_output,
+                profile_alias_output_before,
+                sizeof(profile_alias_output)) == 0,
+            "profile size/input alias is rejected transactionally"))
+    {
+        wirehair_v2_free(encoder);
+        return 1;
+    }
+
+    WirehairV2Profile staged_profile_output = profile;
+    uint32_t staged_profile_bytes = 0u;
+    if (!Check(wirehair_v2_profile_serialize(
+            &staged_profile_output,
+            &staged_profile_output,
+            sizeof(staged_profile_output),
+            &staged_profile_bytes) == WirehairV2_Success &&
+            staged_profile_bytes == sizeof(staged_profile_output) &&
+            std::memcmp(
+                &staged_profile_output,
+                serialized,
+                sizeof(staged_profile_output)) == 0,
+            "staged profile input/output alias remains supported"))
+    {
+        wirehair_v2_free(encoder);
+        return 1;
+    }
+
     if (!CheckMalformedProfiles(ExpectedProfile)) {
         wirehair_v2_free(encoder);
         return 1;
@@ -686,6 +767,51 @@ int main()
         wirehair_v2_free(decoder);
         return 1;
     };
+
+    const auto check_encode_output_alias = [
+        encoder](uint32_t capacity, bool partial, const char* what)
+    {
+        std::vector<uint32_t> alias_words(
+            (BlockBytes + 2u + sizeof(uint32_t) - 1u) /
+                sizeof(uint32_t),
+            UINT32_C(0xa5a5a5a5));
+        const std::vector<uint32_t> before = alias_words;
+        uint8_t* const base =
+            reinterpret_cast<uint8_t*>(alias_words.data());
+        void* const output = base + (partial ? 2u : 0u);
+        return Check(wirehair_v2_encode(
+                encoder, BlockCount, output, capacity,
+                alias_words.data()) == WirehairV2_InvalidInput &&
+                alias_words == before,
+            what);
+    };
+    if (!check_encode_output_alias(
+            BlockBytes, false,
+            "exact encode size/output alias is rejected transactionally") ||
+        !check_encode_output_alias(
+            BlockBytes - 1u, false,
+            "short exact encode size/output alias is transactional") ||
+        !check_encode_output_alias(
+            BlockBytes, true,
+            "partial encode size/output alias is rejected transactionally") ||
+        !check_encode_output_alias(
+            BlockBytes - 1u, true,
+            "short partial encode size/output alias is transactional"))
+    {
+        return fail_after_create();
+    }
+
+    uint8_t disjoint_output[BlockBytes];
+    std::memset(disjoint_output, 0xa5, sizeof(disjoint_output));
+    uint32_t disjoint_bytes = UINT32_C(0xa5a5a5a5);
+    if (!Check(wirehair_v2_encode(
+            encoder, BlockCount,
+            disjoint_output, sizeof(disjoint_output), &disjoint_bytes) ==
+                WirehairV2_Success && disjoint_bytes == BlockBytes,
+            "disjoint encode size/output remains supported"))
+    {
+        return fail_after_create();
+    }
 
     uint8_t short_output[BlockBytes];
     uint8_t short_before[BlockBytes];
