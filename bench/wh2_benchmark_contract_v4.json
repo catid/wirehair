@@ -1,6 +1,6 @@
 {
-  "schema": "wirehair.wh2.benchmark-contract.v3",
-  "contract_id": "wh2-pure-gf256-1pct-v6",
+  "schema": "wirehair.wh2.benchmark-contract.v4",
+  "contract_id": "wh2-pure-gf256-1pct-v7",
   "field": "GF(256)",
   "goal": {
     "primary_failure_threshold_ppm": 10000,
@@ -268,6 +268,16 @@
   },
   "selection": {
     "controls": ["wirehair2_head", "wirehair1"],
+    "development_architecture_roles": {
+      "descriptive_controls": ["wirehair2_head", "wirehair1"],
+      "recovery_reference": "wirehair2_raw_d12_h12_periodic",
+      "recovery_candidates": ["wirehair2_dense_two07_basis_v1"],
+      "timing_proxy": "wirehair2_head",
+      "timing_candidates": ["wirehair2_dense_two07_basis_v1"]
+    },
+    "development_recovery_eligibility": "candidate eligibility is gated only against the uniform-raw D12/H12 recovery reference; production WH2 and Wirehair1 are descriptive non-vetoing controls",
+    "development_timing_eligibility": "time only the frozen Two07 candidate against the production-head D12 structure proxy; the raw D12 recovery reference has no timing panel",
+    "development_timing_proxy_policy": "the witness proves only D12-disabled non-seed structure equivalence under development attempt-0 production timing seeds, separately binds the distinct uniform-raw recovery seed schedule, and requires a new witness for any other attempt semantics",
     "noninferiority_margin_ppm": 1000,
     "architecture_failure_equivalence_ppm": 1000,
     "raw_weak_seed_definition": "a (K,base_seed_attempt,block_bytes) with any overhead-0 failure",
@@ -290,13 +300,25 @@
   },
   "evidence": {
     "freeze_before_results": [
-      "source_git_commit", "benchmark_binary_sha256", "contract_sha256",
-      "arm_roster_sha256", "recovery_domain_sha256", "timing_domain_sha256",
-      "trace_manifest_sha256", "arm_descriptor_sha256", "repair_map_sha256",
-      "repair_training_trace_manifest_sha256", "commands", "CPU_affinity",
-      "host_identity"
+      "all freezes: source_git_commit", "all freezes: contract_sha256",
+      "all freezes: arm_roster_sha256", "all freezes: domain_sha256",
+      "all freezes: trace_manifest_sha256",
+      "all freezes per arm: binary_sha256",
+      "all freezes per arm: arm_descriptor_sha256",
+      "all freezes per arm: repair_map_sha256",
+      "all freezes: repair_training_trace_manifest_sha256",
+      "all freezes: commands", "all freezes: cpu_affinity",
+      "all freezes: host_identity",
+      "development raw-v3 per arm: construction_seed_basis",
+      "development raw-v3 per arm: seed_schedule_sha256",
+      "development raw-v3 per arm: dense_anchor_layout",
+      "development raw-v3: architecture_roles",
+      "development raw-v3: timing_proxy_witness_sha256",
+      "development raw-v3: work_rank_summary_sha256",
+      "development raw-v3: work_rank_result_stream_sha256",
+      "development raw-v3: work_rank_domain_sha256"
     ],
-    "freeze_manifest_schema": "wirehair.wh2.benchmark-freeze.v1 canonical JSON object; it is the sole arm-roster and artifact authority",
+    "freeze_manifest_schema": "phase-scoped canonical JSON: benchmark-freeze.v3 is mandatory for development raw recovery; benchmark-freeze.v1 remains mandatory for timing and non-development production phases; read-only legacy raw-v2 development evidence cannot authenticate dense-anchor arms; each accepted manifest is the sole arm-roster and artifact authority",
     "trace_manifest_schema": "recovery uses wirehair.wh2.trace-manifest.v1; timing uses v2 with a hash header binding the base domain, qualified domain, and qualification-map SHA-256; both use ordered canonical JSONL rows of ordinal,cell_sha256,trace_sha256 and permit duplicate trace hashes",
     "repair_map_schema": "wirehair.wh2.repair-map.v1 canonical JSON object with 63999 retry offsets indexed by K-2 and bound to training traces",
     "timing_qualification_schema": "one phase-scoped wirehair.wh2.timing-qualification-map.v1 canonical JSON object binds an ordered candidate-blind audit and one lowest uint8 loss retry offset per base timing-cell ordinal",
@@ -310,7 +332,9 @@
       "qualification_map_drift", "qualification_audit_drift",
       "loss_retry_drift", "source_identity_drift",
       "timing_panel_drift", "timing_order_drift", "timing_batch_drift",
-      "timing_geometry_drift"
+      "timing_geometry_drift", "raw_schema_downgrade",
+      "dense_anchor_layout_drift", "architecture_role_drift",
+      "timing_proxy_witness_drift", "work_rank_binding_drift"
     ],
     "selectable_excluded_cells": 0,
     "unsupported_policy": "only an explicitly measured routed composite is selectable",

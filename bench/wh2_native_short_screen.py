@@ -32,7 +32,9 @@ import wh2_benchmark_contract as contract_api
 
 TRACE_RECORD_SCHEMA = "wirehair.wh2.native-trace-record.v1"
 RECOVERY_RECORD_SCHEMA = "wirehair.wh2.native-recovery-record.v1"
-RAW_RECOVERY_RECORD_SCHEMA = "wirehair.wh2.native-recovery-record.v2"
+LEGACY_RAW_RECOVERY_RECORD_SCHEMA = \
+    "wirehair.wh2.native-recovery-record.v2"
+RAW_RECOVERY_RECORD_SCHEMA = "wirehair.wh2.native-recovery-record.v3"
 TIMING_RECORD_SCHEMA = "wirehair.wh2.native-timing-record.v4"
 TIMING_QUALIFICATION_RECORD_SCHEMA = \
     "wirehair.wh2.native-timing-qualification-record.v1"
@@ -40,7 +42,8 @@ TIMING_QUALIFICATION_EXECUTION_SCHEMA = \
     "wirehair.wh2.native-timing-qualification-execution-receipt.v1"
 SAMPLER_SCHEMA = "wirehair.wh2.sampler-attestation.v1"
 EXECUTION_SCHEMA = "wirehair.wh2.native-execution-receipt.v1"
-RAW_EXECUTION_SCHEMA = "wirehair.wh2.native-execution-receipt.v2"
+LEGACY_RAW_EXECUTION_SCHEMA = "wirehair.wh2.native-execution-receipt.v2"
+RAW_EXECUTION_SCHEMA = "wirehair.wh2.native-execution-receipt.v3"
 TIMING_EXECUTION_SCHEMA = \
     "wirehair.wh2.native-timing-execution-receipt.v1"
 
@@ -1002,10 +1005,13 @@ def recovery_record_schema_fields(
     raw_arm = frozen_arm.get("construction_seed_basis") == \
         contract_api.RAW_CONSTRUCTION_SEED_BASIS
     if raw_arm:
-        if freeze.get("schema") != contract_api.RAW_FREEZE_SCHEMA:
-            fail("uniform raw payload is not bound by a raw v2 freeze")
-        return (RAW_RECOVERY_RECORD_SCHEMA,
-                contract_api.RAW_RECOVERY_RECORD_FIELDS)
+        if freeze.get("schema") == contract_api.RAW_FREEZE_SCHEMA:
+            return (RAW_RECOVERY_RECORD_SCHEMA,
+                    contract_api.RAW_RECOVERY_RECORD_FIELDS)
+        if freeze.get("schema") == contract_api.LEGACY_RAW_FREEZE_SCHEMA:
+            return (LEGACY_RAW_RECOVERY_RECORD_SCHEMA,
+                    contract_api.LEGACY_RAW_RECOVERY_RECORD_FIELDS)
+        fail("uniform raw payload is not bound by a raw freeze")
     return RECOVERY_RECORD_SCHEMA, contract_api.LEDGER_FIELDS
 
 
@@ -1209,8 +1215,8 @@ def _validate_timing_qualification_records(
     allowed_cpus = observed_cpus
     if expected_cpus is not None:
         requested = list(expected_cpus)
-        if (requested != sorted(set(requested)) or
-                any(type(cpu) is not int or cpu < 0 for cpu in requested)):
+        if (any(type(cpu) is not int or cpu < 0 for cpu in requested) or
+                requested != sorted(set(requested))):
             fail("qualification CPU roster is malformed")
         if observed_cpus != requested:
             fail("qualification did not exercise every allowed logical CPU")
@@ -1314,12 +1320,21 @@ def load_timing_qualification_execution_receipt(
     allowed_cpus = receipt["qualification_allowed_cpus"]
     worker_cpus = receipt["qualification_worker_cpus"]
     if (not isinstance(allowed_cpus, list) or not allowed_cpus or
-            allowed_cpus != sorted(set(allowed_cpus)) or
             any(type(cpu) is not int or cpu < 0 for cpu in allowed_cpus) or
-            worker_cpus != allowed_cpus):
+            allowed_cpus != sorted(set(allowed_cpus)) or
+            not isinstance(worker_cpus, list) or
+            any(type(cpu) is not int or cpu < 0 for cpu in worker_cpus) or
+            contract_api.canonical_json(worker_cpus) !=
+                contract_api.canonical_json(allowed_cpus)):
         fail("timing qualification execution receipt CPU roster is invalid")
-    if expected_cpus is not None and list(expected_cpus) != allowed_cpus:
-        fail("timing qualification execution receipt changes allowed affinity")
+    if expected_cpus is not None:
+        expected_cpu_list = list(expected_cpus)
+        if (any(type(cpu) is not int or cpu < 0
+                for cpu in expected_cpu_list) or
+                contract_api.canonical_json(expected_cpu_list) !=
+                    contract_api.canonical_json(allowed_cpus)):
+            fail("timing qualification execution receipt changes allowed "
+                 "affinity")
     records = _load_canonical_jsonl(
         native_path, "native timing qualification stream")
     _, _, metadata_with_runtime = _validate_timing_qualification_records(
@@ -1338,7 +1353,8 @@ def load_timing_qualification_execution_receipt(
             "qualification_worker_end_monotonic_ns",
             "qualification_worker_cpus", "qualification_workers",
             "qualification_worker_binary_sha256s"):
-        if receipt[field] != metadata[field]:
+        if contract_api.canonical_json(receipt[field]) != \
+                contract_api.canonical_json(metadata[field]):
             fail("timing qualification execution receipt {} differs from "
                  "native evidence".format(field))
     if (type(receipt["qualification_attempt_count"]) is not int or
@@ -1351,12 +1367,17 @@ def load_timing_qualification_execution_receipt(
             len(receipt["qualification_workers"]) != len(allowed_cpus) or
             any(not isinstance(worker, dict) or set(worker) != WORKER_FIELDS
                 for worker in receipt["qualification_workers"]) or
+            any(type(worker["cpu"]) is not int or worker["cpu"] < 0 or
+                type(worker["pid"]) is not int or worker["pid"] <= 0 or
+                type(worker["process_start_ticks"]) is not int or
+                worker["process_start_ticks"] <= 0
+                for worker in receipt["qualification_workers"]) or
             not isinstance(receipt["qualification_worker_binary_sha256s"], list) or
             not receipt["qualification_worker_binary_sha256s"] or
-            receipt["qualification_worker_binary_sha256s"] != sorted(set(
-                receipt["qualification_worker_binary_sha256s"])) or
             any(not _is_sha256(value) for value in
-                receipt["qualification_worker_binary_sha256s"])):
+                receipt["qualification_worker_binary_sha256s"]) or
+            receipt["qualification_worker_binary_sha256s"] != sorted(set(
+                receipt["qualification_worker_binary_sha256s"]))):
         fail("timing qualification execution receipt provenance is malformed")
     return receipt, metadata
 
@@ -2163,9 +2184,13 @@ def assemble_results(
         if evidence_kind == "timing":
             receipt_schema = TIMING_EXECUTION_SCHEMA
         else:
-            receipt_schema = RAW_EXECUTION_SCHEMA \
-                if freeze.get("schema") == contract_api.RAW_FREEZE_SCHEMA \
-                else EXECUTION_SCHEMA
+            if freeze.get("schema") == contract_api.RAW_FREEZE_SCHEMA:
+                receipt_schema = RAW_EXECUTION_SCHEMA
+            elif freeze.get("schema") == \
+                    contract_api.LEGACY_RAW_FREEZE_SCHEMA:
+                receipt_schema = LEGACY_RAW_EXECUTION_SCHEMA
+            else:
+                receipt_schema = EXECUTION_SCHEMA
         receipt: Dict[str, Any] = {
             "schema": receipt_schema,
             "contract_sha256": contract_api.contract_sha256(contract),
@@ -2348,9 +2373,12 @@ def validate_execution_receipt(
     if evidence_kind == "timing":
         expected_receipt_schema = TIMING_EXECUTION_SCHEMA
     else:
-        expected_receipt_schema = RAW_EXECUTION_SCHEMA \
-            if freeze.get("schema") == contract_api.RAW_FREEZE_SCHEMA \
-            else EXECUTION_SCHEMA
+        if freeze.get("schema") == contract_api.RAW_FREEZE_SCHEMA:
+            expected_receipt_schema = RAW_EXECUTION_SCHEMA
+        elif freeze.get("schema") == contract_api.LEGACY_RAW_FREEZE_SCHEMA:
+            expected_receipt_schema = LEGACY_RAW_EXECUTION_SCHEMA
+        else:
+            expected_receipt_schema = EXECUTION_SCHEMA
     if receipt["schema"] != expected_receipt_schema:
         fail("execution receipt has an unknown schema")
     unsigned = {key: value for key, value in receipt.items()
@@ -2388,7 +2416,11 @@ def validate_execution_receipt(
             "worker_end_monotonic_ns", "worker_cpus", "workers",
             "worker_binary_sha256s", "message_set_sha256",
             "work_set_sha256", "native_stream_sha256"):
-        if receipt[field] != metadata[field]:
+        # Python's structural equality aliases JSON true/false and integral
+        # floats with integers.  Receipt authentication is over exact JSON
+        # values, so compare canonical encodings at every derived boundary.
+        if contract_api.canonical_json(receipt[field]) != \
+                contract_api.canonical_json(metadata[field]):
             fail("execution receipt {} differs from native evidence".format(
                 field))
     if timing_qualification is not None and \
@@ -2410,7 +2442,8 @@ def validate_execution_receipt(
             },
         }
         for field, expected in qualification_bindings.items():
-            if receipt[field] != expected:
+            if contract_api.canonical_json(receipt[field]) != \
+                    contract_api.canonical_json(expected):
                 fail("execution receipt {} differs from qualification evidence".
                      format(field))
         if receipt["qualification_worker_end_monotonic_ns"] > \
@@ -2436,7 +2469,8 @@ def validate_execution_receipt(
             receipt["qualification_worker_start_monotonic_ns"],
             receipt["qualification_worker_end_monotonic_ns"],
             receipt["qualification_worker_cpus"], verify_live_sampler)
-        if actual_qualification_thermal != qualification_thermal:
+        if contract_api.canonical_json(actual_qualification_thermal) != \
+                contract_api.canonical_json(qualification_thermal):
             fail("qualification thermal summary differs from sampler bytes")
     if receipt["result_stream_sha256"] != _sha256_jsonl(payloads):
         fail("execution receipt result hash differs from native payloads")
@@ -2479,14 +2513,16 @@ def validate_execution_receipt(
     sampler_attestation = _exact_keys(
         _load_canonical_object(sampler_path, "sampler attestation"),
         SAMPLER_FIELDS, "sampler attestation")
-    if sampler_attestation != sampler:
+    if contract_api.canonical_json(sampler_attestation) != \
+            contract_api.canonical_json(sampler):
         fail("execution receipt sampler binding differs from its attestation")
     actual_thermal = _thermal_window(
         sampler_attestation, receipt["worker_start_monotonic_ns"],
         receipt["worker_end_monotonic_ns"], receipt["worker_cpus"],
         verify_live_sampler,
         controller_cpu=freeze.get("host_identity", {}).get("controller_cpu"))
-    if actual_thermal != thermal:
+    if contract_api.canonical_json(actual_thermal) != \
+            contract_api.canonical_json(thermal):
         fail("execution receipt thermal summary differs from sampler bytes")
     if evidence_kind == "timing":
         _require_one_continuous_sampler(
@@ -2537,7 +2573,15 @@ def validate_execution_receipt(
         _load_canonical_object(
             execution_receipt_path, "execution receipt after validation"),
         receipt_fields, "execution receipt after validation")
-    if final_receipt != receipt:
+    final_unsigned = {
+        key: value for key, value in final_receipt.items()
+        if key != "receipt_sha256"
+    }
+    if (not _is_sha256(final_receipt["receipt_sha256"]) or
+            final_receipt["receipt_sha256"] !=
+                contract_api.sha256_json(final_unsigned) or
+            contract_api.canonical_json(final_receipt) !=
+                contract_api.canonical_json(receipt)):
         fail("execution receipt changed during authoritative validation")
     try:
         final_freeze = contract_api.load_freeze_manifest(
@@ -2568,8 +2612,10 @@ def validate_execution_receipt(
         receipt["worker_end_monotonic_ns"], receipt["worker_cpus"],
         verify_live_sampler,
         controller_cpu=freeze.get("host_identity", {}).get("controller_cpu"))
-    if (final_sampler_attestation != sampler_attestation or
-            final_thermal != thermal):
+    if (contract_api.canonical_json(final_sampler_attestation) !=
+            contract_api.canonical_json(sampler_attestation) or
+            contract_api.canonical_json(final_thermal) !=
+            contract_api.canonical_json(thermal)):
         fail("timing sampler evidence changed during receipt validation")
     if timing_qualification is not None and \
             qualification_metadata is not None and \

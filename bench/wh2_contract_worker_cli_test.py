@@ -12,10 +12,10 @@ import unittest
 
 
 DESCRIPTION_SCHEMA = "wirehair.wh2.native-worker-description.v1"
-RAW_DESCRIPTION_SCHEMA = "wirehair.wh2.native-worker-description.v2"
+RAW_DESCRIPTION_SCHEMA = "wirehair.wh2.native-worker-description.v3"
 DESCRIPTOR_SCHEMA = "wirehair.wh2.native-arm-descriptor.v1"
 RECOVERY_SCHEMA = "wirehair.wh2.native-recovery-record.v1"
-RAW_RECOVERY_SCHEMA = "wirehair.wh2.native-recovery-record.v2"
+RAW_RECOVERY_SCHEMA = "wirehair.wh2.native-recovery-record.v3"
 TIMING_SCHEMA = "wirehair.wh2.native-timing-record.v4"
 TIMING_QUALIFICATION_SCHEMA = (
     "wirehair.wh2.native-timing-qualification-record.v1"
@@ -24,8 +24,10 @@ NATIVE_WORK_SCHEMA = "wirehair.wh2.native-work.v1"
 TIMING_QUALIFICATION_MESSAGE_DOMAIN = (
     b"wirehair.wh2.timing-qualification-message.v1\0"
 )
+TIMING_PROXY_SCHEMA = "wirehair.wh2.native-timing-proxy-witness.v2"
+TIMING_PROXY_DOMAIN = b"wirehair.wh2.timing-proxy-domain.v2\0"
 SOURCE_DOMAIN = b"wirehair.wh2.source.v1\0"
-RAW_REALIZED_SCHEMA = "wirehair.wh2.raw-realized-construction.v1"
+RAW_REALIZED_SCHEMA = "wirehair.wh2.raw-realized-construction.v2"
 REALIZED_SCHEMA = "wirehair.wh2.realized-construction.v1"
 ZERO_SHA256 = "0" * 64
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -45,6 +47,29 @@ RAW_SEED_SCHEDULE_CANONICAL = (
 )
 RAW_SEED_SCHEDULE_SHA256 = (
     "90a98a3db207852dabdf5fb27573ef48bce52e0228cee4e291d96fa44ed509a7"
+)
+
+# Exact K=8, 64-byte structure-only witness golden.  These values bind the
+# serialization and native seed resolution, not merely SHA syntax.  Any
+# intentional serialization change must bump the witness schema and domain.
+TIMING_PROXY_K8_B64_GOLDEN = {
+    "K": 8,
+    "block_bytes": 64,
+    "construction_attempt": 0,
+    "normalized_structure_sha256":
+        "cd7311fd7b8bea997428148e6331b8cc2d76cc52585d276f69fc65ad8327e20c",
+    "production_timing_configuration_sha256":
+        "899dec1ce827dd5f85deff01ab3c88af8f180948bb95b5b79134c160e8eedea4",
+    "production_timing_equation_system_sha256":
+        "994637c26be404e790c6232bcb6c97dbc4576c0afce9a96f92e54b4f99a86434",
+    "production_timing_packet_seed": "0xf57e654d",
+    "production_timing_precode_seed": "0x94c06c665dbaad3a",
+    "raw_recovery_packet_seed": "0x4ec72102",
+    "raw_recovery_precode_seed": "0x487468302aad7105",
+    "seeds_differ": True,
+}
+TIMING_PROXY_CELLS_SHA256 = (
+    "6701e65f9a81c3906d6c4f9367e15881526bd85ce3e46b79439edc23497611ca"
 )
 
 CONTROLS = [
@@ -101,11 +126,11 @@ RAW_CONTROL = {
 
 CANDIDATE_REALIZED_CELL_ZERO = {
     "d12-h11-periodic":
-        "d9b77ab20e2d06aa4a9664c85f8f020dbec35249ad1f911a916c7ccae8937a49",
+        "156e7063353cde2ad42b0ea517af0f5c941feed497e60d931e2e5ee08878717c",
     "d12-h13-periodic":
-        "a89c6b491b5f36bfe18b6ff21d6f327cb45b9e0c48b0f5b63571a002571ce8bf",
+        "ea2fe8cc925a523a11def53fd10b1749d496987df23c573592c7144adaa7b225",
     "d13-h12-periodic":
-        "943fffd7354809c211d93da6303616216287eaa554400d726199bffaeccf323a",
+        "945a94dfbe9b18d66d8da38c3555728b40766fc1c5869da8193ddda8b91794c3",
 }
 
 CANDIDATE_DISCRIMINATORS = {
@@ -145,7 +170,7 @@ CONTROL_REALIZED_CELL_ZERO = {
 }
 
 RAW_CONTROL_REALIZED_CELL_ZERO = (
-    "7562bed772f60e6cc3cfc7f1d9448e1c6fa88f976af003dfdfd4cc8425da43d6"
+    "e6cbc57f44a58f7f7a3b1a907ab0749cd27b5e8e4c5946cfb3f262fa67ce64d6"
 )
 
 TIMING_CANDIDATE = {
@@ -287,12 +312,16 @@ def canonical_descriptor(arm, codec, transform):
 
 
 def candidate_arm_record(candidate):
-    """Description v2 binds raw structure and seed policy independently."""
+    """Description v3 binds raw structure and seed policy independently."""
     return {
         "arm": candidate["arm"],
         "arm_descriptor_sha256": candidate["arm_descriptor_sha256"],
         "codec": candidate["codec"],
         "construction_seed_basis": RAW_SEED_BASIS,
+        "dense_anchor_layout": candidate.get(
+            "dense_anchor_layout",
+            "two07" if candidate["arm"] == TIMING_CANDIDATE["arm"]
+            else "disabled"),
         "seed_schedule_sha256": RAW_SEED_SCHEDULE_SHA256,
     }
 
@@ -303,6 +332,8 @@ def candidate_control_record(control):
         result["construction_seed_basis"] = "not-applicable"
     else:
         result["construction_seed_basis"] = "production-profile-v1"
+    result["dense_anchor_layout"] = \
+        "not-applicable" if control["codec"] == "wirehair1" else "disabled"
     result["seed_schedule_sha256"] = ZERO_SHA256
     return result
 
@@ -316,6 +347,7 @@ def raw_realized_object(payload, codec):
         "block_bytes": payload["block_bytes"],
         "codec": codec,
         "construction_seed_basis": payload["construction_seed_basis"],
+        "dense_anchor_layout": payload["dense_anchor_layout"],
         "dense_identity_corner": payload["dense_identity_corner"],
         "effective_packet_seed": payload["effective_packet_seed"],
         "effective_precode_seed": payload["effective_precode_seed"],
@@ -439,6 +471,81 @@ class ContractWorkerCliTest(unittest.TestCase):
                     candidate["arm_descriptor_sha256"], descriptor_hash)
                 self.assertNotIn(descriptor_hash, observed_hashes)
                 observed_hashes.add(descriptor_hash)
+
+        two07_description, two07_raw = self.description(
+            "--describe-recovery-candidate", "two07")
+        self.assert_exact_description(
+            two07_description,
+            two07_raw,
+            [candidate_control_record(control) for control in CONTROLS] +
+            [candidate_arm_record(RAW_CONTROL),
+             candidate_arm_record(TIMING_CANDIDATE)],
+            executable_hash,
+            baseline["source_git_commit"],
+            RAW_DESCRIPTION_SCHEMA,
+        )
+        self.assertEqual(
+            two07_description["arms"][3]["arm_descriptor_sha256"],
+            baseline["arms"][2]["arm_descriptor_sha256"])
+
+    def test_structure_only_timing_proxy_witness_is_closed_and_canonical(self):
+        result = self.run_worker("--emit-timing-proxy-witness")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        self.assertTrue(result.stdout.endswith("\n"))
+        witness = json.loads(result.stdout)
+        self.assertEqual(
+            result.stdout[:-1],
+            json.dumps(witness, sort_keys=True, separators=(",", ":")))
+        self.assertEqual(witness["schema"], TIMING_PROXY_SCHEMA)
+        self.assertEqual(
+            witness["proof_scope"],
+            "d12-disabled-structure-under-production-timing-seed-policy-v1")
+        self.assertEqual(witness["evidence_phase"], "development")
+        self.assertEqual(witness["construction_attempts"], [0])
+        self.assertEqual(
+            witness["raw_recovery_reference_arm_descriptor_sha256"],
+            RAW_CONTROL["arm_descriptor_sha256"])
+        self.assertEqual(witness["raw_recovery_seed_basis"], RAW_SEED_BASIS)
+        self.assertEqual(
+            witness["raw_recovery_seed_schedule_sha256"],
+            RAW_SEED_SCHEDULE_SHA256)
+        self.assertEqual(
+            witness["timing_seed_policy_arms"],
+            ["wirehair2_head", TIMING_CANDIDATE["arm"]])
+        coordinates = [
+            {"K": K, "block_bytes": block_bytes,
+             "construction_attempt": 0}
+            for block_bytes in (64, 1280)
+            for K in (8, 32, 100, 128, 512, 1000, 2048, 5000,
+                      8192, 20000, 32768, 64000)
+        ]
+        self.assertEqual(
+            witness["witness_domain_sha256"],
+            hashlib.sha256(
+                TIMING_PROXY_DOMAIN +
+                canonical_json(coordinates).encode("ascii")).hexdigest())
+        self.assertEqual(len(witness["cells"]), 24)
+        self.assertEqual(witness["cells"][0], TIMING_PROXY_K8_B64_GOLDEN)
+        self.assertEqual(
+            hashlib.sha256(canonical_json(witness["cells"]).encode(
+                "ascii")).hexdigest(),
+            TIMING_PROXY_CELLS_SHA256)
+        for cell, coordinate in zip(witness["cells"], coordinates):
+            self.assertEqual(
+                {key: cell[key] for key in coordinate}, coordinate)
+            self.assertTrue(cell["seeds_differ"])
+            self.assertNotEqual(
+                cell["production_timing_precode_seed"],
+                cell["raw_recovery_precode_seed"])
+            self.assertNotEqual(
+                cell["production_timing_packet_seed"],
+                cell["raw_recovery_packet_seed"])
+            for field in (
+                    "normalized_structure_sha256",
+                    "production_timing_configuration_sha256",
+                    "production_timing_equation_system_sha256"):
+                self.assertRegex(cell[field], SHA256)
 
     def test_unknown_candidate_and_noncanonical_arity_reject(self):
         for arguments in (
@@ -618,6 +725,8 @@ class ContractWorkerCliTest(unittest.TestCase):
                 self.assertEqual(raw_control_payload["binary_dense_rows"], 12)
                 self.assertEqual(raw_control_payload["gf256_heavy_rows"], 12)
                 self.assertEqual(
+                    raw_control_payload["dense_anchor_layout"], "disabled")
+                self.assertEqual(
                     raw_control_payload["heavy_family"], "periodic-cauchy")
                 self.assertRegex(
                     raw_control_payload["effective_precode_seed"],
@@ -642,7 +751,7 @@ class ContractWorkerCliTest(unittest.TestCase):
                     "effective_precode_seed", "effective_packet_seed",
                     "staircase", "binary_dense_rows", "gf256_heavy_rows",
                     "source_hits", "dense_identity_corner", "heavy_family",
-                    "mix_count",
+                    "mix_count", "dense_anchor_layout",
                 }
                 self.assertEqual(
                     set(raw_control_payload),
@@ -674,6 +783,7 @@ class ContractWorkerCliTest(unittest.TestCase):
                     payload["binary_dense_rows"], candidate["dense_rows"])
                 self.assertEqual(
                     payload["gf256_heavy_rows"], candidate["heavy_rows"])
+                self.assertEqual(payload["dense_anchor_layout"], "disabled")
                 self.assertEqual(payload["source_hits"], 2)
                 self.assertEqual(payload["staircase"], 2)
                 self.assertFalse(payload["dense_identity_corner"])

@@ -49,8 +49,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import wh2_benchmark_contract as contract_api
 
 
-RECORD_SCHEMA = "wirehair.wh2.precodefail-work-record.v2"
-SUMMARY_SCHEMA = "wirehair.wh2.precodefail-work-summary.v2"
+RECORD_SCHEMA = "wirehair.wh2.precodefail-work-record.v3"
+SUMMARY_SCHEMA = "wirehair.wh2.precodefail-work-summary.v3"
 TRACE_IDENTITY_SCHEMA = "wirehair.wh2.precodefail-trace-identity.v1"
 NATIVE_DESCRIPTOR_SCHEMA = "wirehair.wh2.native-arm-descriptor.v1"
 RESULT_NAME = "work-rank-results.jsonl"
@@ -59,8 +59,8 @@ MAX_WALL_SECONDS = 7200.0
 MAX_JOBS = 48
 MAX_STDOUT_BYTES = 2 * 1024 * 1024
 MAX_STDERR_BYTES = 64 * 1024
-EXPECTED_RECORDS = 5760
-EXPECTED_INVOCATIONS = 48
+EXPECTED_RECORDS = 2880
+EXPECTED_INVOCATIONS = 24
 EXPECTED_FROZEN_TRACE_AGGREGATE_SHA256 = (
     "ec6f5ed3976e5e9664bb5db927c525a7"
     "3e8ab952d080492aaecd99c366db41a9"
@@ -105,30 +105,23 @@ STRATA = (
 )
 ROOTS = tuple(contract_api.EXPECTED_TRAINING_LOSS_ROOTS)
 ARMS = (
-    ("wirehair2_raw_d12_h11_periodic", 12, 11),
-    ("wirehair2_raw_d12_h12_periodic", 12, 12),
-    ("wirehair2_raw_d12_h13_periodic", 12, 13),
-    ("wirehair2_raw_d13_h12_periodic", 13, 12),
+    ("wirehair2_raw_d12_h12_periodic", 12, 12, "disabled"),
+    ("wirehair2_dense_two07_basis_v1", 12, 12, "two07"),
 )
 ARM_TRANSFORMS = {
-    "wirehair2_raw_d12_h11_periodic": "d12-h11-periodic",
     "wirehair2_raw_d12_h12_periodic": "d12-h12-periodic",
-    "wirehair2_raw_d12_h13_periodic": "d12-h13-periodic",
-    "wirehair2_raw_d13_h12_periodic": "d13-h12-periodic",
+    "wirehair2_dense_two07_basis_v1":
+        "dense-anchor-two07+basis-segment-adjacent-symdiff-v1",
 }
 # These are SHA-256 hashes of the closed, structure-only native arm
 # descriptors.  The uniform raw seed schedule is bound separately by every
 # realized-construction receipt, so changing the schedule cannot masquerade
 # as changing the equation structure (or vice versa).
 ARM_DESCRIPTOR_SHA256 = {
-    "wirehair2_raw_d12_h11_periodic":
-        "91d7c1a558e1cf93b002fcf2062b7657d301faca03972215495bdf2429499e90",
     "wirehair2_raw_d12_h12_periodic":
         "739092a7824449e6168f08b46661dfbe8ad5495ea4166b36073c79cd3bacdd11",
-    "wirehair2_raw_d12_h13_periodic":
-        "7c7889747a97ac160726b807fb03349344d49d4bec84c9e8220aa4689b00d2ca",
-    "wirehair2_raw_d13_h12_periodic":
-        "c70e0f57bb8d7783fa29b0decbed5da5058a8eb532d57d540f72108e114f091a",
+    "wirehair2_dense_two07_basis_v1":
+        "9527f200ad38c7eec6502b2f768fdd67b92787fb227eed3d7616274ffc2df388",
 }
 
 CSV_HEADER = (
@@ -149,7 +142,8 @@ CSV_HEADER = (
 METADATA_KEYS = frozenset((
     "trials", "threads", "loss", "seed", "source_hits_override",
     "packet_peel_seed_xor", "binary_dense_rows_override",
-    "gf256_heavy_rows_override", "odd_packet_peel_seed_xor",
+    "gf256_heavy_rows_override", "dense_anchor_layout",
+    "odd_packet_peel_seed_xor",
     "packet_row_seed_multiplier", "packet_row_seed_avalanche",
     "seed_block_bytes_override", "overhead_stream", "full_payload_solve",
     "schedule", "exact_attempt_mode", "exact_precode_attempt",
@@ -183,7 +177,8 @@ RECORD_FIELDS = frozenset((
     "seed_schedule_sha256", "precode_attempt", "packet_attempt",
     "effective_precode_seed", "effective_packet_seed", "staircase",
     "binary_dense_rows", "gf256_heavy_rows", "source_hits",
-    "dense_identity_corner", "heavy_family", "mix_count", "phase", "band",
+    "dense_anchor_layout", "dense_identity_corner", "heavy_family",
+    "mix_count", "phase", "band",
     "K", "block_bytes", "loss_ppm", "schedule", "trial",
     "base_seed_attempt", "loss_seed", "overhead", "attempt_mode",
     "cell_sha256", "frozen_trace_sha256", "frozen_packet_prefix_sha256",
@@ -210,6 +205,7 @@ class Invocation:
     arm: str
     dense_rows: int
     heavy_rows: int
+    dense_anchor_layout: str
     trial: int
     root: str
     schedule: str
@@ -228,6 +224,7 @@ class Invocation:
             "--heavy-family", "periodic", "--mix-count", "3",
             "--binary-dense-rows", str(self.dense_rows),
             "--gf256-heavy-rows", str(self.heavy_rows),
+            "--dense-anchors", self.dense_anchor_layout,
             "--paired-overhead-stream", "--full-payload-solve",
             "--exact-precode-attempt", str(self.trial),
             "--exact-packet-attempt", str(self.trial),
@@ -238,6 +235,7 @@ class Invocation:
         return {
             "arm": self.arm,
             "binary_dense_rows": self.dense_rows,
+            "dense_anchor_layout": self.dense_anchor_layout,
             "gf256_heavy_rows": self.heavy_rows,
             "heavy_family": "periodic",
             "loss_ppm": self.loss_ppm,
@@ -514,9 +512,13 @@ def _arm_descriptor_sha256(arm: str) -> str:
 def _raw_realized_construction_sha256(
         arm: str, K: int, block_bytes: int,
         raw_fields: Mapping[str, Any]) -> str:
-    return contract_api.raw_realized_construction_sha256(
-        "wirehair2_experiment", arm, _arm_descriptor_sha256(arm), K,
-        block_bytes, raw_fields)
+    try:
+        return contract_api.raw_realized_construction_sha256(
+            "wirehair2_experiment", arm, _arm_descriptor_sha256(arm), K,
+            block_bytes, raw_fields)
+    except contract_api.ContractError as exc:
+        fail(str(exc))
+    return ""
 
 
 def _git_source_state(repo_root: Path = REPO_ROOT) -> Mapping[str, Any]:
@@ -715,12 +717,12 @@ def build_frozen_domain(contract: Mapping[str, Any]) \
 
 def make_invocations() -> Tuple[Invocation, ...]:
     values: List[Invocation] = []
-    for arm, dense_rows, heavy_rows in ARMS:
+    for arm, dense_rows, heavy_rows, dense_anchor_layout in ARMS:
         for trial, root in enumerate(ROOTS):
             for schedule, loss_ppm in STRATA:
                 values.append(Invocation(
-                    len(values), arm, dense_rows, heavy_rows, trial, root,
-                    schedule, loss_ppm))
+                    len(values), arm, dense_rows, heavy_rows,
+                    dense_anchor_layout, trial, root, schedule, loss_ppm))
     if len(values) != EXPECTED_INVOCATIONS:
         fail("internal invocation cardinality is inconsistent")
     return tuple(values)
@@ -779,6 +781,7 @@ def _parse_metadata(
         "source_hits_override": "0", "packet_peel_seed_xor": "0x0",
         "binary_dense_rows_override": str(invocation.dense_rows),
         "gf256_heavy_rows_override": str(invocation.heavy_rows),
+        "dense_anchor_layout": invocation.dense_anchor_layout,
         "odd_packet_peel_seed_xor": "0x0",
         "packet_row_seed_multiplier": "0x1",
         "packet_row_seed_avalanche": "0",
@@ -968,6 +971,7 @@ def parse_invocation_output(
             "gf256_heavy_rows": gf256_heavy_rows,
             "source_hits": source_hits,
             "dense_identity_corner": dense_identity_corner,
+            "dense_anchor_layout": invocation.dense_anchor_layout,
             "heavy_family": "periodic-cauchy",
             "mix_count": 3,
         }
@@ -1067,7 +1071,8 @@ def _domain_sha256(records: Sequence[Mapping[str, Any]]) -> str:
     digest = hashlib.sha256()
     identity_fields = (
         "K", "arm", "arm_descriptor_sha256", "binary_dense_rows",
-        "block_bytes", "construction_seed_basis", "dense_identity_corner",
+        "block_bytes", "construction_seed_basis", "dense_anchor_layout",
+        "dense_identity_corner",
         "effective_packet_seed", "effective_precode_seed",
         "gf256_heavy_rows", "heavy_family", "loss_ppm", "loss_seed",
         "mix_count", "overhead", "packet_attempt", "precode_attempt",
@@ -1095,7 +1100,7 @@ def _aggregate(records: Sequence[Mapping[str, Any]]) -> List[Mapping[str, Any]]:
     if len(control_rows) != 1440:
         fail("control arm aggregation has the wrong cardinality")
     summaries: List[Mapping[str, Any]] = []
-    for arm, dense_rows, heavy_rows in ARMS:
+    for arm, dense_rows, heavy_rows, dense_anchor_layout in ARMS:
         arm_rows = [row for row in records if row["arm"] == arm]
         arm_index = {
             (row["trial"], row["schedule"], row["K"], row["overhead"]): row
@@ -1181,6 +1186,7 @@ def _aggregate(records: Sequence[Mapping[str, Any]]) -> List[Mapping[str, Any]]:
             "arm": arm,
             "arm_descriptor_sha256": _arm_descriptor_sha256(arm),
             "binary_dense_rows": dense_rows,
+            "dense_anchor_layout": dense_anchor_layout,
             "gf256_heavy_rows": heavy_rows,
             "heavy_family": "periodic-cauchy",
             "mix_count": 3,
@@ -1748,7 +1754,7 @@ def _run_campaign_pinned(
             "worker_stdout_sha256": result.stdout_sha256,
         })
     expected_keys = set()
-    for arm, _, _ in ARMS:
+    for arm, _, _, _ in ARMS:
         for trial in range(3):
             for schedule, _ in STRATA:
                 for K in K_VALUES:
@@ -1760,7 +1766,7 @@ def _run_campaign_pinned(
     }
     if (len(rows) != EXPECTED_RECORDS or len(actual_keys) != EXPECTED_RECORDS or
             actual_keys != expected_keys):
-        fail("work/rank campaign is not exactly 5760 unique frozen rows")
+        fail("work/rank campaign is not exactly 2880 unique frozen rows")
     records: List[Mapping[str, Any]] = []
     for ordinal, row in enumerate(rows):
         record = dict(row)
@@ -1867,7 +1873,7 @@ def _read_canonical_json(
 
 def load_completed_work_screen(
         contract: Mapping[str, Any], artifact_dir: Path) -> Mapping[str, Any]:
-    """Strictly load one complete v2 work/rank campaign.
+    """Strictly load one complete v3 work/rank campaign.
 
     This is the only supported ingestion seam for joining sidecar algebraic
     work with native recovery records.  It deliberately replays every raw
@@ -1916,8 +1922,10 @@ def load_completed_work_screen(
     if (summary.get("contract_sha256") != expected_contract_sha256 or
             summary.get("recovery_domain_sha256") != expected_domain_sha256):
         fail("work/rank summary is bound to a different contract or domain")
-    if (summary.get("record_count") != EXPECTED_RECORDS or
-            summary.get("invocation_count") != EXPECTED_INVOCATIONS or
+    if (type(summary.get("record_count")) is not int or
+            summary["record_count"] != EXPECTED_RECORDS or
+            type(summary.get("invocation_count")) is not int or
+            summary["invocation_count"] != EXPECTED_INVOCATIONS or
             summary.get("construction_seed_basis") != RAW_SEED_BASIS or
             summary.get("seed_schedule_sha256") !=
                 RAW_SEED_SCHEDULE_SHA256 or
@@ -1959,9 +1967,13 @@ def load_completed_work_screen(
         fail("work/rank result stream has the wrong cardinality")
 
     cell_map, trace_map, trace_identity = build_frozen_domain(contract)
-    if summary.get("trace_identity") != trace_identity:
+    if _canonical(summary.get("trace_identity")) != \
+            _canonical(trace_identity):
         fail("work/rank trace identity is invalid")
-    arm_shapes = {arm: (dense, heavy) for arm, dense, heavy in ARMS}
+    arm_shapes = {
+        arm: (dense, heavy, layout)
+        for arm, dense, heavy, layout in ARMS
+    }
     rows: List[Mapping[str, Any]] = []
     seen = set()
     hash_fields = (
@@ -1996,7 +2008,7 @@ def load_completed_work_screen(
                 row.get("arm_descriptor_sha256") != \
                 _arm_descriptor_sha256(arm):
             fail("work/rank record has an unknown raw arm descriptor")
-        dense_rows, heavy_rows = arm_shapes[arm]
+        dense_rows, heavy_rows, dense_anchor_layout = arm_shapes[arm]
         K = row.get("K")
         overhead = row.get("overhead")
         trial = row.get("trial")
@@ -2011,10 +2023,13 @@ def load_completed_work_screen(
         staircase = row.get("staircase")
         source_hits = row.get("source_hits")
         if (row.get("phase") != "development" or
-                row.get("block_bytes") != 2 or
-                row.get("loss_ppm") != expected_loss_ppm or
+                type(row.get("block_bytes")) is not int or
+                row["block_bytes"] != 2 or
+                type(row.get("loss_ppm")) is not int or
+                row["loss_ppm"] != expected_loss_ppm or
                 row.get("loss_seed") != ROOTS[trial] or
-                row.get("base_seed_attempt") != trial or
+                type(row.get("base_seed_attempt")) is not int or
+                row["base_seed_attempt"] != trial or
                 row.get("precode_attempt") != trial or
                 row.get("packet_attempt") != trial or
                 row.get("attempt_mode") != "exact" or
@@ -2028,6 +2043,7 @@ def load_completed_work_screen(
                 type(staircase) is not int or not 1 <= staircase <= 400 or
                 row.get("binary_dense_rows") != dense_rows or
                 row.get("gf256_heavy_rows") != heavy_rows or
+                row.get("dense_anchor_layout") != dense_anchor_layout or
                 type(source_hits) is not int or
                 source_hits != (3 if K >= 10000 else 2) or
                 row.get("dense_identity_corner") is not False or
@@ -2041,7 +2057,8 @@ def load_completed_work_screen(
                 "precode_attempt", "packet_attempt",
                 "effective_precode_seed", "effective_packet_seed",
                 "staircase", "binary_dense_rows", "gf256_heavy_rows",
-                "source_hits", "dense_identity_corner", "heavy_family",
+                "source_hits", "dense_anchor_layout",
+                "dense_identity_corner", "heavy_family",
                 "mix_count")
         }
         if row["realized_construction_sha256"] != \
@@ -2059,7 +2076,8 @@ def load_completed_work_screen(
                 row.get("frozen_trace_sha256") != trace.trace_sha256 or
                 row.get("frozen_packet_prefix_sha256") !=
                     _packet_hash(prefix) or
-                row.get("packet_count") != K + overhead or
+                type(row.get("packet_count")) is not int or
+                row["packet_count"] != K + overhead or
                 row.get("frozen_trace_attempted_candidates") !=
                     trace.attempted_candidates or
                 row.get("frozen_prefix_attempted_candidates") !=
@@ -2098,7 +2116,7 @@ def load_completed_work_screen(
 
     expected_coordinates = {
         (arm, trial, schedule, K, overhead)
-        for arm, _dense, _heavy in ARMS
+        for arm, _dense, _heavy, _layout in ARMS
         for trial in range(len(ROOTS))
         for schedule, _loss_ppm in STRATA
         for K in K_VALUES for overhead in OVERHEADS
@@ -2107,7 +2125,7 @@ def load_completed_work_screen(
         fail("work/rank result stream omitted a frozen coordinate")
     if summary.get("work_domain_sha256") != _domain_sha256(rows):
         fail("work/rank domain hash is invalid")
-    if summary.get("arms") != _aggregate(rows):
+    if _canonical(summary.get("arms")) != _canonical(_aggregate(rows)):
         fail("work/rank arm summary is invalid")
 
     receipts = []
@@ -2137,7 +2155,7 @@ def load_completed_work_screen(
             any(not isinstance(value, dict) or
                 set(value) != set(INVOCATION_RECEIPT_FIELDS)
                 for value in summary_receipts) or
-            summary_receipts != receipts):
+            _canonical(summary_receipts) != _canonical(receipts)):
         fail("work/rank invocation receipts are invalid")
     return {
         "summary": summary,

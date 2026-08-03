@@ -24,6 +24,21 @@ import wh2_native_short_screen as subject
 
 
 ARMS = ("wirehair2_head", "wirehair1", "candidate")
+RAW_RECOVERY_ARMS = (
+    "wirehair2_head", "wirehair1",
+    "wirehair2_raw_d12_h12_periodic",
+    "wirehair2_dense_two07_basis_v1",
+)
+RAW_RECOVERY_DESCRIPTORS = {
+    "wirehair2_head":
+        "4cafe27a8fb388ca9a4249b2c279b1406e7a0a86bcf14e98246988c7c503fa7a",
+    "wirehair1":
+        "d5a24d404e69efeb439907cd8271eba98d6af86b58efe159a820fb7aea08883d",
+    "wirehair2_raw_d12_h12_periodic":
+        "739092a7824449e6168f08b46661dfbe8ad5495ea4166b36073c79cd3bacdd11",
+    "wirehair2_dense_two07_basis_v1":
+        "9527f200ad38c7eec6502b2f768fdd67b92787fb227eed3d7616274ffc2df388",
+}
 WORKER_CPUS = tuple(range(8))
 QUALIFICATION_CPUS = tuple(range(9))
 WORKER_BINARY = hashlib.sha256(b"one native worker").hexdigest()
@@ -130,10 +145,9 @@ def trace_records(
     return rows, hashes
 
 
-def freeze_manifest(
-        contract: Mapping[str, Any], kind: str, phase: str,
-        trace_sha256: str,
-        qualification: Optional[contract_api.TimingQualification] = None,
+def timing_freeze_manifest(
+        contract: Mapping[str, Any], phase: str, trace_sha256: str,
+        qualification: contract_api.TimingQualification,
         ) -> Dict[str, Any]:
     records = []
     for arm in ARMS:
@@ -150,17 +164,15 @@ def freeze_manifest(
     return {
         "schema": contract_api.FREEZE_SCHEMA,
         "contract_sha256": contract_api.contract_sha256(contract),
-        "evidence_kind": kind,
+        "evidence_kind": "timing",
         "phase": phase,
-        "domain_sha256": qualification.qualified_domain_sha256
-            if kind == "timing" and qualification is not None else
-            contract[kind]["domains"][phase]["domain_sha256"],
+        "domain_sha256": qualification.qualified_domain_sha256,
         "source_git_commit": SOURCE_COMMIT,
         "arm_roster": list(ARMS),
         "arm_roster_sha256": contract_api.arm_roster_sha256(ARMS),
         "trace_manifest_sha256": trace_sha256,
         "repair_training_trace_manifest_sha256": "0" * 64,
-        "commands": [["wirehair_v2_contract_worker", kind, phase]],
+        "commands": [["wirehair_v2_contract_worker", "timing", phase]],
         "cpu_affinity": list(WORKER_CPUS),
         "host_identity": {
             "name": "native-fixture", "controller_cpu": 8,
@@ -291,7 +303,11 @@ def envelope(ordinal: int, message_ordinal: int,
              cpu: Optional[int] = None,
              started_monotonic_ns: Optional[int] = None,
              finished_monotonic_ns: Optional[int] = None) -> Dict[str, Any]:
-    kind = "recovery" if schema == subject.RECOVERY_RECORD_SCHEMA else "timing"
+    kind = "recovery" if schema in (
+        subject.RECOVERY_RECORD_SCHEMA,
+        subject.LEGACY_RAW_RECOVERY_RECORD_SCHEMA,
+        subject.RAW_RECOVERY_RECORD_SCHEMA,
+    ) else "timing"
     selected_cpu = WORKER_CPUS[ordinal % len(WORKER_CPUS)] \
         if cpu is None else cpu
     start = 2000000000 + ordinal * 2 \
@@ -314,13 +330,73 @@ def envelope(ordinal: int, message_ordinal: int,
     }
 
 
-def recovery_records(
-        contract: Mapping[str, Any], hashes: Sequence[str]
-        ) -> List[Dict[str, Any]]:
-    rows = []
+def raw_v3_recovery_fixture(
+        root: Path, contract: Mapping[str, Any]) -> BuiltEvidence:
+    """Build one exact mixed control/raw native recovery execution."""
+    native_traces, trace_hashes = trace_records(
+        contract, "recovery", "development")
+    native_trace_path = root / "raw-v3-native-traces.jsonl"
+    trace_path = root / "raw-v3-traces.jsonl"
+    canonical_jsonl(native_trace_path, list(reversed(native_traces)))
+    trace_sha256 = subject.assemble_trace_manifest(
+        contract, "recovery", "development", native_trace_path, trace_path)
+
+    arms = []
+    for arm in RAW_RECOVERY_ARMS:
+        codec = arm_codec(arm)
+        raw = arm in RAW_RECOVERY_ARMS[2:]
+        arms.append({
+            "arm": arm,
+            "codec": codec,
+            "binary_sha256": WORKER_BINARY,
+            "arm_descriptor_sha256": RAW_RECOVERY_DESCRIPTORS[arm],
+            "construction_policy":
+                "not_applicable" if codec == "wirehair1" else "raw_base",
+            "repair_map_sha256": "0" * 64,
+            "construction_seed_basis":
+                contract_api.RAW_CONSTRUCTION_SEED_BASIS if raw else
+                (contract_api.NOT_APPLICABLE_CONSTRUCTION_SEED_BASIS
+                 if codec == "wirehair1" else
+                 contract_api.PRODUCTION_CONSTRUCTION_SEED_BASIS),
+            "seed_schedule_sha256":
+                contract_api.RAW_SEED_SCHEDULE_SHA256 if raw else "0" * 64,
+            "dense_anchor_layout":
+                "two07" if arm == RAW_RECOVERY_ARMS[3] else
+                ("not-applicable" if codec == "wirehair1" else "disabled"),
+        })
+    freeze = {
+        "schema": contract_api.RAW_FREEZE_SCHEMA,
+        "contract_sha256": contract_api.contract_sha256(contract),
+        "evidence_kind": "recovery",
+        "phase": "development",
+        "domain_sha256": contract["recovery"]["domains"]["development"]
+            ["domain_sha256"],
+        "source_git_commit": SOURCE_COMMIT,
+        "arm_roster": list(RAW_RECOVERY_ARMS),
+        "arm_roster_sha256": contract_api.arm_roster_sha256(
+            RAW_RECOVERY_ARMS),
+        "trace_manifest_sha256": trace_sha256,
+        "repair_training_trace_manifest_sha256": "0" * 64,
+        "commands": [["wirehair_wh2_contract_worker", "raw-v3-recovery"]],
+        "cpu_affinity": list(WORKER_CPUS),
+        "host_identity": {
+            "name": "raw-v3-native-fixture", "controller_cpu": 8,
+        },
+        "architecture_roles": copy.deepcopy(
+            contract_api.EXPECTED_RAW_ARCHITECTURE_ROLES),
+        "timing_proxy_witness_sha256": "1" * 64,
+        "work_rank_summary_sha256": "2" * 64,
+        "work_rank_result_stream_sha256": "3" * 64,
+        "work_rank_domain_sha256": "4" * 64,
+        "arms": arms,
+    }
+    freeze_path = root / "raw-v3-freeze.json"
+    canonical_file(freeze_path, freeze)
+
+    records = []
     for cell_ordinal, cell in enumerate(contract_api.iter_recovery_cells(
             contract, "development")):
-        for arm_index, arm in enumerate(ARMS):
+        for arm_index, arm in enumerate(RAW_RECOVERY_ARMS):
             codec = arm_codec(arm)
             attempt = 0 if codec == "wirehair1" else \
                 cell["base_seed_attempt"]
@@ -330,19 +406,55 @@ def recovery_records(
                 "outcome": "success",
                 "decoded_extra": 0,
                 "cell_sha256": contract_api.sha256_json(cell),
-                "trace_sha256": hashes[cell_ordinal],
+                "trace_sha256": trace_hashes[cell_ordinal],
                 "binary_sha256": WORKER_BINARY,
-                "arm_descriptor_sha256": descriptor(arm),
+                "arm_descriptor_sha256": RAW_RECOVERY_DESCRIPTORS[arm],
                 "construction_attempt": attempt,
-                "realized_construction_sha256": realized(
-                    arm, cell["K"], cell["block_bytes"], attempt),
                 "repair_map_sha256": "0" * 64,
             }
-            ordinal = cell_ordinal * len(ARMS) + arm_index
-            rows.append(envelope(
-                ordinal, cell_ordinal, payload,
-                subject.RECOVERY_RECORD_SCHEMA))
-    return rows
+            schema = subject.RECOVERY_RECORD_SCHEMA
+            if arm in RAW_RECOVERY_ARMS[2:]:
+                raw_fields = {
+                    "construction_seed_basis":
+                        contract_api.RAW_CONSTRUCTION_SEED_BASIS,
+                    "seed_schedule_sha256":
+                        contract_api.RAW_SEED_SCHEDULE_SHA256,
+                    "precode_attempt": attempt,
+                    "packet_attempt": attempt,
+                    "effective_precode_seed":
+                        contract_api._effective_raw_precode_seed(attempt),
+                    "effective_packet_seed":
+                        contract_api._effective_raw_packet_seed(attempt),
+                    "staircase": contract_api._raw_staircase_for_K(cell["K"]),
+                    "binary_dense_rows": 12,
+                    "gf256_heavy_rows": 12,
+                    "source_hits": 3 if cell["K"] >= 10000 else 2,
+                    "dense_anchor_layout":
+                        "two07" if arm == RAW_RECOVERY_ARMS[3] else
+                        "disabled",
+                    "dense_identity_corner": False,
+                    "heavy_family": "periodic-cauchy",
+                    "mix_count": 3,
+                }
+                payload.update(raw_fields)
+                payload["realized_construction_sha256"] = \
+                    contract_api.raw_realized_construction_sha256(
+                        codec, arm, RAW_RECOVERY_DESCRIPTORS[arm],
+                        cell["K"], cell["block_bytes"], raw_fields)
+                schema = subject.RAW_RECOVERY_RECORD_SCHEMA
+            else:
+                payload["realized_construction_sha256"] = \
+                    contract_api.generic_realized_construction_sha256(
+                        codec, RAW_RECOVERY_DESCRIPTORS[arm], cell["K"],
+                        cell["block_bytes"], attempt)
+            ordinal = cell_ordinal * len(RAW_RECOVERY_ARMS) + arm_index
+            records.append(envelope(
+                ordinal, cell_ordinal, payload, schema))
+    native_path = root / "raw-v3-native-results.jsonl"
+    canonical_jsonl(native_path, list(reversed(records)))
+    return BuiltEvidence(
+        freeze_path, trace_path, native_path, records,
+        None, None, None, None, None, None, None, None, None)
 
 
 def timing_records(
@@ -528,36 +640,24 @@ class NativeShortScreenTests(unittest.TestCase):
         cls.topology_temporary.cleanup()
 
     def build_kind(self, root: Path, kind: str) -> BuiltEvidence:
+        if kind == "recovery":
+            return raw_v3_recovery_fixture(root, self.contract)
+        if kind != "timing":
+            raise AssertionError("fixture evidence kind must be recovery or timing")
         phase = "development"
-        trace_path = root / (kind + "-traces.jsonl")
-        qualification_fixture: Optional[BuiltQualification] = None
-        if kind == "timing":
-            qualification_fixture = build_qualification(root, self.contract)
-            qualification = qualification_fixture.value
-            hashes = list(qualification.selected_trace_sha256s)
-            trace_sha = subject.publish_timing_trace_manifest(
-                self.contract, phase, qualification, trace_path)
-        else:
-            qualification = None
-            native_traces, hashes = trace_records(
-                self.contract, kind, phase)
-            native_trace_path = root / (kind + "-native-traces.jsonl")
-            canonical_jsonl(native_trace_path, list(reversed(native_traces)))
-            trace_sha = subject.assemble_trace_manifest(
-                self.contract, kind, phase, native_trace_path, trace_path)
-        freeze = freeze_manifest(
-            self.contract, kind, phase, trace_sha, qualification)
-        freeze_path = root / (kind + "-freeze.json")
+        trace_path = root / "timing-traces.jsonl"
+        qualification_fixture = build_qualification(root, self.contract)
+        qualification = qualification_fixture.value
+        hashes = list(qualification.selected_trace_sha256s)
+        trace_sha = subject.publish_timing_trace_manifest(
+            self.contract, phase, qualification, trace_path)
+        freeze = timing_freeze_manifest(
+            self.contract, phase, trace_sha, qualification)
+        freeze_path = root / "timing-freeze.json"
         canonical_file(freeze_path, freeze)
-        records = recovery_records(self.contract, hashes) if \
-            kind == "recovery" else timing_records(
-                self.contract, hashes, qualification)
-        native_path = root / (kind + "-native-results.jsonl")
+        records = timing_records(self.contract, hashes, qualification)
+        native_path = root / "timing-native-results.jsonl"
         canonical_jsonl(native_path, list(reversed(records)))
-        if qualification_fixture is None:
-            return BuiltEvidence(
-                freeze_path, trace_path, native_path, records,
-                None, None, None, None, None, None, None, None, None)
         sampler = sampler_fixture(
             root, window_start_ns=3000000000,
             window_end_ns=10000000000)
@@ -584,7 +684,7 @@ class NativeShortScreenTests(unittest.TestCase):
                 "development"]["expected_cells"] * len(
                     contract_api.timing_panels(self.contract, ARMS))
             for kind, expected in (
-                    ("recovery", 1080), ("timing", timing_expected)):
+                    ("recovery", 1440), ("timing", timing_expected)):
                 built = self.build_kind(root, kind)
                 output = root / (kind + "-output.jsonl")
                 receipt = root / (kind + "-execution.json")
@@ -658,9 +758,12 @@ class NativeShortScreenTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             recovery = self.build_kind(root, "recovery").records
-            self.assertTrue(all(
-                row["schema"] == subject.RECOVERY_RECORD_SCHEMA
-                for row in recovery))
+            self.assertEqual(
+                sum(row["schema"] == subject.RECOVERY_RECORD_SCHEMA
+                    for row in recovery), 720)
+            self.assertEqual(
+                sum(row["schema"] == subject.RAW_RECOVERY_RECORD_SCHEMA
+                    for row in recovery), 720)
             self.assertTrue(all(
                 "invocations_per_slot" not in row["payload"]
                 for row in recovery))
@@ -1165,6 +1268,53 @@ class NativeShortScreenTests(unittest.TestCase):
             })
             mutations["worker_roster"] = worker
 
+            def add_rehashed(name: str, changed: Dict[str, Any]) -> None:
+                changed["receipt_sha256"] = contract_api.sha256_json({
+                    key: value for key, value in changed.items()
+                    if key != "receipt_sha256"
+                })
+                mutations[name] = changed
+
+            allowed_cpu_alias = copy.deepcopy(receipt)
+            allowed_cpu_alias["qualification_allowed_cpus"][0] = 0.0
+            add_rehashed("allowed_cpu_numeric_alias", allowed_cpu_alias)
+            for name, value in (
+                    ("allowed_cpu_list_container", []),
+                    ("allowed_cpu_object_container", {})):
+                changed = copy.deepcopy(receipt)
+                changed["qualification_allowed_cpus"][0] = value
+                add_rehashed(name, changed)
+            worker_cpu_alias = copy.deepcopy(receipt)
+            worker_cpu_alias["qualification_worker_cpus"][0] = 0.0
+            add_rehashed("worker_cpu_numeric_alias", worker_cpu_alias)
+            worker_field_aliases = (
+                ("worker_cpu_bool_alias", "cpu", False),
+                ("worker_pid_numeric_alias", "pid", float(
+                    receipt["qualification_workers"][0]["pid"])),
+                ("worker_start_ticks_numeric_alias", "process_start_ticks",
+                 float(receipt["qualification_workers"][0]
+                       ["process_start_ticks"])),
+            )
+            for name, field, value in worker_field_aliases:
+                changed = copy.deepcopy(receipt)
+                changed["qualification_workers"][0][field] = value
+                add_rehashed(name, changed)
+            numeric_aliases = (
+                ("attempt_count_numeric_alias",
+                 "qualification_attempt_count"),
+                ("worker_start_numeric_alias",
+                 "qualification_worker_start_monotonic_ns"),
+                ("worker_end_numeric_alias",
+                 "qualification_worker_end_monotonic_ns"),
+            )
+            for name, field in numeric_aliases:
+                changed = copy.deepcopy(receipt)
+                changed[field] = float(changed[field])
+                add_rehashed(name, changed)
+            binary_container = copy.deepcopy(receipt)
+            binary_container["qualification_worker_binary_sha256s"][0] = {}
+            add_rehashed("worker_binary_object_container", binary_container)
+
             for name, value in mutations.items():
                 mutant = root / (name + "-qualification-execution.json")
                 canonical_file(mutant, value)
@@ -1174,6 +1324,17 @@ class NativeShortScreenTests(unittest.TestCase):
                         self.contract, "development", built.value,
                         built.native, mutant,
                         expected_receipt_sha256=value["receipt_sha256"])
+
+            for name, value in (("list", []), ("object", {})):
+                expected_cpus = [value, *QUALIFICATION_CPUS[1:]]
+                with self.subTest(expected_cpu_container=name), \
+                        self.assertRaises(subject.NativeEvidenceError):
+                    subject.load_timing_qualification_execution_receipt(
+                        self.contract, "development", built.value,
+                        built.native, built.execution_receipt,
+                        expected_receipt_sha256=
+                            built.execution_receipt_sha256,
+                        expected_cpus=expected_cpus)
 
             original_native = built.native.read_bytes()
             rows = list(contract_api._parse_canonical_jsonl(
@@ -1260,6 +1421,98 @@ class NativeShortScreenTests(unittest.TestCase):
             freeze, {"arm": "wirehair2_raw_fixture"})
         self.assertEqual(schema, subject.RAW_RECOVERY_RECORD_SCHEMA)
         self.assertEqual(fields, contract_api.RAW_RECOVERY_RECORD_FIELDS)
+
+    def test_raw_v3_mixed_stream_receipt_downgrade_and_terminal_alias(
+            self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            built = raw_v3_recovery_fixture(root, self.contract)
+            sampler = sampler_fixture(root)
+            result = root / "raw-v3-result.jsonl"
+            receipt_path = root / "raw-v3-execution.json"
+            assembled = subject.assemble_results(
+                self.contract, "recovery", "development", built.freeze,
+                built.traces, built.native, sampler, result, receipt_path,
+                verify_live_sampler=False)
+            receipt = assembled["execution_receipt"]
+            self.assertEqual(receipt["schema"], subject.RAW_EXECUTION_SCHEMA)
+            self.assertEqual(receipt["record_count"], 1440)
+            self.assertEqual(
+                {row["schema"] for row in built.records},
+                {subject.RECOVERY_RECORD_SCHEMA,
+                 subject.RAW_RECOVERY_RECORD_SCHEMA})
+            subject.validate_execution_receipt(
+                self.contract, "recovery", "development", built.freeze,
+                built.traces, built.native, result, receipt_path,
+                verify_live_sampler=False, sampler_path=sampler)
+
+            downgraded_records = copy.deepcopy(built.records)
+            downgraded_records[2]["schema"] = \
+                subject.LEGACY_RAW_RECOVERY_RECORD_SCHEMA
+            downgraded_native = root / "downgraded-raw-native.jsonl"
+            canonical_jsonl(downgraded_native, downgraded_records)
+            with self.assertRaisesRegex(
+                    subject.NativeEvidenceError, "unknown schema"):
+                subject.assemble_results(
+                    self.contract, "recovery", "development", built.freeze,
+                    built.traces, downgraded_native, sampler,
+                    root / "downgraded-result.jsonl",
+                    root / "downgraded-execution.json",
+                    verify_live_sampler=False)
+
+            downgraded_receipt = copy.deepcopy(receipt)
+            downgraded_receipt["schema"] = subject.LEGACY_RAW_EXECUTION_SCHEMA
+            downgraded_receipt["receipt_sha256"] = contract_api.sha256_json({
+                key: value for key, value in downgraded_receipt.items()
+                if key != "receipt_sha256"
+            })
+            downgraded_receipt_path = root / "downgraded-receipt.json"
+            canonical_file(downgraded_receipt_path, downgraded_receipt)
+            with self.assertRaisesRegex(
+                    subject.NativeEvidenceError, "unknown schema"):
+                subject.validate_execution_receipt(
+                    self.contract, "recovery", "development", built.freeze,
+                    built.traces, built.native, result,
+                    downgraded_receipt_path, verify_live_sampler=False,
+                    sampler_path=sampler)
+
+            aliased_receipt = copy.deepcopy(receipt)
+            aliased_receipt["record_count"] = float(
+                aliased_receipt["record_count"])
+            aliased_receipt["receipt_sha256"] = contract_api.sha256_json({
+                key: value for key, value in aliased_receipt.items()
+                if key != "receipt_sha256"
+            })
+            aliased_path = root / "aliased-receipt.json"
+            canonical_file(aliased_path, aliased_receipt)
+            with self.assertRaisesRegex(
+                    subject.NativeEvidenceError,
+                    "differs from native evidence"):
+                subject.validate_execution_receipt(
+                    self.contract, "recovery", "development", built.freeze,
+                    built.traces, built.native, result, aliased_path,
+                    verify_live_sampler=False, sampler_path=sampler)
+
+            original_validate = contract_api.validate_ledger
+
+            def validate_then_alias(*args, **kwargs):
+                summary = original_validate(*args, **kwargs)
+                value = json.loads(
+                    receipt_path.read_text(encoding="utf-8"))
+                value["record_count"] = float(value["record_count"])
+                canonical_file(receipt_path, value)
+                return summary
+
+            with mock.patch.object(
+                    contract_api, "validate_ledger",
+                    side_effect=validate_then_alias), \
+                    self.assertRaisesRegex(
+                        subject.NativeEvidenceError,
+                        "execution receipt changed"):
+                subject.validate_execution_receipt(
+                    self.contract, "recovery", "development", built.freeze,
+                    built.traces, built.native, result, receipt_path,
+                    verify_live_sampler=False, sampler_path=sampler)
 
     def test_terminal_timing_geometry_rejects_placement_and_barrier_drift(
             self) -> None:
@@ -1805,6 +2058,38 @@ class NativeShortScreenTests(unittest.TestCase):
                 self.contract, "recovery", "development", built.freeze,
                 built.traces, built.native, result, receipt,
                 verify_live_sampler=False, sampler_path=sampler_path)
+            authentic = json.loads(receipt.read_text(encoding="utf-8"))
+            alias_mutations = {
+                "record-count-float": lambda value: value.__setitem__(
+                    "record_count", float(value["record_count"])),
+                "worker-start-float": lambda value: value.__setitem__(
+                    "worker_start_monotonic_ns",
+                    float(value["worker_start_monotonic_ns"])),
+                "worker-cpu-bool": lambda value: value["worker_cpus"].
+                    __setitem__(0, False),
+                "worker-record-cpu-bool": lambda value: value["workers"][0].
+                    __setitem__("cpu", False),
+                "thermal-sample-count-float": lambda value: value[
+                    "thermal"].__setitem__(
+                        "sample_count", float(
+                            value["thermal"]["sample_count"])),
+            }
+            for name, mutate in alias_mutations.items():
+                with self.subTest(exact_json_alias=name):
+                    aliased = copy.deepcopy(authentic)
+                    mutate(aliased)
+                    aliased["receipt_sha256"] = contract_api.sha256_json({
+                        key: value for key, value in aliased.items()
+                        if key != "receipt_sha256"
+                    })
+                    aliased_path = root / (name + "-execution.json")
+                    canonical_file(aliased_path, aliased)
+                    with self.assertRaises(subject.NativeEvidenceError):
+                        subject.validate_execution_receipt(
+                            self.contract, "recovery", "development",
+                            built.freeze, built.traces, built.native, result,
+                            aliased_path, verify_live_sampler=False,
+                            sampler_path=sampler_path)
             changed = json.loads(receipt.read_text(encoding="utf-8"))
             changed["thermal"]["edac_ce_max"] = 1
             unsigned = {key: value for key, value in changed.items()
@@ -1824,11 +2109,10 @@ class NativeShortScreenTests(unittest.TestCase):
             def validate_then_mutate_receipt(*args, **kwargs):
                 summary = original_validate(*args, **kwargs)
                 value = json.loads(receipt.read_text(encoding="utf-8"))
-                value["record_count"] -= 1
-                value["receipt_sha256"] = contract_api.sha256_json({
-                    key: item for key, item in value.items()
-                    if key != "receipt_sha256"
-                })
+                # Retain the old self-hash while exploiting Python's
+                # 1440 == 1440.0 structural alias.  The terminal comparison
+                # must authenticate exact JSON bytes/types, not dict equality.
+                value["record_count"] = float(value["record_count"])
                 canonical_file(receipt, value)
                 return summary
 
@@ -1844,6 +2128,42 @@ class NativeShortScreenTests(unittest.TestCase):
                         sampler_path=sampler_path)
             finally:
                 receipt.write_bytes(original_receipt)
+
+    def test_timing_terminal_receipt_rejects_stale_hash_numeric_alias_race(
+            self) -> None:
+        """Exercise the terminal exact-JSON check on an accepted v1 timing freeze."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            built = self.build_kind(root, "timing")
+            result = root / "timing-result.jsonl"
+            receipt = root / "timing-execution.json"
+            evidence = timing_evidence_kwargs(built)
+            subject.assemble_results(
+                self.contract, "timing", "development", built.freeze,
+                built.traces, built.native, built.sampler, result, receipt,
+                verify_live_sampler=False, **evidence)
+            original_validate = contract_api.validate_timing_receipt
+
+            def validate_then_alias(*args, **kwargs):
+                summary = original_validate(*args, **kwargs)
+                value = json.loads(receipt.read_text(encoding="utf-8"))
+                # Preserve the stale hash: dict equality aliases this float
+                # with the authentic integer, canonical JSON equality does not.
+                value["record_count"] = float(value["record_count"])
+                canonical_file(receipt, value)
+                return summary
+
+            with mock.patch.object(
+                    contract_api, "validate_timing_receipt",
+                    side_effect=validate_then_alias), \
+                    self.assertRaisesRegex(
+                        subject.NativeEvidenceError,
+                        "execution receipt changed"):
+                subject.validate_execution_receipt(
+                    self.contract, "timing", "development", built.freeze,
+                    built.traces, built.native, result, receipt,
+                    verify_live_sampler=False, sampler_path=built.sampler,
+                    **evidence)
 
     def test_existing_destination_cannot_leave_a_partial_artifact_pair(
             self) -> None:

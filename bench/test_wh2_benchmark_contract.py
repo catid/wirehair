@@ -30,7 +30,7 @@ EXPECTED_TIMING_BASE_HASHES = {
     "final": "5b53ef3780f9b5b3cab83b411da0c8d0d06abaa3c76a9dc51d96425cd9de6c94",
 }
 EXPECTED_CONTRACT_SHA256 = \
-    "64aa60eea7a13b143420349d878b1ad334d314eb6f996ed6018833a73ef89e3e"
+    "2de0e050b96c63a125995228255e2bf2a6ccd2d96420923730d039c90b5ff613"
 
 
 def digest(label: str) -> str:
@@ -177,10 +177,18 @@ def write_freeze_manifest(
 
 
 RAW_TEST_ARM = "wirehair2_raw_d12_h12_periodic"
+TWO07_TEST_ARM = "wirehair2_dense_two07_basis_v1"
+RAW_TEST_DESCRIPTOR = \
+    "739092a7824449e6168f08b46661dfbe8ad5495ea4166b36073c79cd3bacdd11"
+TWO07_TEST_DESCRIPTOR = \
+    "9527f200ad38c7eec6502b2f768fdd67b92787fb227eed3d7616274ffc2df388"
 
 
-def raw_construction_fields(attempt: int, K: int = 2) -> Dict[str, Any]:
-    return {
+def raw_construction_fields(
+        attempt: int, K: int = 2,
+        dense_anchor_layout: Optional[str] = None) -> Dict[str, Any]:
+    """Return legacy-v2 fields unless an explicit v3 layout is requested."""
+    fields = {
         "construction_seed_basis": subject.RAW_CONSTRUCTION_SEED_BASIS,
         "seed_schedule_sha256": subject.RAW_SEED_SCHEDULE_SHA256,
         "precode_attempt": attempt,
@@ -197,6 +205,9 @@ def raw_construction_fields(attempt: int, K: int = 2) -> Dict[str, Any]:
         "heavy_family": "periodic-cauchy",
         "mix_count": 3,
     }
+    if dense_anchor_layout is not None:
+        fields["dense_anchor_layout"] = dense_anchor_layout
+    return fields
 
 
 def raw_ledger_rows(
@@ -212,7 +223,7 @@ def raw_ledger_rows(
             row["construction_attempt"], row["K"])
         row.update(fields)
         row["realized_construction_sha256"] = \
-            subject.raw_realized_construction_sha256(
+            subject.legacy_raw_realized_construction_sha256(
                 "wirehair2_experiment", RAW_TEST_ARM,
                 row["arm_descriptor_sha256"], row["K"],
                 row["block_bytes"], fields)
@@ -249,7 +260,7 @@ def write_raw_freeze_manifest(
             "seed_schedule_sha256": schedule,
         })
     manifest = {
-        "schema": subject.RAW_FREEZE_SCHEMA,
+        "schema": subject.LEGACY_RAW_FREEZE_SCHEMA,
         "contract_sha256": subject.contract_sha256(contract),
         "evidence_kind": "recovery",
         "phase": phase,
@@ -267,6 +278,100 @@ def write_raw_freeze_manifest(
         "arms": arm_records,
     }
     path = root / "raw-freeze.json"
+    path.write_bytes((subject.canonical_json(manifest) + "\n").encode("utf-8"))
+    return path
+
+
+def raw_v3_ledger_rows(
+        contract: Mapping[str, Any], trace_hashes: Sequence[str] = (),
+        phase: str = "development") -> List[Dict[str, Any]]:
+    arms = ("wirehair2_head", "wirehair1", RAW_TEST_ARM, TWO07_TEST_ARM)
+    rows = ledger_rows(
+        contract, arms=arms, trace_hashes=trace_hashes, phase=phase)
+    descriptors = {
+        RAW_TEST_ARM: (RAW_TEST_DESCRIPTOR, "disabled"),
+        TWO07_TEST_ARM: (TWO07_TEST_DESCRIPTOR, "two07"),
+    }
+    for row in rows:
+        descriptor_and_layout = descriptors.get(row["arm"])
+        if descriptor_and_layout is None:
+            continue
+        descriptor, layout = descriptor_and_layout
+        fields = raw_construction_fields(
+            row["construction_attempt"], row["K"], layout)
+        row["arm_descriptor_sha256"] = descriptor
+        row.update(fields)
+        row["realized_construction_sha256"] = \
+            subject.raw_realized_construction_sha256(
+                "wirehair2_experiment", row["arm"], descriptor, row["K"],
+                row["block_bytes"], fields)
+    return rows
+
+
+def write_raw_v3_freeze_manifest(
+        root: Path, contract: Mapping[str, Any], trace_path: Path,
+        phase: str = "development") -> Path:
+    arms = ("wirehair2_head", "wirehair1", RAW_TEST_ARM, TWO07_TEST_ARM)
+    descriptors = {
+        RAW_TEST_ARM: RAW_TEST_DESCRIPTOR,
+        TWO07_TEST_ARM: TWO07_TEST_DESCRIPTOR,
+    }
+    layouts = {
+        "wirehair2_head": "disabled",
+        "wirehair1": "not-applicable",
+        RAW_TEST_ARM: "disabled",
+        TWO07_TEST_ARM: "two07",
+    }
+    arm_records = []
+    for arm in arms:
+        codec = arm_codec(arm)
+        if arm == "wirehair2_head":
+            basis = subject.PRODUCTION_CONSTRUCTION_SEED_BASIS
+            schedule = "0" * 64
+        elif arm == "wirehair1":
+            basis = subject.NOT_APPLICABLE_CONSTRUCTION_SEED_BASIS
+            schedule = "0" * 64
+        else:
+            basis = subject.RAW_CONSTRUCTION_SEED_BASIS
+            schedule = subject.RAW_SEED_SCHEDULE_SHA256
+        arm_records.append({
+            "arm": arm,
+            "codec": codec,
+            "binary_sha256": digest("binary:" + arm),
+            "arm_descriptor_sha256": descriptors.get(
+                arm, digest("descriptor:" + arm)),
+            "construction_policy":
+                "not_applicable" if codec == "wirehair1" else "raw_base",
+            "repair_map_sha256": "0" * 64,
+            "construction_seed_basis": basis,
+            "seed_schedule_sha256": schedule,
+            "dense_anchor_layout": layouts[arm],
+        })
+    manifest = {
+        "schema": subject.RAW_FREEZE_SCHEMA,
+        "contract_sha256": subject.contract_sha256(contract),
+        "evidence_kind": "recovery",
+        "phase": phase,
+        "domain_sha256": contract["recovery"]["domains"][phase][
+            "domain_sha256"],
+        "source_git_commit": "1" * 40,
+        "arm_roster": list(arms),
+        "arm_roster_sha256": subject.arm_roster_sha256(arms),
+        "trace_manifest_sha256": subject.trace_manifest_sha256(
+            contract, "recovery", phase, trace_path),
+        "repair_training_trace_manifest_sha256": "0" * 64,
+        "commands": [["wirehair_v2_bench", "raw-cell", "--frozen"]],
+        "cpu_affinity": [0, 1],
+        "host_identity": {"name": "unit-test-host"},
+        "arms": arm_records,
+        "architecture_roles": copy.deepcopy(
+            subject.EXPECTED_RAW_ARCHITECTURE_ROLES),
+        "timing_proxy_witness_sha256": digest("timing proxy witness"),
+        "work_rank_summary_sha256": digest("work rank summary"),
+        "work_rank_result_stream_sha256": digest("work rank result stream"),
+        "work_rank_domain_sha256": digest("work rank domain"),
+    }
+    path = root / "raw-v3-freeze.json"
     path.write_bytes((subject.canonical_json(manifest) + "\n").encode("utf-8"))
     return path
 
@@ -659,16 +764,41 @@ class ContractTests(unittest.TestCase):
     def tearDownClass(cls) -> None:
         cls.qualification_temp.cleanup()
 
-    def test_v6_timing_identity_and_default_contract_path_are_exact(self) -> None:
+    def test_v7_architecture_identity_and_default_contract_path_are_exact(
+            self) -> None:
         self.assertEqual(subject.SCHEMA,
-                         "wirehair.wh2.benchmark-contract.v3")
+                         "wirehair.wh2.benchmark-contract.v4")
         self.assertEqual(subject.DEFAULT_CONTRACT.name,
-                         "wh2_benchmark_contract_v3.json")
+                         "wh2_benchmark_contract_v4.json")
         self.assertEqual(self.contract["schema"], subject.SCHEMA)
         self.assertEqual(self.contract["contract_id"],
-                         "wh2-pure-gf256-1pct-v6")
+                         "wh2-pure-gf256-1pct-v7")
         self.assertEqual(subject.contract_sha256(self.contract),
                          EXPECTED_CONTRACT_SHA256)
+
+    def test_evidence_policy_is_phase_scoped_and_binds_raw_v3_sidecars(
+            self) -> None:
+        policy = self.contract["evidence"]
+        self.assertEqual(policy, subject.EXPECTED_EVIDENCE_POLICY)
+        self.assertIn("benchmark-freeze.v3 is mandatory for development raw",
+                      policy["freeze_manifest_schema"])
+        self.assertIn("benchmark-freeze.v1 remains mandatory for timing",
+                      policy["freeze_manifest_schema"])
+        for binding in (
+                "development raw-v3 per arm: construction_seed_basis",
+                "development raw-v3 per arm: seed_schedule_sha256",
+                "development raw-v3 per arm: dense_anchor_layout",
+                "development raw-v3: architecture_roles",
+                "development raw-v3: timing_proxy_witness_sha256",
+                "development raw-v3: work_rank_summary_sha256",
+                "development raw-v3: work_rank_result_stream_sha256",
+                "development raw-v3: work_rank_domain_sha256"):
+            self.assertIn(binding, policy["freeze_before_results"])
+        for mutation in (
+                "raw_schema_downgrade", "dense_anchor_layout_drift",
+                "architecture_role_drift", "timing_proxy_witness_drift",
+                "work_rank_binding_drift"):
+            self.assertIn(mutation, policy["invalid_domain_mutations"])
 
     def test_exact_recovery_domains_and_hashes(self) -> None:
         expected_counts = {
@@ -1293,14 +1423,16 @@ class ContractTests(unittest.TestCase):
         for K in (3, 4, 1001, 3061, 5550, 7533):
             for attempt, seeds in expected.items():
                 with self.subTest(K=K, attempt=attempt):
-                    fields = raw_construction_fields(attempt)
+                    fields = raw_construction_fields(
+                        attempt, K, dense_anchor_layout="disabled")
                     self.assertEqual(fields["effective_precode_seed"], seeds[0])
                     self.assertEqual(fields["effective_packet_seed"], seeds[1])
                     # Validation and hashing accept exactly the same schedule
                     # for small, large, and production-fixup-active K values.
                     self.assertRegex(subject.raw_realized_construction_sha256(
                         "wirehair2_experiment", RAW_TEST_ARM,
-                        digest("descriptor:" + RAW_TEST_ARM), K, 2, fields),
+                        "739092a7824449e6168f08b46661dfbe8ad5495ea4166b36073c79cd3bacdd11",
+                        K, 2, fields),
                         r"^[0-9a-f]{64}$")
         staircase_bytes = b"".join(
             subject._raw_staircase_for_K(K).to_bytes(2, "little")
@@ -1317,7 +1449,8 @@ class ContractTests(unittest.TestCase):
             path = write_raw_freeze_manifest(root, self.contract, trace_path)
             loaded = subject.load_freeze_manifest(
                 self.contract, "development", path)
-            self.assertEqual(loaded["schema"], subject.RAW_FREEZE_SCHEMA)
+            self.assertEqual(
+                loaded["schema"], subject.LEGACY_RAW_FREEZE_SCHEMA)
             self.assertEqual(
                 loaded["arms_by_name"][RAW_TEST_ARM]
                     ["seed_schedule_sha256"],
@@ -1398,9 +1531,77 @@ class ContractTests(unittest.TestCase):
             path.write_bytes(
                 (subject.canonical_json(malformed_descriptor) + "\n").encode(
                     "utf-8"))
-            with self.assertRaisesRegex(subject.ContractError, "not a SHA-256"):
+            with self.assertRaisesRegex(
+                    subject.ContractError,
+                    "categorically require a raw freeze schema"):
                 subject.load_freeze_manifest(
                     self.contract, "development", path)
+
+    def test_v4_development_rejects_generic_v1_descriptor_downgrade(self) \
+            -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            trace_path = write_trace_manifest(root, self.contract)
+            freeze_path = write_freeze_manifest(
+                root, self.contract, trace_path,
+                ("wirehair2_head", "wirehair1", "relabelled_experiment"))
+            value = json.loads(freeze_path.read_bytes())
+            value["arms"][2]["arm_descriptor_sha256"] = digest(
+                "arbitrary unclosed descriptor")
+            freeze_path.write_bytes(
+                (subject.canonical_json(value) + "\n").encode("utf-8"))
+            with self.assertRaisesRegex(
+                    subject.ContractError,
+                    "categorically require a raw freeze schema"):
+                subject.load_freeze_manifest(
+                    self.contract, "development", freeze_path)
+
+    def test_final_raw_generic_v1_production_freeze_remains_accepted(
+            self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            trace_path = write_trace_manifest(root, self.contract)
+            freeze_path = write_freeze_manifest(
+                root, self.contract, trace_path,
+                ("wirehair2_head", "wirehair1", TWO07_TEST_ARM))
+            value = json.loads(freeze_path.read_bytes())
+            value["phase"] = "final_raw"
+            value["domain_sha256"] = self.contract["recovery"]["domains"][
+                "final_raw"]["domain_sha256"]
+            value["arms"][2]["arm_descriptor_sha256"] = \
+                TWO07_TEST_DESCRIPTOR
+            freeze_path.write_bytes(
+                (subject.canonical_json(value) + "\n").encode("utf-8"))
+            loaded = subject.load_freeze_manifest(
+                self.contract, "final_raw", freeze_path)
+            self.assertEqual(loaded["schema"], subject.FREEZE_SCHEMA)
+            self.assertEqual(
+                loaded["arms_by_name"][TWO07_TEST_ARM]
+                    ["arm_descriptor_sha256"],
+                TWO07_TEST_DESCRIPTOR)
+            for schema in (
+                    subject.LEGACY_RAW_FREEZE_SCHEMA,
+                    subject.RAW_FREEZE_SCHEMA):
+                raw_final = copy.deepcopy(value)
+                raw_final["schema"] = schema
+                if schema == subject.RAW_FREEZE_SCHEMA:
+                    raw_final.update({
+                        "architecture_roles": copy.deepcopy(
+                            subject.EXPECTED_RAW_ARCHITECTURE_ROLES),
+                        "timing_proxy_witness_sha256": "5" * 64,
+                        "work_rank_summary_sha256": "6" * 64,
+                        "work_rank_result_stream_sha256": "7" * 64,
+                        "work_rank_domain_sha256": "8" * 64,
+                    })
+                freeze_path.write_bytes(
+                    (subject.canonical_json(raw_final) + "\n").encode(
+                        "utf-8"))
+                with self.subTest(raw_schema=schema), \
+                        self.assertRaisesRegex(
+                            subject.ContractError,
+                            "restricted to development recovery"):
+                    subject.load_freeze_manifest(
+                        self.contract, "final_raw", freeze_path)
 
     def test_v1_production_freeze_may_retain_selected_raw_arm_name(self) -> None:
         phase = "cross_width_validation"
@@ -1591,7 +1792,12 @@ class ContractTests(unittest.TestCase):
 class LedgerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.contract = subject.load_contract()
+        # Preserve generic v1 ledger-parser coverage against an explicit
+        # legacy contract identity.  The current v4 development raw phase
+        # categorically rejects v1 freezes before any rows are scored.
+        cls.contract = copy.deepcopy(subject.load_contract())
+        cls.contract["schema"] = "wirehair.wh2.benchmark-contract.v3"
+        cls.contract["contract_id"] = "wh2-pure-gf256-1pct-v6"
         cls.trace_hashes = [
             digest("trace:" + subject.sha256_json(cell))
             for cell in subject.iter_recovery_cells(cls.contract, "development")
@@ -1920,7 +2126,8 @@ class RawLedgerTests(unittest.TestCase):
         summary = self.validate(self.valid_rows)
         self.assertEqual(
             summary["schema"], subject.SCHEMA + ".ledger-summary.v2")
-        self.assertEqual(summary["freeze_schema"], subject.RAW_FREEZE_SCHEMA)
+        self.assertEqual(
+            summary["freeze_schema"], subject.LEGACY_RAW_FREEZE_SCHEMA)
         self.assertEqual(summary["arms"][RAW_TEST_ARM]["cells"], 360)
 
     def test_raw_rows_require_exact_policy_and_only_raw_rows_gain_fields(
@@ -1962,9 +2169,12 @@ class RawLedgerTests(unittest.TestCase):
         raw["precode_attempt"] = 1
         raw["effective_precode_seed"] = \
             subject._effective_raw_precode_seed(1)
-        fields = {field: raw[field] for field in subject.RAW_CONSTRUCTION_FIELDS}
+        fields = {
+            field: raw[field]
+            for field in subject.LEGACY_RAW_CONSTRUCTION_FIELDS
+        }
         raw["realized_construction_sha256"] = \
-            subject.raw_realized_construction_sha256(
+            subject.legacy_raw_realized_construction_sha256(
                 "wirehair2_experiment", RAW_TEST_ARM,
                 raw["arm_descriptor_sha256"], raw["K"],
                 raw["block_bytes"], fields)
@@ -1982,15 +2192,15 @@ class RawLedgerTests(unittest.TestCase):
             raw = next(row for row in rows if row["arm"] == RAW_TEST_ARM)
             raw[field] = value
             fields = {
-                item: raw[item] for item in subject.RAW_CONSTRUCTION_FIELDS
+                item: raw[item]
+                for item in subject.LEGACY_RAW_CONSTRUCTION_FIELDS
             }
-            raw["realized_construction_sha256"] = \
-                subject.raw_realized_construction_sha256(
+            with self.subTest(field=field), \
+                    self.assertRaises(subject.ContractError):
+                subject.legacy_raw_realized_construction_sha256(
                     "wirehair2_experiment", RAW_TEST_ARM,
                     raw["arm_descriptor_sha256"], raw["K"],
                     raw["block_bytes"], fields)
-            with self.subTest(field=field):
-                self.assert_rejects(rows)
 
         for label, mutate in (
                 ("retired_descriptor", lambda manifest, arm: arm.__setitem__(
@@ -2024,10 +2234,12 @@ class RawLedgerTests(unittest.TestCase):
                         self.contract, "development", ledger_path,
                         freeze_path, trace_path)
 
-    def test_raw_realized_hash_is_sensitive_to_every_variable_field(self) -> None:
-        descriptor = digest("descriptor:" + RAW_TEST_ARM)
-        base = raw_construction_fields(0)
-        baseline = subject.raw_realized_construction_sha256(
+    def test_legacy_raw_realized_hash_validates_descriptor_and_hashes_attempts(
+            self) -> None:
+        descriptor = \
+            "739092a7824449e6168f08b46661dfbe8ad5495ea4166b36073c79cd3bacdd11"
+        base = raw_construction_fields(0, 3)
+        baseline = subject.legacy_raw_realized_construction_sha256(
             "wirehair2_experiment", RAW_TEST_ARM, descriptor, 3, 2, base)
         variants = []
         precode = copy.deepcopy(base)
@@ -2040,31 +2252,41 @@ class RawLedgerTests(unittest.TestCase):
         packet["effective_packet_seed"] = \
             subject._effective_raw_packet_seed(1)
         variants.append(("packet_attempt", packet))
-        for field, value in (
-                ("staircase", 11), ("binary_dense_rows", 13),
-                ("gf256_heavy_rows", 13), ("source_hits", 3),
-                ("dense_identity_corner", True), ("mix_count", 2)):
-            changed = copy.deepcopy(base)
-            changed[field] = value
-            variants.append((field, changed))
         for field, changed in variants:
             with self.subTest(field=field):
                 self.assertNotEqual(
-                    subject.raw_realized_construction_sha256(
+                    subject.legacy_raw_realized_construction_sha256(
                         "wirehair2_experiment", RAW_TEST_ARM, descriptor,
                         3, 2, changed), baseline)
         for label, args in (
                 ("arm", ("wirehair2_experiment",
                          "wirehair2_raw_other", descriptor, 3, 2, base)),
                 ("descriptor", ("wirehair2_experiment", RAW_TEST_ARM,
-                                digest("other descriptor"), 3, 2, base)),
+                                "91d7c1a558e1cf93b002fcf2062b7657d301faca03972215495bdf2429499e90",
+                                3, 2, base))):
+            with self.subTest(rejected_identity=label), \
+                    self.assertRaises(subject.ContractError):
+                subject.legacy_raw_realized_construction_sha256(*args)
+        for label, args in (
                 ("K", ("wirehair2_experiment", RAW_TEST_ARM,
                        descriptor, 4, 2, base)),
                 ("block_bytes", ("wirehair2_experiment", RAW_TEST_ARM,
                                  descriptor, 3, 3, base))):
-            with self.subTest(field=label):
+            with self.subTest(variable_dimension=label):
                 self.assertNotEqual(
-                    subject.raw_realized_construction_sha256(*args), baseline)
+                    subject.legacy_raw_realized_construction_sha256(*args),
+                    baseline)
+        for field, value in (
+                ("staircase", 11), ("binary_dense_rows", 13),
+                ("gf256_heavy_rows", 13), ("source_hits", 3),
+                ("dense_identity_corner", True), ("mix_count", 2)):
+            changed = copy.deepcopy(base)
+            changed[field] = value
+            with self.subTest(rejected_descriptor_field=field), \
+                    self.assertRaises(subject.ContractError):
+                subject.legacy_raw_realized_construction_sha256(
+                    "wirehair2_experiment", RAW_TEST_ARM, descriptor,
+                    3, 2, changed)
         for field, value in (
                 ("construction_seed_basis", "forged"),
                 ("seed_schedule_sha256", digest("other schedule")),
@@ -2073,9 +2295,151 @@ class RawLedgerTests(unittest.TestCase):
             changed[field] = value
             with self.subTest(rejected_fixed_field=field), \
                     self.assertRaises(subject.ContractError):
-                subject.raw_realized_construction_sha256(
+                subject.legacy_raw_realized_construction_sha256(
                     "wirehair2_experiment", RAW_TEST_ARM, descriptor,
                     3, 2, changed)
+
+
+class RawV3LedgerTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.contract = subject.load_contract()
+        cls.trace_hashes = [
+            digest("trace:" + subject.sha256_json(cell))
+            for cell in subject.iter_recovery_cells(
+                cls.contract, "development")
+        ]
+        cls.valid_rows = raw_v3_ledger_rows(
+            cls.contract, cls.trace_hashes)
+
+    def validate(self, rows: Sequence[Mapping[str, Any]]) \
+            -> Mapping[str, Any]:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            trace_path = write_trace_manifest(
+                root, self.contract, self.trace_hashes)
+            freeze_path = write_raw_v3_freeze_manifest(
+                root, self.contract, trace_path)
+            ledger_path = write_ledger(root, rows)
+            return subject.validate_ledger(
+                self.contract, "development", ledger_path,
+                freeze_path, trace_path)
+
+    def test_valid_v3_evidence_binds_exact_roles_and_sidecars(self) -> None:
+        summary = self.validate(self.valid_rows)
+        self.assertEqual(
+            summary["schema"], subject.SCHEMA + ".ledger-summary.v3")
+        self.assertEqual(summary["freeze_schema"], subject.RAW_FREEZE_SCHEMA)
+        self.assertEqual(
+            summary["architecture_roles"],
+            subject.EXPECTED_RAW_ARCHITECTURE_ROLES)
+        self.assertEqual(
+            list(summary["arms"]),
+            ["wirehair2_head", "wirehair1", RAW_TEST_ARM, TWO07_TEST_ARM])
+        comparison = summary["comparisons"][TWO07_TEST_ARM]
+        self.assertEqual(comparison["recovery_reference"], RAW_TEST_ARM)
+        self.assertTrue(comparison["architecture_eligible"])
+        self.assertEqual(
+            set(comparison["descriptive_controls"]),
+            {"wirehair2_head", "wirehair1"})
+        self.assertEqual(
+            summary["timing_proxy_witness_sha256"],
+            digest("timing proxy witness"))
+        self.assertEqual(
+            summary["work_rank_result_stream_sha256"],
+            digest("work rank result stream"))
+
+    def test_descriptive_controls_do_not_veto_reference_noninferiority(
+            self) -> None:
+        rows = copy.deepcopy(self.valid_rows)
+        raw_ordinals = {0, 1}
+        raw_seen = {RAW_TEST_ARM: 0, TWO07_TEST_ARM: 0}
+        for row in rows:
+            arm = row["arm"]
+            if arm not in raw_seen:
+                continue
+            ordinal = raw_seen[arm]
+            raw_seen[arm] += 1
+            if ordinal in raw_ordinals:
+                row["outcome"] = "need_more_at_cap"
+                row["decoded_extra"] = None
+        summary = self.validate(rows)
+        comparison = summary["comparisons"][TWO07_TEST_ARM]
+        self.assertTrue(comparison["reference_noninferior"])
+        self.assertTrue(comparison["architecture_eligible"])
+        self.assertFalse(
+            comparison["descriptive_controls"]["wirehair2_head"]
+                ["all_noninferiority_gates_pass"])
+
+    def test_v3_freeze_rejects_role_layout_and_sidecar_substitution(
+            self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            trace_path = write_trace_manifest(
+                root, self.contract, self.trace_hashes)
+            freeze_path = write_raw_v3_freeze_manifest(
+                root, self.contract, trace_path)
+            original = json.loads(freeze_path.read_bytes())
+            mutations = []
+            wrong_role = copy.deepcopy(original)
+            wrong_role["architecture_roles"]["timing_proxy"] = "wirehair1"
+            mutations.append(("timing proxy role", wrong_role))
+            wrong_layout = copy.deepcopy(original)
+            wrong_layout["arms"][3]["dense_anchor_layout"] = "disabled"
+            mutations.append(("candidate layout", wrong_layout))
+            wrong_sidecar = copy.deepcopy(original)
+            wrong_sidecar["work_rank_domain_sha256"] = "not-a-sha256"
+            mutations.append(("sidecar domain", wrong_sidecar))
+            for field in (
+                    "timing_proxy_witness_sha256",
+                    "work_rank_summary_sha256",
+                    "work_rank_result_stream_sha256",
+                    "work_rank_domain_sha256"):
+                zero_marker = copy.deepcopy(original)
+                zero_marker[field] = "0" * 64
+                mutations.append(("zero " + field, zero_marker))
+            for label, mutation in mutations:
+                with self.subTest(label=label):
+                    freeze_path.write_bytes(
+                        (subject.canonical_json(mutation) + "\n").encode(
+                            "utf-8"))
+                    with self.assertRaises(subject.ContractError):
+                        subject.load_freeze_manifest(
+                            self.contract, "development", freeze_path)
+
+            legacy = copy.deepcopy(original)
+            legacy["schema"] = subject.LEGACY_RAW_FREEZE_SCHEMA
+            for field in (
+                    "architecture_roles", "timing_proxy_witness_sha256",
+                    "work_rank_summary_sha256",
+                    "work_rank_result_stream_sha256",
+                    "work_rank_domain_sha256"):
+                del legacy[field]
+            for arm in legacy["arms"]:
+                del arm["dense_anchor_layout"]
+            freeze_path.write_bytes(
+                (subject.canonical_json(legacy) + "\n").encode("utf-8"))
+            with self.assertRaises(subject.ContractError):
+                subject.load_freeze_manifest(
+                    self.contract, "development", freeze_path)
+
+    def test_v3_realized_hash_accepts_two07_and_rejects_relabeling(self) -> None:
+        fields = raw_construction_fields(0, 64, "two07")
+        self.assertRegex(
+            subject.raw_realized_construction_sha256(
+                "wirehair2_experiment", TWO07_TEST_ARM,
+                TWO07_TEST_DESCRIPTOR, 64, 2, fields),
+            r"^[0-9a-f]{64}$")
+        for label, arm, descriptor, layout in (
+                ("arm", RAW_TEST_ARM, TWO07_TEST_DESCRIPTOR, "two07"),
+                ("descriptor", TWO07_TEST_ARM, RAW_TEST_DESCRIPTOR, "two07"),
+                ("layout", TWO07_TEST_ARM, TWO07_TEST_DESCRIPTOR, "disabled")):
+            changed = raw_construction_fields(0, 64, layout)
+            with self.subTest(label=label), \
+                    self.assertRaises(subject.ContractError):
+                subject.raw_realized_construction_sha256(
+                    "wirehair2_experiment", arm, descriptor, 64, 2,
+                    changed)
 
 
 class TimingReceiptTests(unittest.TestCase):

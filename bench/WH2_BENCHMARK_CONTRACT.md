@@ -1,18 +1,21 @@
-# Wirehair2 benchmark contract v3, timing protocol v6
+# Wirehair2 benchmark contract v4, timing protocol v6
 
 The machine-readable source of truth is
-[`wh2_benchmark_contract_v3.json`](wh2_benchmark_contract_v3.json).  The
+[`wh2_benchmark_contract_v4.json`](wh2_benchmark_contract_v4.json).  The
 companion checker, [`wh2_benchmark_contract.py`](wh2_benchmark_contract.py),
 validates its exact domains and rejects result ledgers that omit or replace a
 cell.  This is intentionally a small contract and checker, not another
 campaign framework.
 
-The top-level JSON schema remains `wirehair.wh2.benchmark-contract.v3` because
-the recovery enumeration, packet-trace algorithm, cells, and all five recovery
-domain hashes are byte-identical.  The contract identity is
-`wh2-pure-gf256-1pct-v6`; v6 changes only timing identity and qualification.
+The top-level JSON schema is `wirehair.wh2.benchmark-contract.v4`.  The
+recovery enumeration, packet-trace algorithm, cells, and all five recovery
+domain hashes remain byte-identical, but v4 freezes the asymmetric development
+roles: production WH2 and Wirehair1 are descriptive controls, uniform-raw
+D12/H12 is the recovery reference, Two07 is the sole candidate, and production
+WH2 is the structure-only timing proxy.  The contract identity is
+`wh2-pure-gf256-1pct-v7`.
 Recovery trace-manifest v1 includes the top-level contract SHA-256 in its hash
-header, so its enclosing manifest digest necessarily changes with the v6
+header, so its enclosing manifest digest necessarily changes with the v7
 contract SHA even though every recovery row, cell hash, packet trace, and
 recovery-domain hash is unchanged.  Do not describe that envelope digest as a
 preserved recovery hash.
@@ -81,36 +84,50 @@ the source commit or binary hash changes.
 ### Raw seed-policy evidence boundary
 
 Closed uniform-raw architecture recovery uses
-`wirehair.wh2.benchmark-freeze.v2`. Every frozen arm separately binds its
-`construction_seed_basis` and `seed_schedule_sha256`: the certified head uses
-`production-profile-v1`, Wirehair1 uses `not-applicable`, and raw experimental
-arms use `uniform-raw-v1` plus schedule SHA-256
+`wirehair.wh2.benchmark-freeze.v3`. Its exact four-arm roster is descriptive
+production WH2 and Wirehair1 controls, the disabled-anchor uniform-raw D12/H12
+recovery reference, and the uniform-raw Two07 candidate. Every frozen arm
+separately binds `construction_seed_basis`, `seed_schedule_sha256`, and
+`dense_anchor_layout`: the certified head uses `production-profile-v1` and
+`disabled`, Wirehair1 uses `not-applicable`, D12 uses `uniform-raw-v1` and
+`disabled`, and Two07 uses `uniform-raw-v1` and `two07`. The raw schedule is
+SHA-256
 `90a98a3db207852dabdf5fb27573ef48bce52e0228cee4e291d96fa44ed509a7`.
 The seed policy is deliberately alongside, not inside, the structure-only arm
 descriptor, so structure and seed-schedule changes cannot masquerade as one
 another.
 
-Raw native records, logical ledgers, and execution receipts use their v2
+Raw native records, logical ledgers, and execution receipts use their v3
 schemas. Each raw row binds the paired precode/packet attempts, effective
 seeds, and realized staircase, binary-dense, and GF(256)-heavy geometry; the
-realized-construction hash covers all of those fields. The work/rank sidecar
+v2 realized-construction hash also covers the dense-anchor layout. The v3
+work/rank sidecar
 independently emits the same identity, and combination requires an exact
 native-to-sidecar trace and construction join for every raw cell. Missing or
-forged policy fields and legacy v1 freezes that claim a closed raw arm name or
-descriptor are rejected.
+forged policy fields are rejected. Legacy raw-v2 evidence remains readable
+only for its historical disabled-anchor descriptors and cannot authenticate
+Two07 or silently downgrade its layout.
 
-The four current raw descriptors form a closed descriptor-to-arm/geometry
-map: D12/H11, D12/H12, D12/H13, and D13/H12, all periodic-Cauchy with mix
-count three. Validation also reproduces the certified `GetDenseCount(K)`
-staircase exactly for every K in 2..64,000, requires the certified source-hit
-boundary (two below K=10,000 and three thereafter), and requires the dense
-identity corner to remain disabled. Recomputing a realized-construction hash
-therefore cannot relabel one descriptor with another arm or geometry.
+The promotional v3 descriptor roster is D12/H12/disabled and
+D12/H12/Two07, both periodic-Cauchy with mix count three. Validation also
+reproduces the certified `GetDenseCount(K)` staircase exactly for every K in
+2..64,000, requires the certified source-hit boundary (two below K=10,000 and
+three thereafter), and requires the dense identity corner to remain disabled.
+Recomputing a realized-construction hash therefore cannot relabel a descriptor
+with another arm, geometry, or anchor layout.
 
-Production and timing evidence remains on `benchmark-freeze.v1` and the
-existing v1 native receipt schemas. Selecting a raw-named architecture does
-not rewrite later repaired/validation production receipts; the schema boundary
-distinguishes raw construction evidence from the arm's human-readable name.
+The timing-proxy witness is structure-only. At the frozen development
+attempt-0 coordinates it proves that D12/H12/disabled non-seed geometry under
+the production timing seed policy equals the production head, while separately
+binding and showing the distinct uniform-raw recovery seeds. It does not claim
+equal graph, peel, rank, or solve work, and another attempt policy requires a
+new witness.
+
+Development recovery under contract v4 must use `benchmark-freeze.v3`; a
+generic v1 freeze cannot relabel arbitrary experimental evidence into this
+architecture comparison. Development timing and later production evidence
+remain on `benchmark-freeze.v1`. In particular, `final_raw` intentionally
+retains its generic production v1 freeze, as do repaired and validation phases.
 
 ## Final recovery phases
 
@@ -189,10 +206,16 @@ The recovery cell key is:
  base_seed_attempt, loss_seed, overhead_cap)
 ```
 
-The arm name is intentionally excluded.  Before any result is read, one
-canonical freeze manifest becomes the sole authority for the exact contract,
-source commit, ordered arm roster, per-arm binary and descriptor hashes, domain
-hash, trace-manifest hash, repair-map hashes, commands, affinity, and host.
+The arm name is intentionally excluded. Before any result is read, one
+phase-scoped canonical freeze manifest becomes the sole authority for the exact
+contract, source commit, ordered arm roster, per-arm binary and descriptor
+hashes, domain hash, trace-manifest hash, repair-map hashes, commands, affinity,
+and host. Development raw recovery requires freeze v3, which additionally
+freezes each arm's seed basis, seed schedule, dense-anchor layout, the exact
+architecture roles, timing-proxy witness, and all three work/rank sidecar
+hashes. Timing and non-development production phases continue to use generic
+freeze v1. Read-only legacy raw-v2 development evidence cannot authenticate a
+dense-anchor arm.
 The command-line caller cannot substitute a smaller roster.  Every arm must
 then provide exactly one result for every frozen key.  Missing,
 duplicate, extra, seed-swapped, partial, wrong-band, wrong-loss, or roster-drift
@@ -436,11 +459,12 @@ eight-worker timing topology.  Timing evidence embeds this qualification
 receipt's SHA-256 and rejects a surviving or overlapping worker identity.
 
 The timing trace-manifest v2 hash header binds the qualification-map SHA-256
-plus the base and qualified domain hashes.  Its selected trace at each ordinal
-must equal the terminal audit row.  The unchanged freeze v1 directly binds the
-qualified domain and this v2 manifest hash, thereby transitively binding the
-map, audit, offsets, and selected trace roster without adding recovery-freeze
-fields or depending on a future candidate.
+plus the base and qualified domain hashes. Its selected trace at each ordinal
+must equal the terminal audit row. Timing's phase-scoped generic freeze v1
+directly binds the qualified domain and this v2 manifest hash, thereby
+transitively binding the map, audit, offsets, and selected trace roster. This
+timing use of v1 does not weaken the separate raw-v3 requirement for
+development recovery.
 
 After qualification, a candidate non-success carries eight null durations,
 remains explicit, and makes the affected panel non-selectable.  It never

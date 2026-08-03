@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""Run and combine the three bounded WH2 recovery-only candidate screens.
+"""Run the bounded D12-reference versus Two07 WH2 recovery screen.
 
-Each ``run`` invocation freezes exactly one closed candidate with the WH2-head,
-Wirehair1, and uniform-raw D12/H12 controls, emits no timing work, and publishes
-an independently validated native recovery execution receipt.  ``combine``
-revalidates three completed runs and produces a six-arm *logical* recovery
-ledger and summary.
-The combination deliberately is not, and must not be presented as, one native
-execution receipt: its provenance is the three input receipt hashes.
+``run`` freezes exactly four same-binary arms: descriptive production WH2 and
+Wirehair1 controls, the uniform-raw D12/H12 recovery reference, and the
+uniform-raw Two07 candidate.  It binds the D12-to-production timing-proxy
+witness and the two-arm work/rank sidecar before emitting recovery results.
+The proxy witness is structure-only: at development attempt 0 it proves that
+the disabled-anchor D12 structure under the production timing seed policy is
+the production head, while separately binding the distinct uniform-raw
+recovery seeds.  It does not equate their graph, peel, rank, or solve work.
+The compatibility ``combine`` command may re-open that sole campaign as a
+logical bundle, but is not itself a native execution receipt.
 """
 
 from __future__ import annotations
@@ -33,12 +36,8 @@ import wh2_run_native_short_screen as runner_api
 
 
 CANDIDATE_SPECS = (
-    ("d12-h11-periodic", "wirehair2_raw_d12_h11_periodic",
-     "91d7c1a558e1cf93b002fcf2062b7657d301faca03972215495bdf2429499e90"),
-    ("d12-h13-periodic", "wirehair2_raw_d12_h13_periodic",
-     "7c7889747a97ac160726b807fb03349344d49d4bec84c9e8220aa4689b00d2ca"),
-    ("d13-h12-periodic", "wirehair2_raw_d13_h12_periodic",
-     "c70e0f57bb8d7783fa29b0decbed5da5058a8eb532d57d540f72108e114f091a"),
+    ("two07", "wirehair2_dense_two07_basis_v1",
+     "9527f200ad38c7eec6502b2f768fdd67b92787fb227eed3d7616274ffc2df388"),
 )
 CANDIDATE_BY_ID = {
     candidate_id: (arm, descriptor)
@@ -55,19 +54,20 @@ RAW_CONTROL_DESCRIPTOR_SHA256 = \
 RAW_SEED_BASIS = "uniform-raw-v1"
 RAW_SEED_SCHEDULE_SHA256 = \
     "90a98a3db207852dabdf5fb27573ef48bce52e0228cee4e291d96fa44ed509a7"
-CANDIDATE_DESCRIPTION_SCHEMA = "wirehair.wh2.native-worker-description.v2"
+CANDIDATE_DESCRIPTION_SCHEMA = "wirehair.wh2.native-worker-description.v3"
 CANDIDATE_DESCRIPTION_ARM_FIELDS = frozenset((
     "arm", "codec", "arm_descriptor_sha256",
-    "construction_seed_basis", "seed_schedule_sha256",
+    "construction_seed_basis", "dense_anchor_layout",
+    "seed_schedule_sha256",
 ))
 CONTROL_DESCRIPTOR_SHA256S = (
     "4cafe27a8fb388ca9a4249b2c279b1406e7a0a86bcf14e98246988c7c503fa7a",
     "d5a24d404e69efeb439907cd8271eba98d6af86b58efe159a820fb7aea08883d",
 )
 
-CAMPAIGN_SUMMARY_SCHEMA = "wirehair.wh2.native-recovery-screen-run.v2"
+CAMPAIGN_SUMMARY_SCHEMA = "wirehair.wh2.native-recovery-screen-run.v3"
 COMBINATION_SUMMARY_SCHEMA = \
-    "wirehair.wh2.logical-recovery-combination.v2"
+    "wirehair.wh2.logical-recovery-combination.v3"
 CAMPAIGN_SUMMARY_FIELDS = frozenset((
     "schema", "status", "output_dir", "candidate_id", "candidate_arm",
     "source_git_commit", "contract_sha256", "domain_sha256",
@@ -76,6 +76,9 @@ CAMPAIGN_SUMMARY_FIELDS = frozenset((
     "recovery_result_sha256", "recovery_execution_receipt_sha256",
     "thermal_samples", "cpu_tctl_max_millic", "dimm_max_millic",
     "construction_seed_basis", "seed_schedule_sha256", "summary_sha256",
+    "timing_proxy_witness_sha256", "work_rank_summary_sha256",
+    "work_rank_result_stream_sha256", "work_rank_domain_sha256",
+    "raw_identity_join_count", "raw_identity_join_sha256",
 ))
 COMBINATION_SUMMARY_FIELDS = frozenset((
     "schema", "status", "artifact_kind", "is_execution_receipt", "phase",
@@ -96,10 +99,35 @@ CAMPAIGN_BINDING_FIELDS = frozenset((
 ))
 ZERO_SHA256 = "0" * 64
 RECOVERY_RECORDS = 1440
-LOGICAL_RECORDS = 2160
+LOGICAL_RECORDS = 1440
 RECOVERY_WORKER_COUNT = 8
 MAX_COMPLETED_ARTIFACT_BYTES = 64 * 1024 * 1024
-RAW_IDENTITY_JOIN_COUNT = 1440
+RAW_IDENTITY_JOIN_COUNT = 720
+TIMING_PROXY_WITNESS_SCHEMA = \
+    "wirehair.wh2.native-timing-proxy-witness.v2"
+TIMING_PROXY_DOMAIN = b"wirehair.wh2.timing-proxy-domain.v2\0"
+TIMING_PROXY_FIELDS = frozenset((
+    "schema", "source_git_commit", "binary_sha256", "proof_scope",
+    "evidence_phase", "construction_attempts", "applicability",
+    "production_timing_proxy_arm",
+    "production_timing_proxy_arm_descriptor_sha256",
+    "raw_recovery_reference_arm",
+    "raw_recovery_reference_arm_descriptor_sha256",
+    "raw_recovery_seed_basis", "raw_recovery_seed_schedule_sha256",
+    "timing_candidate_arm", "timing_candidate_arm_descriptor_sha256",
+    "timing_seed_basis", "timing_seed_schedule_sha256",
+    "timing_seed_policy_arms", "seed_relationship",
+    "witness_domain_sha256", "cells",
+))
+TIMING_PROXY_CELL_FIELDS = frozenset((
+    "K", "block_bytes", "construction_attempt",
+    "normalized_structure_sha256",
+    "production_timing_configuration_sha256",
+    "production_timing_equation_system_sha256",
+    "production_timing_precode_seed", "production_timing_packet_seed",
+    "raw_recovery_precode_seed", "raw_recovery_packet_seed",
+    "seeds_differ",
+))
 
 
 class RecoveryRunnerError(RuntimeError):
@@ -194,6 +222,9 @@ def describe_candidate_worker(
               arm["seed_schedule_sha256"]) for arm in arms) != \
             expected_policies:
         fail("recovery candidate description has an invalid seed-policy roster")
+    if tuple(arm["dense_anchor_layout"] for arm in arms) != (
+            "disabled", "not-applicable", "disabled", "two07"):
+        fail("recovery candidate description has an invalid layout roster")
     if tuple(arms[index]["arm_descriptor_sha256"] for index in (0, 1)) != \
             CONTROL_DESCRIPTOR_SHA256S:
         fail("recovery candidate description substitutes a control descriptor")
@@ -212,6 +243,125 @@ def describe_candidate_worker(
     return result
 
 
+def load_timing_proxy_witness(
+        description: Mapping[str, Any], source_git_commit: str,
+        deadline: float) -> Mapping[str, Any]:
+    """Validate the attempt-0 structure-only production timing witness."""
+    worker = description.get("resolved_path")
+    if not isinstance(worker, str) or not worker:
+        fail("worker description lacks its resolved executable path")
+    try:
+        witness = runner_api._parse_canonical_line(
+            runner_api._run_command(
+                [worker, "--emit-timing-proxy-witness"], deadline,
+                "D12 timing proxy witness"),
+            "D12 timing proxy witness")
+    except runner_api.RunnerError as exc:
+        fail(str(exc))
+    return _validate_timing_proxy_witness(
+        witness, description.get("binary_sha256"), source_git_commit)
+
+
+def _validate_timing_proxy_witness(
+        witness: Mapping[str, Any], binary_sha256: Any,
+        source_git_commit: Any) -> Mapping[str, Any]:
+    """Pure validator used both at creation and immutable campaign reopen."""
+    if (set(witness) != TIMING_PROXY_FIELDS or
+            witness.get("schema") != TIMING_PROXY_WITNESS_SCHEMA or
+            witness.get("source_git_commit") != source_git_commit or
+            witness.get("binary_sha256") != binary_sha256 or
+            witness.get("proof_scope") !=
+                "d12-disabled-structure-under-production-timing-seed-policy-v1" or
+            witness.get("evidence_phase") != "development" or
+            not isinstance(witness.get("construction_attempts"), list) or
+            len(witness["construction_attempts"]) != 1 or
+            type(witness["construction_attempts"][0]) is not int or
+            witness["construction_attempts"][0] != 0 or
+            witness.get("applicability") !=
+                "development-attempt-0-only-new-witness-required-for-other-attempt-semantics" or
+            witness.get("raw_recovery_reference_arm") !=
+                RAW_CONTROL_ARM[0] or
+            witness.get("raw_recovery_reference_arm_descriptor_sha256") !=
+                RAW_CONTROL_DESCRIPTOR_SHA256 or
+            witness.get("raw_recovery_seed_basis") != RAW_SEED_BASIS or
+            witness.get("raw_recovery_seed_schedule_sha256") !=
+                RAW_SEED_SCHEDULE_SHA256 or
+            witness.get("production_timing_proxy_arm") !=
+                "wirehair2_head" or
+            witness.get(
+                "production_timing_proxy_arm_descriptor_sha256") !=
+                CONTROL_DESCRIPTOR_SHA256S[0] or
+            witness.get("timing_candidate_arm") != CANDIDATE_SPECS[0][1] or
+            witness.get("timing_candidate_arm_descriptor_sha256") !=
+                CANDIDATE_SPECS[0][2] or
+            witness.get("timing_seed_basis") !=
+                contract_api.PRODUCTION_CONSTRUCTION_SEED_BASIS or
+            witness.get("timing_seed_schedule_sha256") != ZERO_SHA256 or
+            witness.get("timing_seed_policy_arms") != [
+                "wirehair2_head", CANDIDATE_SPECS[0][1]] or
+            witness.get("seed_relationship") !=
+                "raw-recovery-precode-and-packet-seeds-differ-from-production-timing"):
+        fail("D12 structure-only timing witness substitutes its proof scope")
+    expected_coordinates = [
+        {"K": K, "block_bytes": block_bytes,
+         "construction_attempt": 0}
+        for block_bytes in (64, 1280)
+        for K in contract_api.EXPECTED_TIMING_SHORT_K
+    ]
+    expected_domain_sha256 = hashlib.sha256(
+        TIMING_PROXY_DOMAIN + contract_api.canonical_json(
+            expected_coordinates).encode("utf-8")).hexdigest()
+    cells = witness.get("cells")
+    if (not isinstance(cells, list) or len(cells) != 24 or
+            witness.get("witness_domain_sha256") !=
+                expected_domain_sha256):
+        fail("D12 timing proxy witness has the wrong frozen domain")
+    observed_coordinates = []
+    for index, cell in enumerate(cells):
+        if (not isinstance(cell, dict) or
+                set(cell) != TIMING_PROXY_CELL_FIELDS or
+                any(not _is_sha256(cell.get(field)) for field in (
+                    "normalized_structure_sha256",
+                    "production_timing_configuration_sha256",
+                    "production_timing_equation_system_sha256")) or
+                not isinstance(cell.get("K"), int) or
+                isinstance(cell.get("K"), bool) or
+                not isinstance(cell.get("block_bytes"), int) or
+                isinstance(cell.get("block_bytes"), bool) or
+                type(cell.get("construction_attempt")) is not int or
+                cell["construction_attempt"] != 0 or
+                cell.get("seeds_differ") is not True or
+                not isinstance(cell.get("production_timing_precode_seed"), str) or
+                contract_api.HEX64.fullmatch(
+                    cell["production_timing_precode_seed"]) is None or
+                not isinstance(cell.get("raw_recovery_precode_seed"), str) or
+                contract_api.HEX64.fullmatch(
+                    cell["raw_recovery_precode_seed"]) is None or
+                not isinstance(cell.get("production_timing_packet_seed"), str) or
+                contract_api.HEX32.fullmatch(
+                    cell["production_timing_packet_seed"]) is None or
+                not isinstance(cell.get("raw_recovery_packet_seed"), str) or
+                contract_api.HEX32.fullmatch(
+                    cell["raw_recovery_packet_seed"]) is None or
+                cell["raw_recovery_precode_seed"] !=
+                    contract_api._effective_raw_precode_seed(0) or
+                cell["raw_recovery_packet_seed"] !=
+                    contract_api._effective_raw_packet_seed(0) or
+                cell["production_timing_precode_seed"] ==
+                    cell["raw_recovery_precode_seed"] or
+                cell["production_timing_packet_seed"] ==
+                    cell["raw_recovery_packet_seed"]):
+            fail("D12 timing proxy witness cell {} is malformed".format(
+                index))
+        observed_coordinates.append({
+            "K": cell["K"], "block_bytes": cell["block_bytes"],
+            "construction_attempt": cell["construction_attempt"],
+        })
+    if observed_coordinates != expected_coordinates:
+        fail("D12 timing proxy witness omits or reorders a frozen cell")
+    return witness
+
+
 def _candidate_commands(
         description: Mapping[str, Any], candidate_id: str,
         cpus: Sequence[int]) -> List[List[str]]:
@@ -225,16 +375,20 @@ def _candidate_commands(
     ] + [
         [worker, "--recovery-candidate-worker", candidate_id, str(cpu)]
         for cpu in cpus
-    ]
+    ] + [[worker, "--emit-timing-proxy-witness"]]
 
 
 def _candidate_freeze(
         contract: Mapping[str, Any], description: Mapping[str, Any],
         candidate_id: str, cpus: Sequence[int], controller_cpu: int,
-        source_commit: str, trace_sha256: str) -> Mapping[str, Any]:
+        source_commit: str, trace_sha256: str,
+        timing_proxy_witness_sha256: str,
+        work_binding: Mapping[str, Any]) -> Mapping[str, Any]:
     expected = _expected_arms(candidate_id)
-    if len(cpus) != RECOVERY_WORKER_COUNT or \
-            list(cpus) != sorted(set(cpus)):
+    cpu_list = list(cpus)
+    if (len(cpu_list) != RECOVERY_WORKER_COUNT or
+            any(type(cpu) is not int or cpu < 0 for cpu in cpu_list) or
+            cpu_list != sorted(set(cpu_list))):
         fail("recovery-only screen requires eight sorted unique worker CPUs")
     roster = [arm for arm, _ in expected]
     arms = []
@@ -250,6 +404,7 @@ def _candidate_freeze(
                 if value["codec"] == "wirehair1" else "raw_base",
             "repair_map_sha256": ZERO_SHA256,
             "construction_seed_basis": value["construction_seed_basis"],
+            "dense_anchor_layout": value["dense_anchor_layout"],
             "seed_schedule_sha256": value["seed_schedule_sha256"],
         })
     return {
@@ -264,9 +419,19 @@ def _candidate_freeze(
         "arm_roster_sha256": contract_api.arm_roster_sha256(roster),
         "trace_manifest_sha256": trace_sha256,
         "repair_training_trace_manifest_sha256": ZERO_SHA256,
-        "commands": _candidate_commands(description, candidate_id, cpus),
-        "cpu_affinity": list(cpus),
+        "commands": _candidate_commands(
+            description, candidate_id, cpu_list),
+        "cpu_affinity": cpu_list,
         "host_identity": runner_api._host_identity(controller_cpu),
+        "architecture_roles": dict(
+            contract_api.EXPECTED_RAW_ARCHITECTURE_ROLES),
+        "timing_proxy_witness_sha256": timing_proxy_witness_sha256,
+        "work_rank_summary_sha256":
+            work_binding["work_rank_summary_sha256"],
+        "work_rank_result_stream_sha256":
+            work_binding["work_rank_result_stream_sha256"],
+        "work_rank_domain_sha256":
+            work_binding["work_rank_domain_sha256"],
         "arms": arms,
     }
 
@@ -278,7 +443,10 @@ def _validate_candidate_freeze(
     expected_roster = [arm for arm, _ in _expected_arms(candidate_id)]
     if freeze.get("arm_roster") != expected_roster or \
             freeze.get("evidence_kind") != "recovery" or \
-            freeze.get("phase") != "development":
+            freeze.get("phase") != "development" or \
+            freeze.get("schema") != contract_api.RAW_FREEZE_SCHEMA or \
+            freeze.get("architecture_roles") != \
+                contract_api.EXPECTED_RAW_ARCHITECTURE_ROLES:
         fail("candidate freeze does not bind the exact four-arm recovery roster")
     arms = freeze.get("arms")
     if (not isinstance(arms, list) or len(arms) != 4 or
@@ -294,6 +462,16 @@ def _validate_candidate_freeze(
     if tuple(arms[index].get("arm_descriptor_sha256")
              for index in (0, 1)) != CONTROL_DESCRIPTOR_SHA256S:
         fail("candidate freeze substitutes a control descriptor")
+    if tuple(arm.get("dense_anchor_layout") for arm in arms) != (
+            "disabled", "not-applicable", "disabled", "two07"):
+        fail("candidate freeze substitutes a dense-anchor layout")
+    for field in (
+            "timing_proxy_witness_sha256", "work_rank_summary_sha256",
+            "work_rank_result_stream_sha256", "work_rank_domain_sha256"):
+        if not _is_sha256(freeze.get(field)) or \
+                freeze.get(field) == ZERO_SHA256:
+            fail("candidate freeze lacks its nonzero {} binding".format(
+                field))
     binaries = {arm.get("binary_sha256") for arm in arms}
     if len(binaries) != 1 or not _is_sha256(next(iter(binaries))):
         fail("candidate freeze does not use one bound worker binary")
@@ -314,9 +492,9 @@ def _validate_candidate_freeze(
 
 def _raw_policy_from_freeze(
         freeze: Mapping[str, Any]) -> Tuple[str, str]:
-    """Return the one worker-attested raw policy bound by a v2 freeze."""
+    """Return the one worker-attested raw policy bound by a v3 freeze."""
     if freeze.get("schema") != contract_api.RAW_FREEZE_SCHEMA:
-        fail("candidate evidence does not use the raw v2 freeze schema")
+        fail("candidate evidence does not use the raw v3 freeze schema")
     arms = freeze.get("arms")
     if not isinstance(arms, list):
         fail("candidate freeze arm records are malformed")
@@ -336,11 +514,14 @@ def write_recovery_freeze(
         contract: Mapping[str, Any], description: Mapping[str, Any],
         candidate_id: str, cpus: Sequence[int], controller_cpu: int,
         source_commit: str, trace_sha256: str, output_dir: Path,
+        timing_proxy_witness_sha256: str,
+        work_binding: Mapping[str, Any],
         ) -> Mapping[str, Any]:
     path = output_dir / "recovery-freeze.json"
     runner_api._atomic_write_object(path, _candidate_freeze(
         contract, description, candidate_id, cpus, controller_cpu,
-        source_commit, trace_sha256))
+        source_commit, trace_sha256, timing_proxy_witness_sha256,
+        work_binding))
     try:
         loaded = contract_api.load_freeze_manifest(
             contract, "development", path, "recovery")
@@ -452,6 +633,18 @@ def run_recovery_screen(args: argparse.Namespace) -> Mapping[str, Any]:
         fail("--deadline-seconds must be in (0,7200]")
     deadline = time.monotonic() + args.deadline_seconds
     contract = contract_api.load_contract(args.contract)
+    try:
+        work_screen = work_api.load_completed_work_screen(
+            contract, args.work_rank_dir)
+    except work_api.WorkScreenError as exc:
+        fail(str(exc))
+    work_summary = work_screen["summary"]
+    work_binding = {
+        "work_rank_summary_sha256": work_summary["summary_sha256"],
+        "work_rank_result_stream_sha256":
+            work_summary["result_stream_sha256"],
+        "work_rank_domain_sha256": work_summary["work_domain_sha256"],
+    }
     description = describe_candidate_worker(args.worker, candidate_id, deadline)
     try:
         original_affinity = set(os.sched_getaffinity(0))
@@ -467,7 +660,15 @@ def run_recovery_screen(args: argparse.Namespace) -> Mapping[str, Any]:
         args.sampler_script, args.sampler_csv)
     source_commit = runner_api._git_head(deadline)
     runner_api._require_worker_source_commit(description, source_commit)
+    if work_screen.get("source_git_commit") != source_commit:
+        fail("native and work/rank evidence use different source commits")
+    timing_proxy_witness = load_timing_proxy_witness(
+        description, source_commit, deadline)
+    timing_proxy_witness_sha256 = contract_api.sha256_json(
+        timing_proxy_witness)
     output_dir = runner_api._create_output_dir(args.output_dir)
+    runner_api._atomic_write_object(
+        output_dir / "timing-proxy-witness.json", timing_proxy_witness)
 
     trace_path, trace_sha256 = runner_api._emit_and_assemble_trace(
         contract, "recovery", description, output_dir, deadline)
@@ -475,7 +676,8 @@ def run_recovery_screen(args: argparse.Namespace) -> Mapping[str, Any]:
         fail("codec source commit changed before the recovery freeze")
     freeze = write_recovery_freeze(
         contract, description, candidate_id, cpus, controller_cpu,
-        source_commit, trace_sha256, output_dir)
+        source_commit, trace_sha256, output_dir,
+        timing_proxy_witness_sha256, work_binding)
     freeze_path = output_dir / "recovery-freeze.json"
 
     workers: List[runner_api.PersistentWorker] = []
@@ -517,7 +719,7 @@ def run_recovery_screen(args: argparse.Namespace) -> Mapping[str, Any]:
             validated = native_api.validate_execution_receipt(
                 contract, "recovery", "development", freeze_path,
                 trace_path, native_path, result_path, receipt_path,
-                verify_live_sampler=True)
+                verify_live_sampler=True, sampler_path=sampler_path)
             runner_api._remaining(deadline, "validating recovery execution")
         except (native_api.NativeEvidenceError,
                 contract_api.ContractError) as exc:
@@ -530,6 +732,17 @@ def run_recovery_screen(args: argparse.Namespace) -> Mapping[str, Any]:
         receipt = assembled["execution_receipt"]
         if receipt.get("record_count") != RECOVERY_RECORDS:
             fail("recovery execution receipt does not contain 1440 records")
+        result_bytes = _read_regular_bytes(
+            result_path, "campaign recovery ledger")
+        if _hash_bytes(result_bytes) != receipt["result_stream_sha256"]:
+            fail("campaign recovery ledger changed after terminal validation")
+        result_rows = _parse_exact_jsonl(
+            result_bytes, "campaign recovery ledger")
+        joined_work = _bind_work_rank_identities(
+            result_rows, work_screen, source_commit)
+        if any(joined_work[field] != value
+               for field, value in work_binding.items()):
+            fail("joined work/rank evidence differs from its pre-result freeze")
         thermal = receipt["thermal"]
         raw_basis, raw_schedule_sha256 = _raw_policy_from_freeze(freeze)
         summary: Dict[str, Any] = {
@@ -555,6 +768,9 @@ def run_recovery_screen(args: argparse.Namespace) -> Mapping[str, Any]:
             "dimm_max_millic": thermal["dimm_max_millic"],
             "construction_seed_basis": raw_basis,
             "seed_schedule_sha256": raw_schedule_sha256,
+            "timing_proxy_witness_sha256":
+                timing_proxy_witness_sha256,
+            **joined_work,
         }
         summary["summary_sha256"] = contract_api.sha256_json(summary)
         completed_summary = summary
@@ -565,6 +781,12 @@ def run_recovery_screen(args: argparse.Namespace) -> Mapping[str, Any]:
             runner_api._restore_controller_affinity(original_affinity)
     if completed_summary is None:
         fail("recovery screen reached cleanup without a completed summary")
+    _revalidate_terminal_campaign_execution(
+        contract, candidate_id, freeze, assembled, freeze_path, trace_path,
+        native_path, result_path, receipt_path, sampler_path)
+    _revalidate_terminal_timing_proxy_witness(
+        output_dir / "timing-proxy-witness.json", description,
+        source_commit, timing_proxy_witness_sha256)
     runner_api._atomic_write_object(
         output_dir / "run-summary.json", completed_summary)
     return completed_summary
@@ -585,6 +807,47 @@ def _parse_canonical_object(data: bytes, context: str) -> Mapping[str, Any]:
     if data != logical + b"\n":
         fail("{} must be exact canonical JSON followed by LF".format(context))
     return value
+
+
+def _revalidate_terminal_timing_proxy_witness(
+        path: Path, description: Mapping[str, Any], source_git_commit: str,
+        expected_sha256: str) -> Mapping[str, Any]:
+    """Reopen the published witness immediately before terminal status."""
+    witness = _parse_canonical_object(
+        _read_regular_bytes(path, "terminal timing proxy witness"),
+        "terminal timing proxy witness")
+    _validate_timing_proxy_witness(
+        witness, description["binary_sha256"], source_git_commit)
+    if contract_api.sha256_json(witness) != expected_sha256:
+        fail("timing proxy witness changed before terminal summary publication")
+    return witness
+
+
+def _revalidate_terminal_campaign_execution(
+        contract: Mapping[str, Any], candidate_id: str,
+        expected_freeze: Mapping[str, Any],
+        expected_validation: Mapping[str, Any], freeze_path: Path,
+        trace_path: Path, native_path: Path, result_path: Path,
+        receipt_path: Path, sampler_path: Path) -> Mapping[str, Any]:
+    """Reopen every execution dependency immediately before completion."""
+    try:
+        validated = native_api.validate_execution_receipt(
+            contract, "recovery", "development", freeze_path, trace_path,
+            native_path, result_path, receipt_path,
+            verify_live_sampler=False, sampler_path=sampler_path)
+        reopened_freeze = contract_api.load_freeze_manifest(
+            contract, "development", freeze_path, "recovery")
+    except (native_api.NativeEvidenceError,
+            contract_api.ContractError) as exc:
+        fail(str(exc))
+    _validate_candidate_freeze(reopened_freeze, candidate_id)
+    if contract_api.canonical_json(reopened_freeze) != \
+            contract_api.canonical_json(expected_freeze):
+        fail("campaign freeze changed after native validation")
+    if contract_api.canonical_json(validated) != \
+            contract_api.canonical_json(expected_validation):
+        fail("campaign execution changed after native validation")
+    return validated
 
 
 def _read_regular_bytes(
@@ -633,6 +896,43 @@ def _read_regular_bytes(
         if descriptor >= 0:
             os.close(descriptor)
     return b""
+
+
+def _read_terminal_combination_artifacts(
+        output_dir: Path) -> Mapping[str, bytes]:
+    """Read the three named logical outputs through one pinned directory."""
+    directory_fd = -1
+    try:
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        directory_flag = getattr(os, "O_DIRECTORY", 0)
+        if nofollow == 0 or directory_flag == 0:
+            fail("logical output directory cannot be opened fail-closed")
+        directory_fd = os.open(
+            str(output_dir), os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) |
+            nofollow | directory_flag)
+        opened_info = os.fstat(directory_fd)
+        if not stat.S_ISDIR(opened_info.st_mode):
+            fail("logical output path must be a real directory")
+        resolved_info = output_dir.resolve(strict=True).stat()
+        if (opened_info.st_dev, opened_info.st_ino) != \
+                (resolved_info.st_dev, resolved_info.st_ino):
+            fail("logical output directory identity changed")
+        return {
+            "trace": _read_regular_bytes(
+                Path("logical-recovery-traces.jsonl"),
+                "terminal logical recovery trace", directory_fd),
+            "freeze": _read_regular_bytes(
+                Path("logical-recovery-freeze.json"),
+                "terminal logical recovery freeze", directory_fd),
+            "result": _read_regular_bytes(
+                Path("logical-recovery-results.jsonl"),
+                "terminal logical recovery result", directory_fd),
+        }
+    except OSError as exc:
+        fail("cannot reopen logical output directory: {}".format(exc))
+    finally:
+        if directory_fd >= 0:
+            os.close(directory_fd)
 
 
 def _parse_exact_jsonl(
@@ -723,6 +1023,8 @@ def load_completed_campaign(
         "native": "recovery-native-results.jsonl",
         "result": "recovery-results.jsonl",
         "receipt": "recovery-execution.json",
+        "witness": "timing-proxy-witness.json",
+        "sampler": "sampler-attestation.json",
     }
     contexts = {
         "summary": "campaign run summary",
@@ -731,6 +1033,8 @@ def load_completed_campaign(
         "native": "campaign native recovery stream",
         "result": "campaign recovery ledger",
         "receipt": "campaign recovery execution receipt",
+        "witness": "campaign timing proxy witness",
+        "sampler": "campaign sampler attestation",
     }
     try:
         snapshots = {
@@ -767,7 +1071,8 @@ def load_completed_campaign(
             validated = native_api.validate_execution_receipt(
                 contract, "recovery", "development", paths["freeze"],
                 paths["trace"], paths["native"], paths["result"],
-                paths["receipt"], verify_live_sampler=False)
+                paths["receipt"], verify_live_sampler=False,
+                sampler_path=paths["sampler"])
             freeze = contract_api.load_freeze_manifest(
                 contract, "development", paths["freeze"], "recovery")
         except (native_api.NativeEvidenceError,
@@ -779,6 +1084,21 @@ def load_completed_campaign(
                 receipt.get("freeze_manifest_sha256"):
             fail("reopened candidate freeze differs from its execution receipt")
         raw_basis, raw_schedule_sha256 = _raw_policy_from_freeze(freeze)
+        witness = _parse_canonical_object(
+            snapshots["witness"], "campaign timing proxy witness")
+        _validate_timing_proxy_witness(
+            witness, freeze["arms"][0]["binary_sha256"],
+            freeze["source_git_commit"])
+        witness_sha256 = contract_api.sha256_json(witness)
+        if (witness_sha256 != freeze["timing_proxy_witness_sha256"] or
+                witness_sha256 != summary["timing_proxy_witness_sha256"]):
+            fail("campaign timing proxy witness differs from freeze or summary")
+        for field in (
+                "work_rank_summary_sha256",
+                "work_rank_result_stream_sha256",
+                "work_rank_domain_sha256"):
+            if summary.get(field) != freeze.get(field):
+                fail("campaign work/rank binding differs from its freeze")
         expected_summary = {
             "source_git_commit": freeze["source_git_commit"],
             "contract_sha256": contract_api.contract_sha256(contract),
@@ -797,12 +1117,22 @@ def load_completed_campaign(
             "dimm_max_millic": receipt["thermal"]["dimm_max_millic"],
             "construction_seed_basis": raw_basis,
             "seed_schedule_sha256": raw_schedule_sha256,
+            "timing_proxy_witness_sha256": witness_sha256,
+            "work_rank_summary_sha256":
+                freeze["work_rank_summary_sha256"],
+            "work_rank_result_stream_sha256":
+                freeze["work_rank_result_stream_sha256"],
+            "work_rank_domain_sha256":
+                freeze["work_rank_domain_sha256"],
         }
         if (type(expected_summary["controller_cpu"]) is not int or
                 expected_summary["controller_cpu"] < 0 or
-                any(summary.get(field) != value
+                any(contract_api.canonical_json(summary.get(field)) !=
+                    contract_api.canonical_json(value)
                     for field, value in expected_summary.items()) or
-                summary.get("recovery_records") != RECOVERY_RECORDS):
+                contract_api.canonical_json(
+                    summary.get("recovery_records")) !=
+                contract_api.canonical_json(RECOVERY_RECORDS)):
             fail("campaign run summary differs from its validated execution")
         rows = _parse_exact_jsonl(
             snapshots["result"], "campaign recovery ledger")
@@ -810,11 +1140,16 @@ def load_completed_campaign(
                 _hash_bytes(snapshots["result"]) != \
                 receipt["result_stream_sha256"]:
             fail("campaign recovery ledger differs from its receipted result hash")
+        raw_join = _native_raw_identity_join_binding(rows)
+        if any(contract_api.canonical_json(summary.get(field)) !=
+               contract_api.canonical_json(value)
+               for field, value in raw_join.items()):
+            fail("campaign raw identity join receipt differs from native rows")
         _validate_bound_recovery_trace_bytes(
             contract, freeze, snapshots["trace"])
         return {
             "directory": str(resolved),
-        "directory_identity": (opened_info.st_dev, opened_info.st_ino),
+            "directory_identity": (opened_info.st_dev, opened_info.st_ino),
             "candidate_id": candidate_id,
             "candidate_arm": candidate_arm,
             "summary": summary,
@@ -822,6 +1157,7 @@ def load_completed_campaign(
             "receipt": receipt,
             "rows": rows,
             "trace_bytes": snapshots["trace"],
+            "timing_proxy_witness": witness,
         }
 
 
@@ -829,9 +1165,9 @@ def _combine_loaded_campaigns(
         contract: Mapping[str, Any], campaigns: Sequence[Mapping[str, Any]],
         ) -> Tuple[Mapping[str, Any], List[Mapping[str, Any]],
                    List[Mapping[str, Any]], bytes]:
-    """Construct a logical six-arm freeze/ledger from validated payloads."""
+    """Re-open the sole four-arm campaign as a logical evidence bundle."""
     if len(campaigns) != len(CANDIDATE_SPECS):
-        fail("combination requires exactly three completed campaign directories")
+        fail("combination requires exactly one completed campaign directory")
     by_id: Dict[str, Mapping[str, Any]] = {}
     identities = set()
     for campaign in campaigns:
@@ -927,7 +1263,7 @@ def _combine_loaded_campaigns(
         logical_rows.extend(
             campaign["rows"][cell * 4 + 3] for campaign in ordered)
     if len(logical_rows) != LOGICAL_RECORDS:
-        fail("logical recovery ledger is not exactly six arms by 360 cells")
+        fail("logical recovery ledger is not exactly four arms by 360 cells")
 
     logical_freeze = {
         "schema": contract_api.RAW_FREEZE_SCHEMA,
@@ -946,12 +1282,22 @@ def _combine_loaded_campaigns(
             "artifact_kind": "logical_recovery_combination",
             "input_freeze_manifest_sha256s": input_freezes,
         },
+        "architecture_roles": dict(
+            first["freeze"]["architecture_roles"]),
+        "timing_proxy_witness_sha256":
+            first["freeze"]["timing_proxy_witness_sha256"],
+        "work_rank_summary_sha256":
+            first["freeze"]["work_rank_summary_sha256"],
+        "work_rank_result_stream_sha256":
+            first["freeze"]["work_rank_result_stream_sha256"],
+        "work_rank_domain_sha256":
+            first["freeze"]["work_rank_domain_sha256"],
         "arms": logical_arms,
     }
     try:
         # Validate the synthesized structure before allowing publication.
         contract_api._exact_keys(
-            logical_freeze, contract_api.FREEZE_FIELDS,
+            logical_freeze, contract_api.RAW_V3_FREEZE_FIELDS,
             "logical recovery freeze")
     except contract_api.ContractError as exc:
         fail(str(exc))
@@ -965,6 +1311,52 @@ def _combine_loaded_campaigns(
         "execution_receipt_sha256": campaign["receipt"]["receipt_sha256"],
     } for campaign in ordered]
     return logical_freeze, logical_rows, bindings, first["trace_bytes"]
+
+
+def _native_raw_identity_join_binding(
+        rows: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
+    """Recompute the sidecar-join receipt projection from native rows only."""
+    joined = []
+    seen = set()
+    for row in rows:
+        if row.get("construction_seed_basis") != RAW_SEED_BASIS:
+            continue
+        if (row.get("base_seed_attempt") != row.get("trial") or
+                row.get("construction_attempt") !=
+                    row.get("precode_attempt") or
+                row.get("precode_attempt") != row.get("packet_attempt")):
+            fail("native raw row has inconsistent construction attempts")
+        key = (
+            row.get("arm"), row.get("K"), row.get("block_bytes"),
+            row.get("trial"), row.get("schedule"), row.get("loss_ppm"),
+            row.get("loss_seed"),
+        )
+        if key in seen:
+            fail("native logical ledger repeats a raw construction identity")
+        seen.add(key)
+        try:
+            joined.append({
+                "K": row["K"],
+                "arm": row["arm"],
+                "block_bytes": row["block_bytes"],
+                "cell_sha256": row["cell_sha256"],
+                "dense_anchor_layout": row["dense_anchor_layout"],
+                "loss_ppm": row["loss_ppm"],
+                "loss_seed": row["loss_seed"],
+                "realized_construction_sha256":
+                    row["realized_construction_sha256"],
+                "schedule": row["schedule"],
+                "trace_sha256": row["trace_sha256"],
+                "trial": row["trial"],
+            })
+        except KeyError as exc:
+            fail("native raw identity row lacks {}".format(exc.args[0]))
+    if len(joined) != RAW_IDENTITY_JOIN_COUNT:
+        fail("native raw identity receipt has the wrong cardinality")
+    return {
+        "raw_identity_join_count": len(joined),
+        "raw_identity_join_sha256": contract_api.sha256_json(joined),
+    }
 
 
 def _bind_work_rank_identities(
@@ -1005,10 +1397,10 @@ def _bind_work_rank_identities(
         "seed_schedule_sha256", "precode_attempt", "packet_attempt",
         "effective_precode_seed", "effective_packet_seed", "staircase",
         "binary_dense_rows", "gf256_heavy_rows", "source_hits",
-        "dense_identity_corner", "heavy_family", "mix_count",
+        "dense_anchor_layout", "dense_identity_corner", "heavy_family",
+        "mix_count",
         "realized_construction_sha256",
     )
-    joined = []
     seen = set()
     for native in logical_rows:
         if native.get("construction_seed_basis") != RAW_SEED_BASIS:
@@ -1039,20 +1431,7 @@ def _bind_work_rank_identities(
                     native.get("trace_sha256") !=
                     sidecar.get("frozen_trace_sha256")):
                 fail("native and work/rank frozen trace identities differ")
-        joined.append({
-            "K": native["K"],
-            "arm": native["arm"],
-            "block_bytes": native["block_bytes"],
-            "cell_sha256": native["cell_sha256"],
-            "loss_ppm": native["loss_ppm"],
-            "loss_seed": native["loss_seed"],
-            "realized_construction_sha256":
-                native["realized_construction_sha256"],
-            "schedule": native["schedule"],
-            "trace_sha256": native["trace_sha256"],
-            "trial": native["trial"],
-        })
-    if len(joined) != RAW_IDENTITY_JOIN_COUNT or seen != set(grouped):
+    if len(seen) != RAW_IDENTITY_JOIN_COUNT or seen != set(grouped):
         fail("native and work/rank raw identity domains differ")
     for field in ("summary_sha256", "result_stream_sha256",
                   "work_domain_sha256"):
@@ -1062,8 +1441,7 @@ def _bind_work_rank_identities(
         "work_rank_summary_sha256": summary["summary_sha256"],
         "work_rank_result_stream_sha256": summary["result_stream_sha256"],
         "work_rank_domain_sha256": summary["work_domain_sha256"],
-        "raw_identity_join_count": len(joined),
-        "raw_identity_join_sha256": contract_api.sha256_json(joined),
+        **_native_raw_identity_join_binding(logical_rows),
     }
 
 
@@ -1080,6 +1458,14 @@ def combine_recovery_screens(args: argparse.Namespace) -> Mapping[str, Any]:
         _combine_loaded_campaigns(contract, campaigns)
     work_binding = _bind_work_rank_identities(
         logical_rows, work_screen, logical_freeze["source_git_commit"])
+    for field in (
+            "work_rank_summary_sha256",
+            "work_rank_result_stream_sha256",
+            "work_rank_domain_sha256"):
+        if contract_api.canonical_json(work_binding.get(field)) != \
+                contract_api.canonical_json(logical_freeze.get(field)):
+            fail("loaded work/rank artifact differs from campaign freeze {}".
+                 format(field))
     output_dir = runner_api._create_output_dir(args.output_dir)
     trace_path = output_dir / "logical-recovery-traces.jsonl"
     freeze_path = output_dir / "logical-recovery-freeze.json"
@@ -1101,16 +1487,30 @@ def combine_recovery_screens(args: argparse.Namespace) -> Mapping[str, Any]:
             contract, "development", result_path, freeze_path, trace_path)
     except contract_api.ContractError as exc:
         fail(str(exc))
-    if contract_api.freeze_manifest_sha256(loaded_freeze) != \
-            validator_summary.get("freeze_manifest_sha256"):
-        fail("logical validator summary does not bind its synthesized freeze")
+    terminal = _read_terminal_combination_artifacts(output_dir)
+    terminal_freeze = _parse_canonical_object(
+        terminal["freeze"], "terminal logical recovery freeze")
+    terminal_freeze_sha256 = contract_api.freeze_manifest_sha256(
+        terminal_freeze)
+    if (contract_api.canonical_json(terminal_freeze) !=
+            contract_api.canonical_json(logical_freeze) or
+            terminal_freeze_sha256 !=
+                contract_api.freeze_manifest_sha256(loaded_freeze) or
+            terminal_freeze_sha256 !=
+                validator_summary.get("freeze_manifest_sha256")):
+        fail("terminal logical freeze differs from validated evidence")
+    if terminal["trace"] != trace_bytes:
+        fail("terminal logical trace differs from validated evidence")
+    _validate_bound_recovery_trace_bytes(
+        contract, terminal_freeze, terminal["trace"])
+    terminal_rows = _parse_exact_jsonl(
+        terminal["result"], "terminal logical recovery result")
     result_hash = _hash_jsonl(logical_rows)
-    try:
-        if runner_api._hash_file(result_path) != result_hash:
-            fail("published logical ledger differs from its canonical hash")
-    except runner_api.RunnerError as exc:
-        fail(str(exc))
-    raw_basis, raw_schedule_sha256 = _raw_policy_from_freeze(loaded_freeze)
+    if (contract_api.canonical_json(terminal_rows) !=
+            contract_api.canonical_json(logical_rows) or
+            _hash_bytes(terminal["result"]) != result_hash):
+        fail("terminal logical result differs from validated evidence")
+    raw_basis, raw_schedule_sha256 = _raw_policy_from_freeze(terminal_freeze)
     summary: Dict[str, Any] = {
         "schema": COMBINATION_SUMMARY_SCHEMA,
         "status": "complete",
@@ -1120,7 +1520,7 @@ def combine_recovery_screens(args: argparse.Namespace) -> Mapping[str, Any]:
         "contract_sha256": contract_api.contract_sha256(contract),
         "domain_sha256": logical_freeze["domain_sha256"],
         "trace_manifest_sha256": logical_freeze["trace_manifest_sha256"],
-        "trace_file_sha256": _hash_bytes(trace_bytes),
+        "trace_file_sha256": _hash_bytes(terminal["trace"]),
         "source_git_commit": logical_freeze["source_git_commit"],
         "worker_binary_sha256": logical_freeze["arms"][0]["binary_sha256"],
         "candidate_roster": [value[0] for value in CANDIDATE_SPECS],
@@ -1129,7 +1529,7 @@ def combine_recovery_screens(args: argparse.Namespace) -> Mapping[str, Any]:
         "construction_seed_basis": raw_basis,
         "seed_schedule_sha256": raw_schedule_sha256,
         "logical_freeze_manifest_sha256":
-            contract_api.freeze_manifest_sha256(loaded_freeze),
+            terminal_freeze_sha256,
         "logical_result_stream_sha256": result_hash,
         "validator_summary": validator_summary,
         "validator_summary_sha256":
@@ -1155,6 +1555,9 @@ def _add_common_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--candidate", choices=tuple(CANDIDATE_BY_ID),
                         required=True)
+    parser.add_argument(
+        "--work-rank-dir", type=Path, required=True,
+        help="completed raw-v3 D12/Two07 work/rank artifact directory")
     parser.add_argument("--sampler-pid", type=int, required=True)
     parser.add_argument("--sampler-cpu", type=int, required=True)
     parser.add_argument("--sampler-script", type=Path, required=True)
@@ -1176,15 +1579,15 @@ def main(argv: Sequence[str] = ()) -> int:
         "run", help="run one exact four-arm native recovery campaign")
     _add_common_run_arguments(run)
     combine = commands.add_parser(
-        "combine", help="combine three completed runs into a logical ledger")
+        "combine", help="combine the sole completed Two07 recovery campaign")
     combine.add_argument(
         "--contract", type=Path, default=contract_api.DEFAULT_CONTRACT)
     combine.add_argument(
         "--campaign-dir", type=Path, action="append", required=True,
-        help="repeat exactly three times, once per closed candidate")
+        help="supply exactly once for the sole closed Two07 candidate")
     combine.add_argument(
         "--work-rank-dir", type=Path, required=True,
-        help="completed raw-v2 precodefail work/rank artifact directory")
+        help="completed raw-v3 D12/Two07 work/rank artifact directory")
     combine.add_argument("--output-dir", type=Path, required=True)
     combine.add_argument(
         "--deadline-seconds", type=float,
@@ -1200,7 +1603,7 @@ def main(argv: Sequence[str] = ()) -> int:
                 summary = run_recovery_screen(args)
         else:
             if len(args.campaign_dir) != len(CANDIDATE_SPECS):
-                fail("--campaign-dir must be supplied exactly three times")
+                fail("--campaign-dir must be supplied exactly one time")
             if (not math.isfinite(args.deadline_seconds) or
                     not 0.0 < args.deadline_seconds <=
                     runner_api.MAX_WALL_SECONDS):
