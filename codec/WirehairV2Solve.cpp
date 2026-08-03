@@ -1935,6 +1935,18 @@ WirehairResult SolvePrecodeSystem(
         intermediate_blocks_out, stats, resume_state);
 }
 
+static bool SolveOutputAliasesResumeState(
+    const std::vector<uint8_t>& output,
+    const PrecodeSolveResumeState& state)
+{
+    return &output == &state.Values ||
+        &output == &state.PivotCoefficients ||
+        &output == &state.PivotRhs ||
+        &output == &state.HavePivot ||
+        &output == &state.CoefficientScratch ||
+        &output == &state.RhsScratch;
+}
+
 static WirehairResult SolvePrecodeSystemImpl(
     const PrecodeSystem& system,
     const PacketRowConfig& config,
@@ -1946,6 +1958,11 @@ static WirehairResult SolvePrecodeSystemImpl(
     PrecodeSolveResumeState* resume_state,
     bool validate_system)
 {
+    if (resume_state && SolveOutputAliasesResumeState(
+            intermediate_blocks_out, *resume_state))
+    {
+        return Wirehair_InvalidInput;
+    }
     PrecodeSolveStats st = {};
     const uint32_t K = system.Params.BlockCount;
     const uint32_t S = system.Params.Staircase;
@@ -2984,6 +3001,9 @@ WirehairResult ResumePrecodeSystem(
     PrecodeSolveStats* stats,
     bool allow_insert)
 {
+    if (SolveOutputAliasesResumeState(intermediate_blocks_out, state)) {
+        return Wirehair_InvalidInput;
+    }
     const uint32_t K = system.Params.BlockCount;
     const uint64_t P_wide = (uint64_t)system.Params.Staircase +
         system.Params.DenseRows + system.Params.HeavyRows;

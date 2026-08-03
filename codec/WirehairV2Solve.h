@@ -266,6 +266,9 @@ bool EvaluatePacketBlockForValidatedSystemWithRuntime(
     every failure.  When resume_state is non-null, a rank-deficient residual
     within the cap atomically replaces it with an active affine/pivot
     checkpoint; cap failures leave it unchanged and require a cold retry.
+    The output vector must not alias Values, PivotCoefficients, PivotRhs,
+    HavePivot, CoefficientScratch, or RhsScratch in that same resume_state;
+    such an alias returns InvalidInput without changing output, state, or stats.
     `stats` is diagnostic rather than transactional output: completed algebraic
     outcomes publish their counters, while validation failures and allocation
     failures before a resumable checkpoint may leave the caller's prior value
@@ -316,6 +319,9 @@ WirehairResult SolvePrecodeSystemForValidatedSystemWithRuntime(
     Allocations finish before an inserting call changes the algebraic state, so
     OOM is retryable.  On OOM, stats receives the unchanged checkpoint counters
     when non-null.  Output remains unchanged on NeedMore and every failure.
+    The output vector must not alias Values, PivotCoefficients, PivotRhs,
+    HavePivot, CoefficientScratch, or RhsScratch in resume_state; such an alias
+    returns InvalidInput without changing output, state, or stats.
 */
 WirehairResult ResumePrecodeSystem(
     const PrecodeSystem& system,

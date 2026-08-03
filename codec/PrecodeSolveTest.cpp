@@ -34,6 +34,136 @@ public:
     }
 };
 
+bool SameSolveStats(
+    const wirehair_v2::PrecodeSolveStats& a,
+    const wirehair_v2::PrecodeSolveStats& b)
+{
+    return a.PacketRows == b.PacketRows &&
+        a.PeeledColumns == b.PeeledColumns &&
+        a.InactivatedColumns == b.InactivatedColumns &&
+        a.ResidualRows == b.ResidualRows &&
+        a.ResidualRank == b.ResidualRank &&
+        a.BinaryResidualRank == b.BinaryResidualRank &&
+        a.BinaryRowReferences == b.BinaryRowReferences &&
+        a.BinaryRowStorageBytes == b.BinaryRowStorageBytes &&
+        a.BinaryAdjacencyStorageBytes == b.BinaryAdjacencyStorageBytes &&
+        a.BinaryRowStorageAllocations == b.BinaryRowStorageAllocations &&
+        a.BinaryAdjacencyStorageAllocations ==
+            b.BinaryAdjacencyStorageAllocations &&
+        a.BlockXors == b.BlockXors &&
+        a.BlockMulAdds == b.BlockMulAdds &&
+        a.BuildNanoseconds == b.BuildNanoseconds &&
+        a.PeelNanoseconds == b.PeelNanoseconds &&
+        a.ProjectNanoseconds == b.ProjectNanoseconds &&
+        a.ResidualNanoseconds == b.ResidualNanoseconds &&
+        a.BackSubNanoseconds == b.BackSubNanoseconds &&
+        a.PacketSeedAttempt == b.PacketSeedAttempt;
+}
+
+bool SameResumeState(
+    const wirehair_v2::PrecodeSolveResumeState& a,
+    const wirehair_v2::PrecodeSolveResumeState& b)
+{
+    return a.SourceCount == b.SourceCount &&
+        a.PrecodeCount == b.PrecodeCount &&
+        a.ColumnCount == b.ColumnCount &&
+        a.BlockBytes == b.BlockBytes &&
+        a.InactiveCount == b.InactiveCount &&
+        a.ProjectionWords == b.ProjectionWords &&
+        a.Rank == b.Rank &&
+        a.Config.PeelSeed == b.Config.PeelSeed &&
+        a.Config.MixCount == b.Config.MixCount &&
+        a.Runtime.SourcePrime() == b.Runtime.SourcePrime() &&
+        a.Runtime.PrecodePrime() == b.Runtime.PrecodePrime() &&
+        SameSolveStats(a.Stats, b.Stats) &&
+        a.InactiveIndex == b.InactiveIndex &&
+        a.InactiveColumns == b.InactiveColumns &&
+        a.Projection == b.Projection &&
+        a.Values == b.Values &&
+        a.PivotCoefficients == b.PivotCoefficients &&
+        a.PivotRhs == b.PivotRhs &&
+        a.HavePivot == b.HavePivot &&
+        a.CoefficientScratch == b.CoefficientScratch &&
+        a.RhsScratch == b.RhsScratch &&
+        a.Active == b.Active;
+}
+
+struct ResumeStorageIdentity
+{
+    const uint32_t* InactiveIndexData;
+    size_t InactiveIndexCapacity;
+    const uint32_t* InactiveColumnsData;
+    size_t InactiveColumnsCapacity;
+    const uint64_t* ProjectionData;
+    size_t ProjectionCapacity;
+    const uint8_t* ValuesData;
+    size_t ValuesCapacity;
+    const uint8_t* PivotCoefficientsData;
+    size_t PivotCoefficientsCapacity;
+    const uint8_t* PivotRhsData;
+    size_t PivotRhsCapacity;
+    const uint8_t* HavePivotData;
+    size_t HavePivotCapacity;
+    const uint8_t* CoefficientScratchData;
+    size_t CoefficientScratchCapacity;
+    const uint8_t* RhsScratchData;
+    size_t RhsScratchCapacity;
+};
+
+ResumeStorageIdentity CaptureResumeStorageIdentity(
+    const wirehair_v2::PrecodeSolveResumeState& state)
+{
+    ResumeStorageIdentity identity = {};
+    identity.InactiveIndexData = state.InactiveIndex.data();
+    identity.InactiveIndexCapacity = state.InactiveIndex.capacity();
+    identity.InactiveColumnsData = state.InactiveColumns.data();
+    identity.InactiveColumnsCapacity = state.InactiveColumns.capacity();
+    identity.ProjectionData = state.Projection.data();
+    identity.ProjectionCapacity = state.Projection.capacity();
+    identity.ValuesData = state.Values.data();
+    identity.ValuesCapacity = state.Values.capacity();
+    identity.PivotCoefficientsData = state.PivotCoefficients.data();
+    identity.PivotCoefficientsCapacity = state.PivotCoefficients.capacity();
+    identity.PivotRhsData = state.PivotRhs.data();
+    identity.PivotRhsCapacity = state.PivotRhs.capacity();
+    identity.HavePivotData = state.HavePivot.data();
+    identity.HavePivotCapacity = state.HavePivot.capacity();
+    identity.CoefficientScratchData = state.CoefficientScratch.data();
+    identity.CoefficientScratchCapacity =
+        state.CoefficientScratch.capacity();
+    identity.RhsScratchData = state.RhsScratch.data();
+    identity.RhsScratchCapacity = state.RhsScratch.capacity();
+    return identity;
+}
+
+bool SameResumeStorageIdentity(
+    const wirehair_v2::PrecodeSolveResumeState& state,
+    const ResumeStorageIdentity& identity)
+{
+    return state.InactiveIndex.data() == identity.InactiveIndexData &&
+        state.InactiveIndex.capacity() == identity.InactiveIndexCapacity &&
+        state.InactiveColumns.data() == identity.InactiveColumnsData &&
+        state.InactiveColumns.capacity() ==
+            identity.InactiveColumnsCapacity &&
+        state.Projection.data() == identity.ProjectionData &&
+        state.Projection.capacity() == identity.ProjectionCapacity &&
+        state.Values.data() == identity.ValuesData &&
+        state.Values.capacity() == identity.ValuesCapacity &&
+        state.PivotCoefficients.data() == identity.PivotCoefficientsData &&
+        state.PivotCoefficients.capacity() ==
+            identity.PivotCoefficientsCapacity &&
+        state.PivotRhs.data() == identity.PivotRhsData &&
+        state.PivotRhs.capacity() == identity.PivotRhsCapacity &&
+        state.HavePivot.data() == identity.HavePivotData &&
+        state.HavePivot.capacity() == identity.HavePivotCapacity &&
+        state.CoefficientScratch.data() ==
+            identity.CoefficientScratchData &&
+        state.CoefficientScratch.capacity() ==
+            identity.CoefficientScratchCapacity &&
+        state.RhsScratch.data() == identity.RhsScratchData &&
+        state.RhsScratch.capacity() == identity.RhsScratchCapacity;
+}
+
 bool CheckLowestBitIndex()
 {
     for (unsigned bit = 0u; bit < 64u; ++bit)
@@ -1397,6 +1527,103 @@ bool CheckIncrementalResumeCase(uint32_t block_bytes)
     {
         std::fprintf(stderr, "solve: rank-deficient checkpoint missing\n");
         return false;
+    }
+
+    typedef std::vector<uint8_t>
+        wirehair_v2::PrecodeSolveResumeState::* ResumeByteVectorMember;
+    static const ResumeByteVectorMember resume_byte_vectors[] = {
+        &wirehair_v2::PrecodeSolveResumeState::Values,
+        &wirehair_v2::PrecodeSolveResumeState::PivotCoefficients,
+        &wirehair_v2::PrecodeSolveResumeState::PivotRhs,
+        &wirehair_v2::PrecodeSolveResumeState::HavePivot,
+        &wirehair_v2::PrecodeSolveResumeState::CoefficientScratch,
+        &wirehair_v2::PrecodeSolveResumeState::RhsScratch
+    };
+    static const char* const resume_byte_vector_names[] = {
+        "Values",
+        "PivotCoefficients",
+        "PivotRhs",
+        "HavePivot",
+        "CoefficientScratch",
+        "RhsScratch"
+    };
+    static_assert(
+        sizeof(resume_byte_vectors) / sizeof(resume_byte_vectors[0]) ==
+            sizeof(resume_byte_vector_names) /
+                sizeof(resume_byte_vector_names[0]),
+        "resume byte-vector alias names must stay complete");
+    for (size_t alias_i = 0u;
+         alias_i < sizeof(resume_byte_vectors) /
+             sizeof(resume_byte_vectors[0]);
+         ++alias_i)
+    {
+        // Cold checkpoint publication replaces an existing resume state.  Its
+        // output cannot be one of the vectors being replaced.
+        wirehair_v2::PrecodeSolveResumeState cold_alias = resume;
+        std::vector<uint8_t>& cold_output =
+            cold_alias.*resume_byte_vectors[alias_i];
+        cold_output.assign(alias_i + 3u, (uint8_t)(0x80u + alias_i));
+        const wirehair_v2::PrecodeSolveResumeState cold_before = cold_alias;
+        const ResumeStorageIdentity cold_storage_before =
+            CaptureResumeStorageIdentity(cold_alias);
+        const std::vector<uint8_t> cold_output_before = cold_output;
+        const size_t cold_persistent_before = cold_alias.PersistentBytes();
+        wirehair_v2::PrecodeSolveStats cold_stats = stats;
+        cold_stats.PacketRows ^= UINT32_C(0x13579bdf);
+        cold_stats.BlockXors ^= UINT64_C(0x2468ace013579bdf);
+        const wirehair_v2::PrecodeSolveStats cold_stats_before = cold_stats;
+        if (wirehair_v2::SolvePrecodeSystem(
+                system, config, deficient, block_bytes,
+                cold_output, &cold_stats, &cold_alias) !=
+                Wirehair_InvalidInput ||
+            !SameResumeState(cold_alias, cold_before) ||
+            !SameResumeStorageIdentity(cold_alias, cold_storage_before) ||
+            cold_alias.PersistentBytes() != cold_persistent_before ||
+            cold_output != cold_output_before ||
+            !SameSolveStats(cold_stats, cold_stats_before))
+        {
+            std::fprintf(stderr,
+                "solve: cold checkpoint/output alias changed state "
+                "bb=%u member=%s\n",
+                block_bytes, resume_byte_vector_names[alias_i]);
+            return false;
+        }
+
+        // Resume completion clears the checkpoint after publishing.  Reject
+        // aliases before row generation, scratch writes, or output allocation.
+        wirehair_v2::PrecodeSolveResumeState resume_alias = resume;
+        std::vector<uint8_t>& resume_output =
+            resume_alias.*resume_byte_vectors[alias_i];
+        const wirehair_v2::PrecodeSolveResumeState resume_before =
+            resume_alias;
+        const ResumeStorageIdentity resume_storage_before =
+            CaptureResumeStorageIdentity(resume_alias);
+        const std::vector<uint8_t> resume_output_before = resume_output;
+        const size_t resume_persistent_before =
+            resume_alias.PersistentBytes();
+        wirehair_v2::PrecodeSolveStats resume_stats = stats;
+        resume_stats.PacketRows ^= UINT32_C(0x89abcdef);
+        resume_stats.BlockMulAdds ^= UINT64_C(0xfedcba9876543210);
+        const wirehair_v2::PrecodeSolveStats resume_stats_before =
+            resume_stats;
+        if (wirehair_v2::ResumePrecodeSystem(
+                system, config, 1u,
+                message.data() + block_bytes, block_bytes,
+                resume_alias, resume_output, &resume_stats, true) !=
+                Wirehair_InvalidInput ||
+            !SameResumeState(resume_alias, resume_before) ||
+            !SameResumeStorageIdentity(
+                resume_alias, resume_storage_before) ||
+            resume_alias.PersistentBytes() != resume_persistent_before ||
+            resume_output != resume_output_before ||
+            !SameSolveStats(resume_stats, resume_stats_before))
+        {
+            std::fprintf(stderr,
+                "solve: incremental checkpoint/output alias changed state "
+                "bb=%u member=%s\n",
+                block_bytes, resume_byte_vector_names[alias_i]);
+            return false;
+        }
     }
 
     const uint32_t rank_before = resume.Rank;
