@@ -10,9 +10,10 @@ only when the closed recovery and timing gates produce a winner.
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
+import hashlib
 import os
 from pathlib import Path
-import secrets
 import stat
 import sys
 import tempfile
@@ -109,14 +110,194 @@ def _open_real_parent(path: Path) -> Tuple[int, ReceiptIdentity]:
     raise AssertionError("unreachable")
 
 
-def _read_stable_receipt_bytes(
-        path: Path,
+def _require_parent_descriptor(
+        descriptor: int, identity: ReceiptIdentity) -> None:
+    """Require one still-open descriptor for the originally named parent."""
+    try:
+        opened = os.fstat(descriptor)
+    except OSError as exc:
+        fail("selection receipt parent descriptor is invalid: {}".format(exc))
+    if (not stat.S_ISDIR(opened.st_mode) or
+            (opened.st_dev, opened.st_ino) != identity):
+        fail("selection receipt parent descriptor identity changed")
+
+
+@dataclass(frozen=True)
+class _PreparedReceipt:
+    """One fully written, still-unnamed receipt held by an exact inode fd."""
+
+    device: int
+    inode: int
+    descriptor: int
+    byte_count: int
+    sha256: str
+    canonical_bytes: bytes
+
+    @property
+    def identity(self) -> ReceiptIdentity:
+        return self.device, self.inode
+
+
+class _ReceiptPublicationTransaction:
+    """Pinned parent and unnamed inode for one publish-wins transaction."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = Path(path)
+        self.name = _receipt_basename(self.path)
+        self.parent_fd = -1
+        self.parent_identity: Optional[ReceiptIdentity] = None
+        self.prepared: Optional[_PreparedReceipt] = None
+
+    def open_parent(self) -> None:
+        if self.parent_fd >= 0 or self.parent_identity is not None:
+            fail("selection receipt publication transaction is already open")
+        parent = self.path.parent
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        directory = getattr(os, "O_DIRECTORY", 0)
+        if nofollow == 0 or directory == 0:
+            fail("selection receipt access requires O_NOFOLLOW and O_DIRECTORY")
+        descriptor = -1
+        failed = True
+        try:
+            descriptor = os.open(
+                str(parent), os.O_RDONLY | directory |
+                getattr(os, "O_CLOEXEC", 0) | nofollow)
+            # Transfer ownership before any helper call.  The finally guard
+            # recognizes the brief local/self alias interval, so an injected
+            # BaseException cannot make both aliases close the same reused fd.
+            self.parent_fd = descriptor
+            descriptor = -1
+            opened = os.fstat(self.parent_fd)
+            if not stat.S_ISDIR(opened.st_mode):
+                fail("selection receipt parent must be a real directory")
+            self.parent_identity = (opened.st_dev, opened.st_ino)
+            _verify_real_parent(parent, self.parent_identity)
+            failed = False
+        except OSError as exc:
+            fail("cannot open selection receipt parent {}: {}".format(
+                parent, exc))
+        finally:
+            if descriptor >= 0:
+                if self.parent_fd == descriptor:
+                    # self is the sole owner; clear only the local alias.
+                    descriptor = -1
+                else:
+                    _close_fd_quietly(descriptor)
+                    descriptor = -1
+            if failed:
+                self.close()
+
+    def require_parent(self) -> Tuple[int, ReceiptIdentity]:
+        if self.parent_fd < 0 or self.parent_identity is None:
+            fail("selection receipt publication transaction is not open")
+        _require_parent_descriptor(self.parent_fd, self.parent_identity)
+        return self.parent_fd, self.parent_identity
+
+    def require_prepared(self) -> _PreparedReceipt:
+        if self.prepared is None:
+            fail("selection receipt publication transaction is not prepared")
+        try:
+            retained = os.fstat(self.prepared.descriptor)
+        except OSError as exc:
+            fail("prepared selection receipt descriptor is invalid: {}".format(
+                exc))
+        if (not stat.S_ISREG(retained.st_mode) or
+                (retained.st_dev, retained.st_ino) !=
+                self.prepared.identity or
+                retained.st_size != self.prepared.byte_count or
+                retained.st_nlink != 0):
+            fail("prepared selection receipt descriptor changed")
+        return self.prepared
+
+    def verify_visible_parent(self) -> None:
+        _parent_fd, parent_identity = self.require_parent()
+        _verify_real_parent(self.path.parent, parent_identity)
+
+    def close(self) -> None:
+        prepared = self.prepared
+        self.prepared = None
+        descriptor = self.parent_fd
+        self.parent_fd = -1
+        self.parent_identity = None
+        first_async_error: Optional[BaseException] = None
+        for owned in (
+                prepared.descriptor if prepared is not None else -1,
+                descriptor):
+            if owned < 0:
+                continue
+            try:
+                os.close(owned)
+            except OSError:
+                pass
+            except BaseException as exc:
+                if first_async_error is None:
+                    first_async_error = exc
+        if first_async_error is not None:
+            raise first_async_error
+
+
+def _read_unnamed_receipt(
+        descriptor: int,
         expected_identity: Optional[ReceiptIdentity] = None,
         ) -> Tuple[bytes, ReceiptFingerprint]:
-    """Bounded, no-follow read pinned to one real parent and regular inode."""
+    """Read and fingerprint one exact, regular, still-unnamed descriptor."""
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 0:
+            fail("prepared architecture selection is not an unnamed file")
+        if (expected_identity is not None and
+                (before.st_dev, before.st_ino) != expected_identity):
+            fail("prepared architecture selection inode identity changed")
+        if before.st_size <= 0 or before.st_size > MAX_SELECTION_RECEIPT_BYTES:
+            fail("prepared architecture selection has an invalid byte size")
+        offset = 0
+        chunks = []
+        while offset < before.st_size:
+            block = os.pread(
+                descriptor, min(64 * 1024, before.st_size - offset), offset)
+            if not block:
+                fail("prepared architecture selection was truncated")
+            chunks.append(block)
+            offset += len(block)
+        if os.pread(descriptor, 1, before.st_size):
+            fail("prepared architecture selection grew while reading")
+        after = os.fstat(descriptor)
+        if (after.st_nlink != 0 or
+                _receipt_fingerprint(before) != _receipt_fingerprint(after)):
+            fail("prepared architecture selection changed while reading")
+        return b"".join(chunks), _receipt_fingerprint(after)
+    except OSError as exc:
+        fail("cannot inspect unnamed architecture selection: {}".format(exc))
+    raise AssertionError("unreachable")
+
+
+def _open_unnamed_receipt(transaction: _ReceiptPublicationTransaction) -> int:
+    """Allocate an O_TMPFILE inode without ever creating a directory entry."""
+    parent_fd, _parent_identity = transaction.require_parent()
+    if transaction.prepared is not None:
+        fail("selection receipt publication transaction was already used")
+    tmpfile = getattr(os, "O_TMPFILE", 0)
+    cloexec = getattr(os, "O_CLOEXEC", 0)
+    if tmpfile == 0 or cloexec == 0:
+        fail("selection receipt publication requires O_TMPFILE and O_CLOEXEC")
+    try:
+        return os.open(
+            ".", tmpfile | os.O_RDWR | cloexec,
+            0o600, dir_fd=parent_fd)
+    except OSError as exc:
+        fail("selection receipt parent does not support O_TMPFILE: {}".format(
+            exc))
+    raise AssertionError("unreachable")
+
+
+def _read_stable_receipt_bytes_at(
+        path: Path, parent_fd: int, parent_identity: ReceiptIdentity,
+        expected_identity: Optional[ReceiptIdentity] = None,
+        ) -> Tuple[bytes, ReceiptFingerprint]:
+    """Bounded no-follow read through one already-pinned real parent."""
     path = Path(path)
     name = _receipt_basename(path)
-    parent_fd, parent_identity = _open_real_parent(path)
+    _require_parent_descriptor(parent_fd, parent_identity)
     descriptor = -1
     try:
         descriptor = os.open(
@@ -150,131 +331,143 @@ def _read_stable_receipt_bytes(
         if (stable_before != stable_after or
                 _receipt_fingerprint(entry) != stable_after):
             fail("selection receipt changed while it was being read")
+        data = b"".join(chunks)
         _verify_real_parent(path.parent, parent_identity)
-        return b"".join(chunks), stable_after
+        return data, stable_after
     except OSError as exc:
         fail("cannot read selection receipt {}: {}".format(path, exc))
     finally:
         _close_fd_quietly(descriptor)
-        _close_fd_quietly(parent_fd)
+    raise AssertionError("unreachable")
 
 
-def _publish_receipt(
-        path: Path, value: Mapping[str, Any]) -> ReceiptIdentity:
-    """Publish one immutable canonical receipt through a pinned directory."""
+def _read_stable_receipt_bytes(
+        path: Path,
+        expected_identity: Optional[ReceiptIdentity] = None,
+        ) -> Tuple[bytes, ReceiptFingerprint]:
+    """Bounded, no-follow read pinned to one real parent and regular inode."""
     path = Path(path)
-    name = _receipt_basename(path)
+    parent_fd, parent_identity = _open_real_parent(path)
+    try:
+        return _read_stable_receipt_bytes_at(
+            path, parent_fd, parent_identity, expected_identity)
+    finally:
+        _close_fd_quietly(parent_fd)
+    raise AssertionError("unreachable")
+
+
+def _prepare_receipt(
+        transaction: _ReceiptPublicationTransaction,
+        contract: Mapping[str, Any], value: Mapping[str, Any],
+        ) -> contract_api.ArchitectureSelection:
+    """Write, reread, validate, and seal a receipt while it is still unnamed."""
+    if not isinstance(transaction, _ReceiptPublicationTransaction):
+        fail("selection receipt publication requires transaction state")
+    transaction.require_parent()
     data = (contract_api.canonical_json(value) + "\n").encode("utf-8")
     if not data or len(data) > MAX_SELECTION_RECEIPT_BYTES:
         fail("architecture selection receipt exceeds its publication cap")
-    parent_fd, parent_identity = _open_real_parent(path)
-    descriptor = -1
-    staged_name: Optional[str] = None
-    published_identity: Optional[Tuple[int, int]] = None
-    committed = False
+    descriptor = _open_unnamed_receipt(transaction)
     try:
-        for _attempt in range(32):
-            candidate = ".{}.{}.tmp".format(
-                name, secrets.token_hex(12))
-            try:
-                descriptor = os.open(
-                    candidate,
-                    os.O_WRONLY | os.O_CREAT | os.O_EXCL |
-                    getattr(os, "O_CLOEXEC", 0) |
-                    getattr(os, "O_NOFOLLOW", 0),
-                    0o600, dir_fd=parent_fd)
-                staged_name = candidate
-                break
-            except FileExistsError:
-                continue
-        if descriptor < 0 or staged_name is None:
-            fail("cannot allocate a unique staged selection receipt")
         offset = 0
         while offset < len(data):
             written = os.write(descriptor, data[offset:])
             if written <= 0:
-                fail("short write while staging architecture selection")
+                fail("short write while preparing architecture selection")
             offset += written
         os.fsync(descriptor)
-        staged = os.fstat(descriptor)
-        if not stat.S_ISREG(staged.st_mode) or staged.st_size != len(data):
-            fail("staged architecture selection is not the written file")
-        published_identity = (staged.st_dev, staged.st_ino)
-        try:
-            os.link(
-                staged_name, name, src_dir_fd=parent_fd,
-                dst_dir_fd=parent_fd, follow_symlinks=False)
-        except FileExistsError:
-            fail("refusing to replace existing selection receipt {}".format(
-                path))
-        published = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-        if (published.st_dev, published.st_ino) != \
-                (staged.st_dev, staged.st_ino):
-            fail("published architecture selection identity changed")
-        os.fsync(parent_fd)
-        os.unlink(staged_name, dir_fd=parent_fd)
-        staged_name = None
-        written_descriptor = descriptor
+        reopened, fingerprint = _read_unnamed_receipt(descriptor)
+        if reopened != data:
+            fail("prepared architecture selection differs from written bytes")
+        transaction.prepared = _PreparedReceipt(
+            device=fingerprint[0], inode=fingerprint[1],
+            descriptor=descriptor,
+            byte_count=len(data),
+            sha256=hashlib.sha256(data).hexdigest(), canonical_bytes=data)
         descriptor = -1
-        os.close(written_descriptor)
-        os.fsync(parent_fd)
-        _verify_real_parent(path.parent, parent_identity)
-        committed = True
-        assert published_identity is not None
-        return published_identity
+        parsed = contract_api._load_json_bytes(
+            reopened, "architecture selection receipt")
+        if not isinstance(parsed, dict):
+            fail("architecture selection receipt must be a JSON object")
+        logical = contract_api.canonical_json(parsed).encode("utf-8")
+        if reopened != logical + b"\n":
+            fail("architecture selection receipt must be canonical JSON")
+        validated = contract_api.validate_selection_receipt(contract, parsed)
+        if contract_api.canonical_json(validated) != \
+                contract_api.canonical_json(value):
+            fail("validated architecture selection differs from candidate")
+        selection = contract_api._seal_validated_architecture_selection(
+            contract, validated)
+        if (type(selection) is not contract_api.ArchitectureSelection or
+                selection.contract_sha256 !=
+                contract_api.contract_sha256(contract) or
+                selection.selection_sha256 != validated["selection_sha256"] or
+                selection.canonical_receipt !=
+                contract_api.canonical_json(validated)):
+            fail("architecture selection sealer returned a malformed handle")
+        retained = transaction.require_prepared()
+        terminal_bytes, terminal_fingerprint = _read_unnamed_receipt(
+            retained.descriptor, expected_identity=retained.identity)
+        if (terminal_bytes != retained.canonical_bytes or
+                terminal_fingerprint[2] != retained.byte_count or
+                hashlib.sha256(terminal_bytes).hexdigest() != retained.sha256):
+            fail("prepared architecture selection changed before publication")
+        return selection
+    except contract_api.ContractError as exc:
+        fail(str(exc))
     except OSError as exc:
-        fail("cannot publish selection receipt {}: {}".format(path, exc))
+        fail("cannot prepare architecture selection: {}".format(exc))
     finally:
-        _close_fd_quietly(descriptor)
-        if staged_name is not None:
-            try:
-                os.unlink(staged_name, dir_fd=parent_fd)
-            except OSError:
-                pass
-        if not committed and published_identity is not None:
-            try:
-                visible = os.stat(
-                    name, dir_fd=parent_fd, follow_symlinks=False)
-                if (visible.st_dev, visible.st_ino) == published_identity:
-                    os.unlink(name, dir_fd=parent_fd)
-                    try:
-                        os.fsync(parent_fd)
-                    except OSError:
-                        pass
-            except OSError:
-                pass
-        _close_fd_quietly(parent_fd)
+        if descriptor >= 0:
+            prepared = transaction.prepared
+            if prepared is not None and prepared.descriptor == descriptor:
+                # The transaction owns this exact fd.  Do not close through
+                # the stale local alias; its finally will close it exactly once.
+                descriptor = -1
+            else:
+                _close_fd_quietly(descriptor)
+                descriptor = -1
+    raise AssertionError("unreachable")
 
 
-def _rollback_published_receipt(
-        path: Path, identity: ReceiptIdentity) -> None:
-    """Remove only the exact receipt inode installed by this transaction."""
-    path = Path(path)
-    name = _receipt_basename(path)
-    parent_fd, parent_identity = _open_real_parent(path)
+def _publish_receipt(transaction: _ReceiptPublicationTransaction) -> None:
+    """Link the sealed unnamed inode; a successful link always wins.
+
+    The link is the sole public-name transition and the last operation.  An
+    asynchronous exception after the kernel installs the link can lose the
+    caller's acknowledgement, but must never trigger removal of a valid
+    receipt.
+    """
+    parent_fd, _parent_identity = transaction.require_parent()
+    prepared = transaction.require_prepared()
+    retained_bytes, retained_fingerprint = _read_unnamed_receipt(
+        prepared.descriptor, expected_identity=prepared.identity)
+    if (retained_bytes != prepared.canonical_bytes or
+            retained_fingerprint[2] != prepared.byte_count or
+            hashlib.sha256(retained_bytes).hexdigest() != prepared.sha256):
+        fail("prepared architecture selection changed before final link")
+    # This visible-path check is deliberately the final operation before the
+    # one-way link transition.
+    transaction.verify_visible_parent()
     try:
-        try:
-            visible = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-        except FileNotFoundError:
-            return
-        if (visible.st_dev, visible.st_ino) != identity:
-            return
-        os.unlink(name, dir_fd=parent_fd)
-        os.fsync(parent_fd)
-        _verify_real_parent(path.parent, parent_identity)
+        return os.link(
+            "/proc/self/fd/{}".format(prepared.descriptor), transaction.name,
+            dst_dir_fd=parent_fd, follow_symlinks=True)
+    except FileExistsError:
+        fail("refusing to replace existing selection receipt {}".format(
+            transaction.path))
     except OSError as exc:
-        fail("cannot roll back failed selection publication {}: {}".format(
-            path, exc))
-    finally:
-        _close_fd_quietly(parent_fd)
+        fail("cannot link unnamed selection receipt {}: {}".format(
+            transaction.path, exc))
 
 
 def _require_receipt_snapshot(
         path: Path, fingerprint: ReceiptFingerprint,
         expected_bytes: bytes) -> None:
     """Terminally reread the exact stable receipt observed before sealing."""
+    expected_identity = (fingerprint[0], fingerprint[1])
     current_bytes, current_fingerprint = _read_stable_receipt_bytes(
-        Path(path), expected_identity=(fingerprint[0], fingerprint[1]))
+        Path(path), expected_identity=expected_identity)
     if (current_fingerprint != fingerprint or
             current_bytes != expected_bytes):
         fail("published architecture selection changed before commit")
@@ -507,7 +700,7 @@ def select_development_architecture(
         contract: Mapping[str, Any], recovery_campaign_dir: Path,
         work_rank_dir: Path, timing_screen_dir: Path, output_path: Path,
         ) -> contract_api.ArchitectureSelection:
-    """Recompute, atomically publish, reopen, and seal a winning receipt."""
+    """Recompute, seal while unnamed, then atomically publish one winner."""
     output_path = Path(output_path)
     if output_path.exists() or output_path.is_symlink():
         fail("refusing to replace existing selection receipt {}".format(
@@ -516,20 +709,17 @@ def select_development_architecture(
         contract, recovery_campaign_dir, work_rank_dir, timing_screen_dir)
     if result is None:
         fail("development evidence produced no promotable architecture")
-    published_identity = _publish_receipt(output_path, result)
+    transaction = _ReceiptPublicationTransaction(output_path)
     try:
-        published, fingerprint, published_bytes = _published_receipt(
-            contract, output_path, expected_identity=published_identity)
-        if contract_api.canonical_json(published) != \
-                contract_api.canonical_json(result):
-            fail("published architecture selection changed during commit")
-        selection = contract_api._seal_validated_architecture_selection(
-            contract, published)
-        _require_receipt_snapshot(output_path, fingerprint, published_bytes)
+        transaction.open_parent()
+        selection = _prepare_receipt(transaction, contract, result)
+        # os.link() below is the publish-wins linearization point.  There is no
+        # rollback after it: an asynchronous exception may lose only the
+        # acknowledgement, never the fully validated receipt.
+        _publish_receipt(transaction)
         return selection
-    except BaseException:
-        _rollback_published_receipt(output_path, published_identity)
-        raise
+    finally:
+        transaction.close()
 
 
 def load_authoritative_selection(
