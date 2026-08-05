@@ -264,8 +264,10 @@ def _validate_description(value: Mapping[str, Any],
                           binary_sha256: Optional[str] = None) \
         -> Mapping[str, Any]:
     _exact_mapping(value, DESCRIPTION_FIELDS, "phase worker description")
+    source_git_commit = value.get("source_git_commit")
     if (value.get("schema") != runner_api.DESCRIPTION_SCHEMA or
-            GIT_COMMIT.fullmatch(value.get("source_git_commit", "")) is None or
+            not isinstance(source_git_commit, str) or
+            GIT_COMMIT.fullmatch(source_git_commit) is None or
             not _is_sha256(value.get("binary_sha256")) or
             (binary_sha256 is not None and
              value.get("binary_sha256") != binary_sha256)):
@@ -626,6 +628,8 @@ def validate_native_records(
     _validate_description(description)
     traces, trace_manifest_sha256 = validate_trace_manifest(
         contract, description, trace_data)
+    if not isinstance(coordinate_cpus, (list, tuple)):
+        fail("phase coordinate CPU schedule must be a concrete sequence")
     worker_cpus = tuple(coordinate_cpus[:WORKER_COUNT])
     if (len(coordinate_cpus) != PHASE_COORDINATE_COUNT or
             len(worker_cpus) != WORKER_COUNT or
@@ -634,7 +638,7 @@ def validate_native_records(
             tuple(coordinate_cpus) != worker_cpus * 3 or
             not _is_uint64(window_start_ns) or window_start_ns == 0 or
             not _is_uint64(window_end_ns) or
-            window_end_ns < window_start_ns or
+            window_end_ns <= window_start_ns or
             not isinstance(runtime_workers, Mapping) or
             set(runtime_workers) != set(worker_cpus)):
         fail("phase execution geometry is not the exact 24-job/eight-worker domain")
@@ -689,7 +693,7 @@ def validate_native_records(
         start = row["started_monotonic_ns"]
         end = row["finished_monotonic_ns"]
         if (cpu != coordinate_cpus[coordinate_ordinal] or pid <= 0 or
-                ticks <= 0 or not window_start_ns <= start <= end or
+                ticks <= 0 or not window_start_ns <= start < end or
                 end > window_end_ns):
             fail("phase native envelope has invalid CPU/PID/time provenance")
         try:

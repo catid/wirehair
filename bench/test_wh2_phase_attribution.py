@@ -316,6 +316,12 @@ class PhaseAttributionTest(unittest.TestCase):
             subject.validate_trace_manifest(
                 self.contract, self.description, canonical_jsonl(changed))
 
+        malformed_description = copy.deepcopy(self.description)
+        malformed_description["source_git_commit"] = 1
+        with self.assertRaises(subject.PhaseRunnerError):
+            subject.validate_trace_manifest(
+                self.contract, malformed_description, self.trace_data)
+
     def test_n16_records_and_counterbalanced_statistics(self):
         payloads, metadata = self.validate(self.build_records())
         self.assertEqual(
@@ -472,6 +478,8 @@ class PhaseAttributionTest(unittest.TestCase):
     def test_execution_geometry_and_canonical_boundaries_fail_closed(self):
         records = self.build_records()
         with self.assertRaises(subject.PhaseRunnerError):
+            self.validate(records, coordinate_cpus=None)
+        with self.assertRaises(subject.PhaseRunnerError):
             self.validate(records, coordinate_cpus=tuple(range(8)) * 2 +
                           tuple(reversed(range(8))))
         runtime = dict(self.runtime_workers)
@@ -480,6 +488,14 @@ class PhaseAttributionTest(unittest.TestCase):
             self.validate(records, runtime_workers=runtime)
         with self.assertRaises(subject.PhaseRunnerError):
             self.validate(records, window_start_ns=0)
+        with self.assertRaises(subject.PhaseRunnerError):
+            self.validate(
+                records, window_end_ns=self.window_start_ns)
+        zero_duration = self.build_records()
+        zero_duration[0]["finished_monotonic_ns"] = \
+            zero_duration[0]["started_monotonic_ns"]
+        with self.assertRaises(subject.PhaseRunnerError):
+            self.validate(zero_duration)
         noncanonical = canonical_jsonl(records).replace(b"{", b"{ ", 1)
         with self.assertRaises(subject.PhaseRunnerError):
             self.validate(records, data=noncanonical)
