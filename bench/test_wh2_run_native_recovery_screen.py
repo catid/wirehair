@@ -10,6 +10,7 @@ from io import StringIO
 import json
 import os
 from pathlib import Path
+import stat
 from types import SimpleNamespace
 import sys
 import tempfile
@@ -100,6 +101,33 @@ class RecoveryOnlyRunnerTests(unittest.TestCase):
         path.write_text(FAKE_WORKER, encoding="utf-8")
         path.chmod(0o755)
         return path
+
+    def _publication_fixture(self, label: str):
+        output = self.root / label
+        output.mkdir()
+        for key, name in subject.RECOVERY_COMPLETED_DEPENDENCY_NAMES.items():
+            (output / name).write_bytes(
+                ("fixture:{}\n".format(key)).encode("ascii"))
+        summary = {
+            "candidate_id": subject.CANDIDATE_SPECS[0][0],
+            "candidate_arm": subject.CANDIDATE_SPECS[0][1],
+            "fixture": label,
+        }
+        freeze = {"fixture": "freeze"}
+        receipt = {"fixture": "receipt"}
+        witness = {"fixture": "witness"}
+        validated = {
+            "directory": str(output.resolve()),
+            "directory_identity": (
+                output.stat().st_dev, output.stat().st_ino),
+            "candidate_id": summary["candidate_id"],
+            "candidate_arm": summary["candidate_arm"],
+            "summary": summary,
+            "freeze": freeze,
+            "receipt": receipt,
+            "timing_proxy_witness": witness,
+        }
+        return output, summary, freeze, receipt, witness, validated
 
     def _description(self, candidate_id: str) -> Mapping[str, Any]:
         return subject.describe_candidate_worker(
@@ -530,6 +558,150 @@ class RecoveryOnlyRunnerTests(unittest.TestCase):
             {job.ordinal for job in jobs}, set(range(subject.RECOVERY_RECORDS)))
         self.assertTrue(all(job.command().startswith(b"R ") for job in jobs))
         self.assertFalse(any(job.command().startswith(b"T ") for job in jobs))
+
+    def test_partial_spawn_cleanup_preserves_primary_and_cleanup_failure(
+            self) -> None:
+        first_process = mock.Mock()
+        with mock.patch.object(
+                subject.subprocess, "Popen",
+                side_effect=(first_process,
+                             OSError("injected second spawn failure"))), \
+                mock.patch.object(
+                    subject.runner_api, "terminate_workers",
+                    side_effect=OSError("injected partial cleanup failure")), \
+                self.assertRaises(subject.RecoveryRunnerError) as raised:
+            subject.spawn_candidate_workers(
+                {"resolved_path": "/fixture/worker"},
+                subject.CANDIDATE_SPECS[0][0], [0, 1],
+                time.monotonic() + 5.0)
+        self.assertIsInstance(
+            raised.exception.__cause__, subject.RecoveryRunnerError)
+        message = str(raised.exception)
+        self.assertIn("injected second spawn failure", message)
+        self.assertIn("injected partial cleanup failure", message)
+
+    def test_spawn_worker_handoff_interrupt_owns_and_cleans_process(self) \
+            -> None:
+        class HandoffInterrupt(BaseException):
+            pass
+
+        interrupt = HandoffInterrupt("injected worker handoff interrupt")
+        process = mock.Mock()
+        cleanup_calls = []
+
+        def terminate(workers):
+            cleanup_calls.append(list(workers))
+
+        with mock.patch.object(
+                subject.subprocess, "Popen", return_value=process), \
+                mock.patch.object(
+                    subject.runner_api, "PersistentWorker",
+                    side_effect=interrupt), mock.patch.object(
+                    subject.runner_api, "terminate_workers",
+                    side_effect=terminate), self.assertRaises(
+                        HandoffInterrupt) as raised:
+            subject.spawn_candidate_workers(
+                {"resolved_path": "/fixture/worker"},
+                subject.CANDIDATE_SPECS[0][0], [17],
+                time.monotonic() + 5.0)
+        self.assertIs(raised.exception, interrupt)
+        self.assertEqual(len(cleanup_calls), 1)
+        self.assertEqual(len(cleanup_calls[0]), 1)
+        self.assertIs(cleanup_calls[0][0].process, process)
+        self.assertEqual(cleanup_calls[0][0].cpu, 17)
+
+    def test_spawn_popen_return_interrupt_already_owns_child(self) -> None:
+        class ReturnInterrupt(BaseException):
+            pass
+
+        primary = ReturnInterrupt("injected first post-Popen interrupt")
+        process = mock.Mock()
+        cleanup_calls = []
+        code = subject.spawn_candidate_workers.__code__
+        spawn_returned = False
+        trace_fired = False
+        owner_was_populated = False
+
+        def spawn(*_args, **_kwargs):
+            nonlocal spawn_returned
+            spawn_returned = True
+            return process
+
+        def terminate(workers):
+            cleanup_calls.append(list(workers))
+
+        def interrupt_after_return(frame, event, _argument):
+            nonlocal trace_fired, owner_was_populated
+            if (frame.f_code is code and event == "line" and
+                    spawn_returned and not trace_fired):
+                trace_fired = True
+                provisional = frame.f_locals.get("provisional_worker")
+                owner_was_populated = (
+                    provisional is not None and
+                    provisional.process is process)
+                raise primary
+            return interrupt_after_return
+
+        previous_trace = sys.gettrace()
+        with mock.patch.object(
+                subject.subprocess, "Popen", side_effect=spawn), \
+                mock.patch.object(
+                    subject.runner_api, "terminate_workers",
+                    side_effect=terminate):
+            sys.settrace(interrupt_after_return)
+            try:
+                with self.assertRaises(ReturnInterrupt) as raised:
+                    subject.spawn_candidate_workers(
+                        {"resolved_path": "/fixture/worker"},
+                        subject.CANDIDATE_SPECS[0][0], [17],
+                        time.monotonic() + 5.0)
+            finally:
+                sys.settrace(previous_trace)
+        self.assertIs(raised.exception, primary)
+        self.assertTrue(trace_fired)
+        self.assertTrue(owner_was_populated)
+        self.assertEqual(len(cleanup_calls), 1)
+        self.assertEqual(len(cleanup_calls[0]), 1)
+        self.assertIs(cleanup_calls[0][0].process, process)
+
+    def test_spawn_append_handoff_interrupt_cleans_child_once(self) -> None:
+        class AppendInterrupt(BaseException):
+            pass
+
+        primary = AppendInterrupt("injected worker append handoff interrupt")
+        process = mock.Mock()
+        cleanup_calls = []
+        code = subject.spawn_candidate_workers.__code__
+
+        def terminate(workers):
+            cleanup_calls.append(list(workers))
+
+        def interrupt_handoff(frame, event, _argument):
+            if (frame.f_code is code and event == "line" and
+                    len(frame.f_locals.get("workers", ())) == 1 and
+                    frame.f_locals.get("provisional_worker") is not None):
+                raise primary
+            return interrupt_handoff
+
+        previous_trace = sys.gettrace()
+        with mock.patch.object(
+                subject.subprocess, "Popen", return_value=process), \
+                mock.patch.object(
+                    subject.runner_api, "terminate_workers",
+                    side_effect=terminate):
+            sys.settrace(interrupt_handoff)
+            try:
+                with self.assertRaises(AppendInterrupt) as raised:
+                    subject.spawn_candidate_workers(
+                        {"resolved_path": "/fixture/worker"},
+                        subject.CANDIDATE_SPECS[0][0], [17],
+                        time.monotonic() + 5.0)
+            finally:
+                sys.settrace(previous_trace)
+        self.assertIs(raised.exception, primary)
+        self.assertEqual(len(cleanup_calls), 1)
+        self.assertEqual(len(cleanup_calls[0]), 1)
+        self.assertIs(cleanup_calls[0][0].process, process)
 
     def test_logical_combination_has_four_arms_and_preserves_envelopes(self) \
             -> None:
@@ -1012,7 +1184,9 @@ class RecoveryOnlyRunnerTests(unittest.TestCase):
             publish = stack.enter_context(mock.patch.object(
                 subject.runner_api, "_atomic_write_object"))
             with self.assertRaisesRegex(
-                    subject.runner_api.RunnerError, "restore failure"):
+                    subject.RecoveryRunnerError,
+                    "cannot read.*controller affinity cleanup failed: "
+                    "injected restore failure"):
                 subject.run_recovery_screen(args)
             exact_sampler_path = args.output_dir / "sampler-attestation.json"
             self.assertEqual(assemble_mock.call_args.args[6],
@@ -1169,7 +1343,7 @@ class RecoveryOnlyRunnerTests(unittest.TestCase):
                 subject.runner_api, "_preflight_sampler"))
             stack.enter_context(mock.patch.object(
                 subject.runner_api, "_git_head",
-                side_effect=(source, source, source)))
+                side_effect=(source, source, source, source)))
             stack.enter_context(mock.patch.object(
                 subject.runner_api, "_require_worker_source_commit"))
             stack.enter_context(mock.patch.object(
@@ -1210,6 +1384,13 @@ class RecoveryOnlyRunnerTests(unittest.TestCase):
             stack.enter_context(mock.patch.object(
                 subject, "_bind_work_rank_identities",
                 return_value=joined_work))
+            stack.enter_context(mock.patch.object(
+                subject, "_commit_completed_recovery_screen",
+                side_effect=lambda *_args, **_kwargs:
+                    subject._revalidate_terminal_timing_proxy_witness(
+                        args.output_dir / "timing-proxy-witness.json",
+                        description, source,
+                        contract_api.sha256_json(witness))))
             with self.assertRaisesRegex(
                     subject.RecoveryRunnerError,
                     "witness changed before terminal summary"):
@@ -1405,6 +1586,466 @@ class RecoveryOnlyRunnerTests(unittest.TestCase):
                 b"original")
         finally:
             os.close(directory_fd)
+
+    def test_exact_4096_byte_jsonl_record_cap(self) -> None:
+        empty = (contract_api.canonical_json({"payload": ""}) + "\n").encode(
+            "utf-8")
+        payload = "x" * (subject.MAX_RECOVERY_RECORD_BYTES - len(empty))
+        accepted = (contract_api.canonical_json({"payload": payload}) +
+                    "\n").encode("utf-8")
+        self.assertEqual(len(accepted), subject.MAX_RECOVERY_RECORD_BYTES)
+        self.assertEqual(
+            subject._parse_exact_jsonl(accepted, "boundary fixture"),
+            [{"payload": payload}])
+        rejected = (contract_api.canonical_json({"payload": payload + "x"}) +
+                    "\n").encode("utf-8")
+        self.assertEqual(len(rejected), subject.MAX_RECOVERY_RECORD_BYTES + 1)
+        with self.assertRaisesRegex(
+                subject.RecoveryRunnerError, "4096-byte record cap"):
+            subject._parse_exact_jsonl(rejected, "boundary fixture")
+
+        fragmented = (b"x" * (subject.MAX_RECOVERY_RECORD_BYTES - 1) +
+                      b"\r" +
+                      b"y" * (subject.MAX_RECOVERY_RECORD_BYTES - 1) +
+                      b"\n")
+        self.assertGreater(
+            len(fragmented), subject.MAX_RECOVERY_RECORD_BYTES)
+        with self.assertRaisesRegex(
+                subject.RecoveryRunnerError, "4096-byte record cap"):
+            subject._require_bounded_jsonl_records(
+                fragmented, "control-byte fragmentation fixture")
+
+    def test_campaign_stream_caps_reject_before_semantic_parsing(self) -> None:
+        empty = (contract_api.canonical_json({"payload": ""}) + "\n").encode(
+            "utf-8")
+        payload = "x" * (subject.MAX_RECOVERY_RECORD_BYTES + 1 - len(empty))
+        oversized = (contract_api.canonical_json({"payload": payload}) +
+                     "\n").encode("utf-8")
+        self.assertEqual(
+            len(oversized), subject.MAX_RECOVERY_RECORD_BYTES + 1)
+        for stream in ("trace", "native", "result"):
+            snapshots = {
+                key: b"{}\n"
+                for key in subject.RECOVERY_COMPLETED_SOURCE_NAMES
+            }
+            snapshots[stream] = oversized
+            semantic_parser = mock.Mock(
+                side_effect=AssertionError("semantic parser was reached"))
+            with self.subTest(stream=stream), mock.patch.object(
+                    subject.native_api, "validate_execution_receipt",
+                    semantic_parser), self.assertRaisesRegex(
+                    subject.RecoveryRunnerError, "4096-byte record cap"):
+                subject._validate_completed_campaign_snapshots(
+                    self.contract, self.root,
+                    (self.root.stat().st_dev, self.root.stat().st_ino),
+                    snapshots)
+            semantic_parser.assert_not_called()
+
+    def test_native_recovery_sink_and_response_are_bounded(self) -> None:
+        workers = [SimpleNamespace(cpu=index) for index in range(
+            subject.RECOVERY_WORKER_COUNT)]
+
+        def reject_oversize(
+                _workers, jobs, _rotation, sink, _deadline, validator, *,
+                maximum_response_bytes):
+            self.assertEqual(
+                sink.maximum_bytes, subject.RECOVERY_NATIVE_STREAM_BYTE_CAP)
+            self.assertEqual(
+                maximum_response_bytes, subject.MAX_RECOVERY_RECORD_BYTES)
+            validator({}, b"x" * subject.MAX_RECOVERY_RECORD_BYTES + b"\n",
+                      workers[0], jobs[0])
+            raise AssertionError("oversized response was accepted")
+
+        with mock.patch.object(
+                subject.runner_api, "_strict_response_validator",
+                return_value=lambda *_args: 1), mock.patch.object(
+                subject.runner_api, "run_job_batch",
+                side_effect=reject_oversize), self.assertRaisesRegex(
+                subject.RecoveryRunnerError, "4096-byte record cap"):
+            subject._run_recovery_jobs(
+                self.contract, {}, {}, workers, self.root, 1,
+                time.monotonic() + 5.0)
+        self.assertFalse(
+            (self.root / "recovery-native-results.jsonl").exists())
+
+    def test_validator_construction_failure_leaves_no_native_stage(self) \
+            -> None:
+        class ValidatorInterrupt(BaseException):
+            pass
+
+        primary = ValidatorInterrupt("injected validator construction failure")
+        workers = [SimpleNamespace(cpu=index) for index in range(
+            subject.RECOVERY_WORKER_COUNT)]
+        with mock.patch.object(
+                subject.runner_api, "_strict_response_validator",
+                side_effect=primary), mock.patch.object(
+                subject.runner_api, "AtomicLineSink") as sink_constructor, \
+                self.assertRaises(ValidatorInterrupt) as raised:
+            subject._run_recovery_jobs(
+                self.contract, {}, {}, workers, self.root, 1,
+                time.monotonic() + 5.0)
+        self.assertIs(raised.exception, primary)
+        sink_constructor.assert_not_called()
+        self.assertFalse(
+            (self.root / "recovery-native-results.jsonl").exists())
+        self.assertEqual(
+            list(self.root.glob(".recovery-native-results.jsonl.*.tmp")), [])
+
+    def test_completed_campaign_directory_handoff_interrupt_closes_fd(
+            self) -> None:
+        class OpenInterrupt(BaseException):
+            pass
+
+        real_open = subject._open_completed_campaign_directory
+        snapshots = {"fixture": b"stable"}
+        fingerprints = {"fixture": (1, 2, 3, 4, 5, 6, 7)}
+        for interrupt_call in (1, 2):
+            with self.subTest(interrupt_call=interrupt_call):
+                output = self.root / "open-interrupt-{}".format(
+                    interrupt_call)
+                output.mkdir()
+                captured = []
+                calls = 0
+                primary = OpenInterrupt(
+                    "injected directory-open return interrupt")
+
+                def open_then_interrupt(
+                        campaign_dir, expected_identity=None,
+                        descriptor_holder=None):
+                    nonlocal calls
+                    result = real_open(
+                        campaign_dir, expected_identity, descriptor_holder)
+                    calls += 1
+                    if calls == interrupt_call:
+                        self.assertIsNotNone(descriptor_holder)
+                        captured.append(descriptor_holder[0])
+                        raise primary
+                    return result
+
+                with mock.patch.object(
+                        subject, "_open_completed_campaign_directory",
+                        side_effect=open_then_interrupt), mock.patch.object(
+                        subject, "_read_completed_campaign_bundle",
+                        return_value=(snapshots, fingerprints)), \
+                        mock.patch.object(
+                            subject, "_validate_completed_campaign_snapshots",
+                            return_value={"fixture": "validated"}), \
+                        mock.patch.object(
+                            subject.runner_api,
+                            "_verify_completed_directory_path"), \
+                        self.assertRaises(OpenInterrupt) as raised:
+                    subject.load_completed_campaign(self.contract, output)
+                self.assertIs(raised.exception, primary)
+                self.assertEqual(len(captured), 1)
+                with self.assertRaises(OSError):
+                    os.fstat(captured[0])
+
+    def test_completed_campaign_terminal_reread_rejects_same_byte_replacement(
+            self) -> None:
+        output = self.root / "terminal-replacement"
+        output.mkdir()
+        for key, name in subject.RECOVERY_COMPLETED_SOURCE_NAMES.items():
+            (output / name).write_bytes(
+                ("fixture:{}\n".format(key)).encode("ascii"))
+
+        def validate_then_replace(*_args):
+            victim = output / subject.RECOVERY_COMPLETED_SOURCE_NAMES["result"]
+            replacement = output / "replacement.tmp"
+            replacement.write_bytes(victim.read_bytes())
+            os.replace(str(replacement), str(victim))
+            return {"fixture": "validated"}
+
+        with mock.patch.object(
+                subject, "_validate_completed_campaign_snapshots",
+                side_effect=validate_then_replace), self.assertRaisesRegex(
+                subject.RecoveryRunnerError,
+                "changed during semantic validation"):
+            subject.load_completed_campaign(self.contract, output)
+
+    def test_recovery_completion_publish_rejects_each_prelink_race(self) \
+            -> None:
+        for mode in ("content-mutation", "same-byte-replacement",
+                     "directory-swap"):
+            with self.subTest(mode=mode):
+                output, summary, freeze, receipt, witness, validated = \
+                    self._publication_fixture("prelink-" + mode)
+                victim = output / \
+                    subject.RECOVERY_COMPLETED_DEPENDENCY_NAMES["result"]
+                held = self.root / ("held-" + mode)
+
+                def finish(_mode=mode):
+                    if _mode == "content-mutation":
+                        victim.write_bytes(victim.read_bytes() + b"mutated\n")
+                    elif _mode == "same-byte-replacement":
+                        replacement = output / "replacement.tmp"
+                        replacement.write_bytes(victim.read_bytes())
+                        os.replace(str(replacement), str(victim))
+                    else:
+                        output.rename(held)
+                        output.mkdir()
+
+                with mock.patch.object(
+                        subject, "_validate_completed_campaign_snapshots",
+                        return_value=validated), self.assertRaises(
+                        subject.RecoveryRunnerError):
+                    subject._commit_completed_recovery_screen(
+                        self.contract, output, summary, freeze,
+                        {"execution_receipt": receipt}, witness, finish)
+                self.assertFalse((output / "run-summary.json").exists())
+                if mode == "directory-swap":
+                    self.assertFalse((held / "run-summary.json").exists())
+
+    def test_recovery_completion_parent_return_interrupt_closes_owned_fd(
+            self) -> None:
+        output, summary, freeze, receipt, witness, _validated = \
+            self._publication_fixture("parent-return-interrupt")
+        real_open_parent = subject.runner_api._open_completion_parent
+        captured = []
+
+        def open_then_interrupt(path, descriptor_holder):
+            result = real_open_parent(path, descriptor_holder)
+            captured.append(descriptor_holder[0])
+            raise KeyboardInterrupt("injected parent return interrupt")
+
+        with mock.patch.object(
+                subject.runner_api, "_open_completion_parent",
+                side_effect=open_then_interrupt), self.assertRaisesRegex(
+                KeyboardInterrupt, "parent return interrupt"):
+            subject._commit_completed_recovery_screen(
+                self.contract, output, summary, freeze,
+                {"execution_receipt": receipt}, witness)
+        self.assertEqual(len(captured), 1)
+        with self.assertRaises(OSError):
+            os.fstat(captured[0])
+        self.assertFalse((output / "run-summary.json").exists())
+
+    def test_recovery_completion_link_is_publish_wins_on_lost_ack(self) -> None:
+        output, summary, freeze, receipt, witness, validated = \
+            self._publication_fixture("lost-link-ack")
+        real_link = os.link
+
+        def link_then_lose_ack(*args, **kwargs):
+            real_link(*args, **kwargs)
+            raise OSError("injected lost link acknowledgement")
+
+        with mock.patch.object(
+                subject, "_validate_completed_campaign_snapshots",
+                return_value=validated), mock.patch.object(
+                subject.runner_api.os, "link",
+                side_effect=link_then_lose_ack), self.assertRaisesRegex(
+                subject.RecoveryRunnerError,
+                "lost link acknowledgement"):
+            subject._commit_completed_recovery_screen(
+                self.contract, output, summary, freeze,
+                {"execution_receipt": receipt}, witness)
+        marker = output / "run-summary.json"
+        self.assertEqual(
+            marker.read_bytes(),
+            (contract_api.canonical_json(summary) + "\n").encode("utf-8"))
+        self.assertEqual(
+            subject._load_canonical_object(marker, "published fixture"),
+            summary)
+
+    def test_recovery_completion_publish_wins_on_baseexception_after_link(
+            self) -> None:
+        output, summary, freeze, receipt, witness, validated = \
+            self._publication_fixture("baseexception-after-link")
+        real_link = os.link
+
+        def link_then_interrupt(*args, **kwargs):
+            real_link(*args, **kwargs)
+            raise KeyboardInterrupt("injected post-link interrupt")
+
+        with mock.patch.object(
+                subject, "_validate_completed_campaign_snapshots",
+                return_value=validated), mock.patch.object(
+                subject.runner_api.os, "link",
+                side_effect=link_then_interrupt), self.assertRaisesRegex(
+                KeyboardInterrupt, "post-link interrupt"):
+            subject._commit_completed_recovery_screen(
+                self.contract, output, summary, freeze,
+                {"execution_receipt": receipt}, witness)
+        marker = output / "run-summary.json"
+        self.assertEqual(
+            subject._load_canonical_object(marker, "published fixture"),
+            summary)
+
+    def test_recovery_completion_publish_wins_on_directory_fsync_failure(
+            self) -> None:
+        output, summary, freeze, receipt, witness, validated = \
+            self._publication_fixture("directory-fsync-failure")
+        real_fsync = os.fsync
+
+        def fail_directory_fsync(descriptor):
+            if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+                raise OSError("injected directory fsync failure")
+            return real_fsync(descriptor)
+
+        with mock.patch.object(
+                subject, "_validate_completed_campaign_snapshots",
+                return_value=validated), mock.patch.object(
+                subject.runner_api.os, "fsync",
+                side_effect=fail_directory_fsync), self.assertRaisesRegex(
+                OSError, "directory fsync failure"):
+            subject._commit_completed_recovery_screen(
+                self.contract, output, summary, freeze,
+                {"execution_receipt": receipt}, witness)
+        marker = output / "run-summary.json"
+        self.assertEqual(
+            subject._load_canonical_object(marker, "published fixture"),
+            summary)
+
+    def test_recovery_completion_drains_closes_and_propagates_control_flow(
+            self) -> None:
+        class InjectedCloseControl(BaseException):
+            pass
+
+        output, summary, freeze, receipt, witness, validated = \
+            self._publication_fixture("close-control-flow")
+        real_close = os.close
+        control = InjectedCloseControl("injected close control flow")
+        closed = []
+
+        def close_then_interrupt_once(descriptor):
+            real_close(descriptor)
+            closed.append(descriptor)
+            if len(closed) == 1:
+                raise control
+
+        with mock.patch.object(
+                subject, "_validate_completed_campaign_snapshots",
+                return_value=validated), mock.patch.object(
+                subject.os, "close", side_effect=close_then_interrupt_once), \
+                self.assertRaises(InjectedCloseControl) as raised:
+            subject._commit_completed_recovery_screen(
+                self.contract, output, summary, freeze,
+                {"execution_receipt": receipt}, witness)
+        self.assertIs(raised.exception, control)
+        self.assertIsInstance(
+            raised.exception.__cause__, subject.RecoveryRunnerError)
+        self.assertGreaterEqual(
+            len(closed),
+            len(subject.RECOVERY_COMPLETED_DEPENDENCY_NAMES) + 2)
+        for descriptor in closed:
+            with self.assertRaises(OSError):
+                os.fstat(descriptor)
+        marker = output / "run-summary.json"
+        self.assertEqual(
+            subject._load_canonical_object(marker, "published fixture"),
+            summary)
+
+    def test_terminate_failure_still_attempts_affinity_restore(self) -> None:
+        candidate_id = subject.CANDIDATE_SPECS[0][0]
+        source = "1" * 40
+        description = {
+            "resolved_path": "/fixture/worker",
+            "binary_sha256": "a" * 64,
+            "source_git_commit": source,
+            "arms": [],
+        }
+        args = SimpleNamespace(
+            candidate=candidate_id, deadline_seconds=60.0,
+            contract=contract_api.DEFAULT_CONTRACT,
+            worker=Path("worker"), cpus=None, controller_cpu=None,
+            sampler_pid=1, sampler_cpu=127,
+            sampler_script=Path("sampler.py"),
+            sampler_csv=Path("thermal.csv"),
+            work_rank_dir=Path("work-rank"),
+            output_dir=self.root / "cleanup-order")
+        workers = [object()]
+        restore = mock.Mock(side_effect=subject.runner_api.RunnerError(
+            "injected restore failure"))
+        with ExitStack() as stack:
+            stack.enter_context(mock.patch.object(
+                subject.contract_api, "load_contract",
+                return_value=self.contract))
+            stack.enter_context(mock.patch.object(
+                subject.work_api, "load_completed_work_screen",
+                return_value={
+                    "summary": {
+                        "summary_sha256": "5" * 64,
+                        "result_stream_sha256": "6" * 64,
+                        "work_domain_sha256": "7" * 64,
+                    },
+                    "source_git_commit": source,
+                    "rows": [],
+                }))
+            stack.enter_context(mock.patch.object(
+                subject, "describe_candidate_worker",
+                return_value=description))
+            stack.enter_context(mock.patch.object(
+                subject.os, "sched_getaffinity", return_value=set(range(10))))
+            stack.enter_context(mock.patch.object(
+                subject.runner_api, "select_cpu_layout",
+                return_value=(list(range(8)), 8)))
+            stack.enter_context(mock.patch.object(
+                subject.runner_api, "_preflight_sampler"))
+            stack.enter_context(mock.patch.object(
+                subject.runner_api, "_git_head",
+                side_effect=(source, source)))
+            stack.enter_context(mock.patch.object(
+                subject.runner_api, "_require_worker_source_commit"))
+            stack.enter_context(mock.patch.object(
+                subject, "load_timing_proxy_witness",
+                return_value=self._witness("a" * 64, source)))
+            stack.enter_context(mock.patch.object(
+                subject.runner_api, "_emit_and_assemble_trace",
+                return_value=(Path("trace.jsonl"), "e" * 64)))
+            stack.enter_context(mock.patch.object(
+                subject, "write_recovery_freeze", return_value={}))
+            stack.enter_context(mock.patch.object(
+                subject, "spawn_candidate_workers", return_value=workers))
+            stack.enter_context(mock.patch.object(
+                subject.runner_api, "_pin_controller"))
+            stack.enter_context(mock.patch.object(
+                subject.runner_api, "choose_new_sampler_start",
+                return_value=100))
+            stack.enter_context(mock.patch.object(
+                subject, "_run_recovery_jobs",
+                side_effect=subject.RecoveryRunnerError(
+                    "injected primary failure")))
+            stack.enter_context(mock.patch.object(
+                subject.runner_api, "terminate_workers",
+                side_effect=OSError("injected terminate failure")))
+            stack.enter_context(mock.patch.object(
+                subject.runner_api, "_restore_controller_affinity", restore))
+            with self.assertRaisesRegex(
+                    subject.RecoveryRunnerError,
+                    "injected primary failure; recovery worker cleanup failed: "
+                    "injected terminate failure; controller affinity cleanup "
+                    "failed: injected restore failure"):
+                subject.run_recovery_screen(args)
+        restore.assert_called_once()
+        self.assertFalse((args.output_dir / "run-summary.json").exists())
+
+    def test_recovery_cleanup_does_not_swallow_control_flow(self) -> None:
+        class InjectedControlFlow(BaseException):
+            pass
+
+        for control in (KeyboardInterrupt("interrupt"), SystemExit(7),
+                        InjectedControlFlow("stop")):
+            events = []
+
+            def terminate(_workers, _control=control):
+                events.append("terminate")
+                raise _control
+
+            def restore(_affinity):
+                events.append("restore")
+
+            with self.subTest(control=type(control).__name__), \
+                    mock.patch.object(
+                        subject.runner_api, "terminate_workers",
+                        side_effect=terminate), mock.patch.object(
+                        subject.runner_api, "_restore_controller_affinity",
+                        side_effect=restore), self.assertRaises(
+                            type(control)) as raised:
+                subject._finish_recovery_cleanup(
+                    [mock.Mock()], False, True, {7}, None)
+            self.assertEqual(events, ["terminate", "restore"])
+            self.assertIs(raised.exception, control)
+            self.assertIsInstance(
+                raised.exception.__cause__, subject.RecoveryRunnerError)
 
     def test_combine_hard_wall_interrupts_synchronous_validation(self) -> None:
         stderr = StringIO()
