@@ -154,6 +154,13 @@ PrecodeParams MakeCertifiedParams(uint32_t block_count, uint64_t seed)
     return params;
 }
 
+bool HasValidPrecodeSystemShape(const PrecodeSystem& system)
+{
+    return ValidatePrecodeParams(system.Params) &&
+        system.StaircaseRows.size() == system.Params.Staircase &&
+        system.DenseBasisRowColumns.size() == system.Params.DenseRows;
+}
+
 bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
 {
     const uint32_t K = params.BlockCount;
@@ -358,9 +365,7 @@ bool ValidatePrecodeSystem(const PrecodeSystem& system)
     const uint32_t D2 = params.DenseRows;
     const uint64_t binary_span = (uint64_t)K + S + D2;
 
-    if (!ValidatePrecodeParams(params) ||
-        system.StaircaseRows.size() != S ||
-        system.DenseBasisRowColumns.size() != D2)
+    if (!HasValidPrecodeSystemShape(system))
     {
         return false;
     }

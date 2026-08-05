@@ -27,6 +27,13 @@ namespace {
 thread_local uint32_t OddPacketPeelSeedXor = 0u;
 thread_local uint32_t PacketRowSeedMultiplier = 1u;
 thread_local bool PacketRowSeedAvalanche = false;
+thread_local test::SolveAllocationFailurePoint
+    ActiveSolveAllocationFailurePoint =
+        test::SolveAllocationFailurePoint::None;
+thread_local test::SolveAllocationFailureException
+    ActiveSolveAllocationFailureException =
+        test::SolveAllocationFailureException::BadAlloc;
+thread_local uint32_t ActiveSolveAllocationFailureHits = 0u;
 #endif
 
 constexpr uint32_t PackedWordCount(uint32_t bit_count)
@@ -1584,6 +1591,39 @@ uint64_t HeavyProjectionLegacyFallbacksForTesting()
 {
     return HeavyProjectionLegacyFallbacks.load(std::memory_order_relaxed);
 }
+
+namespace test {
+
+void SetSolveAllocationFailurePointForTesting(
+    SolveAllocationFailurePoint point,
+    SolveAllocationFailureException exception)
+{
+    ActiveSolveAllocationFailurePoint = point;
+    ActiveSolveAllocationFailureException = exception;
+    ActiveSolveAllocationFailureHits = 0u;
+}
+
+uint32_t SolveAllocationFailureHitsForTesting()
+{
+    return ActiveSolveAllocationFailureHits;
+}
+
+void TriggerSolveAllocationFailureForTesting(
+    SolveAllocationFailurePoint point)
+{
+    if (ActiveSolveAllocationFailurePoint != point) {
+        return;
+    }
+    ++ActiveSolveAllocationFailureHits;
+    if (ActiveSolveAllocationFailureException ==
+        SolveAllocationFailureException::LengthError)
+    {
+        throw std::length_error("injected WH2 allocation length failure");
+    }
+    throw std::bad_alloc();
+}
+
+} // namespace test
 #endif
 
 void PrecodeSolveResumeState::Clear()
@@ -1896,7 +1936,8 @@ static bool EvaluatePacketBlockImpl(
     if (!intermediate_blocks ||
         !block_out || block_bytes == 0u || block_bytes > 0x7fffffffu ||
         P_wide > UINT32_MAX ||
-        !runtime.IsValidFor(K, (uint32_t)P_wide, config.MixCount))
+        !runtime.IsValidFor(K, (uint32_t)P_wide, config.MixCount) ||
+        (validate_system && !HasValidPrecodeSystemShape(system)))
     {
         return false;
     }
@@ -1931,8 +1972,15 @@ static bool EvaluatePacketBlockImpl(
     {
         return false;
     }
-    if (validate_system && !ValidatePrecodeSystem(system)) {
-        return false;
+    if (validate_system)
+    {
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        test::TriggerSolveAllocationFailureForTesting(
+            test::SolveAllocationFailurePoint::EvaluateValidation);
+#endif
+        if (!ValidatePrecodeSystem(system)) {
+            return false;
+        }
     }
     const uint32_t P = (uint32_t)P_wide;
 
@@ -2149,23 +2197,32 @@ bool EvaluatePacketBlock(
     uint8_t* block_out,
     uint64_t* block_ops_out)
 {
-    if (gf256_init() != 0) {
-        return false;
-    }
-    const uint64_t P_wide = (uint64_t)system.Params.Staircase +
-        system.Params.DenseRows + system.Params.HeavyRows;
-    PacketRowRuntime runtime;
-    if (P_wide > UINT32_MAX ||
-        !runtime.Initialize(
-            system.Params.BlockCount,
-            (uint32_t)P_wide,
-            config.MixCount))
+    try
     {
+        if (gf256_init() != 0) {
+            return false;
+        }
+        const uint64_t P_wide = (uint64_t)system.Params.Staircase +
+            system.Params.DenseRows + system.Params.HeavyRows;
+        PacketRowRuntime runtime;
+        if (P_wide > UINT32_MAX ||
+            !runtime.Initialize(
+                system.Params.BlockCount,
+                (uint32_t)P_wide,
+                config.MixCount))
+        {
+            return false;
+        }
+        return EvaluatePacketBlockImpl(
+            system, config, runtime, intermediate_blocks, block_bytes,
+            block_id, block_out, block_ops_out, true);
+    }
+    catch (const std::bad_alloc&) {
         return false;
     }
-    return EvaluatePacketBlockImpl(
-        system, config, runtime, intermediate_blocks, block_bytes, block_id,
-        block_out, block_ops_out, true);
+    catch (const std::length_error&) {
+        return false;
+    }
 }
 
 bool EvaluatePacketBlockForValidatedSystem(
@@ -2220,20 +2277,29 @@ WirehairResult SolvePrecodeSystem(
     if (resume_state && stats == &resume_state->Stats) {
         return Wirehair_InvalidInput;
     }
-    const uint64_t P_wide = (uint64_t)system.Params.Staircase +
-        system.Params.DenseRows + system.Params.HeavyRows;
-    PacketRowRuntime runtime;
-    if (P_wide > UINT32_MAX ||
-        !runtime.Initialize(
-            system.Params.BlockCount,
-            (uint32_t)P_wide,
-            config.MixCount))
+    try
     {
-        return Wirehair_InvalidInput;
+        const uint64_t P_wide = (uint64_t)system.Params.Staircase +
+            system.Params.DenseRows + system.Params.HeavyRows;
+        PacketRowRuntime runtime;
+        if (P_wide > UINT32_MAX ||
+            !runtime.Initialize(
+                system.Params.BlockCount,
+                (uint32_t)P_wide,
+                config.MixCount))
+        {
+            return Wirehair_InvalidInput;
+        }
+        return SolvePrecodeSystemWithRuntime(
+            system, config, runtime, packets, block_bytes,
+            intermediate_blocks_out, stats, resume_state);
     }
-    return SolvePrecodeSystemWithRuntime(
-        system, config, runtime, packets, block_bytes,
-        intermediate_blocks_out, stats, resume_state);
+    catch (const std::bad_alloc&) {
+        return Wirehair_OOM;
+    }
+    catch (const std::length_error&) {
+        return Wirehair_OOM;
+    }
 }
 
 static bool SolveOutputAliasesResumeState(
@@ -2247,6 +2313,13 @@ static bool SolveOutputAliasesResumeState(
         &output == &state.CoefficientScratch ||
         &output == &state.RhsScratch;
 }
+
+static bool VerifyPrecodeSolutionImpl(
+    const PrecodeSystem& system,
+    const PacketRowConfig& config,
+    const std::vector<SolvePacket>& packets,
+    const uint8_t* intermediate_blocks,
+    uint32_t block_bytes);
 
 static WirehairResult SolvePrecodeSystemImpl(
     const PrecodeSystem& system,
@@ -2274,19 +2347,28 @@ static WirehairResult SolvePrecodeSystemImpl(
     const uint64_t P_wide = (uint64_t)S + D2 + H;
     if (P_wide > UINT32_MAX ||
         !runtime.IsValidFor(K, (uint32_t)P_wide, config.MixCount) ||
-        (validate_system && !ValidatePrecodeSystem(system)))
+        (validate_system && !HasValidPrecodeSystemShape(system)))
     {
         return Wirehair_InvalidInput;
     }
     const uint32_t P = (uint32_t)P_wide;
     const uint32_t L = K + P;
     size_t value_bytes = 0u;
-    if (!CheckedBlockStorage(L, block_bytes, value_bytes))
-    {
+    if (!CheckedBlockStorage(L, block_bytes, value_bytes)) {
         return Wirehair_InvalidInput;
     }
     for (const SolvePacket& packet : packets) {
         if (!packet.Data) {
+            return Wirehair_InvalidInput;
+        }
+    }
+    if (validate_system)
+    {
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        test::TriggerSolveAllocationFailureForTesting(
+            test::SolveAllocationFailurePoint::ColdSolveValidation);
+#endif
+        if (!ValidatePrecodeSystem(system)) {
             return Wirehair_InvalidInput;
         }
     }
@@ -2568,7 +2650,7 @@ static WirehairResult SolvePrecodeSystemImpl(
                     return terminal_error();
                 }
             }
-            if (!VerifyPrecodeSolution(
+            if (!VerifyPrecodeSolutionImpl(
                     system,
                     config,
                     packets,
@@ -3325,9 +3407,18 @@ WirehairResult SolvePrecodeSystemWithRuntime(
     PrecodeSolveStats* stats,
     PrecodeSolveResumeState* resume_state)
 {
-    return SolvePrecodeSystemImpl(
-        system, config, runtime, packets, block_bytes,
-        intermediate_blocks_out, stats, resume_state, true);
+    try
+    {
+        return SolvePrecodeSystemImpl(
+            system, config, runtime, packets, block_bytes,
+            intermediate_blocks_out, stats, resume_state, true);
+    }
+    catch (const std::bad_alloc&) {
+        return Wirehair_OOM;
+    }
+    catch (const std::length_error&) {
+        return Wirehair_OOM;
+    }
 }
 
 WirehairResult SolvePrecodeSystemForValidatedSystemWithRuntime(
@@ -3607,13 +3698,20 @@ WirehairResult SelectSystematicPacketConfig(
     if (P_wide > UINT32_MAX ||
         !IsPacketRowDomainValid(
             K, (uint32_t)P_wide, base_config.MixCount) ||
-        !ValidatePrecodeSystem(system))
+        !HasValidPrecodeSystemShape(system))
     {
         return Wirehair_InvalidInput;
     }
 
     try
     {
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        test::TriggerSolveAllocationFailureForTesting(
+            test::SolveAllocationFailurePoint::SelectPacketValidation);
+#endif
+        if (!ValidatePrecodeSystem(system)) {
+            return Wirehair_InvalidInput;
+        }
         const uint8_t zero = 0u;
         std::vector<SolvePacket> packets(K);
         for (uint32_t block_id = 0; block_id < K; ++block_id)
@@ -3763,7 +3861,7 @@ WirehairResult ClassifyExactSystematicConstructionFailure(
     }
 }
 
-bool VerifyPrecodeSolution(
+static bool VerifyPrecodeSolutionImpl(
     const PrecodeSystem& system,
     const PacketRowConfig& config,
     const std::vector<SolvePacket>& packets,
@@ -3782,7 +3880,7 @@ bool VerifyPrecodeSolution(
     const uint64_t P_wide = (uint64_t)S + D2 + H;
     if (P_wide > UINT32_MAX ||
         !IsPacketRowDomainValid(K, (uint32_t)P_wide, config.MixCount) ||
-        !ValidatePrecodeSystem(system))
+        !HasValidPrecodeSystemShape(system))
     {
         return false;
     }
@@ -3793,9 +3891,26 @@ bool VerifyPrecodeSolution(
     {
         return false;
     }
+    for (const SolvePacket& packet : packets) {
+        if (!packet.Data) {
+            return false;
+        }
+    }
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    test::TriggerSolveAllocationFailureForTesting(
+        test::SolveAllocationFailurePoint::VerifyValidation);
+#endif
+    if (!ValidatePrecodeSystem(system)) {
+        return false;
+    }
     if (gf256_init() != 0) {
         return false;
     }
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    test::TriggerSolveAllocationFailureForTesting(
+        test::SolveAllocationFailurePoint::VerifyValueScratch);
+#endif
     std::vector<uint8_t> value(block_bytes, 0u);
 
     const auto verify_binary = [&](const std::vector<uint32_t>& columns,
@@ -3825,9 +3940,10 @@ bool VerifyPrecodeSolution(
     }
     for (const SolvePacket& packet : packets)
     {
-        if (!packet.Data) {
-            return false;
-        }
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        test::TriggerSolveAllocationFailureForTesting(
+            test::SolveAllocationFailurePoint::VerifyPacketRow);
+#endif
         const std::vector<uint32_t> row =
             GeneratePacketMatrixRow(K, P, packet.BlockId, config);
         if (row.empty() || !verify_binary(row, packet.Data))
@@ -3862,6 +3978,26 @@ bool VerifyPrecodeSolution(
         }
     }
     return true;
+}
+
+bool VerifyPrecodeSolution(
+    const PrecodeSystem& system,
+    const PacketRowConfig& config,
+    const std::vector<SolvePacket>& packets,
+    const uint8_t* intermediate_blocks,
+    uint32_t block_bytes)
+{
+    try
+    {
+        return VerifyPrecodeSolutionImpl(
+            system, config, packets, intermediate_blocks, block_bytes);
+    }
+    catch (const std::bad_alloc&) {
+        return false;
+    }
+    catch (const std::length_error&) {
+        return false;
+    }
 }
 
 } // namespace wirehair_v2

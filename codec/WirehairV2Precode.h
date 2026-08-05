@@ -139,18 +139,30 @@ struct PrecodeSystem
 };
 
 /**
+    Allocation-free validation of Params and the two outer row-vector sizes.
+    This is the exact prefix checked by ValidatePrecodeSystem before it
+    allocates source-hit scratch.
+*/
+bool HasValidPrecodeSystemShape(const PrecodeSystem& system);
+
+/**
     Build the staircase + Shuffle-2 constraint structure.
 
     Returns false for invalid parameters (BlockCount outside [2, 64000],
     Staircase == 0, SourceHits outside [1, 8], DenseRows > 64,
     HeavyRows > 128, or a full symbol domain that does not fit uint16) or if
-    the generated structure fails ValidatePrecodeSystem().
+    the generated structure fails ValidatePrecodeSystem().  This low-level
+    construction primitive may throw std::bad_alloc or std::length_error;
+    status-bearing API boundaries translate those exceptions to Wirehair_OOM.
 */
 bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out);
 
 /**
     Validate every structural invariant consumed by the encoder.  Validation
-    uses widened arithmetic and performs no writes to block data.
+    uses widened arithmetic and performs no writes to block data.  Validation
+    allocates bounded source-hit scratch and may throw std::bad_alloc or
+    std::length_error; bool and WirehairResult API boundaries that invoke it
+    define their own exception translation.
 */
 bool ValidatePrecodeSystem(const PrecodeSystem& system);
 

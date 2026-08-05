@@ -4,7 +4,6 @@
 #include <cstdio>
 #include <cstring>
 #include <map>
-#include <new>
 #include <string>
 #include <vector>
 
@@ -59,14 +58,8 @@ bool CheckPacketSlotTable()
         return false;
     }
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-    bool growth_oom = false;
     wirehair_v2::SetDecoderAllocationFailureCountdownForTesting(0);
-    try {
-        (void)table.Insert(33u, 3u);
-    }
-    catch (const std::bad_alloc&) {
-        growth_oom = true;
-    }
+    const bool growth_oom = !table.Insert(33u, 3u);
     wirehair_v2::SetDecoderAllocationFailureCountdownForTesting(-1);
     if (!Check(growth_oom && table.Size() == 2u &&
             table.Capacity() == before_duplicate_capacity &&

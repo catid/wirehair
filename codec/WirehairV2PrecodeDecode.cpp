@@ -230,6 +230,19 @@ bool PacketSlotTable::Find(uint32_t packet_id, uint32_t* slot_out) const
 
 bool PacketSlotTable::Insert(uint32_t packet_id, uint32_t slot)
 {
+    try {
+        return InsertImpl(packet_id, slot);
+    }
+    catch (const std::bad_alloc&) {
+        return false;
+    }
+    catch (const std::length_error&) {
+        return false;
+    }
+}
+
+bool PacketSlotTable::InsertImpl(uint32_t packet_id, uint32_t slot)
+{
     if (Keys.empty() || EntryCount >= EntryLimit) {
         return false;
     }
@@ -674,6 +687,9 @@ WirehairResult MessagePrecodeDecoder::DecodeResult(
         catch (const std::bad_alloc&) {
             return Wirehair_OOM;
         }
+        catch (const std::length_error&) {
+            return Wirehair_OOM;
+        }
     }
 
     if (ResumeState.Active)
@@ -771,7 +787,7 @@ WirehairResult MessagePrecodeDecoder::DecodeResult(
                 PendingPacketStorage.begin() + data_bytes,
                 PendingPacketStorage.end(),
                 uint8_t{0});
-            if (!ReceivedSlots.Insert(block_id, UINT32_MAX)) {
+            if (!ReceivedSlots.InsertImpl(block_id, UINT32_MAX)) {
                 return LastSolveResult;
             }
             if (SystematicPacketCache && block_id <
@@ -853,7 +869,7 @@ WirehairResult MessagePrecodeDecoder::DecodeResult(
     try
     {
         const uint32_t slot = (uint32_t)ReceivedBlockIds.size();
-        if (!ReceivedSlots.Insert(block_id, slot)) {
+        if (!ReceivedSlots.InsertImpl(block_id, slot)) {
             return LastSolveResult;
         }
         const size_t old_storage_size = ReceivedBlockStorage.size();

@@ -25,6 +25,7 @@ class PacketSlotTable
 public:
     bool Initialize(size_t initial_entries, size_t max_entries);
     bool Find(uint32_t packet_id, uint32_t* slot_out = nullptr) const;
+    /** Allocation failure returns false and leaves the table unchanged. */
     bool Insert(uint32_t packet_id, uint32_t slot);
     bool Erase(uint32_t packet_id);
     void ClearAndRelease() noexcept;
@@ -35,7 +36,10 @@ public:
     size_t StorageBytes() const;
 
 private:
+    friend class MessagePrecodeDecoder;
+
     static uint32_t Hash(uint32_t packet_id);
+    bool InsertImpl(uint32_t packet_id, uint32_t slot);
     void Grow();
 
     std::vector<uint32_t> Keys;

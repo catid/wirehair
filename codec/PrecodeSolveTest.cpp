@@ -48,6 +48,32 @@ public:
     }
 };
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+class SolveAllocationFailureScope
+{
+public:
+    SolveAllocationFailureScope(
+        wirehair_v2::test::SolveAllocationFailurePoint point,
+        wirehair_v2::test::SolveAllocationFailureException exception)
+    {
+        wirehair_v2::test::SetSolveAllocationFailurePointForTesting(
+            point, exception);
+    }
+
+    ~SolveAllocationFailureScope()
+    {
+        wirehair_v2::test::SetSolveAllocationFailurePointForTesting(
+            wirehair_v2::test::SolveAllocationFailurePoint::None,
+            wirehair_v2::test::SolveAllocationFailureException::BadAlloc);
+    }
+
+private:
+    SolveAllocationFailureScope(const SolveAllocationFailureScope&);
+    SolveAllocationFailureScope& operator=(
+        const SolveAllocationFailureScope&);
+};
+#endif
+
 bool SameSolveStats(
     const wirehair_v2::PrecodeSolveStats& a,
     const wirehair_v2::PrecodeSolveStats& b)
@@ -4183,6 +4209,473 @@ bool CheckLargePacketEvaluationWork()
     return true;
 }
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+bool CheckSolveAllocationExceptionContainment()
+{
+    using wirehair_v2::test::SolveAllocationFailureException;
+    using wirehair_v2::test::SolveAllocationFailurePoint;
+
+    const uint32_t K = 8u;
+    const uint32_t block_bytes = 8u;
+    const wirehair_v2::PrecodeParams params =
+        wirehair_v2::MakeCertifiedParams(
+            K, UINT64_C(0x4f4f4d434f4e5441));
+    wirehair_v2::PrecodeSystem system;
+    if (!wirehair_v2::BuildPrecodeSystem(params, system)) {
+        return false;
+    }
+    wirehair_v2::PacketRowConfig config;
+    config.PeelSeed = UINT32_C(0x51a7c0de);
+    config.MixCount = wirehair_v2::kCertifiedPacketMixCount;
+    const uint32_t P = params.Staircase + params.DenseRows + params.HeavyRows;
+    const uint32_t L = K + P;
+    wirehair_v2::PacketRowRuntime runtime;
+    if (!runtime.Initialize(K, P, config.MixCount)) {
+        return false;
+    }
+
+    std::vector<uint8_t> zero_block(block_bytes, 0u);
+    std::vector<wirehair_v2::SolvePacket> packets(K);
+    for (uint32_t block_id = 0u; block_id < K; ++block_id)
+    {
+        packets[block_id].BlockId = block_id;
+        packets[block_id].Data = zero_block.data();
+    }
+    std::vector<uint8_t> intermediate((size_t)L * block_bytes, 0u);
+    const std::vector<uint8_t> intermediate_before = intermediate;
+    const std::vector<uint8_t> zero_block_before = zero_block;
+
+    const SolveAllocationFailureException exceptions[] = {
+        SolveAllocationFailureException::BadAlloc,
+        SolveAllocationFailureException::LengthError
+    };
+    const char* const exception_names[] = { "bad_alloc", "length_error" };
+
+    for (size_t exception_i = 0u;
+         exception_i < sizeof(exceptions) / sizeof(exceptions[0]);
+         ++exception_i)
+    {
+        const SolveAllocationFailureException exception =
+            exceptions[exception_i];
+        const char* const exception_name = exception_names[exception_i];
+
+        {
+            std::vector<uint8_t> output(block_bytes, 0xa5u);
+            const std::vector<uint8_t> output_before = output;
+            uint64_t operations = UINT64_C(0xfedcba9876543210);
+            SolveAllocationFailureScope failure(
+                SolveAllocationFailurePoint::EvaluateValidation,
+                exception);
+            if (wirehair_v2::EvaluatePacketBlock(
+                    system, config, intermediate.data(), block_bytes, 0u,
+                    output.data(), &operations) ||
+                wirehair_v2::test::
+                    SolveAllocationFailureHitsForTesting() != 1u ||
+                output != output_before ||
+                operations != UINT64_C(0xfedcba9876543210))
+            {
+                std::fprintf(stderr,
+                    "solve: evaluator escaped/committed %s\n",
+                    exception_name);
+                return false;
+            }
+        }
+
+        const ColdSolveEntryPoint solve_entries[] = {
+            ColdSolveEntryPoint::Public,
+            ColdSolveEntryPoint::Runtime
+        };
+        for (ColdSolveEntryPoint entry : solve_entries)
+        {
+            std::vector<uint8_t> output(19u, 0xb6u);
+            const std::vector<uint8_t> output_before = output;
+            const uint8_t* const output_data_before = output.data();
+            const size_t output_capacity_before = output.capacity();
+            wirehair_v2::PrecodeSolveStats stats = {};
+            stats.PacketRows = UINT32_C(0x10293847);
+            stats.BlockXors = UINT64_C(0x123456789abcdef0);
+            stats.BuildNanoseconds = UINT64_C(0xf0e1d2c3b4a59687);
+            const wirehair_v2::PrecodeSolveStats stats_before = stats;
+            wirehair_v2::PrecodeSolveResumeState resume =
+                MakeStatsAliasSentinel(
+                    UINT32_C(0xc00) + (uint32_t)entry +
+                    (uint32_t)exception_i * 16u);
+            const wirehair_v2::PrecodeSolveResumeState resume_before = resume;
+            const ResumeStorageIdentity resume_storage_before =
+                CaptureResumeStorageIdentity(resume);
+            const size_t resume_bytes_before = resume.PersistentBytes();
+
+            SolveAllocationFailureScope failure(
+                SolveAllocationFailurePoint::ColdSolveValidation,
+                exception);
+            const WirehairResult result = CallColdSolve(
+                entry, system, config, runtime, packets, block_bytes,
+                output, &stats, &resume);
+            if (result != Wirehair_OOM ||
+                wirehair_v2::test::
+                    SolveAllocationFailureHitsForTesting() != 1u ||
+                output != output_before ||
+                output.data() != output_data_before ||
+                output.capacity() != output_capacity_before ||
+                !SameSolveStats(stats, stats_before) ||
+                !SameResumeState(resume, resume_before) ||
+                !SameResumeStorageIdentity(
+                    resume, resume_storage_before) ||
+                resume.PersistentBytes() != resume_bytes_before)
+            {
+                std::fprintf(stderr,
+                    "solve: cold validation escaped/committed %s entry=%s "
+                    "result=%d\n",
+                    exception_name, ColdSolveEntryPointName(entry),
+                    (int)result);
+                return false;
+            }
+        }
+
+        {
+            wirehair_v2::PacketRowConfig selected;
+            selected.PeelSeed = UINT32_C(0xdecafbad);
+            selected.MixCount = UINT32_MAX;
+            uint32_t attempt = UINT32_MAX;
+            SolveAllocationFailureScope failure(
+                SolveAllocationFailurePoint::SelectPacketValidation,
+                exception);
+            const WirehairResult result =
+                wirehair_v2::SelectSystematicPacketConfig(
+                    system, config, selected, &attempt);
+            if (result != Wirehair_OOM ||
+                wirehair_v2::test::
+                    SolveAllocationFailureHitsForTesting() != 1u ||
+                selected.PeelSeed != UINT32_C(0xdecafbad) ||
+                selected.MixCount != UINT32_MAX || attempt != UINT32_MAX)
+            {
+                std::fprintf(stderr,
+                    "solve: packet selector escaped/committed %s result=%d\n",
+                    exception_name, (int)result);
+                return false;
+            }
+        }
+
+        const SolveAllocationFailurePoint verify_points[] = {
+            SolveAllocationFailurePoint::VerifyValidation,
+            SolveAllocationFailurePoint::VerifyValueScratch,
+            SolveAllocationFailurePoint::VerifyPacketRow
+        };
+        for (SolveAllocationFailurePoint point : verify_points)
+        {
+            SolveAllocationFailureScope failure(point, exception);
+            if (wirehair_v2::VerifyPrecodeSolution(
+                    system, config, packets, intermediate.data(),
+                    block_bytes) ||
+                wirehair_v2::test::
+                    SolveAllocationFailureHitsForTesting() != 1u ||
+                intermediate != intermediate_before ||
+                zero_block != zero_block_before)
+            {
+                std::fprintf(stderr,
+                    "solve: verifier escaped/wrote %s point=%u\n",
+                    exception_name, (unsigned)point);
+                return false;
+            }
+        }
+
+        {
+            std::vector<uint8_t> output(23u, 0xc7u);
+            const std::vector<uint8_t> output_before = output;
+            const uint8_t* const output_data_before = output.data();
+            const size_t output_capacity_before = output.capacity();
+            SolveAllocationFailureScope failure(
+                SolveAllocationFailurePoint::TinyDenseOracleValidation,
+                exception);
+            const WirehairResult result =
+                wirehair_v2::test::SolvePrecodeSystemTinyDenseOracle(
+                    system, config, packets, block_bytes, output);
+            if (result != Wirehair_OOM ||
+                wirehair_v2::test::
+                    SolveAllocationFailureHitsForTesting() != 1u ||
+                output != output_before ||
+                output.data() != output_data_before ||
+                output.capacity() != output_capacity_before)
+            {
+                std::fprintf(stderr,
+                    "solve: tiny oracle validation escaped/committed %s "
+                    "result=%d\n",
+                    exception_name, (int)result);
+                return false;
+            }
+        }
+    }
+
+    // The validated-system entry is an internal trust boundary, which lets
+    // this deliberately minimal row graph drive the otherwise unreachable
+    // zero-residual verifier caller.  The public validator rejects the graph;
+    // without injection that rejection is published as terminal Error.
+    wirehair_v2::PrecodeSystem zero_residual_system;
+    zero_residual_system.Params.BlockCount = 2u;
+    zero_residual_system.Params.Staircase = 2u;
+    zero_residual_system.Params.SourceHits = 1u;
+    zero_residual_system.Params.Seed = UINT64_C(0x5230564552494659);
+    zero_residual_system.StaircaseRows = {
+        std::vector<uint32_t>{ 0u },
+        std::vector<uint32_t>{ 1u }
+    };
+    wirehair_v2::PacketRowConfig zero_residual_config;
+    zero_residual_config.MixCount = 1u;
+    wirehair_v2::PacketRowRuntime zero_residual_runtime;
+    if (!zero_residual_runtime.Initialize(2u, 2u, 1u)) {
+        return false;
+    }
+    std::vector<wirehair_v2::SolvePacket> zero_residual_packets(2u);
+    for (uint32_t block_id = 0u; block_id < 2u; ++block_id)
+    {
+        zero_residual_packets[block_id].BlockId = block_id;
+        zero_residual_packets[block_id].Data = zero_block.data();
+    }
+    bool found_zero_residual = false;
+    WirehairResult fixture_result = Wirehair_Error;
+    uint32_t fixture_inactive = UINT32_MAX;
+    for (uint32_t peel_seed = 0u; peel_seed < 256u; ++peel_seed)
+    {
+        zero_residual_config.PeelSeed = peel_seed;
+        std::vector<uint8_t> output(5u, 0x6au);
+        wirehair_v2::PrecodeSolveStats stats = {};
+        fixture_result =
+            wirehair_v2::SolvePrecodeSystemForValidatedSystemWithRuntime(
+                zero_residual_system,
+                zero_residual_config,
+                zero_residual_runtime,
+                zero_residual_packets,
+                1u,
+                output,
+                &stats);
+        fixture_inactive = stats.InactivatedColumns;
+        if (fixture_result == Wirehair_Error && fixture_inactive == 0u)
+        {
+            found_zero_residual = true;
+            break;
+        }
+    }
+    if (!found_zero_residual)
+    {
+        std::fprintf(stderr,
+            "solve: zero-residual verifier fixture failed result=%d "
+            "inactive=%u\n", (int)fixture_result, fixture_inactive);
+        return false;
+    }
+    for (SolveAllocationFailureException exception : exceptions)
+    {
+        std::vector<uint8_t> output(7u, 0x7bu);
+        const std::vector<uint8_t> output_before = output;
+        wirehair_v2::PrecodeSolveStats stats = {};
+        stats.PacketRows = UINT32_C(0x76543210);
+        stats.BlockXors = UINT64_C(0xabcdef0123456789);
+        const wirehair_v2::PrecodeSolveStats stats_before = stats;
+        wirehair_v2::PrecodeSolveResumeState resume =
+            MakeStatsAliasSentinel(UINT32_C(0xcf0) + (uint32_t)exception);
+        const wirehair_v2::PrecodeSolveResumeState resume_before = resume;
+        SolveAllocationFailureScope failure(
+            SolveAllocationFailurePoint::VerifyValidation,
+            exception);
+        const WirehairResult result =
+            wirehair_v2::SolvePrecodeSystemForValidatedSystemWithRuntime(
+                zero_residual_system,
+                zero_residual_config,
+                zero_residual_runtime,
+                zero_residual_packets,
+                1u,
+                output,
+                &stats,
+                &resume);
+        if (result != Wirehair_OOM ||
+            wirehair_v2::test::SolveAllocationFailureHitsForTesting() != 1u ||
+            output != output_before || !SameSolveStats(stats, stats_before) ||
+            !SameResumeState(resume, resume_before))
+        {
+            std::fprintf(stderr,
+                "solve: zero-residual verifier OOM mapping failed "
+                "exception=%u result=%d\n",
+                (unsigned)exception, (int)result);
+            return false;
+        }
+    }
+
+    // Deterministic injections must not outrank checks that already establish
+    // invalid input without allocating.
+    {
+        std::vector<uint8_t> output(block_bytes, 0xd8u);
+        const std::vector<uint8_t> output_before = output;
+        uint64_t operations = UINT64_C(0x0102030405060708);
+        SolveAllocationFailureScope failure(
+            SolveAllocationFailurePoint::EvaluateValidation,
+            SolveAllocationFailureException::BadAlloc);
+        if (wirehair_v2::EvaluatePacketBlock(
+                system, config, nullptr, block_bytes, 0u,
+                output.data(), &operations) ||
+            wirehair_v2::test::
+                SolveAllocationFailureHitsForTesting() != 0u ||
+            output != output_before ||
+            operations != UINT64_C(0x0102030405060708))
+        {
+            std::fprintf(stderr,
+                "solve: evaluator invalid-input precedence failed\n");
+            return false;
+        }
+    }
+
+    const ColdSolveEntryPoint validating_entries[] = {
+        ColdSolveEntryPoint::Public,
+        ColdSolveEntryPoint::Runtime
+    };
+    for (ColdSolveEntryPoint entry : validating_entries)
+    {
+        wirehair_v2::PrecodeSolveResumeState resume =
+            MakeStatsAliasSentinel(UINT32_C(0xd00) + (uint32_t)entry);
+        const wirehair_v2::PrecodeSolveResumeState resume_before = resume;
+        const ResumeStorageIdentity resume_storage_before =
+            CaptureResumeStorageIdentity(resume);
+        std::vector<uint8_t> output(29u, 0xe9u);
+        const std::vector<uint8_t> output_before = output;
+        SolveAllocationFailureScope failure(
+            SolveAllocationFailurePoint::ColdSolveValidation,
+            SolveAllocationFailureException::BadAlloc);
+        const WirehairResult result = CallColdSolve(
+            entry, system, config, runtime, packets, block_bytes,
+            output, &resume.Stats, &resume);
+        if (result != Wirehair_InvalidInput ||
+            wirehair_v2::test::SolveAllocationFailureHitsForTesting() != 0u ||
+            output != output_before ||
+            !SameResumeState(resume, resume_before) ||
+            !SameResumeStorageIdentity(resume, resume_storage_before))
+        {
+            std::fprintf(stderr,
+                "solve: cold invalid-input precedence failed entry=%s\n",
+                ColdSolveEntryPointName(entry));
+            return false;
+        }
+    }
+
+    std::vector<wirehair_v2::SolvePacket> null_packets = packets;
+    null_packets[0].Data = nullptr;
+    for (ColdSolveEntryPoint entry : validating_entries)
+    {
+        std::vector<uint8_t> output(17u, 0xedu);
+        const std::vector<uint8_t> output_before = output;
+        wirehair_v2::PrecodeSolveStats stats = {};
+        stats.PacketRows = UINT32_C(0x31415926);
+        const wirehair_v2::PrecodeSolveStats stats_before = stats;
+        SolveAllocationFailureScope failure(
+            SolveAllocationFailurePoint::ColdSolveValidation,
+            SolveAllocationFailureException::BadAlloc);
+        const WirehairResult result = CallColdSolve(
+            entry, system, config, runtime, null_packets, block_bytes,
+            output, &stats, nullptr);
+        if (result != Wirehair_InvalidInput ||
+            wirehair_v2::test::SolveAllocationFailureHitsForTesting() != 0u ||
+            output != output_before || !SameSolveStats(stats, stats_before))
+        {
+            std::fprintf(stderr,
+                "solve: null packet precedence failed entry=%s\n",
+                ColdSolveEntryPointName(entry));
+            return false;
+        }
+    }
+
+    {
+        wirehair_v2::PacketRowConfig invalid = config;
+        invalid.MixCount = 0u;
+        wirehair_v2::PacketRowConfig selected;
+        selected.PeelSeed = UINT32_C(0xfafafafa);
+        selected.MixCount = UINT32_MAX;
+        uint32_t attempt = UINT32_MAX;
+        SolveAllocationFailureScope failure(
+            SolveAllocationFailurePoint::SelectPacketValidation,
+            SolveAllocationFailureException::BadAlloc);
+        const WirehairResult result =
+            wirehair_v2::SelectSystematicPacketConfig(
+                system, invalid, selected, &attempt);
+        if (result != Wirehair_InvalidInput ||
+            wirehair_v2::test::SolveAllocationFailureHitsForTesting() != 0u ||
+            selected.PeelSeed != UINT32_C(0xfafafafa) ||
+            selected.MixCount != UINT32_MAX || attempt != UINT32_MAX)
+        {
+            std::fprintf(stderr,
+                "solve: selector invalid-input precedence failed\n");
+            return false;
+        }
+    }
+
+    {
+        SolveAllocationFailureScope failure(
+            SolveAllocationFailurePoint::VerifyValidation,
+            SolveAllocationFailureException::BadAlloc);
+        if (wirehair_v2::VerifyPrecodeSolution(
+                system, config, packets, nullptr, block_bytes) ||
+            wirehair_v2::test::SolveAllocationFailureHitsForTesting() != 0u)
+        {
+            std::fprintf(stderr,
+                "solve: verifier invalid-input precedence failed\n");
+            return false;
+        }
+    }
+
+    {
+        SolveAllocationFailureScope failure(
+            SolveAllocationFailurePoint::VerifyValidation,
+            SolveAllocationFailureException::BadAlloc);
+        if (wirehair_v2::VerifyPrecodeSolution(
+                system, config, null_packets, intermediate.data(),
+                block_bytes) ||
+            wirehair_v2::test::SolveAllocationFailureHitsForTesting() != 0u)
+        {
+            std::fprintf(stderr,
+                "solve: verifier null-packet precedence failed\n");
+            return false;
+        }
+    }
+
+    {
+        std::vector<uint8_t> output(31u, 0xfau);
+        const std::vector<uint8_t> output_before = output;
+        SolveAllocationFailureScope failure(
+            SolveAllocationFailurePoint::TinyDenseOracleValidation,
+            SolveAllocationFailureException::BadAlloc);
+        const WirehairResult result =
+            wirehair_v2::test::SolvePrecodeSystemTinyDenseOracle(
+                system, config, packets, 0u, output);
+        if (result != Wirehair_InvalidInput ||
+            wirehair_v2::test::SolveAllocationFailureHitsForTesting() != 0u ||
+            output != output_before)
+        {
+            std::fprintf(stderr,
+                "solve: tiny oracle invalid-input precedence failed\n");
+            return false;
+        }
+    }
+
+    {
+        std::vector<uint8_t> output(27u, 0xabu);
+        const std::vector<uint8_t> output_before = output;
+        SolveAllocationFailureScope failure(
+            SolveAllocationFailurePoint::TinyDenseOracleValidation,
+            SolveAllocationFailureException::BadAlloc);
+        const WirehairResult result =
+            wirehair_v2::test::SolvePrecodeSystemTinyDenseOracle(
+                system, config, null_packets, block_bytes, output);
+        if (result != Wirehair_InvalidInput ||
+            wirehair_v2::test::SolveAllocationFailureHitsForTesting() != 0u ||
+            output != output_before)
+        {
+            std::fprintf(stderr,
+                "solve: tiny oracle null-packet precedence failed\n");
+            return false;
+        }
+    }
+
+    std::printf("solve allocation/length exception containment: PASS\n");
+    return true;
+}
+#endif
+
 bool CheckInactiveResidualCap()
 {
     const uint32_t K = 5000u;
@@ -4469,6 +4962,7 @@ int main(int argc, char** argv)
     ok = CheckIncrementalResume() && ok;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     ok = CheckHeavyProjectionPropagationOracle() && ok;
+    ok = CheckSolveAllocationExceptionContainment() && ok;
 #endif
     ok = CheckColdSolveStatsAlias() && ok;
     ok = CheckBinaryPeelLowDegreeXorOracle() && ok;

@@ -134,6 +134,41 @@ void ResetHeavyProjectionOracleCountersForTesting();
 uint64_t HeavyProjectionOracleComparisonsForTesting();
 uint64_t HeavyProjectionLegacyFallbacksForTesting();
 
+namespace test {
+
+/** Allocation-capable scopes exercised by the solve exception tests. */
+enum class SolveAllocationFailurePoint : uint8_t
+{
+    None,
+    EvaluateValidation,
+    ColdSolveValidation,
+    SelectPacketValidation,
+    VerifyValidation,
+    VerifyValueScratch,
+    VerifyPacketRow,
+    TinyDenseOracleValidation
+};
+
+enum class SolveAllocationFailureException : uint8_t
+{
+    BadAlloc,
+    LengthError
+};
+
+/** Select one thread-local, deterministic exception injection point. */
+void SetSolveAllocationFailurePointForTesting(
+    SolveAllocationFailurePoint point,
+    SolveAllocationFailureException exception);
+
+/** Number of times the selected point has injected since the last setter. */
+uint32_t SolveAllocationFailureHitsForTesting();
+
+/** Internal bridge shared with the independently compiled tiny oracle. */
+void TriggerSolveAllocationFailureForTesting(
+    SolveAllocationFailurePoint point);
+
+} // namespace test
+
 #endif
 
 /**
@@ -239,6 +274,8 @@ PrecodeParams PrecodeParamsForAttempt(
     `(K + P) * block_bytes` intermediate-block array.  When non-null, the
     `block_ops_out` object must not overlap either range.  Overlap is rejected
     before writing `block_out`, `block_ops_out`, or intermediate storage.
+    Allocation and length exceptions return false without writing either
+    output.
 */
 bool EvaluatePacketBlock(
     const PrecodeSystem& system,
@@ -368,7 +405,12 @@ WirehairResult ResumePrecodeSystem(
     PrecodeSolveStats* stats = nullptr,
     bool allow_insert = true);
 
-/** Select the first deterministic packet seed whose K systematic rows rank. */
+/**
+    Select the first deterministic packet seed whose K systematic rows rank.
+
+    Allocation and length exceptions return OOM.  Every failure preserves
+    selected_config and attempt_out.
+*/
 WirehairResult SelectSystematicPacketConfig(
     const PrecodeSystem& system,
     const PacketRowConfig& base_config,
@@ -401,7 +443,12 @@ WirehairResult ClassifyExactSystematicConstructionFailure(
     const PacketRowRuntime& runtime,
     WirehairResult solve_result);
 
-/** Expensive test/oracle validation of every supplied equation. */
+/**
+    Expensive test/oracle validation of every supplied equation.
+
+    Allocation and length exceptions return false.  The system, packets, and
+    intermediate block storage are always read-only.
+*/
 bool VerifyPrecodeSolution(
     const PrecodeSystem& system,
     const PacketRowConfig& config,

@@ -20,6 +20,13 @@ namespace {
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 thread_local int64_t AllocationFailureCountdown = -1;
 thread_local uint64_t HeavyBucketStorageLimit = UINT64_C(64) << 20;
+thread_local test::EncodeAllocationFailurePoint
+    ActiveEncodeAllocationFailurePoint =
+        test::EncodeAllocationFailurePoint::None;
+thread_local test::EncodeAllocationFailureException
+    ActiveEncodeAllocationFailureException =
+        test::EncodeAllocationFailureException::BadAlloc;
+thread_local uint32_t EncodeAllocationFailureHits = 0u;
 
 void GuardedAllocation()
 {
@@ -177,32 +184,82 @@ void SetHeavyBucketStorageLimitForTesting(uint64_t bytes)
 {
     HeavyBucketStorageLimit = bytes;
 }
+
+namespace test {
+
+void SetEncodeAllocationFailurePointForTesting(
+    EncodeAllocationFailurePoint point,
+    EncodeAllocationFailureException exception)
+{
+    ActiveEncodeAllocationFailurePoint = point;
+    ActiveEncodeAllocationFailureException = exception;
+    EncodeAllocationFailureHits = 0u;
+}
+
+uint32_t EncodeAllocationFailureHitsForTesting()
+{
+    return EncodeAllocationFailureHits;
+}
+
+void TriggerEncodeAllocationFailureForTesting(
+    EncodeAllocationFailurePoint point)
+{
+    if (ActiveEncodeAllocationFailurePoint != point) {
+        return;
+    }
+    ++EncodeAllocationFailureHits;
+    if (ActiveEncodeAllocationFailureException ==
+        EncodeAllocationFailureException::LengthError)
+    {
+        throw std::length_error("injected WH2 encode allocation failure");
+    }
+    throw std::bad_alloc();
+}
+
+} // namespace test
 #endif
 
 bool DenseCornerInvertible(const PrecodeSystem& system)
 {
     const uint32_t D2 = system.Params.DenseRows;
-    if (!ValidatePrecodeSystem(system)) {
+    if (!HasValidPrecodeSystemShape(system)) {
         return false;
     }
-    if (D2 == 0u) {
-        return true;
-    }
 
-    const uint32_t dense_base =
-        system.Params.BlockCount + system.Params.Staircase;
-    std::vector<uint64_t> masks(D2);
-    for (uint32_t r = 0; r < D2; ++r) {
-        if (!DenseColumnMask(
-                system.DenseBasisRowColumns[r], dense_base, D2, masks[r]))
-        {
+    try
+    {
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        test::TriggerEncodeAllocationFailureForTesting(
+            test::EncodeAllocationFailurePoint::DenseCornerValidation);
+#endif
+        if (!ValidatePrecodeSystem(system)) {
             return false;
         }
+        if (D2 == 0u) {
+            return true;
+        }
+
+        const uint32_t dense_base =
+            system.Params.BlockCount + system.Params.Staircase;
+        std::vector<uint64_t> masks(D2);
+        for (uint32_t r = 0; r < D2; ++r) {
+            if (!DenseColumnMask(
+                    system.DenseBasisRowColumns[r], dense_base, D2, masks[r]))
+            {
+                return false;
+            }
+        }
+        return MaskRank(masks, D2) == D2;
     }
-    return MaskRank(masks, D2) == D2;
+    catch (const std::bad_alloc&) {
+        return false;
+    }
+    catch (const std::length_error&) {
+        return false;
+    }
 }
 
-bool ComputePrecodeValues(
+static bool ComputePrecodeValuesImpl(
     const PrecodeSystem& system,
     const uint8_t* source_blocks,
     uint32_t block_bytes,
@@ -220,7 +277,7 @@ bool ComputePrecodeValues(
         block_bytes == 0u || block_bytes > 0x7fffffffu ||
         system.Params.HeavyFamily !=
             HeavyCoefficientFamily::PeriodicCauchy ||
-        !ValidatePrecodeSystem(system))
+        !HasValidPrecodeSystemShape(system))
     {
         return false;
     }
@@ -236,6 +293,14 @@ bool ComputePrecodeValues(
     if ((uint64_t)K * block_bytes > size_limit ||
         ((uint64_t)S + D2 + H) * block_bytes > size_limit)
     {
+        return false;
+    }
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    test::TriggerEncodeAllocationFailureForTesting(
+        test::EncodeAllocationFailurePoint::PrecodeValuesValidation);
+#endif
+    if (!ValidatePrecodeSystem(system)) {
         return false;
     }
 
@@ -556,6 +621,26 @@ bool ComputePrecodeValues(
     return true;
 }
 
+bool ComputePrecodeValues(
+    const PrecodeSystem& system,
+    const uint8_t* source_blocks,
+    uint32_t block_bytes,
+    uint8_t* parity_blocks,
+    PrecodeEncodeStats* stats)
+{
+    try
+    {
+        return ComputePrecodeValuesImpl(
+            system, source_blocks, block_bytes, parity_blocks, stats);
+    }
+    catch (const std::bad_alloc&) {
+        return false;
+    }
+    catch (const std::length_error&) {
+        return false;
+    }
+}
+
 static bool ComputeRecoveryBlockImpl(
     const PrecodeSystem& system,
     const uint8_t* source_blocks,
@@ -583,9 +668,24 @@ static bool ComputeRecoveryBlockImpl(
             (uint64_t)std::numeric_limits<size_t>::max() ||
         precode_count * block_bytes >
             (uint64_t)std::numeric_limits<size_t>::max() ||
-        (validate_system && !ValidatePrecodeSystem(system)))
+        (validate_system && !HasValidPrecodeSystemShape(system)))
     {
         return false;
+    }
+    for (const uint32_t col : row_columns) {
+        if (col >= total_columns) {
+            return false;
+        }
+    }
+    if (validate_system)
+    {
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        test::TriggerEncodeAllocationFailureForTesting(
+            test::EncodeAllocationFailurePoint::RecoveryBlockValidation);
+#endif
+        if (!ValidatePrecodeSystem(system)) {
+            return false;
+        }
     }
 
     const auto column_value = [&](uint32_t c) -> const uint8_t* {
@@ -593,13 +693,6 @@ static bool ComputeRecoveryBlockImpl(
             source_blocks + (size_t)c * block_bytes :
             parity_blocks + (size_t)(c - K) * block_bytes;
     };
-
-    for (const uint32_t col : row_columns)
-    {
-        if (col >= total_columns) {
-            return false;
-        }
-    }
 
     BlockAccumulator acc(block_out, block_bytes, ops);
     for (const uint32_t col : row_columns) {
@@ -618,12 +711,21 @@ bool ComputeRecoveryBlock(
     uint8_t* block_out,
     uint64_t* block_ops_out)
 {
-    if (gf256_init() != 0) {
+    try
+    {
+        if (gf256_init() != 0) {
+            return false;
+        }
+        return ComputeRecoveryBlockImpl(
+            system, source_blocks, parity_blocks, block_bytes, row_columns,
+            block_out, block_ops_out, true);
+    }
+    catch (const std::bad_alloc&) {
         return false;
     }
-    return ComputeRecoveryBlockImpl(
-        system, source_blocks, parity_blocks, block_bytes, row_columns,
-        block_out, block_ops_out, true);
+    catch (const std::length_error&) {
+        return false;
+    }
 }
 
 static bool ComputeEncodedBlockImpl(
@@ -655,9 +757,20 @@ static bool ComputeEncodedBlockImpl(
             (uint64_t)std::numeric_limits<size_t>::max() ||
         precode_count * block_bytes >
             (uint64_t)std::numeric_limits<size_t>::max() ||
-        (validate_system && !ValidatePrecodeSystem(system)))
+        (block_id >= K && !parity_blocks) ||
+        (validate_system && !HasValidPrecodeSystemShape(system)))
     {
         return false;
+    }
+    if (validate_system)
+    {
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        test::TriggerEncodeAllocationFailureForTesting(
+            test::EncodeAllocationFailurePoint::EncodedBlockValidation);
+#endif
+        if (!ValidatePrecodeSystem(system)) {
+            return false;
+        }
     }
 
     if (block_id < K)
@@ -670,11 +783,12 @@ static bool ComputeEncodedBlockImpl(
         return true;
     }
 
-    if (!parity_blocks) {
-        return false;
-    }
     const uint32_t recovery_index = block_id - K;
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    test::TriggerEncodeAllocationFailureForTesting(
+        test::EncodeAllocationFailurePoint::EncodedBlockRow);
+#endif
     const std::vector<uint32_t> row = GenerateRecoveryMatrixRow(
         codec, K, (uint32_t)precode_count, recovery_index, mix_count,
         row_seed);
@@ -698,12 +812,21 @@ bool ComputeEncodedBlock(
     uint8_t* block_out,
     uint64_t* block_ops_out)
 {
-    if (gf256_init() != 0) {
+    try
+    {
+        if (gf256_init() != 0) {
+            return false;
+        }
+        return ComputeEncodedBlockImpl(
+            system, codec, row_seed, mix_count, source_blocks, parity_blocks,
+            block_bytes, block_id, block_out, block_ops_out, true);
+    }
+    catch (const std::bad_alloc&) {
         return false;
     }
-    return ComputeEncodedBlockImpl(
-        system, codec, row_seed, mix_count, source_blocks, parity_blocks,
-        block_bytes, block_id, block_out, block_ops_out, true);
+    catch (const std::length_error&) {
+        return false;
+    }
 }
 
 PrecodeEncoder::PrecodeEncoder()
@@ -740,48 +863,63 @@ WirehairResult PrecodeEncoder::InitializeSolvedSystem(
     const uint64_t precode_count_wide =
         (uint64_t)system.Params.Staircase +
         system.Params.DenseRows + system.Params.HeavyRows;
+    const uint64_t column_count_wide =
+        (uint64_t)system.Params.BlockCount + precode_count_wide;
     if (precode_count_wide > UINT32_MAX ||
         !IsPacketRowDomainValid(
             system.Params.BlockCount,
             (uint32_t)precode_count_wide,
             packet_config.MixCount) ||
-        !ValidatePrecodeSystem(system) ||
-        block_bytes == 0u || block_bytes > 0x7fffffffu)
-    {
-        return Wirehair_InvalidInput;
-    }
-    const uint32_t L = system.Params.BlockCount + system.Params.Staircase +
-        system.Params.DenseRows + system.Params.HeavyRows;
-    const uint64_t expected = (uint64_t)L * block_bytes;
-    if (expected > (uint64_t)((size_t)-1) ||
-        intermediate_blocks.size() != (size_t)expected)
+        !HasValidPrecodeSystemShape(system) ||
+        block_bytes == 0u || block_bytes > 0x7fffffffu ||
+        column_count_wide >
+            (uint64_t)std::numeric_limits<size_t>::max() / block_bytes ||
+        intermediate_blocks.size() !=
+            (size_t)column_count_wide * block_bytes)
     {
         return Wirehair_InvalidInput;
     }
 
-    PrecodeEncoder next;
-    // The complete graph was required by the solve and validated above, but
-    // packet evaluation consumes only its immutable dimensions/seed params.
-    // Retaining thousands of nested row allocations here would duplicate a
-    // graph that can never be consulted by this encoder mode.
-    next.SystemValue.Params = system.Params;
-    next.RowSeed = packet_config.PeelSeed;
-    next.MixCount = packet_config.MixCount;
-    next.BlockBytesValue = block_bytes;
-    next.PacketConfigValue = packet_config;
-    if (!next.PacketRuntimeValue.Initialize(
-            system.Params.BlockCount,
-            (uint32_t)precode_count_wide,
-            packet_config.MixCount))
+    try
     {
-        return Wirehair_InvalidInput;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        test::TriggerEncodeAllocationFailureForTesting(
+            test::EncodeAllocationFailurePoint::InitializeSolvedValidation);
+#endif
+        if (!ValidatePrecodeSystem(system)) {
+            return Wirehair_InvalidInput;
+        }
+
+        PrecodeEncoder next;
+        // The complete graph was required by the solve and validated above,
+        // but packet evaluation consumes only its immutable dimensions/seed
+        // params.  Retaining thousands of nested row allocations here would
+        // duplicate a graph that can never be consulted by this encoder mode.
+        next.SystemValue.Params = system.Params;
+        next.RowSeed = packet_config.PeelSeed;
+        next.MixCount = packet_config.MixCount;
+        next.BlockBytesValue = block_bytes;
+        next.PacketConfigValue = packet_config;
+        if (!next.PacketRuntimeValue.Initialize(
+                system.Params.BlockCount,
+                (uint32_t)precode_count_wide,
+                packet_config.MixCount))
+        {
+            return Wirehair_InvalidInput;
+        }
+        next.SolvedIntermediateStorage.swap(intermediate_blocks);
+        next.SourceBlocks = next.SolvedIntermediateStorage.data();
+        next.UsesPacketContract = true;
+        next.Initialized = true;
+        Swap(next);
+        return Wirehair_Success;
     }
-    next.SolvedIntermediateStorage.swap(intermediate_blocks);
-    next.SourceBlocks = next.SolvedIntermediateStorage.data();
-    next.UsesPacketContract = true;
-    next.Initialized = true;
-    Swap(next);
-    return Wirehair_Success;
+    catch (const std::bad_alloc&) {
+        return Wirehair_OOM;
+    }
+    catch (const std::length_error&) {
+        return Wirehair_OOM;
+    }
 }
 
 bool PrecodeEncoder::Initialize(
@@ -834,7 +972,7 @@ WirehairResult PrecodeEncoder::InitializeResult(
             (size_t)parity_count_wide * (size_t)block_bytes);
         PrecodeEncodeStats stats = {};
         GuardedAllocation();
-        if (!ComputePrecodeValues(
+        if (!ComputePrecodeValuesImpl(
                 system, source_blocks, block_bytes, parity.data(), &stats))
         {
             return Wirehair_BadDenseSeed;
@@ -1470,6 +1608,9 @@ WirehairResult MessagePrecodeEncoder::EncodeResult(
                 }
             }
             catch (const std::bad_alloc&) {
+                return Wirehair_OOM;
+            }
+            catch (const std::length_error&) {
                 return Wirehair_OOM;
             }
         }

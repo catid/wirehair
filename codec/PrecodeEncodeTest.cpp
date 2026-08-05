@@ -32,6 +32,32 @@
 
 namespace {
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+class EncodeAllocationFailureScope
+{
+public:
+    EncodeAllocationFailureScope(
+        wirehair_v2::test::EncodeAllocationFailurePoint point,
+        wirehair_v2::test::EncodeAllocationFailureException exception)
+    {
+        wirehair_v2::test::SetEncodeAllocationFailurePointForTesting(
+            point, exception);
+    }
+
+    ~EncodeAllocationFailureScope()
+    {
+        wirehair_v2::test::SetEncodeAllocationFailurePointForTesting(
+            wirehair_v2::test::EncodeAllocationFailurePoint::None,
+            wirehair_v2::test::EncodeAllocationFailureException::BadAlloc);
+    }
+
+private:
+    EncodeAllocationFailureScope(const EncodeAllocationFailureScope&);
+    EncodeAllocationFailureScope& operator=(
+        const EncodeAllocationFailureScope&);
+};
+#endif
+
 bool ParsePositiveU32(const char* text, uint32_t& out)
 {
     if (!text || !*text || *text < '0' || *text > '9') {
@@ -1734,6 +1760,328 @@ bool TestSystematicSourceCache()
     return true;
 }
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+bool TestEncodeAllocationExceptionBoundaries()
+{
+    using wirehair_v2::test::EncodeAllocationFailureException;
+    using wirehair_v2::test::EncodeAllocationFailurePoint;
+
+    const uint32_t K = 16u;
+    const uint32_t bb = 19u;
+    wirehair_v2::PrecodeParams params =
+        wirehair_v2::MakeCertifiedParams(
+            K, UINT64_C(0x454e434f4f4d5445));
+    params.DenseIdentityCorner = true;
+    wirehair_v2::PrecodeSystem system;
+    if (!wirehair_v2::BuildPrecodeSystem(params, system)) {
+        return false;
+    }
+    const uint32_t parity_count = params.Staircase + params.DenseRows +
+        params.HeavyRows;
+    std::vector<uint8_t> source((size_t)K * bb, 0u);
+    std::vector<uint8_t> parity((size_t)parity_count * bb, 0x91u);
+    FillRandomBlocks(
+        source.data(), source.size(), UINT64_C(0xa110ca7e4e434f44));
+    const wirehair_v2::PeelingCodec codec =
+        wirehair_v2::MakePeelingCodec(
+            wirehair_v2::PeelStructure::LtM1C32,
+            wirehair_v2::PeelSolver::KsBmaxTop16);
+    const uint64_t row_seed = UINT64_C(0x1020304050607080);
+    const uint32_t mix_count = 3u;
+    const std::vector<uint32_t> recovery_row{ 0u, K };
+
+    wirehair_v2::PrecodeEncoder stateful_encoder;
+    if (stateful_encoder.InitializeResult(
+            system, codec, row_seed, mix_count, source.data(), bb) !=
+            Wirehair_Success)
+    {
+        std::fprintf(stderr,
+            "encode allocation boundaries: initial block encoder failed\n");
+        return false;
+    }
+    const uint8_t* const working_parity = stateful_encoder.ParityBlocks();
+    const uint32_t working_source_count =
+        stateful_encoder.SourceBlockCount();
+
+    wirehair_v2::MessagePrecodeEncoderOptions options;
+    options.DenseIdentityCorner = true;
+    wirehair_v2::MessagePrecodeEncoder message_encoder;
+    const uint64_t message_bytes = (uint64_t)K * bb;
+    if (message_encoder.InitializeResult(
+            source.data(), message_bytes, bb, nullptr, &options) !=
+            Wirehair_Success)
+    {
+        std::fprintf(stderr,
+            "encode allocation boundaries: initial message encoder failed\n");
+        return false;
+    }
+    const uint8_t* const working_intermediate =
+        message_encoder.IntermediateBlocks();
+    const wirehair_v2::SeedProfile working_profile =
+        message_encoder.Profile();
+
+    const EncodeAllocationFailureException exceptions[] = {
+        EncodeAllocationFailureException::BadAlloc,
+        EncodeAllocationFailureException::LengthError
+    };
+    const char* const exception_names[] = { "bad_alloc", "length_error" };
+    for (size_t exception_i = 0u;
+         exception_i < sizeof(exceptions) / sizeof(exceptions[0]);
+         ++exception_i)
+    {
+        const EncodeAllocationFailureException exception =
+            exceptions[exception_i];
+        const char* const exception_name = exception_names[exception_i];
+
+        {
+            EncodeAllocationFailureScope failure(
+                EncodeAllocationFailurePoint::DenseCornerValidation,
+                exception);
+            if (wirehair_v2::DenseCornerInvertible(system) ||
+                wirehair_v2::test::
+                    EncodeAllocationFailureHitsForTesting() != 1u)
+            {
+                std::fprintf(stderr,
+                    "encode allocation boundaries: dense corner escaped %s\n",
+                    exception_name);
+                return false;
+            }
+        }
+
+        {
+            std::fill(parity.begin(), parity.end(), uint8_t{0x91});
+            const std::vector<uint8_t> parity_before = parity;
+            wirehair_v2::PrecodeEncodeStats stats;
+            stats.StaircaseBlockOps = UINT64_MAX;
+            EncodeAllocationFailureScope failure(
+                EncodeAllocationFailurePoint::PrecodeValuesValidation,
+                exception);
+            if (wirehair_v2::ComputePrecodeValues(
+                    system, source.data(), bb, parity.data(), &stats) ||
+                wirehair_v2::test::
+                    EncodeAllocationFailureHitsForTesting() != 1u ||
+                parity != parity_before || !StatsAreZero(stats))
+            {
+                std::fprintf(stderr,
+                    "encode allocation boundaries: values escaped/wrote %s\n",
+                    exception_name);
+                return false;
+            }
+        }
+
+        {
+            EncodeAllocationFailureScope failure(
+                EncodeAllocationFailurePoint::PrecodeValuesValidation,
+                exception);
+            const WirehairResult result = stateful_encoder.InitializeResult(
+                system, codec, row_seed, mix_count, source.data(), bb);
+            if (result != Wirehair_OOM ||
+                wirehair_v2::test::
+                    EncodeAllocationFailureHitsForTesting() != 1u ||
+                !stateful_encoder.IsInitialized() ||
+                stateful_encoder.ParityBlocks() != working_parity ||
+                stateful_encoder.SourceBlockCount() != working_source_count)
+            {
+                std::fprintf(stderr,
+                    "encode allocation boundaries: values status mapping "
+                    "failed %s result=%d\n",
+                    exception_name, (int)result);
+                return false;
+            }
+        }
+
+        {
+            std::vector<uint8_t> output(bb, 0xa2u);
+            const std::vector<uint8_t> output_before = output;
+            uint64_t ops = UINT64_MAX;
+            EncodeAllocationFailureScope failure(
+                EncodeAllocationFailurePoint::RecoveryBlockValidation,
+                exception);
+            if (wirehair_v2::ComputeRecoveryBlock(
+                    system, source.data(), parity.data(), bb, recovery_row,
+                    output.data(), &ops) ||
+                wirehair_v2::test::
+                    EncodeAllocationFailureHitsForTesting() != 1u ||
+                output != output_before || ops != 0u)
+            {
+                std::fprintf(stderr,
+                    "encode allocation boundaries: recovery escaped/wrote "
+                    "%s\n", exception_name);
+                return false;
+            }
+        }
+
+        {
+            std::vector<uint8_t> output(bb, 0xb3u);
+            const std::vector<uint8_t> output_before = output;
+            uint64_t ops = UINT64_MAX;
+            EncodeAllocationFailureScope failure(
+                EncodeAllocationFailurePoint::EncodedBlockValidation,
+                exception);
+            if (wirehair_v2::ComputeEncodedBlock(
+                    system, codec, row_seed, mix_count,
+                    source.data(), parity.data(), bb, K,
+                    output.data(), &ops) ||
+                wirehair_v2::test::
+                    EncodeAllocationFailureHitsForTesting() != 1u ||
+                output != output_before || ops != 0u)
+            {
+                std::fprintf(stderr,
+                    "encode allocation boundaries: encoded validation "
+                    "escaped/wrote %s\n", exception_name);
+                return false;
+            }
+        }
+
+        {
+            std::vector<uint8_t> output(bb, 0xc4u);
+            const std::vector<uint8_t> output_before = output;
+            uint64_t ops = UINT64_MAX;
+            EncodeAllocationFailureScope failure(
+                EncodeAllocationFailurePoint::EncodedBlockRow,
+                exception);
+            if (wirehair_v2::ComputeEncodedBlock(
+                    system, codec, row_seed, mix_count,
+                    source.data(), parity.data(), bb, K,
+                    output.data(), &ops) ||
+                wirehair_v2::test::
+                    EncodeAllocationFailureHitsForTesting() != 1u ||
+                output != output_before || ops != 0u)
+            {
+                std::fprintf(stderr,
+                    "encode allocation boundaries: encoded row escaped/wrote "
+                    "%s\n", exception_name);
+                return false;
+            }
+        }
+
+        {
+            EncodeAllocationFailureScope failure(
+                EncodeAllocationFailurePoint::InitializeSolvedValidation,
+                exception);
+            const WirehairResult result = message_encoder.InitializeResult(
+                source.data(), message_bytes, bb, nullptr, &options);
+            if (result != Wirehair_OOM ||
+                wirehair_v2::test::
+                    EncodeAllocationFailureHitsForTesting() != 1u ||
+                !message_encoder.IsInitialized() ||
+                message_encoder.IntermediateBlocks() != working_intermediate ||
+                message_encoder.Profile().BlockCount !=
+                    working_profile.BlockCount ||
+                message_encoder.Profile().BlockBytes !=
+                    working_profile.BlockBytes)
+            {
+                std::fprintf(stderr,
+                    "encode allocation boundaries: solved init escaped/"
+                    "committed %s result=%d\n",
+                    exception_name, (int)result);
+                return false;
+            }
+        }
+    }
+
+    // Structural and pointer checks that require no allocation retain
+    // precedence over the deterministic validation injection points.
+    wirehair_v2::PrecodeSystem malformed = system;
+    malformed.StaircaseRows.pop_back();
+    const EncodeAllocationFailurePoint validation_points[] = {
+        EncodeAllocationFailurePoint::DenseCornerValidation,
+        EncodeAllocationFailurePoint::PrecodeValuesValidation,
+        EncodeAllocationFailurePoint::RecoveryBlockValidation,
+        EncodeAllocationFailurePoint::EncodedBlockValidation
+    };
+    for (EncodeAllocationFailurePoint point : validation_points)
+    {
+        std::vector<uint8_t> output(bb, 0xd5u);
+        uint64_t ops = UINT64_MAX;
+        wirehair_v2::PrecodeEncodeStats stats;
+        stats.StaircaseBlockOps = UINT64_MAX;
+        bool result = false;
+        EncodeAllocationFailureScope failure(
+            point, EncodeAllocationFailureException::BadAlloc);
+        switch (point)
+        {
+        case EncodeAllocationFailurePoint::DenseCornerValidation:
+            result = wirehair_v2::DenseCornerInvertible(malformed);
+            break;
+        case EncodeAllocationFailurePoint::PrecodeValuesValidation:
+            result = wirehair_v2::ComputePrecodeValues(
+                malformed, source.data(), bb, parity.data(), &stats);
+            break;
+        case EncodeAllocationFailurePoint::RecoveryBlockValidation:
+            result = wirehair_v2::ComputeRecoveryBlock(
+                malformed, source.data(), parity.data(), bb, recovery_row,
+                output.data(), &ops);
+            break;
+        case EncodeAllocationFailurePoint::EncodedBlockValidation:
+            result = wirehair_v2::ComputeEncodedBlock(
+                malformed, codec, row_seed, mix_count,
+                source.data(), parity.data(), bb, K, output.data(), &ops);
+            break;
+        default:
+            return false;
+        }
+        if (result ||
+            wirehair_v2::test::EncodeAllocationFailureHitsForTesting() != 0u)
+        {
+            std::fprintf(stderr,
+                "encode allocation boundaries: invalid precedence failed "
+                "point=%u\n", (unsigned)point);
+            return false;
+        }
+    }
+
+    const EncodeAllocationFailurePoint encoded_null_points[] = {
+        EncodeAllocationFailurePoint::EncodedBlockValidation,
+        EncodeAllocationFailurePoint::EncodedBlockRow
+    };
+    for (EncodeAllocationFailurePoint point : encoded_null_points)
+    {
+        std::vector<uint8_t> output(bb, 0xe6u);
+        const std::vector<uint8_t> output_before = output;
+        uint64_t ops = UINT64_MAX;
+        EncodeAllocationFailureScope failure(
+            point, EncodeAllocationFailureException::BadAlloc);
+        if (wirehair_v2::ComputeEncodedBlock(
+                system, codec, row_seed, mix_count,
+                source.data(), nullptr, bb, K, output.data(), &ops) ||
+            wirehair_v2::test::EncodeAllocationFailureHitsForTesting() != 0u ||
+            output != output_before || ops != 0u)
+        {
+            std::fprintf(stderr,
+                "encode allocation boundaries: encoded invalid precedence "
+                "failed\n");
+            return false;
+        }
+    }
+
+    {
+        std::vector<uint8_t> output(bb, 0xf7u);
+        const std::vector<uint8_t> output_before = output;
+        uint64_t ops = UINT64_MAX;
+        const std::vector<uint32_t> invalid_row{ K + parity_count };
+        EncodeAllocationFailureScope failure(
+            EncodeAllocationFailurePoint::RecoveryBlockValidation,
+            EncodeAllocationFailureException::BadAlloc);
+        if (wirehair_v2::ComputeRecoveryBlock(
+                system, source.data(), parity.data(), bb, invalid_row,
+                output.data(), &ops) ||
+            wirehair_v2::test::
+                EncodeAllocationFailureHitsForTesting() != 0u ||
+            output != output_before || ops != 0u)
+        {
+            std::fprintf(stderr,
+                "encode allocation boundaries: recovery row invalid "
+                "precedence failed\n");
+            return false;
+        }
+    }
+
+    std::printf("encode allocation/length exception boundaries: PASS\n");
+    return true;
+}
+#endif
+
 bool TestTypedFailuresAndAllocationContainment()
 {
     const uint32_t K = 16u;
@@ -1937,6 +2285,9 @@ int main(int argc, char** argv)
     ok = TestMessagePrecodeEncoder() && ok;
     ok = TestBorrowedMessageLifetime() && ok;
     ok = TestSystematicSourceCache() && ok;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    ok = TestEncodeAllocationExceptionBoundaries() && ok;
+#endif
     ok = TestTypedFailuresAndAllocationContainment() && ok;
     ok = TestFeasibility(trials) && ok;
 

@@ -4,6 +4,7 @@
 #include "../gf256.h"
 
 #include <new>
+#include <stdexcept>
 #include <utility>
 
 namespace wirehair_v2 {
@@ -142,6 +143,9 @@ WirehairResult Codec::InitializeEncoder(
     catch (const std::bad_alloc&) {
         return Wirehair_OOM;
     }
+    catch (const std::length_error&) {
+        return Wirehair_OOM;
+    }
 }
 
 WirehairResult Codec::InitializePrecodeEncoder(
@@ -190,6 +194,9 @@ WirehairResult Codec::InitializePrecodeEncoder(
         return Wirehair_Success;
     }
     catch (const std::bad_alloc&) {
+        return Wirehair_OOM;
+    }
+    catch (const std::length_error&) {
         return Wirehair_OOM;
     }
 }
@@ -252,6 +259,9 @@ WirehairResult Codec::InitializeDecoder(
     catch (const std::bad_alloc&) {
         return Wirehair_OOM;
     }
+    catch (const std::length_error&) {
+        return Wirehair_OOM;
+    }
 }
 
 WirehairResult Codec::InitializePrecodeDecoder(
@@ -294,6 +304,9 @@ WirehairResult Codec::InitializePrecodeDecoder(
         return Wirehair_Success;
     }
     catch (const std::bad_alloc&) {
+        return Wirehair_OOM;
+    }
+    catch (const std::length_error&) {
         return Wirehair_OOM;
     }
 }
