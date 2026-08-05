@@ -14,7 +14,6 @@ import json
 import os
 from pathlib import Path
 import signal
-import shutil
 import stat
 import subprocess
 import sys
@@ -815,13 +814,23 @@ class NativeRunnerTests(unittest.TestCase):
             with mock.patch.object(
                     subject.os, "open", side_effect=replace_after_open), \
                     self.assertRaisesRegex(
-                        subject.RunnerError, "changed while it was being read"):
+                        subject.RunnerError,
+                        "single-link|changed while it was being read"):
                 subject._read_completed_regular_bytes(
                     Path(artifact.name), "replacement artifact", directory_fd,
                     1024)
         finally:
             os.close(directory_fd)
         self.assertTrue(replaced)
+
+    def test_completed_loader_rejects_hardlinked_dependency(self) -> None:
+        (contract, _qualification, directory, _freeze, _run_summary,
+         _validated) = self._completed_timing_fixture("hardlinked-dependency")
+        result = directory / "timing-results.jsonl"
+        os.link(str(result), str(directory / "result-hardlink.jsonl"))
+        with self.assertRaisesRegex(
+                subject.RunnerError, "regular non-symlink file"):
+            subject.load_completed_timing_screen(contract, directory)
 
     def test_completed_loader_rejects_mutation_during_semantic_validation(
             self) -> None:
@@ -885,307 +894,314 @@ class NativeRunnerTests(unittest.TestCase):
     def test_producer_applies_loader_cap_to_every_dependency(self) -> None:
         (_contract, _qualification, directory, _freeze, _run_summary,
          _validated) = self._completed_timing_fixture("producer-bounds")
-        summary = (directory / "run-summary.json").read_bytes()
-        real_stat = os.stat
-        for name, limit in subject.COMPLETED_ARTIFACT_BYTE_LIMITS.items():
-            if name == "run-summary.json":
-                continue
+        (directory / "run-summary.json").unlink()
+        parent_fd, _parent_identity = subject._open_completion_parent(
+            directory / "run-summary.json")
+        try:
+            for name in subject.COMPLETED_DEPENDENCY_NAMES.values():
+                descriptors = {}
+                with self.subTest(name=name), mock.patch.dict(
+                        subject.COMPLETED_ARTIFACT_BYTE_LIMITS,
+                        {name: 1}), self.assertRaisesRegex(
+                            subject.RunnerError, "bounded artifact size"):
+                    subject._open_pinned_completed_bundle(
+                        subject.COMPLETED_DEPENDENCY_NAMES, parent_fd,
+                        descriptors)
+                self.assertEqual(descriptors, {})
+            holder = [-1]
+            with mock.patch.dict(
+                    subject.COMPLETED_ARTIFACT_BYTE_LIMITS,
+                    {"run-summary.json": 1}), self.assertRaisesRegex(
+                        subject.RunnerError, "publication byte cap"):
+                subject._open_unnamed_completion_marker(
+                    parent_fd, b"{}\n", holder)
+            self.assertEqual(holder, [-1])
+        finally:
+            os.close(parent_fd)
 
-            def oversized(path, *args, _name=name, _limit=limit, **kwargs):
-                info = real_stat(path, *args, **kwargs)
-                if Path(path).name == _name:
-                    return mock.Mock(
-                        st_mode=info.st_mode, st_size=_limit + 1)
-                return info
-
-            with self.subTest(name=name), mock.patch.object(
-                    subject.os, "stat", side_effect=oversized), \
-                    self.assertRaisesRegex(
-                        subject.RunnerError, "producer byte cap"):
-                subject._require_completed_dependency_bounds(
-                    directory, summary)
-
-        with self.assertRaisesRegex(subject.RunnerError, "loader byte cap"):
-            subject._require_completed_dependency_bounds(
-                directory,
-                b"x" * (
-                    subject.COMPLETED_ARTIFACT_BYTE_LIMITS[
-                        "run-summary.json"] + 1))
-
-    def test_completion_marker_parent_fsync_failure_rolls_back(self) -> None:
-        directory = self.root / "marker-fsync"
-        directory.mkdir()
-        marker = directory / "run-summary.json"
-        real_fsync = os.fsync
-        failed = False
-
-        def fail_first_directory_fsync(descriptor: int) -> None:
-            nonlocal failed
-            if stat.S_ISDIR(os.fstat(descriptor).st_mode) and not failed:
-                failed = True
-                raise OSError(errno.EIO, "injected marker parent fsync failure")
-            real_fsync(descriptor)
-
-        with mock.patch.object(
-                subject.os, "fsync", side_effect=fail_first_directory_fsync), \
-                self.assertRaisesRegex(
-                    subject.RunnerError, "injected marker parent fsync failure"):
-            subject._publish_completion_marker(marker, {"status": "complete"})
-        self.assertTrue(failed)
-        self.assertFalse(marker.exists())
-
-    def test_completion_marker_post_commit_close_error_is_success(self) -> None:
-        directory = self.root / "marker-close"
-        directory.mkdir()
-        marker = directory / "run-summary.json"
-        real_close = os.close
-        failed = False
-
-        def close_then_fail_directory(descriptor: int) -> None:
-            nonlocal failed
-            is_directory = stat.S_ISDIR(os.fstat(descriptor).st_mode)
-            real_close(descriptor)
-            if is_directory and not failed:
-                failed = True
-                raise OSError(errno.EIO, "injected post-commit close failure")
-
-        with mock.patch.object(
-                subject.os, "close", side_effect=close_then_fail_directory):
-            identity = subject._publish_completion_marker(
-                marker, {"status": "complete"})
-        self.assertTrue(failed)
-        self.assertEqual(
-            (marker.stat().st_dev, marker.stat().st_ino), identity)
-
-    def test_completion_marker_staging_replacement_cannot_survive(self) -> None:
-        directory = self.root / "marker-stage-replacement"
-        directory.mkdir()
-        marker = directory / "run-summary.json"
-        attacker = directory / "attacker.tmp"
-        attacker.write_bytes(b"attacker\n")
-        real_link = os.link
-        replaced = False
-
-        def replace_staging_then_link(source, destination, *args, **kwargs):
-            nonlocal replaced
-            staged = next(directory.glob(".run-summary.json.*.tmp"))
-            os.replace(str(attacker), str(staged))
-            replaced = True
-            return real_link(source, destination, *args, **kwargs)
-
-        with mock.patch.object(
-                subject.os, "link", side_effect=replace_staging_then_link), \
-                self.assertRaisesRegex(
-                    subject.RunnerError,
-                    "staged completion-marker name changed|"
-                    "cannot publish completion marker"):
-            subject._publish_completion_marker(marker, {"status": "complete"})
-        self.assertTrue(replaced)
-        self.assertFalse(marker.exists())
-
-    def test_post_publication_reopen_failure_rolls_back_marker(self) -> None:
-        directory = self.root / "marker-reopen"
-        directory.mkdir()
-        marker = directory / "run-summary.json"
-        qualification = mock.Mock(
-            map_sha256="a" * 64, qualified_domain_sha256="b" * 64)
-        with mock.patch.object(
-                subject, "_require_completed_dependency_bounds"), \
-                mock.patch.object(
-                    subject, "_read_completed_bundle", return_value=({}, {})), \
-                mock.patch.object(
-                    subject, "load_completed_timing_screen",
-                    side_effect=subject.RunnerError("injected strict reopen")), \
-                self.assertRaisesRegex(subject.RunnerError, "strict reopen"):
-            subject._commit_completed_timing_screen(
-                {}, directory, {"status": "complete"}, {}, {}, {},
-                qualification)
-        self.assertFalse(marker.exists())
-
-    def test_malformed_post_publication_reopen_rolls_back_marker(self) -> None:
-        qualification = mock.Mock(
-            map_sha256="a" * 64, qualified_domain_sha256="b" * 64)
-        for index, malformed in enumerate((None, [], "invalid")):
-            directory = self.root / "marker-malformed-{}".format(index)
-            directory.mkdir()
-            marker = directory / "run-summary.json"
-            with self.subTest(value=malformed), mock.patch.object(
-                    subject, "_require_completed_dependency_bounds"), \
-                    mock.patch.object(
-                        subject, "_read_completed_bundle",
-                        return_value=({}, {})), mock.patch.object(
-                        subject, "load_completed_timing_screen",
-                        return_value=malformed), self.assertRaisesRegex(
-                        subject.RunnerError, "reopen differs"):
-                subject._commit_completed_timing_screen(
-                    {}, directory, {"status": "complete"}, {}, {}, {},
-                    qualification)
-            self.assertFalse(marker.exists())
-
-    def test_hard_wall_finish_failure_rolls_back_marker(self) -> None:
-        directory = self.root / "marker-hard-wall-finish"
-        directory.mkdir()
-        marker = directory / "run-summary.json"
-        qualification = mock.Mock(
-            map_sha256="a" * 64, qualified_domain_sha256="b" * 64)
-        summary = {"status": "complete"}
-        artifact_snapshots = {
-            key: key.encode("ascii") for key in subject.COMPLETED_SOURCE_NAMES
-        }
-        artifact_fingerprints = {
-            key: (1, index + 1, stat.S_IFREG, 1, len(value), 1, 1)
-            for index, (key, value) in enumerate(artifact_snapshots.items())
-        }
-        directory_info = directory.stat()
-        reopened = {
-            "directory": str(directory.resolve()),
-            "directory_identity": (
-                directory_info.st_dev, directory_info.st_ino),
-            "run_summary": summary,
-            "freeze": {},
-            "summary": {},
-            "execution_receipt": {},
-            "timing_qualification": qualification,
-        }
-
-        def fail_finish() -> None:
-            raise OSError(errno.EIO, "injected hard-wall finish failure")
-
-        with mock.patch.object(
-                subject, "_require_completed_dependency_bounds"), \
-                mock.patch.object(
-                    subject, "load_completed_timing_screen",
-                    return_value=reopened), \
-                mock.patch.object(
-                    subject, "_read_completed_bundle",
-                    return_value=(artifact_snapshots,
-                                  artifact_fingerprints)), \
-                self.assertRaisesRegex(OSError, "hard-wall finish failure"):
-            subject._commit_completed_timing_screen(
-                {}, directory, summary, {}, {}, {}, qualification,
-                fail_finish)
-        self.assertFalse(marker.exists())
-
-    def test_post_publication_parent_replacement_rolls_back_pinned_marker(
-            self) -> None:
-        (_contract, _qualification, directory, _freeze, run_summary,
-         _validated) = self._completed_timing_fixture(
-             "marker-parent-replacement")
-        marker = directory / "run-summary.json"
-        marker.unlink()
-        moved = self.root / "moved-marker-parent-replacement"
-
-        def replace_parent_then_fail(*_args, **_kwargs):
-            directory.rename(moved)
-            directory.mkdir()
-            raise subject.RunnerError("injected parent replacement")
-
-        with mock.patch.object(
-                subject, "load_completed_timing_screen",
-                side_effect=replace_parent_then_fail), \
-                self.assertRaisesRegex(
-                    subject.RunnerError, "injected parent replacement"):
-            subject._commit_completed_timing_screen(
-                {}, directory, run_summary, {}, {}, {}, mock.Mock())
-        self.assertFalse(marker.exists())
-        self.assertFalse((moved / "run-summary.json").exists())
-
-    def test_parent_copy_substitution_rejects_and_rolls_back_only_installed_marker(
-            self) -> None:
+    def test_validator_failure_leaves_no_marker_or_staging_name(self) -> None:
         (contract, qualification, directory, freeze, run_summary,
-         validated) = self._completed_timing_fixture("marker-parent-copy")
+         _validated) = self._completed_timing_fixture("validator-failure")
         marker = directory / "run-summary.json"
         marker.unlink()
-        moved = self.root / "moved-marker-parent-copy"
-        replacement = self.root / "replacement-marker-parent-copy"
-        copied_marker_identity = []
-        real_loader = subject.load_completed_timing_screen
-
-        def substitute_parent_then_load(input_contract, input_directory):
-            shutil.copytree(str(directory), str(replacement))
-            copied = replacement / "run-summary.json"
-            copied_info = copied.stat()
-            copied_marker_identity.append(
-                (copied_info.st_dev, copied_info.st_ino))
-            directory.rename(moved)
-            replacement.rename(directory)
-            loaded = real_loader(input_contract, input_directory)
-            directory.rename(replacement)
-            moved.rename(directory)
-            return loaded
+        names_before = {path.name for path in directory.iterdir()}
 
         with mock.patch.object(
                 contract_api, "load_timing_qualification_map",
                 return_value=qualification), mock.patch.object(
                 native_api, "validate_execution_receipt",
-                return_value=validated), mock.patch.object(
+                side_effect=subject.RunnerError(
+                    "injected semantic validator failure")), mock.patch.object(
                 contract_api, "load_freeze_manifest", return_value=freeze), \
-                mock.patch.object(
-                    subject, "load_completed_timing_screen",
-                    side_effect=substitute_parent_then_load), \
                 self.assertRaisesRegex(
-                    subject.RunnerError,
-                    "reopen differs|changed after strict reopen"):
+                    subject.RunnerError, "semantic validator failure"):
             subject._commit_completed_timing_screen(
-                contract, directory, run_summary, freeze,
-                validated["summary"], validated["execution_receipt"],
+                contract, directory, run_summary, freeze, {}, {},
                 qualification)
-        self.assertEqual(len(copied_marker_identity), 1)
         self.assertFalse(marker.exists())
-        self.assertFalse(moved.exists())
-        visible = (replacement / "run-summary.json").stat()
         self.assertEqual(
-            (visible.st_dev, visible.st_ino), copied_marker_identity[0])
+            {path.name for path in directory.iterdir()}, names_before)
 
-    def test_post_validation_dependency_mutation_rolls_back_marker(self) \
-            -> None:
+    def test_strict_loader_cannot_observe_marker_during_validation(self) -> None:
         (contract, qualification, directory, freeze, run_summary,
-         validated) = self._completed_timing_fixture("marker-dependency-race")
+         validated) = self._completed_timing_fixture("private-validation")
         marker = directory / "run-summary.json"
         marker.unlink()
-        replacement = self.root / "late-results-replacement.jsonl"
-        replacement.write_bytes(b'{"late_mutation":true}\n')
-        mutated = False
+        observations = []
 
-        def mutate_during_reopen(*_args, **_kwargs):
-            nonlocal mutated
-            if not mutated:
-                os.replace(
-                    str(replacement), str(directory / "timing-results.jsonl"))
-                mutated = True
+        def validate_while_private(*_args, **_kwargs):
+            visible = marker.exists()
+            observations.append(visible)
+            if not visible:
+                with self.assertRaisesRegex(
+                        subject.RunnerError,
+                        "cannot read completed timing summary"):
+                    subject.load_completed_timing_screen(contract, directory)
             return validated
 
         with mock.patch.object(
                 contract_api, "load_timing_qualification_map",
                 return_value=qualification), mock.patch.object(
                 native_api, "validate_execution_receipt",
-                side_effect=mutate_during_reopen), mock.patch.object(
-                contract_api, "load_freeze_manifest", return_value=freeze), \
-                self.assertRaisesRegex(
-                    subject.RunnerError, "changed during semantic validation"):
+                side_effect=validate_while_private), mock.patch.object(
+                contract_api, "load_freeze_manifest", return_value=freeze):
             subject._commit_completed_timing_screen(
                 contract, directory, run_summary, freeze,
                 validated["summary"], validated["execution_receipt"],
                 qualification)
-        self.assertTrue(mutated)
-        self.assertFalse(marker.exists())
+            loaded = subject.load_completed_timing_screen(contract, directory)
+        self.assertEqual(observations, [False, True])
+        self.assertEqual(loaded["run_summary"], run_summary)
 
-    def test_post_loader_dependency_mutation_rolls_back_marker(self) -> None:
+    def test_hard_wall_failure_leaves_no_marker(self) -> None:
         (contract, qualification, directory, freeze, run_summary,
-         validated) = self._completed_timing_fixture("marker-post-loader-race")
+         validated) = self._completed_timing_fixture("hard-wall-failure")
         marker = directory / "run-summary.json"
         marker.unlink()
-        result_path = directory / "timing-results.jsonl"
-        replacement = self.root / "post-loader-results-replacement.jsonl"
-        replacement.write_bytes(b'{"post_loader_mutation":true}\n')
-        real_require = subject._require_completion_marker
-        mutated = False
 
-        def require_then_mutate(*args, **kwargs):
-            nonlocal mutated
-            real_require(*args, **kwargs)
-            os.replace(str(replacement), str(result_path))
-            mutated = True
+        def fail_finish() -> None:
+            raise OSError(errno.EIO, "injected hard-wall finish failure")
+
+        with mock.patch.object(
+                contract_api, "load_timing_qualification_map",
+                return_value=qualification), mock.patch.object(
+                native_api, "validate_execution_receipt",
+                return_value=validated), mock.patch.object(
+                contract_api, "load_freeze_manifest", return_value=freeze), \
+                self.assertRaisesRegex(OSError, "hard-wall finish failure"):
+            subject._commit_completed_timing_screen(
+                contract, directory, run_summary, freeze,
+                validated["summary"], validated["execution_receipt"],
+                qualification, fail_finish)
+        self.assertFalse(marker.exists())
+
+    def test_dependency_mutation_during_validation_fails_prelink(self) -> None:
+        for index, name in enumerate((
+                "timing-freeze.json", "timing-results.jsonl")):
+            (contract, qualification, directory, freeze, run_summary,
+             validated) = self._completed_timing_fixture(
+                 "dependency-mutation-{}".format(index))
+            marker = directory / "run-summary.json"
+            marker.unlink()
+            replacement = self.root / "replacement-{}".format(index)
+            replacement.write_bytes(b'{"mutated":true}\n')
+            mutated = False
+
+            def mutate_dependency(*_args, _name=name, **_kwargs):
+                nonlocal mutated
+                if not mutated:
+                    os.replace(str(replacement), str(directory / _name))
+                    mutated = True
+                return validated
+
+            with self.subTest(name=name), mock.patch.object(
+                    contract_api, "load_timing_qualification_map",
+                    return_value=qualification), mock.patch.object(
+                    native_api, "validate_execution_receipt",
+                    side_effect=mutate_dependency), mock.patch.object(
+                    contract_api, "load_freeze_manifest",
+                    return_value=freeze), self.assertRaisesRegex(
+                        subject.RunnerError,
+                        "single-link|changed during semantic validation"):
+                subject._commit_completed_timing_screen(
+                    contract, directory, run_summary, freeze,
+                    validated["summary"], validated["execution_receipt"],
+                    qualification)
+            self.assertTrue(mutated)
+            self.assertFalse(marker.exists())
+
+    def test_finish_mutation_is_caught_by_post_finish_guard(self) -> None:
+        (contract, qualification, directory, freeze, run_summary,
+         validated) = self._completed_timing_fixture("finish-mutation")
+        marker = directory / "run-summary.json"
+        marker.unlink()
+        result = directory / "timing-results.jsonl"
+        replacement = self.root / "finish-replacement.jsonl"
+        replacement.write_bytes(b'{"mutated_after_reread":true}\n')
+
+        def mutate_at_finish() -> None:
+            os.replace(str(replacement), str(result))
+
+        with mock.patch.object(
+                contract_api, "load_timing_qualification_map",
+                return_value=qualification), mock.patch.object(
+                native_api, "validate_execution_receipt",
+                return_value=validated), mock.patch.object(
+                contract_api, "load_freeze_manifest", return_value=freeze), \
+                self.assertRaisesRegex(
+                    subject.RunnerError, "changed before publication"):
+            subject._commit_completed_timing_screen(
+                contract, directory, run_summary, freeze,
+                validated["summary"], validated["execution_receipt"],
+                qualification, mutate_at_finish)
+        self.assertFalse(marker.exists())
+
+    def test_parent_replacement_during_validation_fails_prelink(self) -> None:
+        (contract, qualification, directory, freeze, run_summary,
+         validated) = self._completed_timing_fixture("parent-replacement-commit")
+        marker = directory / "run-summary.json"
+        marker.unlink()
+        moved = self.root / "moved-parent-replacement-commit"
+
+        def replace_parent(*_args, **_kwargs):
+            directory.rename(moved)
+            directory.mkdir()
+            return validated
+
+        with mock.patch.object(
+                contract_api, "load_timing_qualification_map",
+                return_value=qualification), mock.patch.object(
+                native_api, "validate_execution_receipt",
+                side_effect=replace_parent), mock.patch.object(
+                contract_api, "load_freeze_manifest", return_value=freeze), \
+                self.assertRaises(subject.RunnerError):
+            subject._commit_completed_timing_screen(
+                contract, directory, run_summary, freeze,
+                validated["summary"], validated["execution_receipt"],
+                qualification)
+        self.assertFalse(marker.exists())
+        self.assertFalse((moved / "run-summary.json").exists())
+
+    def test_unsupported_otmpfile_leaves_no_name(self) -> None:
+        directory = self.root / "unsupported-otmpfile"
+        directory.mkdir()
+        marker = directory / "run-summary.json"
+        parent_fd, _identity = subject._open_completion_parent(marker)
+        holder = [-1]
+        try:
+            with mock.patch.object(subject.os, "O_TMPFILE", 0), \
+                    self.assertRaisesRegex(
+                        subject.RunnerError, "requires O_TMPFILE"):
+                subject._open_unnamed_completion_marker(
+                    parent_fd, b"{}\n", holder)
+        finally:
+            os.close(parent_fd)
+        self.assertEqual(holder, [-1])
+        self.assertEqual(list(directory.iterdir()), [])
+
+    def test_unsupported_proc_link_leaves_no_name(self) -> None:
+        directory = self.root / "unsupported-proc-link"
+        directory.mkdir()
+        marker = directory / "run-summary.json"
+        parent_fd, parent_identity = subject._open_completion_parent(marker)
+        holder = [-1]
+        try:
+            subject._open_unnamed_completion_marker(
+                parent_fd, b"{}\n", holder)
+            with mock.patch.object(
+                    subject.os, "link",
+                    side_effect=OSError(errno.EOPNOTSUPP, "no proc link")), \
+                    self.assertRaisesRegex(
+                        subject.RunnerError, "cannot publish"):
+                subject._link_unnamed_completion_marker(
+                    marker, holder[0], parent_fd, parent_identity)
+        finally:
+            if holder[0] >= 0:
+                os.close(holder[0])
+            os.close(parent_fd)
+        self.assertEqual(list(directory.iterdir()), [])
+
+    def test_unnamed_stage_return_interrupt_is_closed_without_a_name(
+            self) -> None:
+        directory = self.root / "unnamed-return-interrupt"
+        directory.mkdir()
+        marker = directory / "run-summary.json"
+        helper_code = subject._open_unnamed_completion_marker.__code__
+        captured = []
+
+        class ReturnInterrupt(BaseException):
+            pass
+
+        def interrupt_return(frame, event, _argument):
+            if frame.f_code is helper_code and event == "return":
+                descriptor = frame.f_locals["descriptor_holder"][0]
+                captured.append(descriptor)
+                self.assertEqual(os.fstat(descriptor).st_nlink, 0)
+                raise ReturnInterrupt("injected unnamed-stage return interrupt")
+            return interrupt_return
+
+        previous_trace = sys.gettrace()
+        sys.settrace(interrupt_return)
+        try:
+            with self.assertRaisesRegex(
+                    ReturnInterrupt, "unnamed-stage return interrupt"):
+                subject._commit_completed_timing_screen(
+                    {}, directory, {"status": "complete"}, {}, {}, {},
+                    mock.Mock())
+        finally:
+            sys.settrace(previous_trace)
+        self.assertEqual(len(captured), 1)
+        with self.assertRaises(OSError):
+            os.fstat(captured[0])
+        self.assertFalse(marker.exists())
+        self.assertEqual(list(directory.iterdir()), [])
+
+    def test_parent_fd_return_interrupt_is_closed_without_a_marker(self) -> None:
+        directory = self.root / "parent-return-interrupt"
+        directory.mkdir()
+        marker = directory / "run-summary.json"
+        helper_code = subject._open_completion_parent.__code__
+        captured = []
+
+        class ReturnInterrupt(BaseException):
+            pass
+
+        def interrupt_return(frame, event, _argument):
+            if frame.f_code is helper_code and event == "return":
+                descriptor = frame.f_locals["descriptor_holder"][0]
+                captured.append(descriptor)
+                self.assertTrue(stat.S_ISDIR(os.fstat(descriptor).st_mode))
+                raise ReturnInterrupt("injected parent-fd return interrupt")
+            return interrupt_return
+
+        previous_trace = sys.gettrace()
+        sys.settrace(interrupt_return)
+        try:
+            with self.assertRaisesRegex(
+                    ReturnInterrupt, "parent-fd return interrupt"):
+                subject._commit_completed_timing_screen(
+                    {}, directory, {"status": "complete"}, {}, {}, {},
+                    mock.Mock())
+        finally:
+            sys.settrace(previous_trace)
+        self.assertEqual(len(captured), 1)
+        with self.assertRaises(OSError):
+            os.fstat(captured[0])
+        self.assertFalse(marker.exists())
+
+    def test_final_link_interrupt_leaves_strictly_loadable_marker(self) -> None:
+        (contract, qualification, directory, freeze, run_summary,
+         validated) = self._completed_timing_fixture("link-interrupt")
+        marker = directory / "run-summary.json"
+        marker.unlink()
+        real_link = os.link
+
+        class LinkInterrupt(BaseException):
+            pass
+
+        def link_then_interrupt(source, destination, *args, **kwargs):
+            real_link(source, destination, *args, **kwargs)
+            raise LinkInterrupt("injected after successful final link")
 
         with mock.patch.object(
                 contract_api, "load_timing_qualification_map",
@@ -1194,16 +1210,247 @@ class NativeRunnerTests(unittest.TestCase):
                 return_value=validated), mock.patch.object(
                 contract_api, "load_freeze_manifest", return_value=freeze), \
                 mock.patch.object(
-                    subject, "_require_completion_marker",
-                    side_effect=require_then_mutate), \
-                self.assertRaisesRegex(
-                    subject.RunnerError, "changed after strict reopen"):
+                    subject.os, "link", side_effect=link_then_interrupt), \
+                self.assertRaisesRegex(LinkInterrupt, "successful final link"):
             subject._commit_completed_timing_screen(
                 contract, directory, run_summary, freeze,
                 validated["summary"], validated["execution_receipt"],
                 qualification)
-        self.assertTrue(mutated)
-        self.assertFalse(marker.exists())
+        self.assertTrue(marker.is_file())
+        with mock.patch.object(
+                contract_api, "load_timing_qualification_map",
+                return_value=qualification), mock.patch.object(
+                native_api, "validate_execution_receipt",
+                return_value=validated), mock.patch.object(
+                contract_api, "load_freeze_manifest", return_value=freeze):
+            loaded = subject.load_completed_timing_screen(contract, directory)
+        self.assertEqual(loaded["run_summary"], run_summary)
+
+    def test_final_link_oserror_leaves_strictly_loadable_marker(self) -> None:
+        (contract, qualification, directory, freeze, run_summary,
+         validated) = self._completed_timing_fixture("link-oserror")
+        marker = directory / "run-summary.json"
+        marker.unlink()
+        real_link = os.link
+
+        def link_then_error(source, destination, *args, **kwargs):
+            real_link(source, destination, *args, **kwargs)
+            raise OSError(errno.EIO, "injected OSError after final link")
+
+        with mock.patch.object(
+                contract_api, "load_timing_qualification_map",
+                return_value=qualification), mock.patch.object(
+                native_api, "validate_execution_receipt",
+                return_value=validated), mock.patch.object(
+                contract_api, "load_freeze_manifest", return_value=freeze), \
+                mock.patch.object(
+                    subject.os, "link", side_effect=link_then_error), \
+                self.assertRaisesRegex(
+                    subject.RunnerError, "OSError after final link"):
+            subject._commit_completed_timing_screen(
+                contract, directory, run_summary, freeze,
+                validated["summary"], validated["execution_receipt"],
+                qualification)
+        self.assertTrue(marker.is_file())
+        with mock.patch.object(
+                contract_api, "load_timing_qualification_map",
+                return_value=qualification), mock.patch.object(
+                native_api, "validate_execution_receipt",
+                return_value=validated), mock.patch.object(
+                contract_api, "load_freeze_manifest", return_value=freeze):
+            loaded = subject.load_completed_timing_screen(contract, directory)
+        self.assertEqual(loaded["run_summary"], run_summary)
+
+    def test_post_link_directory_fsync_failure_keeps_loadable_marker(self) -> None:
+        (contract, qualification, directory, freeze, run_summary,
+         validated) = self._completed_timing_fixture("link-fsync-failure")
+        marker = directory / "run-summary.json"
+        marker.unlink()
+        real_fsync = os.fsync
+        failed = False
+
+        def fail_linked_directory_fsync(descriptor: int) -> None:
+            nonlocal failed
+            if (not failed and marker.exists() and
+                    stat.S_ISDIR(os.fstat(descriptor).st_mode)):
+                failed = True
+                raise OSError(errno.EIO, "injected linked directory fsync")
+            real_fsync(descriptor)
+
+        with mock.patch.object(
+                contract_api, "load_timing_qualification_map",
+                return_value=qualification), mock.patch.object(
+                native_api, "validate_execution_receipt",
+                return_value=validated), mock.patch.object(
+                contract_api, "load_freeze_manifest", return_value=freeze), \
+                mock.patch.object(
+                    subject.os, "fsync",
+                    side_effect=fail_linked_directory_fsync), \
+                self.assertRaisesRegex(OSError, "linked directory fsync"):
+            subject._commit_completed_timing_screen(
+                contract, directory, run_summary, freeze,
+                validated["summary"], validated["execution_receipt"],
+                qualification)
+        self.assertTrue(failed)
+        self.assertTrue(marker.is_file())
+        with mock.patch.object(
+                contract_api, "load_timing_qualification_map",
+                return_value=qualification), mock.patch.object(
+                native_api, "validate_execution_receipt",
+                return_value=validated), mock.patch.object(
+                contract_api, "load_freeze_manifest", return_value=freeze):
+            loaded = subject.load_completed_timing_screen(contract, directory)
+        self.assertEqual(loaded["run_summary"], run_summary)
+
+    def test_post_link_close_interrupt_drains_all_and_keeps_loadable_marker(
+            self) -> None:
+        (contract, qualification, directory, freeze, run_summary,
+         validated) = self._completed_timing_fixture("close-interrupt")
+        marker = directory / "run-summary.json"
+        marker.unlink()
+        real_close = os.close
+        close_interrupt = type(
+            "CloseInterrupt", (BaseException,), {})(
+                "injected after a successful descriptor close")
+        linked_closes = []
+
+        def close_then_interrupt(descriptor: int) -> None:
+            linked = marker.exists()
+            real_close(descriptor)
+            if linked:
+                linked_closes.append(descriptor)
+                if len(linked_closes) == 1:
+                    raise close_interrupt
+
+        with mock.patch.object(
+                contract_api, "load_timing_qualification_map",
+                return_value=qualification), mock.patch.object(
+                native_api, "validate_execution_receipt",
+                return_value=validated), mock.patch.object(
+                contract_api, "load_freeze_manifest", return_value=freeze), \
+                mock.patch.object(
+                    subject.os, "close", side_effect=close_then_interrupt), \
+                self.assertRaises(type(close_interrupt)) as raised:
+            subject._commit_completed_timing_screen(
+                contract, directory, run_summary, freeze,
+                validated["summary"], validated["execution_receipt"],
+                qualification)
+        self.assertIs(raised.exception, close_interrupt)
+        self.assertIsInstance(
+            raised.exception.__cause__, subject.RunnerError)
+        self.assertEqual(
+            len(linked_closes), len(subject.COMPLETED_DEPENDENCY_NAMES) + 2)
+        self.assertTrue(marker.is_file())
+        with mock.patch.object(
+                contract_api, "load_timing_qualification_map",
+                return_value=qualification), mock.patch.object(
+                native_api, "validate_execution_receipt",
+                return_value=validated), mock.patch.object(
+                contract_api, "load_freeze_manifest", return_value=freeze):
+            loaded = subject.load_completed_timing_screen(contract, directory)
+        self.assertEqual(loaded["run_summary"], run_summary)
+
+    def test_preexisting_marker_is_preserved(self) -> None:
+        (contract, qualification, directory, freeze, run_summary,
+         validated) = self._completed_timing_fixture("preexisting-marker")
+        marker = directory / "run-summary.json"
+        original = marker.read_bytes()
+        with self.assertRaisesRegex(
+                subject.RunnerError, "refusing to replace"):
+            subject._commit_completed_timing_screen(
+                contract, directory, run_summary, freeze,
+                validated["summary"], validated["execution_receipt"],
+                qualification)
+        self.assertEqual(marker.read_bytes(), original)
+
+    def test_public_loader_keeps_two_stable_bundle_reads(self) -> None:
+        (contract, qualification, directory, freeze, _run_summary,
+         validated) = self._completed_timing_fixture("two-loader-reads")
+        real_read = subject._read_completed_bundle
+        calls = []
+
+        def record_read(source_names, directory_fd):
+            calls.append(tuple(source_names.items()))
+            return real_read(source_names, directory_fd)
+
+        with mock.patch.object(
+                contract_api, "load_timing_qualification_map",
+                return_value=qualification), mock.patch.object(
+                native_api, "validate_execution_receipt",
+                return_value=validated), mock.patch.object(
+                contract_api, "load_freeze_manifest", return_value=freeze), \
+                mock.patch.object(
+                    subject, "_read_completed_bundle",
+                    side_effect=record_read):
+            subject.load_completed_timing_screen(contract, directory)
+        self.assertEqual(calls, [
+            tuple(subject.COMPLETED_SOURCE_NAMES.items()),
+            tuple(subject.COMPLETED_SOURCE_NAMES.items()),
+        ])
+
+    def test_public_loader_close_interrupt_drains_both_directory_fds(
+            self) -> None:
+        (contract, qualification, directory, freeze, run_summary,
+         validated) = self._completed_timing_fixture("loader-close-interrupt")
+        real_close = os.close
+        real_open = os.open
+        close_interrupt = type(
+            "LoaderCloseInterrupt", (BaseException,), {})(
+                "injected loader directory close interrupt")
+        loader_directory_fds = []
+        directory_closes = []
+
+        def track_loader_directory_open(path, flags, *args, **kwargs):
+            descriptor = real_open(path, flags, *args, **kwargs)
+            if (str(path) == str(directory) and
+                    flags & getattr(os, "O_DIRECTORY", 0)):
+                loader_directory_fds.append(descriptor)
+            return descriptor
+
+        def close_then_interrupt(descriptor: int) -> None:
+            is_loader_directory = (
+                len(loader_directory_fds) == 2 and
+                descriptor in loader_directory_fds)
+            real_close(descriptor)
+            if is_loader_directory:
+                directory_closes.append(descriptor)
+                if len(directory_closes) == 1:
+                    raise close_interrupt
+
+        with mock.patch.object(
+                contract_api, "load_timing_qualification_map",
+                return_value=qualification), mock.patch.object(
+                native_api, "validate_execution_receipt",
+                return_value=validated), mock.patch.object(
+                contract_api, "load_freeze_manifest", return_value=freeze), \
+                mock.patch.object(
+                    subject.os, "open",
+                    side_effect=track_loader_directory_open), \
+                mock.patch.object(
+                    subject.os, "close", side_effect=close_then_interrupt), \
+                self.assertRaises(type(close_interrupt)) as raised:
+            subject.load_completed_timing_screen(contract, directory)
+        self.assertIs(raised.exception, close_interrupt)
+        self.assertEqual(len(directory_closes), 2)
+        self.assertIsInstance(
+            raised.exception.__cause__, subject.RunnerError)
+        with mock.patch.object(
+                contract_api, "load_timing_qualification_map",
+                return_value=qualification), mock.patch.object(
+                native_api, "validate_execution_receipt",
+                return_value=validated), mock.patch.object(
+                contract_api, "load_freeze_manifest", return_value=freeze):
+            loaded = subject.load_completed_timing_screen(contract, directory)
+        self.assertEqual(loaded["run_summary"], run_summary)
+
+    def test_completion_publication_has_no_named_rollback_machinery(self) -> None:
+        source = inspect.getsource(subject)
+        for forbidden in (
+                "_CompletionMarkerTransaction", "_PublishedCompletionMarker",
+                "_rollback_completion_marker", "_rename_noreplace_at",
+                "renameat2", "quarantine"):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, source)
 
     def test_runner_has_no_explicit_failure_point_after_summary_commit(
             self) -> None:
@@ -1213,6 +1460,217 @@ class NativeRunnerTests(unittest.TestCase):
         self.assertNotIn("_remaining(", before_return)
         self.assertNotIn("_git_head(", before_return)
         self.assertNotIn("fail(", before_return)
+
+    def test_timing_cleanup_restores_affinity_after_terminate_oserror(
+            self) -> None:
+        events = []
+        primary = subject.RunnerError("injected primary failure")
+
+        def terminate(_workers):
+            events.append("terminate")
+            raise OSError(errno.EIO, "injected terminate failure")
+
+        def restore(_affinity):
+            events.append("restore")
+            raise subject.RunnerError("injected restore failure")
+
+        with mock.patch.object(
+                subject, "terminate_workers", side_effect=terminate), \
+                mock.patch.object(
+                    subject, "_restore_controller_affinity",
+                    side_effect=restore), self.assertRaises(
+                        subject.RunnerError) as raised:
+            subject._finish_timing_cleanup(
+                [mock.Mock()], False, True, {7}, primary)
+        self.assertEqual(events, ["terminate", "restore"])
+        self.assertIs(raised.exception.__cause__, primary)
+        message = str(raised.exception)
+        self.assertIn("injected primary failure", message)
+        self.assertIn("injected terminate failure", message)
+        self.assertIn("injected restore failure", message)
+
+    def test_timing_cleanup_does_not_swallow_control_flow(self) -> None:
+        class CustomInterrupt(BaseException):
+            pass
+
+        for control in (KeyboardInterrupt("interrupt"), SystemExit(7),
+                        CustomInterrupt("custom interrupt")):
+            events = []
+
+            def terminate(_workers, _control=control):
+                events.append("terminate")
+                raise _control
+
+            def restore(_affinity):
+                events.append("restore")
+
+            with self.subTest(control=type(control).__name__), \
+                    mock.patch.object(
+                        subject, "terminate_workers", side_effect=terminate), \
+                    mock.patch.object(
+                        subject, "_restore_controller_affinity",
+                        side_effect=restore), self.assertRaises(
+                            type(control)) as raised:
+                subject._finish_timing_cleanup(
+                    [mock.Mock()], False, True, {7}, None)
+            self.assertEqual(events, ["terminate", "restore"])
+            self.assertIs(raised.exception, control)
+            self.assertIsInstance(
+                raised.exception.__cause__, subject.RunnerError)
+
+    def test_spawn_cleanup_preserves_primary_control_after_terminate_oserror(
+            self) -> None:
+        class SpawnInterrupt(BaseException):
+            pass
+
+        primary = SpawnInterrupt("injected second-spawn interrupt")
+        first_process = mock.Mock()
+        cleanup_calls = []
+
+        def terminate(workers):
+            cleanup_calls.append(list(workers))
+            raise OSError(errno.EIO, "injected partial-pool cleanup failure")
+
+        with mock.patch.object(
+                subject.subprocess, "Popen",
+                side_effect=(first_process, primary)), mock.patch.object(
+                subject, "terminate_workers", side_effect=terminate), \
+                self.assertRaises(SpawnInterrupt) as raised:
+            subject.spawn_workers(
+                {"resolved_path": "/injected/worker"}, [3, 5],
+                time.monotonic() + 1.0)
+        self.assertIs(raised.exception, primary)
+        self.assertEqual(len(cleanup_calls), 1)
+        self.assertEqual(len(cleanup_calls[0]), 1)
+        self.assertIs(cleanup_calls[0][0].process, first_process)
+        self.assertIsInstance(
+            raised.exception.__cause__, subject.RunnerError)
+        self.assertIn(
+            "partial-pool cleanup failure", str(raised.exception.__cause__))
+
+    def test_spawn_constructor_interrupt_cleans_provisional_child(self) -> None:
+        class ConstructorInterrupt(BaseException):
+            pass
+
+        primary = ConstructorInterrupt("injected worker constructor interrupt")
+        process = mock.Mock()
+        cleanup_calls = []
+
+        def terminate(workers):
+            cleanup_calls.append(list(workers))
+
+        with mock.patch.object(
+                subject.subprocess, "Popen", return_value=process), \
+                mock.patch.object(
+                    subject, "PersistentWorker", side_effect=primary), \
+                mock.patch.object(
+                    subject, "terminate_workers", side_effect=terminate), \
+                self.assertRaises(ConstructorInterrupt) as raised:
+            subject.spawn_workers(
+                {"resolved_path": "/injected/worker"}, [3],
+                time.monotonic() + 1.0)
+        self.assertIs(raised.exception, primary)
+        self.assertEqual(len(cleanup_calls), 1)
+        self.assertEqual(len(cleanup_calls[0]), 1)
+        self.assertIs(cleanup_calls[0][0].process, process)
+
+    def test_spawn_first_post_assignment_interrupt_cleans_child_once(
+            self) -> None:
+        class AssignmentInterrupt(BaseException):
+            pass
+
+        primary = AssignmentInterrupt(
+            "injected first post-Popen-assignment interrupt")
+        process = mock.Mock()
+        cleanup_calls = []
+        code = subject.spawn_workers.__code__
+
+        def terminate(workers):
+            cleanup_calls.append(list(workers))
+
+        def interrupt_after_assignment(frame, event, _argument):
+            provisional = frame.f_locals.get("provisional_worker")
+            if (frame.f_code is code and event == "line" and
+                    provisional is not None and
+                    provisional.process is process and
+                    not frame.f_locals.get("workers")):
+                raise primary
+            return interrupt_after_assignment
+
+        previous_trace = sys.gettrace()
+        with mock.patch.object(
+                subject.subprocess, "Popen", return_value=process), \
+                mock.patch.object(
+                    subject, "terminate_workers", side_effect=terminate):
+            sys.settrace(interrupt_after_assignment)
+            try:
+                with self.assertRaises(AssignmentInterrupt) as raised:
+                    subject.spawn_workers(
+                        {"resolved_path": "/injected/worker"}, [3],
+                        time.monotonic() + 1.0)
+            finally:
+                sys.settrace(previous_trace)
+        self.assertIs(raised.exception, primary)
+        self.assertEqual(len(cleanup_calls), 1)
+        self.assertEqual(len(cleanup_calls[0]), 1)
+        self.assertIs(cleanup_calls[0][0].process, process)
+
+    def test_spawn_append_handoff_interrupt_cleans_child_once(self) -> None:
+        class AppendInterrupt(BaseException):
+            pass
+
+        primary = AppendInterrupt("injected worker append handoff interrupt")
+        process = mock.Mock()
+        cleanup_calls = []
+        code = subject.spawn_workers.__code__
+
+        def terminate(workers):
+            cleanup_calls.append(list(workers))
+
+        def interrupt_handoff(frame, event, _argument):
+            if (frame.f_code is code and event == "line" and
+                    len(frame.f_locals.get("workers", ())) == 1 and
+                    frame.f_locals.get("provisional_worker") is not None):
+                raise primary
+            return interrupt_handoff
+
+        previous_trace = sys.gettrace()
+        with mock.patch.object(
+                subject.subprocess, "Popen", return_value=process), \
+                mock.patch.object(
+                    subject, "terminate_workers", side_effect=terminate):
+            sys.settrace(interrupt_handoff)
+            try:
+                with self.assertRaises(AppendInterrupt) as raised:
+                    subject.spawn_workers(
+                        {"resolved_path": "/injected/worker"}, [3],
+                        time.monotonic() + 1.0)
+            finally:
+                sys.settrace(previous_trace)
+        self.assertIs(raised.exception, primary)
+        self.assertEqual(len(cleanup_calls), 1)
+        self.assertEqual(len(cleanup_calls[0]), 1)
+        self.assertIs(cleanup_calls[0][0].process, process)
+
+    def test_qualification_cleanup_control_outranks_ordinary_primary(
+            self) -> None:
+        class CleanupInterrupt(BaseException):
+            pass
+
+        primary = subject.RunnerError("injected qualification failure")
+        cleanup = CleanupInterrupt("injected qualification cleanup interrupt")
+        with mock.patch.object(
+                subject, "terminate_workers", side_effect=cleanup), \
+                self.assertRaises(CleanupInterrupt) as raised:
+            subject._finish_worker_pool_cleanup(
+                [mock.Mock()], False,
+                "qualification worker cleanup failed", primary)
+        self.assertIs(raised.exception, cleanup)
+        self.assertIsInstance(
+            raised.exception.__cause__, subject.RunnerError)
+        diagnostic = str(raised.exception.__cause__)
+        self.assertIn("injected qualification failure", diagnostic)
+        self.assertIn("qualification cleanup interrupt", diagnostic)
 
     def test_qualification_pool_is_quit_and_reaped_before_exact_eight_spawn(
             self) -> None:
@@ -1274,16 +1732,13 @@ class NativeRunnerTests(unittest.TestCase):
 
         published_summary = {}
 
-        def publish_summary(path, value, **_kwargs):
-            if path.name == "run-summary.json":
-                self.assertTrue(all(
-                    worker.process.poll() is not None
-                    for worker in qualification_workers + timing_workers))
-                self.assertIn("affinity_restored", lifecycle)
-                lifecycle.append("summary_published")
-                published_summary.update(value)
-                return (123, 456)
-            raise AssertionError("unexpected completion marker path")
+        def commit_summary(_contract, _directory, value, *_args, **_kwargs):
+            self.assertTrue(all(
+                worker.process.poll() is not None
+                for worker in qualification_workers + timing_workers))
+            self.assertIn("affinity_restored", lifecycle)
+            lifecycle.append("summary_published")
+            published_summary.update(value)
 
         description = {
             "binary_sha256": "a" * 64,
@@ -1308,14 +1763,6 @@ class NativeRunnerTests(unittest.TestCase):
             },
         }
         frozen = {"trace_manifest_sha256": "e" * 64}
-        artifact_snapshots = {
-            key: key.encode("ascii") for key in subject.COMPLETED_SOURCE_NAMES
-        }
-        artifact_fingerprints = {
-            key: (1, index + 1, stat.S_IFREG, 1, len(value), 1, 1)
-            for index, (key, value) in enumerate(artifact_snapshots.items())
-        }
-
         def assembled(_contract, kind, *_args, **_kwargs):
             self.assertEqual(kind, "timing")
             value = dict(receipt)
@@ -1339,20 +1786,6 @@ class NativeRunnerTests(unittest.TestCase):
                 self.assertIn("affinity_restored", lifecycle)
                 lifecycle.append("post_shutdown_validation")
             return assembled(*args, **kwargs)
-
-        def reopen(_contract, _directory):
-            value = assembled(contract, "timing")
-            directory_info = _directory.stat()
-            return {
-                "directory": str(_directory.resolve()),
-                "directory_identity": (
-                    directory_info.st_dev, directory_info.st_ino),
-                "run_summary": dict(published_summary),
-                "freeze": frozen,
-                "summary": value["summary"],
-                "execution_receipt": value["execution_receipt"],
-                "timing_qualification": qualification,
-            }
 
         args = mock.Mock(
             deadline_seconds=60.0, contract=None, worker=Path("worker"),
@@ -1422,21 +1855,14 @@ class NativeRunnerTests(unittest.TestCase):
                 contract_api, "architecture_artifact_sha256",
                 return_value="9" * 64),
             mock.patch.object(
-                subject, "_require_completed_dependency_bounds"),
-            mock.patch.object(
-                subject, "_publish_completion_marker",
-                side_effect=publish_summary),
-            mock.patch.object(
-                subject, "load_completed_timing_screen", side_effect=reopen),
-            mock.patch.object(subject, "_require_completion_marker"),
-            mock.patch.object(
-                subject, "_read_completed_bundle",
-                return_value=(artifact_snapshots, artifact_fingerprints)),
+                subject, "_commit_completed_timing_screen",
+                side_effect=commit_summary),
         )
         with ExitStack() as stack:
             for patcher in patches:
                 stack.enter_context(patcher)
             result = subject.run_short_screen(args)
+        self.assertEqual(published_summary, result)
         self.assertEqual(result["status"], "complete")
         self.assertEqual(result["cpu_tctl_max_millic"], 60000)
         self.assertEqual(result["dimm_max_millic"], 40000)
@@ -2119,6 +2545,48 @@ class NativeRunnerTests(unittest.TestCase):
         self.assertEqual(len((self.root / "native.jsonl").read_text().splitlines()),
                          12)
 
+    def test_job_batch_rejects_exact_raw_cap_before_json_parse(self) -> None:
+        process = mock.Mock()
+        process.poll.return_value = None
+        process.stdout.fileno.return_value = 17
+        worker = subject.PersistentWorker(3, process, 1)
+        job = subject.Job("recovery", 1, 0, 0)
+        selector = mock.Mock()
+        selector.select.return_value = [
+            (mock.Mock(data=worker), subject.selectors.EVENT_READ),
+        ]
+        parser = mock.Mock(side_effect=AssertionError(
+            "oversized raw response reached JSON parser"))
+        validator = mock.Mock()
+        sink = mock.Mock()
+        line = b'{"value":"oversized"}\n'
+        self.assertGreater(len(line), 16)
+
+        with mock.patch.object(
+                subject.selectors, "DefaultSelector",
+                return_value=selector), mock.patch.object(
+                subject, "_write_worker"), mock.patch.object(
+                subject.os, "read", return_value=line), mock.patch.object(
+                subject, "_parse_canonical_line", parser), \
+                self.assertRaisesRegex(
+                    subject.RunnerError, "exact byte cap"):
+            subject.run_job_batch(
+                [worker], [job], 0, sink, time.monotonic() + 1.0,
+                validator, maximum_response_bytes=16)
+        parser.assert_not_called()
+        validator.assert_not_called()
+        sink.write.assert_not_called()
+        selector.close.assert_called_once_with()
+
+    def test_job_batch_rejects_invalid_exact_raw_caps(self) -> None:
+        for invalid in (
+                None, False, 0, -1, 1.0, subject.MAX_RESPONSE_BYTES + 1):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(
+                    subject.RunnerError, "response byte cap"):
+                subject.run_job_batch(
+                    [], [], 0, mock.Mock(), time.monotonic() + 1.0,
+                    mock.Mock(), maximum_response_bytes=invalid)
+
     def test_timing_runner_dispatches_only_t_commands_and_no_recovery_file(
             self) -> None:
         cpus = sorted(os.sched_getaffinity(0))[:subject.TIMING_WORKER_COUNT]
@@ -2348,6 +2816,70 @@ class NativeRunnerTests(unittest.TestCase):
         self.assertEqual(len(process.wait_timeouts), 2)
         for stream in (process.stdin, process.stdout, process.stderr):
             stream.close.assert_called_once_with()
+
+    def test_terminate_workers_defers_first_failure_and_cleans_later_worker(
+            self) -> None:
+        class PollInterrupt(BaseException):
+            pass
+
+        poll_interrupt = PollInterrupt("injected first-worker poll interrupt")
+
+        class Process:
+            def __init__(self, first: bool) -> None:
+                self.stdin = mock.Mock()
+                self.stdout = mock.Mock()
+                self.stderr = mock.Mock()
+                self.first = first
+                self.status = None
+                self.poll_calls = 0
+                self.terminate_calls = 0
+                self.kill_calls = 0
+                self.wait_calls = 0
+
+            def poll(self):
+                self.poll_calls += 1
+                if self.first and self.poll_calls == 1:
+                    raise poll_interrupt
+                return self.status
+
+            def terminate(self) -> None:
+                self.terminate_calls += 1
+
+            def kill(self) -> None:
+                self.kill_calls += 1
+
+            def wait(self, timeout=None):
+                self.wait_calls += 1
+                if self.wait_calls == 1:
+                    if self.first:
+                        raise OSError(
+                            errno.EIO, "injected first-worker wait failure")
+                    raise subprocess.TimeoutExpired(
+                        "injected later stubborn worker", timeout)
+                self.status = -9
+                return self.status
+
+        first = Process(True)
+        later = Process(False)
+        workers = (
+            subject.PersistentWorker(11, first, 1),
+            subject.PersistentWorker(13, later, 1),
+        )
+        with self.assertRaises(PollInterrupt) as raised:
+            subject.terminate_workers(workers)
+        self.assertIs(raised.exception, poll_interrupt)
+        self.assertIsInstance(
+            raised.exception.__cause__, subject.RunnerError)
+        diagnostic = str(raised.exception.__cause__)
+        self.assertIn("first-worker poll interrupt", diagnostic)
+        self.assertIn("first-worker wait failure", diagnostic)
+        for process in (first, later):
+            self.assertEqual(process.terminate_calls, 1)
+            self.assertEqual(process.kill_calls, 1)
+            self.assertEqual(process.wait_calls, 2)
+            self.assertEqual(process.status, -9)
+            for stream in (process.stdin, process.stdout, process.stderr):
+                stream.close.assert_called_once_with()
 
     def test_git_head_rejects_relevant_dirty_or_untracked_source(self) -> None:
         repo = self.root / "repo"
