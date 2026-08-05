@@ -189,6 +189,10 @@ void TriggerSolveAllocationFailureForTesting(
 
 } // namespace test
 
+/** Count public resume calls that recompute the complete system fingerprint. */
+void ResetResumeSystemFingerprintChecksForTesting();
+uint64_t ResumeSystemFingerprintChecksForTesting();
+
 #endif
 
 /**
@@ -421,6 +425,26 @@ WirehairResult SolvePrecodeSystemForValidatedSystemWithRuntime(
     checkpoint clearing cannot repopulate part of the cleared state.
 */
 WirehairResult ResumePrecodeSystem(
+    const PrecodeSystem& system,
+    const PacketRowConfig& config,
+    uint32_t block_id,
+    const uint8_t* block_data,
+    uint32_t block_bytes,
+    PrecodeSolveResumeState& resume_state,
+    std::vector<uint8_t>& intermediate_blocks_out,
+    PrecodeSolveStats* stats = nullptr,
+    bool allow_insert = true);
+
+/**
+    Internal resume path for a decoder-owned, validated immutable system.
+
+    The caller must retain exclusive ownership of the exact system graph that
+    produced the checkpoint.  All checkpoint, parameter, config, runtime,
+    packet-equation, alias, and transactional checks remain identical to the
+    public entry point; only the redundant O(K) graph fingerprint recomputation
+    is skipped.
+*/
+WirehairResult ResumePrecodeSystemForValidatedSystem(
     const PrecodeSystem& system,
     const PacketRowConfig& config,
     uint32_t block_id,

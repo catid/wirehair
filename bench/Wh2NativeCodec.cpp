@@ -1543,14 +1543,15 @@ TimedArmResult NativeReceiveFixture::Run() const
 
                 if (resume_state.Active)
                 {
-                    receive_result = wirehair_v2::ResumePrecodeSystem(
-                        arm.System,
-                        arm.PacketConfig,
-                        packet.BlockId,
-                        packet.Data,
-                        arm.BlockBytes,
-                        resume_state,
-                        intermediate);
+                    receive_result =
+                        wirehair_v2::ResumePrecodeSystemForValidatedSystem(
+                            arm.System,
+                            arm.PacketConfig,
+                            packet.BlockId,
+                            packet.Data,
+                            arm.BlockBytes,
+                            resume_state,
+                            intermediate);
                 }
                 else
                 {

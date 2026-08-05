@@ -454,6 +454,7 @@ std::atomic<uint64_t> BinaryPeelOracleComparisons(0u);
 std::atomic<uint32_t> HeavyProjectionOracleUsers(0u);
 std::atomic<uint64_t> HeavyProjectionOracleComparisons(0u);
 std::atomic<uint64_t> HeavyProjectionLegacyFallbacks(0u);
+std::atomic<uint64_t> ResumeSystemFingerprintChecks(0u);
 #endif
 
 bool CheckedBlockStorage(
@@ -1644,6 +1645,16 @@ void TriggerSolveAllocationFailureForTesting(
 }
 
 } // namespace test
+
+void ResetResumeSystemFingerprintChecksForTesting()
+{
+    ResumeSystemFingerprintChecks.store(0u, std::memory_order_relaxed);
+}
+
+uint64_t ResumeSystemFingerprintChecksForTesting()
+{
+    return ResumeSystemFingerprintChecks.load(std::memory_order_relaxed);
+}
 #endif
 
 void PrecodeSolveResumeState::Clear()
@@ -3459,7 +3470,7 @@ WirehairResult SolvePrecodeSystemForValidatedSystemWithRuntime(
         intermediate_blocks_out, stats, resume_state, false);
 }
 
-WirehairResult ResumePrecodeSystem(
+static WirehairResult ResumePrecodeSystemImpl(
     const PrecodeSystem& system,
     const PacketRowConfig& config,
     uint32_t block_id,
@@ -3468,7 +3479,8 @@ WirehairResult ResumePrecodeSystem(
     PrecodeSolveResumeState& state,
     std::vector<uint8_t>& intermediate_blocks_out,
     PrecodeSolveStats* stats,
-    bool allow_insert)
+    bool allow_insert,
+    bool verify_system_fingerprint)
 {
     if (stats == &state.Stats ||
         SolveOutputAliasesResumeState(intermediate_blocks_out, state))
@@ -3512,19 +3524,28 @@ WirehairResult ResumePrecodeSystem(
     {
         typedef std::chrono::steady_clock SolveClock;
         const SolveClock::time_point build_start = SolveClock::now();
-        // Resume state contains substitutions and residual pivots derived
-        // from every accepted precode equation.  Matching dimensions and
-        // construction parameters are insufficient because PrecodeSystem
-        // deliberately exposes validated explicit row graphs.  Recompute
-        // their stable content identity before row generation or any caller-
-        // visible mutation.  This accepts a distinct but value-equivalent
-        // PrecodeSystem object, and accounts the graph walk as build work.
-        const PrecodeSystemFingerprint system_fingerprint =
-            FingerprintPrecodeSystem(system);
-        if (state.SystemFingerprint0 != system_fingerprint.First ||
-            state.SystemFingerprint1 != system_fingerprint.Second)
+        if (verify_system_fingerprint)
         {
-            return Wirehair_InvalidInput;
+            // Resume state contains substitutions and residual pivots derived
+            // from every accepted precode equation.  Matching dimensions and
+            // construction parameters are insufficient because PrecodeSystem
+            // deliberately exposes validated explicit row graphs.  Recompute
+            // their stable content identity before row generation or any
+            // caller-visible mutation.  This accepts a distinct but value-
+            // equivalent PrecodeSystem object, and accounts the graph walk as
+            // build work.  Decoder-owned immutable systems use the internal
+            // entry point below and preserve every other validation check.
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            ResumeSystemFingerprintChecks.fetch_add(
+                1u, std::memory_order_relaxed);
+#endif
+            const PrecodeSystemFingerprint system_fingerprint =
+                FingerprintPrecodeSystem(system);
+            if (state.SystemFingerprint0 != system_fingerprint.First ||
+                state.SystemFingerprint1 != system_fingerprint.Second)
+            {
+                return Wirehair_InvalidInput;
+            }
         }
         const std::vector<uint32_t> columns =
             GeneratePacketMatrixRowWithRuntime(
@@ -3709,6 +3730,38 @@ WirehairResult ResumePrecodeSystem(
         }
         return Wirehair_OOM;
     }
+}
+
+WirehairResult ResumePrecodeSystem(
+    const PrecodeSystem& system,
+    const PacketRowConfig& config,
+    uint32_t block_id,
+    const uint8_t* block_data,
+    uint32_t block_bytes,
+    PrecodeSolveResumeState& state,
+    std::vector<uint8_t>& intermediate_blocks_out,
+    PrecodeSolveStats* stats,
+    bool allow_insert)
+{
+    return ResumePrecodeSystemImpl(
+        system, config, block_id, block_data, block_bytes, state,
+        intermediate_blocks_out, stats, allow_insert, true);
+}
+
+WirehairResult ResumePrecodeSystemForValidatedSystem(
+    const PrecodeSystem& system,
+    const PacketRowConfig& config,
+    uint32_t block_id,
+    const uint8_t* block_data,
+    uint32_t block_bytes,
+    PrecodeSolveResumeState& state,
+    std::vector<uint8_t>& intermediate_blocks_out,
+    PrecodeSolveStats* stats,
+    bool allow_insert)
+{
+    return ResumePrecodeSystemImpl(
+        system, config, block_id, block_data, block_bytes, state,
+        intermediate_blocks_out, stats, allow_insert, false);
 }
 
 WirehairResult SelectSystematicPacketConfig(

@@ -2478,6 +2478,7 @@ bool CheckResumeSystemBinding(
     uint32_t block_bytes,
     const wirehair_v2::PrecodeSolveResumeState& initial_state)
 {
+    wirehair_v2::ResetResumeSystemFingerprintChecksForTesting();
     if ((initial_state.SystemFingerprint0 == 0u &&
          initial_state.SystemFingerprint1 == 0u) ||
         initial_state.SystemParams.Seed != system.Params.Seed ||
@@ -2795,9 +2796,18 @@ bool CheckResumeSystemBinding(
         return false;
     }
 
+    const uint64_t fingerprint_checks =
+        wirehair_v2::ResumeSystemFingerprintChecksForTesting();
+    if (fingerprint_checks == 0u)
+    {
+        std::fprintf(stderr,
+            "solve: public resume skipped exact system fingerprint checks\n");
+        return false;
+    }
     std::printf(
         "resume exact system/packet-equation binding/equivalent/retry: "
-        "PASS\n");
+        "PASS fingerprint_checks=%llu\n",
+        (unsigned long long)fingerprint_checks);
     return true;
 }
 

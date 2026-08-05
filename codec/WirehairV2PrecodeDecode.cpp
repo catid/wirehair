@@ -546,16 +546,17 @@ WirehairResult MessagePrecodeDecoder::AttemptSolve()
             PrecodeSolveStats solve_stats = SolveStatsValue;
             ++SolveAttemptCountValue;
             GuardedDecoderAllocation();
-            const WirehairResult result = ResumePrecodeSystem(
-                SystemValue,
-                PacketConfigValue,
-                PendingPacketId,
-                PendingPacketStorage.data(),
-                BlockBytesValue,
-                ResumeState,
-                intermediate,
-                &solve_stats,
-                true);
+            const WirehairResult result =
+                ResumePrecodeSystemForValidatedSystem(
+                    SystemValue,
+                    PacketConfigValue,
+                    PendingPacketId,
+                    PendingPacketStorage.data(),
+                    BlockBytesValue,
+                    ResumeState,
+                    intermediate,
+                    &solve_stats,
+                    true);
             solve_stats.PacketSeedAttempt = PacketSeedAttemptValue;
             SolveStatsValue = solve_stats;
             if (result == Wirehair_Success)
@@ -717,16 +718,17 @@ WirehairResult MessagePrecodeDecoder::DecodeResult(
                     std::memcpy(
                         duplicate_data.data(), block_in, data_bytes);
                     std::vector<uint8_t> ignored;
-                    const WirehairResult consistency = ResumePrecodeSystem(
-                        SystemValue,
-                        PacketConfigValue,
-                        block_id,
-                        duplicate_data.data(),
-                        BlockBytesValue,
-                        ResumeState,
-                        ignored,
-                        nullptr,
-                        false);
+                    const WirehairResult consistency =
+                        ResumePrecodeSystemForValidatedSystem(
+                            SystemValue,
+                            PacketConfigValue,
+                            block_id,
+                            duplicate_data.data(),
+                            BlockBytesValue,
+                            ResumeState,
+                            ignored,
+                            nullptr,
+                            false);
                     if (consistency == Wirehair_OOM) {
                         return Wirehair_OOM;
                     }

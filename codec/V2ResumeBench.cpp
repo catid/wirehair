@@ -164,6 +164,9 @@ bool RunWarm(const Fixture& fixture, Sample& sample)
     for (uint32_t i = 0u; i < kOverheadPackets; ++i)
     {
         const uint32_t id = fixture.K - kOverheadPackets + i;
+        // Deliberately benchmark the public safety contract here, including
+        // exact graph identity verification.  Decoder-owned resume speed is
+        // covered by MessagePrecodeDecoder and NativeReceiveFixture.
         const WirehairResult result = wirehair_v2::ResumePrecodeSystem(
             fixture.System,
             fixture.Config,

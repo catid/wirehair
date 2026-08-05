@@ -496,6 +496,12 @@ bool CheckIncrementalDecoderParity()
         return false;
     }
 
+    // Every resume below operates on the decoder's privately owned immutable
+    // system.  Exact warm/cold parity still proves the fast path's algebra,
+    // while this counter makes an accidental return to the public O(K) graph
+    // walk observable.
+    wirehair_v2::ResetResumeSystemFingerprintChecksForTesting();
+
     // Systematic-heavy, rank-deficient, duplicate/conflict, and OOM retry.
     DecoderPair main_pair;
     if (!Check(
@@ -897,13 +903,22 @@ bool CheckIncrementalDecoderParity()
         return false;
     }
 
+    const uint64_t fingerprint_checks =
+        wirehair_v2::ResumeSystemFingerprintChecksForTesting();
+    if (!Check(
+            fingerprint_checks == 0u,
+            "decoder-owned resume recomputed the system fingerprint"))
+    {
+        return false;
+    }
     std::printf(
         "incremental decoder parity: collision=%u/%u checkpoint=%zu "
-        "cold=%zu\n",
+        "cold=%zu fingerprint_checks=%llu\n",
         collision_a,
         collision_b,
         warm_resume_bytes,
-        cold_receive_bytes);
+        cold_receive_bytes,
+        (unsigned long long)fingerprint_checks);
     return true;
 #endif
 }
