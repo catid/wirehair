@@ -150,6 +150,17 @@ struct PrecodeSolveResumeState
     uint32_t InactiveCount = 0u;
     uint32_t ProjectionWords = 0u;
     uint32_t Rank = 0u;
+    // Exact parameters permit cheap rejection before recomputing the stable
+    // content fingerprint over the accepted precode row graphs.  The two
+    // words are independent fixed-key SipHash-2-4 results: equality uses the
+    // same operational 128-bit collision model as packet duplicate identity.
+    // Retaining a second full graph would add O(K) checkpoint memory and can
+    // disable the decoder's bounded resume policy.  Equivalent PrecodeSystem
+    // values remain interchangeable; object identity is not part of the
+    // checkpoint contract.
+    PrecodeParams SystemParams = {};
+    uint64_t SystemFingerprint0 = 0u;
+    uint64_t SystemFingerprint1 = 0u;
     PacketRowConfig Config = {};
     PacketRowRuntime Runtime = {};
     PrecodeSolveStats Stats = {};

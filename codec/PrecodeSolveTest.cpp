@@ -103,6 +103,18 @@ bool SameResumeState(
         a.InactiveCount == b.InactiveCount &&
         a.ProjectionWords == b.ProjectionWords &&
         a.Rank == b.Rank &&
+        a.SystemParams.BlockCount == b.SystemParams.BlockCount &&
+        a.SystemParams.Staircase == b.SystemParams.Staircase &&
+        a.SystemParams.DenseRows == b.SystemParams.DenseRows &&
+        a.SystemParams.HeavyRows == b.SystemParams.HeavyRows &&
+        a.SystemParams.SourceHits == b.SystemParams.SourceHits &&
+        a.SystemParams.DenseIdentityCorner ==
+            b.SystemParams.DenseIdentityCorner &&
+        a.SystemParams.HeavyFamily == b.SystemParams.HeavyFamily &&
+        a.SystemParams.DenseAnchors == b.SystemParams.DenseAnchors &&
+        a.SystemParams.Seed == b.SystemParams.Seed &&
+        a.SystemFingerprint0 == b.SystemFingerprint0 &&
+        a.SystemFingerprint1 == b.SystemFingerprint1 &&
         a.Config.PeelSeed == b.Config.PeelSeed &&
         a.Config.MixCount == b.Config.MixCount &&
         a.Runtime.SourcePrime() == b.Runtime.SourcePrime() &&
@@ -2195,6 +2207,353 @@ bool CheckResumePacketInputAliases(
     return true;
 }
 
+bool MutateDenseBasisValue(wirehair_v2::PrecodeSystem& system)
+{
+    const uint64_t span_wide = (uint64_t)system.Params.BlockCount +
+        system.Params.Staircase + system.Params.DenseRows;
+    if (span_wide > UINT32_MAX) {
+        return false;
+    }
+    const uint32_t span = (uint32_t)span_wide;
+    for (size_t row_i = 1u;
+         row_i < system.DenseBasisRowColumns.size();
+         ++row_i)
+    {
+        std::vector<uint32_t>& row =
+            system.DenseBasisRowColumns[row_i];
+        if (row.size() != 2u) {
+            continue;
+        }
+        const std::vector<uint32_t> original = row;
+        for (uint32_t column = 0u; column < span; ++column)
+        {
+            if (column == original[0] || column == original[1]) {
+                continue;
+            }
+            row[0] = column;
+            row[1] = original[1];
+            std::sort(row.begin(), row.end());
+            if (row != original &&
+                wirehair_v2::ValidatePrecodeSystem(system))
+            {
+                return true;
+            }
+        }
+        row = original;
+    }
+    return false;
+}
+
+bool MutateDenseBasisOrder(wirehair_v2::PrecodeSystem& system)
+{
+    for (size_t first = 1u;
+         first < system.DenseBasisRowColumns.size();
+         ++first)
+    {
+        if (system.DenseBasisRowColumns[first].size() != 2u) {
+            continue;
+        }
+        for (size_t second = first + 1u;
+             second < system.DenseBasisRowColumns.size();
+             ++second)
+        {
+            if (system.DenseBasisRowColumns[second].size() != 2u ||
+                system.DenseBasisRowColumns[first] ==
+                    system.DenseBasisRowColumns[second])
+            {
+                continue;
+            }
+            std::swap(
+                system.DenseBasisRowColumns[first],
+                system.DenseBasisRowColumns[second]);
+            if (wirehair_v2::ValidatePrecodeSystem(system)) {
+                return true;
+            }
+            std::swap(
+                system.DenseBasisRowColumns[first],
+                system.DenseBasisRowColumns[second]);
+        }
+    }
+    return false;
+}
+
+bool MutateStaircaseRowLengths(wirehair_v2::PrecodeSystem& system)
+{
+    const uint32_t K = system.Params.BlockCount;
+    for (uint32_t column = 0u; column < K; ++column)
+    {
+        for (size_t remove_i = 0u;
+             remove_i < system.StaircaseRows.size();
+             ++remove_i)
+        {
+            std::vector<uint32_t>& remove_row =
+                system.StaircaseRows[remove_i];
+            const std::vector<uint32_t>::iterator remove_at =
+                std::lower_bound(
+                    remove_row.begin(), remove_row.end(), column);
+            if (remove_at == remove_row.end() || *remove_at != column) {
+                continue;
+            }
+            for (size_t add_i = 0u;
+                 add_i < system.StaircaseRows.size();
+                 ++add_i)
+            {
+                if (add_i == remove_i) {
+                    continue;
+                }
+                std::vector<uint32_t>& add_row =
+                    system.StaircaseRows[add_i];
+                const std::vector<uint32_t>::iterator add_at =
+                    std::lower_bound(add_row.begin(), add_row.end(), column);
+                if (add_at != add_row.end() && *add_at == column) {
+                    continue;
+                }
+                const std::vector<uint32_t> remove_original = remove_row;
+                const std::vector<uint32_t> add_original = add_row;
+                remove_row.erase(std::lower_bound(
+                    remove_row.begin(), remove_row.end(), column));
+                add_row.insert(
+                    std::lower_bound(
+                        add_row.begin(), add_row.end(), column),
+                    column);
+                if (wirehair_v2::ValidatePrecodeSystem(system)) {
+                    return true;
+                }
+                remove_row = remove_original;
+                add_row = add_original;
+            }
+        }
+    }
+    return false;
+}
+
+bool ExpectResumeSystemMismatchRejected(
+    const char* name,
+    const wirehair_v2::PrecodeSystem& original_system,
+    const wirehair_v2::PrecodeSystem& mismatched_system,
+    const wirehair_v2::PacketRowConfig& config,
+    const std::vector<uint8_t>& message,
+    uint32_t block_bytes,
+    const wirehair_v2::PrecodeSolveResumeState& initial_state)
+{
+    const uint32_t block_id = 1u;
+    const uint8_t* const block_data = message.data() + block_bytes;
+    const std::vector<uint8_t> sentinel(13u, uint8_t{0x6d});
+
+    wirehair_v2::PrecodeSolveResumeState control = initial_state;
+    std::vector<uint8_t> control_output = sentinel;
+    wirehair_v2::PrecodeSolveStats control_stats = initial_state.Stats;
+    control_stats.PacketRows ^= UINT32_C(0x3c6ef372);
+    control_stats.BlockXors ^= UINT64_C(0xa54ff53a5f1d36f1);
+    const WirehairResult control_result =
+        wirehair_v2::ResumePrecodeSystem(
+            original_system, config, block_id, block_data, block_bytes,
+            control, control_output, &control_stats, true);
+    if (control_result != Wirehair_NeedMore ||
+        control.Rank <= initial_state.Rank || control_output != sentinel)
+    {
+        std::fprintf(stderr,
+            "solve: resume system binding control failed case=%s "
+            "result=%d rank=%u/%u\n",
+            name, (int)control_result, control.Rank, initial_state.Rank);
+        return false;
+    }
+
+    wirehair_v2::PrecodeSolveResumeState rejected = initial_state;
+    const wirehair_v2::PrecodeSolveResumeState rejected_before = rejected;
+    const ResumeStorageIdentity storage_before =
+        CaptureResumeStorageIdentity(rejected);
+    const size_t persistent_before = rejected.PersistentBytes();
+    std::vector<uint8_t> rejected_output = sentinel;
+    wirehair_v2::PrecodeSolveStats rejected_stats = initial_state.Stats;
+    rejected_stats.PacketRows ^= UINT32_C(0x3c6ef372);
+    rejected_stats.BlockXors ^= UINT64_C(0xa54ff53a5f1d36f1);
+    const wirehair_v2::PrecodeSolveStats rejected_stats_before =
+        rejected_stats;
+    if (wirehair_v2::ResumePrecodeSystem(
+            mismatched_system, config, block_id, block_data, block_bytes,
+            rejected, rejected_output, &rejected_stats, true) !=
+            Wirehair_InvalidInput ||
+        !SameResumeState(rejected, rejected_before) ||
+        !SameResumeStorageIdentity(rejected, storage_before) ||
+        rejected.PersistentBytes() != persistent_before ||
+        rejected_output != sentinel ||
+        !SameSolveStats(rejected_stats, rejected_stats_before))
+    {
+        std::fprintf(stderr,
+            "solve: resume system mismatch was not transactional case=%s\n",
+            name);
+        return false;
+    }
+
+    // Retry the exact checkpoint after rejection.  It must behave identically
+    // to a fresh same-system resume, proving the mismatch consumed nothing.
+    const WirehairResult retry_result =
+        wirehair_v2::ResumePrecodeSystem(
+            original_system, config, block_id, block_data, block_bytes,
+            rejected, rejected_output, &rejected_stats, true);
+    if (retry_result != control_result ||
+        rejected_output != control_output ||
+        !SameResumeStateIgnoringTiming(rejected, control) ||
+        !SameSolveStatsIgnoringTiming(rejected_stats, control_stats))
+    {
+        std::fprintf(stderr,
+            "solve: resume system mismatch retry diverged case=%s "
+            "result=%d/%d\n",
+            name, (int)retry_result, (int)control_result);
+        return false;
+    }
+    return true;
+}
+
+bool CheckResumeSystemBinding(
+    const wirehair_v2::PrecodeSystem& system,
+    const wirehair_v2::PacketRowConfig& config,
+    const std::vector<uint8_t>& message,
+    uint32_t block_bytes,
+    const wirehair_v2::PrecodeSolveResumeState& initial_state)
+{
+    if ((initial_state.SystemFingerprint0 == 0u &&
+         initial_state.SystemFingerprint1 == 0u) ||
+        initial_state.SystemParams.Seed != system.Params.Seed)
+    {
+        std::fprintf(stderr,
+            "solve: resume system identity was not published\n");
+        return false;
+    }
+
+    // A separately allocated value-equivalent graph must remain accepted.
+    const wirehair_v2::PrecodeSystem equivalent_system = system;
+    wirehair_v2::PrecodeSolveResumeState original_state = initial_state;
+    wirehair_v2::PrecodeSolveResumeState equivalent_state = initial_state;
+    const std::vector<uint8_t> sentinel(13u, uint8_t{0x6d});
+    std::vector<uint8_t> original_output = sentinel;
+    std::vector<uint8_t> equivalent_output = sentinel;
+    wirehair_v2::PrecodeSolveStats original_stats = initial_state.Stats;
+    wirehair_v2::PrecodeSolveStats equivalent_stats = initial_state.Stats;
+    const WirehairResult original_result =
+        wirehair_v2::ResumePrecodeSystem(
+            system, config, 1u, message.data() + block_bytes, block_bytes,
+            original_state, original_output, &original_stats, true);
+    const WirehairResult equivalent_result =
+        wirehair_v2::ResumePrecodeSystem(
+            equivalent_system, config, 1u,
+            message.data() + block_bytes, block_bytes,
+            equivalent_state, equivalent_output, &equivalent_stats, true);
+    if (original_result != Wirehair_NeedMore ||
+        equivalent_result != original_result ||
+        equivalent_output != original_output ||
+        !SameResumeStateIgnoringTiming(
+            equivalent_state, original_state) ||
+        !SameSolveStatsIgnoringTiming(
+            equivalent_stats, original_stats))
+    {
+        std::fprintf(stderr,
+            "solve: value-equivalent resume system was rejected/diverged\n");
+        return false;
+    }
+
+    wirehair_v2::PrecodeParams different_seed_params = system.Params;
+    wirehair_v2::PrecodeSystem different_seed_system;
+    bool found_different_seed_graph = false;
+    for (uint32_t attempt = 1u; attempt <= 8u; ++attempt)
+    {
+        different_seed_params.Seed = system.Params.Seed +
+            UINT64_C(0x9e3779b97f4a7c15) * attempt;
+        if (wirehair_v2::BuildPrecodeSystem(
+                different_seed_params, different_seed_system) &&
+            (different_seed_system.StaircaseRows != system.StaircaseRows ||
+             different_seed_system.DenseBasisRowColumns !=
+                system.DenseBasisRowColumns))
+        {
+            found_different_seed_graph = true;
+            break;
+        }
+    }
+    if (!found_different_seed_graph ||
+        !ExpectResumeSystemMismatchRejected(
+            "different-seed", system, different_seed_system, config,
+            message, block_bytes, initial_state))
+    {
+        return false;
+    }
+
+    wirehair_v2::PrecodeSystem value_mutation = system;
+    if (!MutateDenseBasisValue(value_mutation) ||
+        value_mutation.Params.Seed != system.Params.Seed ||
+        !ExpectResumeSystemMismatchRejected(
+            "same-params-row-value", system, value_mutation, config,
+            message, block_bytes, initial_state))
+    {
+        return false;
+    }
+
+    wirehair_v2::PrecodeSystem order_mutation = system;
+    if (!MutateDenseBasisOrder(order_mutation) ||
+        order_mutation.Params.Seed != system.Params.Seed ||
+        !ExpectResumeSystemMismatchRejected(
+            "same-params-row-order", system, order_mutation, config,
+            message, block_bytes, initial_state))
+    {
+        return false;
+    }
+
+    wirehair_v2::PrecodeSystem length_mutation = system;
+    if (!MutateStaircaseRowLengths(length_mutation) ||
+        length_mutation.Params.Seed != system.Params.Seed ||
+        !ExpectResumeSystemMismatchRejected(
+            "same-params-row-length", system, length_mutation, config,
+            message, block_bytes, initial_state))
+    {
+        return false;
+    }
+
+    wirehair_v2::PrecodeSystem parameter_mutation = system;
+    parameter_mutation.Params.HeavyFamily =
+        system.Params.HeavyFamily ==
+                wirehair_v2::HeavyCoefficientFamily::PeriodicCauchy ?
+            wirehair_v2::HeavyCoefficientFamily::HashedNonzero :
+            wirehair_v2::HeavyCoefficientFamily::PeriodicCauchy;
+    if (!wirehair_v2::ValidatePrecodeSystem(parameter_mutation) ||
+        parameter_mutation.StaircaseRows != system.StaircaseRows ||
+        parameter_mutation.DenseBasisRowColumns !=
+            system.DenseBasisRowColumns ||
+        !ExpectResumeSystemMismatchRejected(
+            "equation-param", system, parameter_mutation, config,
+            message, block_bytes, initial_state))
+    {
+        return false;
+    }
+
+    // Fixed-size identity fields add no dynamic accounting.  Swap and Clear
+    // must still move/reset them together with all checkpoint storage.
+    wirehair_v2::PrecodeSolveResumeState source = initial_state;
+    const size_t source_bytes = source.PersistentBytes();
+    wirehair_v2::PrecodeSolveResumeState moved;
+    moved.Swap(source);
+    const wirehair_v2::PrecodeSolveResumeState empty;
+    if (!SameResumeState(moved, initial_state) ||
+        !SameResumeState(source, empty) ||
+        moved.PersistentBytes() != source_bytes ||
+        source.PersistentBytes() != 0u)
+    {
+        std::fprintf(stderr,
+            "solve: resume system identity swap/accounting mismatch\n");
+        return false;
+    }
+    moved.Clear();
+    if (!SameResumeState(moved, empty) || moved.PersistentBytes() != 0u)
+    {
+        std::fprintf(stderr,
+            "solve: resume system identity clear mismatch\n");
+        return false;
+    }
+
+    std::printf(
+        "resume exact system binding/equivalent/retry: PASS\n");
+    return true;
+}
+
 bool CheckIncrementalResumeCase(uint32_t block_bytes)
 {
     const uint32_t K = 64u;
@@ -2247,6 +2606,12 @@ bool CheckIncrementalResumeCase(uint32_t block_bytes)
         resume.Rank >= resume.InactiveCount)
     {
         std::fprintf(stderr, "solve: rank-deficient checkpoint missing\n");
+        return false;
+    }
+    if (block_bytes == 17u &&
+        !CheckResumeSystemBinding(
+            system, config, message, block_bytes, resume))
+    {
         return false;
     }
 

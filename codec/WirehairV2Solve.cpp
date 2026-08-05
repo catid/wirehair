@@ -38,6 +38,168 @@ static_assert(
     PackedWordCount(UINT32_MAX) == UINT32_C(67108864),
     "packed word count must not wrap at the uint32 boundary");
 
+struct PrecodeSystemFingerprint
+{
+    uint64_t First;
+    uint64_t Second;
+};
+
+static GF256_FORCE_INLINE void SystemFingerprintSipRound(
+    uint64_t& v0,
+    uint64_t& v1,
+    uint64_t& v2,
+    uint64_t& v3) noexcept
+{
+    v0 += v1;
+    v1 = CAT_ROL64(v1, 13);
+    v1 ^= v0;
+    v0 = CAT_ROL64(v0, 32);
+    v2 += v3;
+    v3 = CAT_ROL64(v3, 16);
+    v3 ^= v2;
+    v0 += v3;
+    v3 = CAT_ROL64(v3, 21);
+    v3 ^= v0;
+    v2 += v1;
+    v1 = CAT_ROL64(v1, 17);
+    v1 ^= v2;
+    v2 = CAT_ROL64(v2, 32);
+}
+
+class PrecodeSystemFingerprintBuilder
+{
+public:
+    PrecodeSystemFingerprintBuilder() noexcept
+        : A0(UINT64_C(0x736f6d6570736575) ^
+              UINT64_C(0x0f8f4ab39d72e615))
+        , A1(UINT64_C(0x646f72616e646f6d) ^
+              UINT64_C(0x6c91d20a57b438ef))
+        , A2(UINT64_C(0x6c7967656e657261) ^
+              UINT64_C(0x0f8f4ab39d72e615))
+        , A3(UINT64_C(0x7465646279746573) ^
+              UINT64_C(0x6c91d20a57b438ef))
+        , B0(UINT64_C(0x736f6d6570736575) ^
+              UINT64_C(0xc4ceb9fe1a85ec53))
+        , B1(UINT64_C(0x646f72616e646f6d) ^
+              UINT64_C(0x9e3779b97f4a7c15))
+        , B2(UINT64_C(0x6c7967656e657261) ^
+              UINT64_C(0xc4ceb9fe1a85ec53))
+        , B3(UINT64_C(0x7465646279746573) ^
+              UINT64_C(0x9e3779b97f4a7c15))
+    {
+    }
+
+    void Add(uint64_t word) noexcept
+    {
+        A3 ^= word;
+        SystemFingerprintSipRound(A0, A1, A2, A3);
+        SystemFingerprintSipRound(A0, A1, A2, A3);
+        A0 ^= word;
+        B3 ^= word;
+        SystemFingerprintSipRound(B0, B1, B2, B3);
+        SystemFingerprintSipRound(B0, B1, B2, B3);
+        B0 ^= word;
+        ++WordCount;
+    }
+
+    PrecodeSystemFingerprint Finish() noexcept
+    {
+        // Every input token is represented by one canonical little-endian
+        // 64-bit word.  SipHash's final word therefore contains only length.
+        const uint64_t tail = (WordCount * UINT64_C(8)) << 56;
+        A3 ^= tail;
+        SystemFingerprintSipRound(A0, A1, A2, A3);
+        SystemFingerprintSipRound(A0, A1, A2, A3);
+        A0 ^= tail;
+        A2 ^= UINT64_C(0xff);
+        SystemFingerprintSipRound(A0, A1, A2, A3);
+        SystemFingerprintSipRound(A0, A1, A2, A3);
+        SystemFingerprintSipRound(A0, A1, A2, A3);
+        SystemFingerprintSipRound(A0, A1, A2, A3);
+
+        B3 ^= tail;
+        SystemFingerprintSipRound(B0, B1, B2, B3);
+        SystemFingerprintSipRound(B0, B1, B2, B3);
+        B0 ^= tail;
+        B2 ^= UINT64_C(0xff);
+        SystemFingerprintSipRound(B0, B1, B2, B3);
+        SystemFingerprintSipRound(B0, B1, B2, B3);
+        SystemFingerprintSipRound(B0, B1, B2, B3);
+        SystemFingerprintSipRound(B0, B1, B2, B3);
+
+        PrecodeSystemFingerprint result;
+        result.First = A0 ^ A1 ^ A2 ^ A3;
+        result.Second = B0 ^ B1 ^ B2 ^ B3;
+        return result;
+    }
+
+private:
+    uint64_t A0;
+    uint64_t A1;
+    uint64_t A2;
+    uint64_t A3;
+    uint64_t B0;
+    uint64_t B1;
+    uint64_t B2;
+    uint64_t B3;
+    uint64_t WordCount = 0u;
+};
+
+bool SamePrecodeParams(
+    const PrecodeParams& a,
+    const PrecodeParams& b) noexcept
+{
+    return a.BlockCount == b.BlockCount &&
+        a.Staircase == b.Staircase &&
+        a.DenseRows == b.DenseRows &&
+        a.HeavyRows == b.HeavyRows &&
+        a.SourceHits == b.SourceHits &&
+        a.DenseIdentityCorner == b.DenseIdentityCorner &&
+        a.HeavyFamily == b.HeavyFamily &&
+        a.DenseAnchors == b.DenseAnchors &&
+        a.Seed == b.Seed;
+}
+
+PrecodeSystemFingerprint FingerprintPrecodeSystem(
+    const PrecodeSystem& system) noexcept
+{
+    PrecodeSystemFingerprintBuilder builder;
+    const PrecodeParams& params = system.Params;
+    builder.Add(UINT64_C(0x574832535953544d)); // "WH2SYSTM"
+    builder.Add(kPrecodeContractVersion);
+    builder.Add(params.BlockCount);
+    builder.Add(params.Staircase);
+    builder.Add(params.DenseRows);
+    builder.Add(params.HeavyRows);
+    builder.Add(params.SourceHits);
+    builder.Add(params.DenseIdentityCorner ? 1u : 0u);
+    builder.Add((uint32_t)params.HeavyFamily);
+    builder.Add((uint32_t)params.DenseAnchors);
+    builder.Add(params.Seed);
+
+    builder.Add(UINT64_C(0x5354414952434153)); // "STAIRCAS"
+    builder.Add(system.StaircaseRows.size());
+    for (const std::vector<uint32_t>& row : system.StaircaseRows)
+    {
+        builder.Add(row.size());
+        for (uint32_t column : row) {
+            builder.Add(column);
+        }
+    }
+
+    builder.Add(UINT64_C(0x44454e5345424153)); // "DENSEBAS"
+    builder.Add(system.DenseBasisRowColumns.size());
+    for (const std::vector<uint32_t>& row :
+            system.DenseBasisRowColumns)
+    {
+        builder.Add(row.size());
+        for (uint32_t column : row) {
+            builder.Add(column);
+        }
+    }
+    return builder.Finish();
+}
+
 struct ColumnSpan
 {
     const uint32_t* First = nullptr;
@@ -1441,6 +1603,9 @@ void PrecodeSolveResumeState::Swap(
     swap(InactiveCount, other.InactiveCount);
     swap(ProjectionWords, other.ProjectionWords);
     swap(Rank, other.Rank);
+    swap(SystemParams, other.SystemParams);
+    swap(SystemFingerprint0, other.SystemFingerprint0);
+    swap(SystemFingerprint1, other.SystemFingerprint1);
     swap(Config, other.Config);
     swap(Runtime, other.Runtime);
     swap(Stats, other.Stats);
@@ -2884,6 +3049,11 @@ static WirehairResult SolvePrecodeSystemImpl(
         if (rank < R) {
             if (resume_state)
             {
+                // This full graph walk is confined to the rare checkpoint
+                // publication path.  Successful cold solves, including those
+                // passed a resume_state, pay no fingerprinting cost.
+                const PrecodeSystemFingerprint system_fingerprint =
+                    FingerprintPrecodeSystem(system);
                 PrecodeSolveResumeState checkpoint;
                 checkpoint.SourceCount = K;
                 checkpoint.PrecodeCount = P;
@@ -2892,6 +3062,9 @@ static WirehairResult SolvePrecodeSystemImpl(
                 checkpoint.InactiveCount = R;
                 checkpoint.ProjectionWords = words;
                 checkpoint.Rank = rank;
+                checkpoint.SystemParams = system.Params;
+                checkpoint.SystemFingerprint0 = system_fingerprint.First;
+                checkpoint.SystemFingerprint1 = system_fingerprint.Second;
                 checkpoint.Config = config;
                 checkpoint.Runtime = runtime;
                 checkpoint.Stats = st;
@@ -3195,6 +3368,7 @@ WirehairResult ResumePrecodeSystem(
         state.SourceCount != K || state.PrecodeCount != (uint32_t)P_wide ||
         state.ColumnCount != K + (uint32_t)P_wide ||
         state.BlockBytes != block_bytes || block_bytes == 0u ||
+        !SamePrecodeParams(state.SystemParams, system.Params) ||
         state.Config.PeelSeed != config.PeelSeed ||
         state.Config.MixCount != config.MixCount ||
         !state.Runtime.IsValidFor(
@@ -3222,6 +3396,20 @@ WirehairResult ResumePrecodeSystem(
     {
         typedef std::chrono::steady_clock SolveClock;
         const SolveClock::time_point build_start = SolveClock::now();
+        // Resume state contains substitutions and residual pivots derived
+        // from every accepted precode equation.  Matching dimensions and
+        // construction parameters are insufficient because PrecodeSystem
+        // deliberately exposes validated explicit row graphs.  Recompute
+        // their stable content identity before row generation or any caller-
+        // visible mutation.  This accepts a distinct but value-equivalent
+        // PrecodeSystem object, and accounts the graph walk as build work.
+        const PrecodeSystemFingerprint system_fingerprint =
+            FingerprintPrecodeSystem(system);
+        if (state.SystemFingerprint0 != system_fingerprint.First ||
+            state.SystemFingerprint1 != system_fingerprint.Second)
+        {
+            return Wirehair_InvalidInput;
+        }
         const std::vector<uint32_t> columns =
             GeneratePacketMatrixRowWithRuntime(
                 K, (uint32_t)P_wide, block_id, config, state.Runtime);
