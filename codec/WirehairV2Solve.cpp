@@ -36,6 +36,26 @@ thread_local test::SolveAllocationFailureException
 thread_local uint32_t ActiveSolveAllocationFailureHits = 0u;
 #endif
 
+PacketRowEquationIdentity CurrentPacketRowEquationIdentity() noexcept
+{
+    PacketRowEquationIdentity identity;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    identity.BlockIdMultiplier = PacketRowSeedMultiplier;
+    identity.BlockIdAvalanche = PacketRowSeedAvalanche ? 1u : 0u;
+    identity.OddPeelSeedXor = OddPacketPeelSeedXor;
+#endif
+    return identity;
+}
+
+bool SamePacketRowEquationIdentity(
+    const PacketRowEquationIdentity& a,
+    const PacketRowEquationIdentity& b) noexcept
+{
+    return a.BlockIdMultiplier == b.BlockIdMultiplier &&
+        a.BlockIdAvalanche == b.BlockIdAvalanche &&
+        a.OddPeelSeedXor == b.OddPeelSeedXor;
+}
+
 constexpr uint32_t PackedWordCount(uint32_t bit_count)
 {
     return bit_count / 64u + ((bit_count & 63u) != 0u ? 1u : 0u);
@@ -1647,6 +1667,7 @@ void PrecodeSolveResumeState::Swap(
     swap(SystemFingerprint0, other.SystemFingerprint0);
     swap(SystemFingerprint1, other.SystemFingerprint1);
     swap(Config, other.Config);
+    swap(PacketEquation, other.PacketEquation);
     swap(Runtime, other.Runtime);
     swap(Stats, other.Stats);
     InactiveIndex.swap(other.InactiveIndex);
@@ -3148,6 +3169,8 @@ static WirehairResult SolvePrecodeSystemImpl(
                 checkpoint.SystemFingerprint0 = system_fingerprint.First;
                 checkpoint.SystemFingerprint1 = system_fingerprint.Second;
                 checkpoint.Config = config;
+                checkpoint.PacketEquation =
+                    CurrentPacketRowEquationIdentity();
                 checkpoint.Runtime = runtime;
                 checkpoint.Stats = st;
                 checkpoint.InactiveIndex.swap(inactive_index);
@@ -3462,6 +3485,8 @@ WirehairResult ResumePrecodeSystem(
         !SamePrecodeParams(state.SystemParams, system.Params) ||
         state.Config.PeelSeed != config.PeelSeed ||
         state.Config.MixCount != config.MixCount ||
+        !SamePacketRowEquationIdentity(
+            state.PacketEquation, CurrentPacketRowEquationIdentity()) ||
         !state.Runtime.IsValidFor(
             K, (uint32_t)P_wide, config.MixCount) ||
         state.InactiveCount == 0u ||

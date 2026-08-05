@@ -143,6 +143,12 @@ bool SameResumeState(
         a.SystemFingerprint1 == b.SystemFingerprint1 &&
         a.Config.PeelSeed == b.Config.PeelSeed &&
         a.Config.MixCount == b.Config.MixCount &&
+        a.PacketEquation.BlockIdMultiplier ==
+            b.PacketEquation.BlockIdMultiplier &&
+        a.PacketEquation.BlockIdAvalanche ==
+            b.PacketEquation.BlockIdAvalanche &&
+        a.PacketEquation.OddPeelSeedXor ==
+            b.PacketEquation.OddPeelSeedXor &&
         a.Runtime.SourcePrime() == b.Runtime.SourcePrime() &&
         a.Runtime.PrecodePrime() == b.Runtime.PrecodePrime() &&
         SameSolveStats(a.Stats, b.Stats) &&
@@ -242,6 +248,39 @@ bool SameResumeStorageIdentity(
         state.RhsScratch.data() == identity.RhsScratchData &&
         state.RhsScratch.capacity() == identity.RhsScratchCapacity;
 }
+
+bool SetPacketRowEquationIdentityForTesting(
+    const wirehair_v2::PacketRowEquationIdentity& identity)
+{
+    if (!wirehair_v2::SetPacketRowSeedMultiplierForTesting(
+            identity.BlockIdMultiplier))
+    {
+        return false;
+    }
+    wirehair_v2::SetPacketRowSeedAvalancheForTesting(
+        identity.BlockIdAvalanche != 0u);
+    wirehair_v2::SetOddPacketPeelSeedXorForTesting(
+        identity.OddPeelSeedXor);
+    return true;
+}
+
+class PacketRowEquationIdentityRestore
+{
+public:
+    explicit PacketRowEquationIdentityRestore(
+        const wirehair_v2::PacketRowEquationIdentity& identity)
+        : Identity(identity)
+    {
+    }
+
+    ~PacketRowEquationIdentityRestore()
+    {
+        (void)SetPacketRowEquationIdentityForTesting(Identity);
+    }
+
+private:
+    wirehair_v2::PacketRowEquationIdentity Identity;
+};
 
 enum class ColdSolveEntryPoint
 {
@@ -2441,12 +2480,18 @@ bool CheckResumeSystemBinding(
 {
     if ((initial_state.SystemFingerprint0 == 0u &&
          initial_state.SystemFingerprint1 == 0u) ||
-        initial_state.SystemParams.Seed != system.Params.Seed)
+        initial_state.SystemParams.Seed != system.Params.Seed ||
+        initial_state.PacketEquation.BlockIdMultiplier != 1u ||
+        initial_state.PacketEquation.BlockIdAvalanche != 0u ||
+        initial_state.PacketEquation.OddPeelSeedXor != 0u)
     {
         std::fprintf(stderr,
             "solve: resume system identity was not published\n");
         return false;
     }
+    const wirehair_v2::PacketRowEquationIdentity original_equation =
+        initial_state.PacketEquation;
+    PacketRowEquationIdentityRestore restore_equation(original_equation);
 
     // A separately allocated value-equivalent graph must remain accepted.
     const wirehair_v2::PrecodeSystem equivalent_system = system;
@@ -2476,6 +2521,181 @@ bool CheckResumeSystemBinding(
     {
         std::fprintf(stderr,
             "solve: value-equivalent resume system was rejected/diverged\n");
+        return false;
+    }
+
+    struct PacketEquationMutation
+    {
+        const char* Name;
+        uint32_t Multiplier;
+        uint32_t Avalanche;
+        uint32_t OddPeelSeedXor;
+    };
+    static const PacketEquationMutation packet_equation_mutations[] = {
+        { "block-id-multiplier", 3u, 0u, 0u },
+        { "block-id-avalanche", 1u, 1u, 0u },
+        { "odd-peel-seed-xor", 1u, 0u, UINT32_C(0x9e3779b9) }
+    };
+    if (!SetPacketRowEquationIdentityForTesting(original_equation)) {
+        return false;
+    }
+    const std::vector<uint32_t> original_packet_row =
+        wirehair_v2::GeneratePacketMatrixRow(
+            initial_state.SourceCount,
+            initial_state.PrecodeCount,
+            1u,
+            config);
+    for (const PacketEquationMutation& mutation : packet_equation_mutations)
+    {
+        wirehair_v2::PacketRowEquationIdentity mismatched_equation;
+        mismatched_equation.BlockIdMultiplier = mutation.Multiplier;
+        mismatched_equation.BlockIdAvalanche = mutation.Avalanche;
+        mismatched_equation.OddPeelSeedXor = mutation.OddPeelSeedXor;
+        if (!SetPacketRowEquationIdentityForTesting(mismatched_equation)) {
+            return false;
+        }
+        const std::vector<uint32_t> mismatched_packet_row =
+            wirehair_v2::GeneratePacketMatrixRow(
+                initial_state.SourceCount,
+                initial_state.PrecodeCount,
+                1u,
+                config);
+
+        wirehair_v2::PrecodeSolveResumeState rejected = initial_state;
+        const wirehair_v2::PrecodeSolveResumeState rejected_before = rejected;
+        const ResumeStorageIdentity storage_before =
+            CaptureResumeStorageIdentity(rejected);
+        const size_t persistent_before = rejected.PersistentBytes();
+        std::vector<uint8_t> rejected_output = sentinel;
+        wirehair_v2::PrecodeSolveStats rejected_stats = initial_state.Stats;
+        rejected_stats.PacketRows ^= UINT32_C(0x3c6ef372);
+        rejected_stats.BlockXors ^= UINT64_C(0xa54ff53a5f1d36f1);
+        const wirehair_v2::PrecodeSolveStats rejected_stats_before =
+            rejected_stats;
+        const WirehairResult rejected_result =
+            wirehair_v2::ResumePrecodeSystem(
+                system, config, 1u, message.data() + block_bytes,
+                block_bytes, rejected, rejected_output, &rejected_stats,
+                true);
+        if (original_packet_row.empty() ||
+            mismatched_packet_row == original_packet_row ||
+            rejected_result != Wirehair_InvalidInput ||
+            !SameResumeState(rejected, rejected_before) ||
+            !SameResumeStorageIdentity(rejected, storage_before) ||
+            rejected.PersistentBytes() != persistent_before ||
+            rejected_output != sentinel ||
+            !SameSolveStats(rejected_stats, rejected_stats_before))
+        {
+            std::fprintf(stderr,
+                "solve: resume packet-equation mismatch was not "
+                "transactional case=%s result=%d\n",
+                mutation.Name, (int)rejected_result);
+            return false;
+        }
+
+        // Restore the exact packet mapping and prove that rejection consumed
+        // no part of the checkpoint.
+        if (!SetPacketRowEquationIdentityForTesting(original_equation)) {
+            return false;
+        }
+        const WirehairResult retry_result =
+            wirehair_v2::ResumePrecodeSystem(
+                system, config, 1u, message.data() + block_bytes,
+                block_bytes, rejected, rejected_output, &rejected_stats,
+                true);
+        if (retry_result != original_result ||
+            rejected_output != original_output ||
+            !SameResumeStateIgnoringTiming(rejected, original_state) ||
+            !SameSolveStatsIgnoringTiming(rejected_stats, original_stats))
+        {
+            std::fprintf(stderr,
+                "solve: resume packet-equation retry diverged case=%s "
+                "result=%d/%d\n",
+                mutation.Name, (int)retry_result, (int)original_result);
+            return false;
+        }
+    }
+
+    // Non-default experiment mappings must publish their active identity rather
+    // than merely rejecting every non-production checkpoint.  A duplicate
+    // consistency check through a separately allocated equivalent system is
+    // non-mutating and proves that the exact identity remains accepted.
+    wirehair_v2::PacketRowEquationIdentity noncanonical_equation;
+    noncanonical_equation.BlockIdMultiplier = UINT32_C(0x9e3779b1);
+    noncanonical_equation.BlockIdAvalanche = 1u;
+    noncanonical_equation.OddPeelSeedXor = UINT32_C(0x85ebca6b);
+    if (!SetPacketRowEquationIdentityForTesting(noncanonical_equation)) {
+        return false;
+    }
+    std::vector<wirehair_v2::SolvePacket> noncanonical_packets(
+        initial_state.SourceCount);
+    for (wirehair_v2::SolvePacket& packet : noncanonical_packets) {
+        packet.BlockId = 0u;
+        packet.Data = message.data();
+    }
+    wirehair_v2::PrecodeSolveResumeState noncanonical_state;
+    std::vector<uint8_t> noncanonical_output = sentinel;
+    if (wirehair_v2::SolvePrecodeSystem(
+            system, config, noncanonical_packets, block_bytes,
+            noncanonical_output, nullptr, &noncanonical_state) !=
+            Wirehair_NeedMore ||
+        !noncanonical_state.Active || noncanonical_output != sentinel ||
+        noncanonical_state.PacketEquation.BlockIdMultiplier !=
+            noncanonical_equation.BlockIdMultiplier ||
+        noncanonical_state.PacketEquation.BlockIdAvalanche !=
+            noncanonical_equation.BlockIdAvalanche ||
+        noncanonical_state.PacketEquation.OddPeelSeedXor !=
+            noncanonical_equation.OddPeelSeedXor)
+    {
+        std::fprintf(stderr,
+            "solve: noncanonical packet-equation identity was not published\n");
+        return false;
+    }
+    const wirehair_v2::PrecodeSolveResumeState noncanonical_before =
+        noncanonical_state;
+    const ResumeStorageIdentity noncanonical_storage =
+        CaptureResumeStorageIdentity(noncanonical_state);
+    const size_t noncanonical_bytes = noncanonical_state.PersistentBytes();
+    const wirehair_v2::PrecodeSystem equivalent_noncanonical_system = system;
+    if (wirehair_v2::ResumePrecodeSystem(
+            equivalent_noncanonical_system, config, 0u, message.data(),
+            block_bytes, noncanonical_state, noncanonical_output, nullptr,
+            false) != Wirehair_NeedMore ||
+        !SameResumeState(noncanonical_state, noncanonical_before) ||
+        !SameResumeStorageIdentity(
+            noncanonical_state, noncanonical_storage) ||
+        noncanonical_state.PersistentBytes() != noncanonical_bytes ||
+        noncanonical_output != sentinel)
+    {
+        std::fprintf(stderr,
+            "solve: unchanged noncanonical packet equation was rejected\n");
+        return false;
+    }
+    wirehair_v2::PrecodeSolveResumeState noncanonical_source =
+        noncanonical_state;
+    const size_t noncanonical_source_bytes =
+        noncanonical_source.PersistentBytes();
+    wirehair_v2::PrecodeSolveResumeState noncanonical_moved;
+    noncanonical_moved.Swap(noncanonical_source);
+    const wirehair_v2::PrecodeSolveResumeState empty_state;
+    if (!SameResumeState(noncanonical_moved, noncanonical_before) ||
+        !SameResumeState(noncanonical_source, empty_state) ||
+        noncanonical_moved.PersistentBytes() != noncanonical_source_bytes ||
+        noncanonical_source.PersistentBytes() != 0u)
+    {
+        std::fprintf(stderr,
+            "solve: noncanonical packet identity swap/accounting mismatch\n");
+        return false;
+    }
+    noncanonical_moved.Clear();
+    if (!SameResumeState(noncanonical_moved, empty_state) ||
+        noncanonical_moved.PersistentBytes() != 0u)
+    {
+        std::fprintf(stderr,
+            "solve: noncanonical packet identity clear mismatch\n");
+        return false;
+    }
+    if (!SetPacketRowEquationIdentityForTesting(original_equation)) {
         return false;
     }
 
@@ -2576,7 +2796,8 @@ bool CheckResumeSystemBinding(
     }
 
     std::printf(
-        "resume exact system binding/equivalent/retry: PASS\n");
+        "resume exact system/packet-equation binding/equivalent/retry: "
+        "PASS\n");
     return true;
 }
 

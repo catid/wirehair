@@ -34,6 +34,26 @@ struct PacketRowConfig
 };
 
 /**
+    Process-local controls that participate in the packet equation mapping.
+
+    Production builds always use the canonical {1, 0, 0} identity.  Test-hook
+    builds snapshot the calling thread's experimental block-id multiplier,
+    avalanche toggle, and odd-id peel-seed XOR.  Fixed-width integers keep the
+    checkpoint layout independent of the compiler's bool representation and
+    make the identity available even when test hooks are compiled out.
+*/
+struct PacketRowEquationIdentity
+{
+    uint32_t BlockIdMultiplier = 1u;
+    uint32_t BlockIdAvalanche = 0u;
+    uint32_t OddPeelSeedXor = 0u;
+};
+
+static_assert(
+    sizeof(PacketRowEquationIdentity) == 3u * sizeof(uint32_t),
+    "packet-row equation identity must remain three fixed-width words");
+
+/**
     Validated process-local invariants for one packet-row domain.
 
     Prime values are deliberately private and are derived only by Initialize;
@@ -186,7 +206,9 @@ struct PrecodeSolveResumeState
     uint32_t ProjectionWords = 0u;
     uint32_t Rank = 0u;
     // Exact parameters permit cheap rejection before recomputing the stable
-    // content fingerprint over the accepted precode row graphs.  The two
+    // content fingerprint over the accepted precode row graphs.  PacketEquation
+    // separately binds process-local packet-row experiment controls that are
+    // not represented by Config.  The two
     // words are independent fixed-key SipHash-2-4 results: equality uses the
     // same operational 128-bit collision model as packet duplicate identity.
     // Retaining a second full graph would add O(K) checkpoint memory and can
@@ -197,6 +219,7 @@ struct PrecodeSolveResumeState
     uint64_t SystemFingerprint0 = 0u;
     uint64_t SystemFingerprint1 = 0u;
     PacketRowConfig Config = {};
+    PacketRowEquationIdentity PacketEquation = {};
     PacketRowRuntime Runtime = {};
     PrecodeSolveStats Stats = {};
     std::vector<uint32_t> InactiveIndex;
@@ -381,6 +404,9 @@ WirehairResult SolvePrecodeSystemForValidatedSystemWithRuntime(
     With allow_insert=false this performs a non-mutating duplicate consistency
     check.  With allow_insert=true an independent row is committed and Success
     is returned as soon as the complete intermediate vector is reconstructed.
+    The active process-local packet-row equation identity must match the cold
+    solve that published the checkpoint; mismatch returns InvalidInput before
+    row generation or caller-visible mutation.
     Allocations finish before an inserting call changes the algebraic state, so
     OOM is retryable.  On OOM, stats receives the unchanged checkpoint counters
     when non-null.  Output remains unchanged on NeedMore and every failure.
