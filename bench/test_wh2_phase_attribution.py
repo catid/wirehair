@@ -322,6 +322,20 @@ class PhaseAttributionTest(unittest.TestCase):
             subject.validate_trace_manifest(
                 self.contract, malformed_description, self.trace_data)
 
+    def test_physical_record_cap_precedes_semantic_parsing(self):
+        limit = 4096
+        fragmented = b"x" * (limit - 1) + b"\r" + \
+            b"y" * (limit - 1) + b"\n"
+        parser = mock.Mock(
+            side_effect=AssertionError("oversized record reached parser"))
+        with mock.patch.object(
+                subject.runner_api, "_parse_canonical_line", parser), \
+                self.assertRaisesRegex(
+                    subject.PhaseRunnerError, "line 1 exceeds its bound"):
+            subject._parse_jsonl_bytes(
+                fragmented, "fragmented fixture", 1, len(fragmented), limit)
+        parser.assert_not_called()
+
     def test_n16_records_and_counterbalanced_statistics(self):
         payloads, metadata = self.validate(self.build_records())
         self.assertEqual(
@@ -452,6 +466,27 @@ class PhaseAttributionTest(unittest.TestCase):
             "message_sha256", digest("substitute-source")))
         mutate("work", lambda rows: rows[0].__setitem__(
             "work_sha256", digest("substitute-work")))
+        mutate("worker-overlap", lambda rows: (
+            rows[8].__setitem__(
+                "started_monotonic_ns",
+                rows[0]["finished_monotonic_ns"] - 1),
+            rows[8].__setitem__(
+                "finished_monotonic_ns",
+                rows[0]["finished_monotonic_ns"] + 1)))
+        mutate("worker-reverse-order", lambda rows: (
+            rows[8].__setitem__(
+                "started_monotonic_ns",
+                rows[0]["started_monotonic_ns"] - 2),
+            rows[8].__setitem__(
+                "finished_monotonic_ns",
+                rows[0]["started_monotonic_ns"] - 1)))
+        mutate("cross-lane-wave-overlap", lambda rows: (
+            rows[8].__setitem__(
+                "started_monotonic_ns",
+                rows[0]["finished_monotonic_ns"] + 1),
+            rows[8].__setitem__(
+                "finished_monotonic_ns",
+                rows[0]["finished_monotonic_ns"] + 2)))
         mutate("chronology", lambda rows: rows[0]["payload"][
             "measured_observations"][0].__setitem__("slot", 1))
         mutate("slot-sum", lambda rows: rows[0]["payload"][

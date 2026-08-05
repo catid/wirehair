@@ -178,7 +178,11 @@ def _parse_jsonl_bytes(
             data.count(b"\n") != expected_count):
         fail("{} has invalid bounded cardinality".format(context))
     rows = []
-    for index, line in enumerate(data.splitlines(keepends=True)):
+    # JSONL records are delimited by LF only.  bytes.splitlines() also treats
+    # CR, VT, FF, and other control bytes as boundaries, which can fragment
+    # one oversized physical record before its byte cap is checked.
+    for index, payload in enumerate(data[:-1].split(b"\n")):
+        line = payload + b"\n"
         if len(line) > max_line_bytes:
             fail("{} line {} exceeds its bound".format(context, index + 1))
         try:
@@ -670,6 +674,8 @@ def validate_native_records(
     worker_end: Optional[int] = None
     work_hashes: List[Optional[str]] = [None] * PHASE_COORDINATE_COUNT
     message_hashes: List[Optional[str]] = [None] * PHASE_COORDINATE_COUNT
+    intervals: List[Optional[Tuple[int, int, int]]] = \
+        [None] * PHASE_COORDINATE_COUNT
     for row in rows:
         _exact_mapping(row, NATIVE_RECORD_FIELDS, "phase native envelope")
         if (row.get("schema") != PHASE_RECORD_SCHEMA or
@@ -728,14 +734,32 @@ def validate_native_records(
         if ordinal != expected_ordinal or row["work_sha256"] != expected_work:
             fail("phase native work hash differs from its exact command")
         ordered[coordinate_ordinal] = payload
+        intervals[coordinate_ordinal] = (cpu, start, end)
         work_hashes[coordinate_ordinal] = row["work_sha256"]
         message_hashes[coordinate_ordinal] = row["message_sha256"]
         worker_start = start if worker_start is None else min(
             worker_start, start)
         worker_end = end if worker_end is None else max(worker_end, end)
     if (any(value is None for value in ordered) or
+            any(value is None for value in intervals) or
             set(cpu_to_pid) != set(coordinate_cpus)):
         fail("phase native stream is incomplete or did not use every worker")
+    complete_intervals = [
+        value for value in intervals if value is not None
+    ]
+    wave_count = PHASE_COORDINATE_COUNT // WORKER_COUNT
+    for wave in range(1, wave_count):
+        previous = complete_intervals[
+            (wave - 1) * WORKER_COUNT:wave * WORKER_COUNT]
+        current = complete_intervals[
+            wave * WORKER_COUNT:(wave + 1) * WORKER_COUNT]
+        # The sealed runner dispatches one eight-job batch at a time.  Per-lane
+        # serial order alone is weaker: lane 0 of the next wave could begin
+        # while lane 7 of the prior wave was still running.  Prove the two
+        # actual global barriers from the native monotonic intervals.
+        if min(value[1] for value in current) < \
+                max(value[2] for value in previous):
+            fail("phase persistent-worker waves overlap or run out of order")
     metadata = {
         "coordinate_cpus": list(coordinate_cpus),
         "message_set_sha256": contract_api.sha256_json(message_hashes),
