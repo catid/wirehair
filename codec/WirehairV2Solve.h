@@ -122,6 +122,18 @@ void SetBinaryPeelOracleForTesting(bool enabled);
 void ResetBinaryPeelOracleComparisonsForTesting();
 uint64_t BinaryPeelOracleComparisonsForTesting();
 
+/**
+    Enable an exact legacy-scan comparison for the production H=12 packed
+    heavy-coefficient propagation path.  The optimized result is rejected if
+    any projected GF(256) coefficient byte differs.
+*/
+void SetHeavyProjectionOracleForTesting(bool enabled);
+
+/** Reset/read optimized oracle comparisons and legacy-fallback observations. */
+void ResetHeavyProjectionOracleCountersForTesting();
+uint64_t HeavyProjectionOracleComparisonsForTesting();
+uint64_t HeavyProjectionLegacyFallbacksForTesting();
+
 #endif
 
 /**

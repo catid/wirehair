@@ -34,6 +34,20 @@ public:
     }
 };
 
+class HeavyProjectionOracleScope
+{
+public:
+    HeavyProjectionOracleScope()
+    {
+        wirehair_v2::SetHeavyProjectionOracleForTesting(true);
+    }
+
+    ~HeavyProjectionOracleScope()
+    {
+        wirehair_v2::SetHeavyProjectionOracleForTesting(false);
+    }
+};
+
 bool SameSolveStats(
     const wirehair_v2::PrecodeSolveStats& a,
     const wirehair_v2::PrecodeSolveStats& b)
@@ -1706,6 +1720,7 @@ bool CheckExactSystematicFailureClassification()
 
 bool CheckHeavyCoefficientBoundaryOracle()
 {
+    wirehair_v2::ResetHeavyProjectionOracleCountersForTesting();
     struct Geometry
     {
         uint32_t DenseRows;
@@ -1776,9 +1791,13 @@ bool CheckHeavyCoefficientBoundaryOracle()
 
         std::vector<uint8_t> solved;
         std::vector<uint8_t> oracle;
-        if (wirehair_v2::SolvePrecodeSystem(
-                system, config, packets, block_bytes, solved) !=
-                Wirehair_Success ||
+        WirehairResult solve_result = Wirehair_Error;
+        {
+            HeavyProjectionOracleScope oracle_scope;
+            solve_result = wirehair_v2::SolvePrecodeSystem(
+                system, config, packets, block_bytes, solved);
+        }
+        if (solve_result != Wirehair_Success ||
             wirehair_v2::test::SolvePrecodeSystemTinyDenseOracle(
                 system, config, packets, block_bytes, oracle) !=
                 Wirehair_Success ||
@@ -1813,9 +1832,23 @@ bool CheckHeavyCoefficientBoundaryOracle()
             }
         }
     }
+    const uint64_t comparisons =
+        wirehair_v2::HeavyProjectionOracleComparisonsForTesting();
+    const uint64_t fallbacks =
+        wirehair_v2::HeavyProjectionLegacyFallbacksForTesting();
+    if (comparisons != 0u || fallbacks == 0u)
+    {
+        std::fprintf(stderr,
+            "solve: heavy projection fallback boundary mismatch "
+            "comparisons=%llu fallbacks=%llu\n",
+            (unsigned long long)comparisons,
+            (unsigned long long)fallbacks);
+        return false;
+    }
     std::printf(
         "heavy H=0/1/11/12/13/128 and K=3/4 D/H candidates "
-        "periodic/hashed dense oracle: PASS\n");
+        "periodic/hashed dense oracle fallbacks=%llu: PASS\n",
+        (unsigned long long)fallbacks);
     return true;
 }
 
@@ -2471,6 +2504,280 @@ bool CheckIncrementalResume()
     return CheckIncrementalResumeCase(17u) &&
         CheckIncrementalResumeCase(
             wirehair_v2::kBinaryQuotientMinBlockBytes);
+}
+
+struct HeavyProjectionCase
+{
+    const char* Name;
+    uint32_t K;
+    uint32_t HeavyRows;
+    wirehair_v2::DenseAnchorLayout DenseAnchors;
+};
+
+bool CheckHeavyProjectionCase(const HeavyProjectionCase& test_case)
+{
+    const uint32_t block_bytes = 1u;
+    wirehair_v2::PrecodeParams params = wirehair_v2::MakeCertifiedParams(
+        test_case.K,
+        UINT64_C(0x4850524f4a454354) ^
+            ((uint64_t)test_case.K << 17) ^
+            ((uint64_t)test_case.HeavyRows << 8) ^
+            (uint32_t)test_case.DenseAnchors);
+    params.HeavyRows = test_case.HeavyRows;
+    params.DenseAnchors = test_case.DenseAnchors;
+    wirehair_v2::PacketRowConfig base_config;
+    base_config.PeelSeed = UINT32_C(0x4850524f) ^ test_case.K ^
+        (test_case.HeavyRows << 16) ^ (uint32_t)test_case.DenseAnchors;
+    base_config.MixCount = wirehair_v2::kCertifiedPacketMixCount;
+    wirehair_v2::PrecodeSystem system;
+    wirehair_v2::PacketRowConfig config;
+    if (wirehair_v2::SelectSystematicConfiguration(
+            params, base_config, system, config) != Wirehair_Success ||
+        system.Params.HeavyRows != test_case.HeavyRows ||
+        system.Params.DenseAnchors != test_case.DenseAnchors)
+    {
+        std::fprintf(stderr,
+            "solve: heavy projection configuration failed case=%s\n",
+            test_case.Name);
+        return false;
+    }
+
+    std::vector<uint8_t> message(test_case.K * block_bytes);
+    for (size_t i = 0u; i < message.size(); ++i) {
+        message[i] = (uint8_t)(
+            i * 109u + (i >> 5) + test_case.K * 3u +
+            test_case.HeavyRows * 7u + (uint32_t)test_case.DenseAnchors);
+    }
+    std::vector<wirehair_v2::SolvePacket> packets(test_case.K);
+    for (uint32_t id = 0u; id < test_case.K; ++id) {
+        packets[id].BlockId = id;
+        packets[id].Data = message.data() + (size_t)id * block_bytes;
+    }
+
+    std::vector<uint8_t> control;
+    std::vector<uint8_t> checked;
+    wirehair_v2::PrecodeSolveStats control_stats;
+    wirehair_v2::PrecodeSolveStats checked_stats;
+    if (wirehair_v2::SolvePrecodeSystem(
+            system, config, packets, block_bytes, control,
+            &control_stats) != Wirehair_Success)
+    {
+        std::fprintf(stderr,
+            "solve: heavy projection control failed case=%s\n",
+            test_case.Name);
+        return false;
+    }
+
+    const uint64_t comparisons_before =
+        wirehair_v2::HeavyProjectionOracleComparisonsForTesting();
+    const uint64_t fallbacks_before =
+        wirehair_v2::HeavyProjectionLegacyFallbacksForTesting();
+    WirehairResult checked_result = Wirehair_Error;
+    {
+        HeavyProjectionOracleScope oracle_scope;
+        checked_result = wirehair_v2::SolvePrecodeSystem(
+            system, config, packets, block_bytes, checked, &checked_stats);
+    }
+    const uint64_t comparison_delta =
+        wirehair_v2::HeavyProjectionOracleComparisonsForTesting() -
+        comparisons_before;
+    const uint64_t fallback_delta =
+        wirehair_v2::HeavyProjectionLegacyFallbacksForTesting() -
+        fallbacks_before;
+    const uint32_t L = test_case.K + system.Params.Staircase +
+        system.Params.DenseRows + system.Params.HeavyRows;
+    const bool optimized =
+        system.Params.HeavyFamily ==
+            wirehair_v2::HeavyCoefficientFamily::PeriodicCauchy &&
+        system.Params.HeavyRows == 12u && L >= 244u &&
+        control_stats.InactivatedColumns != 0u;
+    const uint64_t expected_comparisons = optimized ? 1u : 0u;
+    const uint64_t expected_fallbacks =
+        !optimized && control_stats.InactivatedColumns != 0u ? 1u : 0u;
+    if (checked_result != Wirehair_Success || checked != control ||
+        !SameSolveStatsIgnoringTiming(control_stats, checked_stats) ||
+        comparison_delta != expected_comparisons ||
+        fallback_delta != expected_fallbacks ||
+        !wirehair_v2::VerifyPrecodeSolution(
+            system, config, packets, checked.data(), block_bytes))
+    {
+        std::fprintf(stderr,
+            "solve: heavy projection oracle mismatch case=%s result=%d "
+            "comparisons=%llu/%llu fallbacks=%llu/%llu R=%u L=%u\n",
+            test_case.Name,
+            (int)checked_result,
+            (unsigned long long)comparison_delta,
+            (unsigned long long)expected_comparisons,
+            (unsigned long long)fallback_delta,
+            (unsigned long long)expected_fallbacks,
+            control_stats.InactivatedColumns,
+            L);
+        return false;
+    }
+
+    static const uint32_t kSampleNumerators[] = { 0u, 1u, 2u };
+    uint8_t recovered = 0u;
+    for (uint32_t numerator : kSampleNumerators)
+    {
+        const uint32_t id = numerator == 0u ? 0u :
+            (numerator == 1u ? test_case.K / 2u : test_case.K - 1u);
+        if (!wirehair_v2::EvaluatePacketBlockForValidatedSystem(
+                system, config, checked.data(), block_bytes, id,
+                &recovered) ||
+            recovered != message[id])
+        {
+            std::fprintf(stderr,
+                "solve: heavy projection replay mismatch case=%s id=%u\n",
+                test_case.Name, id);
+            return false;
+        }
+    }
+    std::printf(
+        "heavy projection case=%s K=%u H=%u layout=%u "
+        "comparisons=%llu fallbacks=%llu: PASS\n",
+        test_case.Name,
+        test_case.K,
+        test_case.HeavyRows,
+        (unsigned)test_case.DenseAnchors,
+        (unsigned long long)comparison_delta,
+        (unsigned long long)fallback_delta);
+    return true;
+}
+
+bool CheckHeavyProjectionResumeOracle()
+{
+    const uint32_t K = 320u;
+    const uint32_t block_bytes = 17u;
+    wirehair_v2::PrecodeParams params = wirehair_v2::MakeCertifiedParams(
+        K, UINT64_C(0x4850524f4a52534d));
+    wirehair_v2::PacketRowConfig base_config;
+    base_config.PeelSeed = UINT32_C(0x4a52534d);
+    base_config.MixCount = wirehair_v2::kCertifiedPacketMixCount;
+    wirehair_v2::PrecodeSystem system;
+    wirehair_v2::PacketRowConfig config;
+    if (wirehair_v2::SelectSystematicConfiguration(
+            params, base_config, system, config) != Wirehair_Success)
+    {
+        std::fprintf(stderr,
+            "solve: heavy projection resume configuration failed\n");
+        return false;
+    }
+
+    std::vector<uint8_t> message((size_t)K * block_bytes);
+    for (size_t i = 0u; i < message.size(); ++i) {
+        message[i] = (uint8_t)(i * 181u + (i >> 4) + 0x37u);
+    }
+    std::vector<wirehair_v2::SolvePacket> systematic(K);
+    for (uint32_t id = 0u; id < K; ++id) {
+        systematic[id].BlockId = id;
+        systematic[id].Data =
+            message.data() + (size_t)id * block_bytes;
+    }
+    std::vector<uint8_t> expected;
+    if (wirehair_v2::SolvePrecodeSystem(
+            system, config, systematic, block_bytes, expected) !=
+            Wirehair_Success)
+    {
+        std::fprintf(stderr,
+            "solve: heavy projection resume control failed\n");
+        return false;
+    }
+
+    std::vector<wirehair_v2::SolvePacket> deficient(
+        K, systematic.front());
+    wirehair_v2::PrecodeSolveResumeState resume;
+    wirehair_v2::PrecodeSolveStats stats;
+    std::vector<uint8_t> output(7u, uint8_t{0x5a});
+    const std::vector<uint8_t> sentinel = output;
+    const uint64_t comparisons_before =
+        wirehair_v2::HeavyProjectionOracleComparisonsForTesting();
+    const uint64_t fallbacks_before =
+        wirehair_v2::HeavyProjectionLegacyFallbacksForTesting();
+    WirehairResult result = Wirehair_Error;
+    {
+        HeavyProjectionOracleScope oracle_scope;
+        result = wirehair_v2::SolvePrecodeSystem(
+            system, config, deficient, block_bytes, output, &stats, &resume);
+    }
+    const uint64_t comparison_delta =
+        wirehair_v2::HeavyProjectionOracleComparisonsForTesting() -
+        comparisons_before;
+    const uint64_t fallback_delta =
+        wirehair_v2::HeavyProjectionLegacyFallbacksForTesting() -
+        fallbacks_before;
+    if (result != Wirehair_NeedMore || !resume.Active ||
+        resume.Rank >= resume.InactiveCount || output != sentinel ||
+        comparison_delta != 1u || fallback_delta != 0u)
+    {
+        std::fprintf(stderr,
+            "solve: heavy projection resume checkpoint failed result=%d "
+            "rank=%u/%u comparisons=%llu fallbacks=%llu\n",
+            (int)result,
+            resume.Rank,
+            resume.InactiveCount,
+            (unsigned long long)comparison_delta,
+            (unsigned long long)fallback_delta);
+        return false;
+    }
+
+    for (uint32_t id = 1u; id < K && result == Wirehair_NeedMore; ++id)
+    {
+        result = wirehair_v2::ResumePrecodeSystem(
+            system,
+            config,
+            id,
+            message.data() + (size_t)id * block_bytes,
+            block_bytes,
+            resume,
+            output,
+            &stats,
+            true);
+    }
+    if (result != Wirehair_Success || resume.Active || output != expected ||
+        !wirehair_v2::VerifyPrecodeSolution(
+            system, config, systematic, output.data(), block_bytes))
+    {
+        std::fprintf(stderr,
+            "solve: heavy projection resumed output mismatch result=%d\n",
+            (int)result);
+        return false;
+    }
+    std::printf(
+        "heavy projection deficient resume K=%u comparisons=%llu: PASS\n",
+        K,
+        (unsigned long long)comparison_delta);
+    return true;
+}
+
+bool CheckHeavyProjectionPropagationOracle()
+{
+    static const HeavyProjectionCase kCases[] = {
+        { "tiny-h12", 8u, 12u,
+          wirehair_v2::DenseAnchorLayout::Disabled },
+        { "middle-production", 1000u, 12u,
+          wirehair_v2::DenseAnchorLayout::Disabled },
+        { "middle-two07", 1000u, 12u,
+          wirehair_v2::DenseAnchorLayout::Two07 },
+        { "large-production", 64000u, 12u,
+          wirehair_v2::DenseAnchorLayout::Disabled },
+        { "fallback-h0", 320u, 0u,
+          wirehair_v2::DenseAnchorLayout::Disabled },
+        { "fallback-h13", 320u, 13u,
+          wirehair_v2::DenseAnchorLayout::Disabled },
+        { "fallback-h128", 320u, 128u,
+          wirehair_v2::DenseAnchorLayout::Disabled }
+    };
+    wirehair_v2::ResetHeavyProjectionOracleCountersForTesting();
+    for (const HeavyProjectionCase& test_case : kCases) {
+        if (!CheckHeavyProjectionCase(test_case)) {
+            return false;
+        }
+    }
+    if (!CheckHeavyProjectionResumeOracle()) {
+        return false;
+    }
+    std::printf("packed H=12 peel-schedule heavy projection oracle: PASS\n");
+    return true;
 }
 
 bool CheckColdSolveStatsAlias()
@@ -3795,6 +4102,9 @@ int main(int argc, char** argv)
     ok = CheckBinaryQuotientBoundary() && ok;
     ok = CheckConcurrentCoefficientCaches() && ok;
     ok = CheckIncrementalResume() && ok;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    ok = CheckHeavyProjectionPropagationOracle() && ok;
+#endif
     ok = CheckColdSolveStatsAlias() && ok;
     ok = CheckBinaryPeelLowDegreeXorOracle() && ok;
     ok = CheckMixDomainValidation() && ok;

@@ -262,6 +262,9 @@ static_assert(
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 std::atomic<uint32_t> BinaryPeelOracleUsers(0u);
 std::atomic<uint64_t> BinaryPeelOracleComparisons(0u);
+std::atomic<uint32_t> HeavyProjectionOracleUsers(0u);
+std::atomic<uint64_t> HeavyProjectionOracleComparisons(0u);
+std::atomic<uint64_t> HeavyProjectionLegacyFallbacks(0u);
 #endif
 
 bool CheckedBlockStorage(
@@ -773,6 +776,88 @@ CachedPeriodicHeavyTable()
             return result;
         }();
     return table;
+}
+
+// Project the production H=12 coefficient rows through the binary peel
+// schedule without visiting every set bit in every dense affine projection.
+// A selected binary row has the form
+//
+//     x[column] = rhs + XOR(x[dependency]).
+//
+// PeelOrder is chronological, so each dependency is inactive or was resolved
+// earlier.  Traversing that order backward substitutes the selected variable
+// out of all twelve heavy rows at once.  GF(256) addition is byte XOR, allowing
+// the twelve coefficients to travel as two packed 64-bit words.
+void ProjectCachedPeriodicHeavyByPeel(
+    const BinaryEquationArena& rows,
+    const PeelResult& peel,
+    uint32_t column_count,
+    std::vector<uint64_t>& projected_heavy)
+{
+    static_assert(
+        kCachedPeriodicWords == 2u,
+        "the production H=12 propagation path requires two packed words");
+    CAT_DEBUG_ASSERT(
+        peel.PeelOrder.size() + peel.InactiveOrder.size() == column_count);
+    CAT_DEBUG_ASSERT(
+        projected_heavy.size() ==
+            peel.InactiveOrder.size() * kCachedPeriodicWords);
+
+    std::vector<uint64_t> propagated(
+        (size_t)column_count * kCachedPeriodicWords, uint64_t{0});
+    const uint64_t* const periodic = CachedPeriodicHeavyTable().data();
+    uint32_t residue = 0u;
+    for (uint32_t column = 0u; column < column_count; ++column)
+    {
+        uint64_t* const destination = propagated.data() +
+            (size_t)column * kCachedPeriodicWords;
+        const uint64_t* const source = periodic +
+            (size_t)residue * kCachedPeriodicWords;
+        destination[0] = source[0];
+        destination[1] = source[1];
+        if (++residue == kCachedPeriodicWindow) {
+            residue = 0u;
+        }
+    }
+
+    for (size_t peel_i = peel.PeelOrder.size(); peel_i-- > 0u;)
+    {
+        const uint32_t column = peel.PeelOrder[peel_i];
+        CAT_DEBUG_ASSERT(column < column_count);
+        const uint32_t solve_row = peel.SolveRow[column];
+        CAT_DEBUG_ASSERT(solve_row != UINT32_MAX);
+        const BinaryEquationView dependencies =
+            rows.SolveDependencies(solve_row);
+        uint64_t* const packed = propagated.data() +
+            (size_t)column * kCachedPeriodicWords;
+        // Snapshot before writing any destination.  This also makes duplicate
+        // dependency cancellation well-defined, while the existing row
+        // uniqueness invariant still requires the solve column exactly once.
+        const uint64_t low = packed[0];
+        const uint64_t high = packed[1];
+        for (uint32_t dependency : dependencies.Columns)
+        {
+            CAT_DEBUG_ASSERT(dependency < column_count);
+            uint64_t* const destination = propagated.data() +
+                (size_t)dependency * kCachedPeriodicWords;
+            destination[0] ^= low;
+            destination[1] ^= high;
+        }
+    }
+
+    for (uint32_t inactive = 0u;
+         inactive < (uint32_t)peel.InactiveOrder.size();
+         ++inactive)
+    {
+        const uint32_t column = peel.InactiveOrder[inactive];
+        CAT_DEBUG_ASSERT(column < column_count);
+        const uint64_t* const source = propagated.data() +
+            (size_t)column * kCachedPeriodicWords;
+        uint64_t* const destination = projected_heavy.data() +
+            (size_t)inactive * kCachedPeriodicWords;
+        destination[0] = source[0];
+        destination[1] = source[1];
+    }
 }
 
 void AddScaledResidualCoefficients(
@@ -1302,6 +1387,40 @@ void ResetBinaryPeelOracleComparisonsForTesting()
 uint64_t BinaryPeelOracleComparisonsForTesting()
 {
     return BinaryPeelOracleComparisons.load(std::memory_order_relaxed);
+}
+
+void SetHeavyProjectionOracleForTesting(bool enabled)
+{
+    if (enabled) {
+        HeavyProjectionOracleUsers.fetch_add(1u, std::memory_order_relaxed);
+        return;
+    }
+    uint32_t users =
+        HeavyProjectionOracleUsers.load(std::memory_order_relaxed);
+    while (users != 0u &&
+           !HeavyProjectionOracleUsers.compare_exchange_weak(
+               users, users - 1u,
+               std::memory_order_relaxed,
+               std::memory_order_relaxed))
+    {
+    }
+    CAT_DEBUG_ASSERT(users != 0u);
+}
+
+void ResetHeavyProjectionOracleCountersForTesting()
+{
+    HeavyProjectionOracleComparisons.store(0u, std::memory_order_relaxed);
+    HeavyProjectionLegacyFallbacks.store(0u, std::memory_order_relaxed);
+}
+
+uint64_t HeavyProjectionOracleComparisonsForTesting()
+{
+    return HeavyProjectionOracleComparisons.load(std::memory_order_relaxed);
+}
+
+uint64_t HeavyProjectionLegacyFallbacksForTesting()
+{
+    return HeavyProjectionLegacyFallbacks.load(std::memory_order_relaxed);
 }
 #endif
 
@@ -2386,7 +2505,9 @@ static WirehairResult SolvePrecodeSystemImpl(
 
         // Heavy RHS values are bucketed by the coefficient period, avoiding
         // H*L full-block multiplications.  Heavy coefficient vectors are
-        // packed eight rows per word so each projection bit is visited once.
+        // packed eight rows per word; production H=12 projects them through
+        // the sparse peel schedule while other geometries retain the exact
+        // projection-bit scan.
         st.BinaryResidualRank = rank;
         const uint32_t window = 256u - H;
         const uint32_t heavy_words = (H + 7u) / 8u;
@@ -2408,15 +2529,23 @@ static WirehairResult SolvePrecodeSystemImpl(
         }
         std::vector<uint64_t> projected_heavy(
             (size_t)R * heavy_words, 0u);
-        std::vector<uint64_t> packed_heavy(
-            cached_periodic ? 0u : heavy_words, uint64_t{0});
         const uint64_t* periodic_packed = cached_periodic ?
             CachedPeriodicHeavyTable().data() :
             nullptr;
-        if (H > 0u)
+
+        // Retain the projection-bit implementation both as the fallback for
+        // every non-production geometry and as an explicitly enabled test
+        // oracle for the H=12 propagation path.
+        const auto project_heavy_legacy =
+            [&](std::vector<uint64_t>& output)
         {
+            std::vector<uint64_t> packed_heavy(
+                cached_periodic ? 0u : heavy_words, uint64_t{0});
+            if (H == 0u) {
+                return;
+            }
             uint32_t residue = 0u;
-            for (uint32_t column = 0; column < L; ++column)
+            for (uint32_t column = 0u; column < L; ++column)
             {
                 const uint64_t* column_heavy = nullptr;
                 if (cached_periodic)
@@ -2441,7 +2570,7 @@ static WirehairResult SolvePrecodeSystemImpl(
                     column_heavy = packed_heavy.data();
                 }
                 const auto xor_packed = [&](uint32_t index) {
-                    uint64_t* destination = projected_heavy.data() +
+                    uint64_t* destination = output.data() +
                         (size_t)index * heavy_words;
                     for (uint32_t w = 0; w < heavy_words; ++w) {
                         destination[w] ^= column_heavy[w];
@@ -2469,6 +2598,38 @@ static WirehairResult SolvePrecodeSystemImpl(
                     }
                 }
             }
+        };
+
+        if (cached_periodic)
+        {
+            ProjectCachedPeriodicHeavyByPeel(
+                rows, peel, L, projected_heavy);
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            if (HeavyProjectionOracleUsers.load(
+                    std::memory_order_relaxed) != 0u)
+            {
+                std::vector<uint64_t> legacy(
+                    (size_t)R * heavy_words, uint64_t{0});
+                project_heavy_legacy(legacy);
+                if (legacy != projected_heavy) {
+                    return terminal_error();
+                }
+                HeavyProjectionOracleComparisons.fetch_add(
+                    1u, std::memory_order_relaxed);
+            }
+#endif
+        }
+        else
+        {
+            project_heavy_legacy(projected_heavy);
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            if (HeavyProjectionOracleUsers.load(
+                    std::memory_order_relaxed) != 0u)
+            {
+                HeavyProjectionLegacyFallbacks.fetch_add(
+                    1u, std::memory_order_relaxed);
+            }
+#endif
         }
 
         std::vector<uint8_t> heavy_rhs((size_t)H * block_bytes, 0u);
