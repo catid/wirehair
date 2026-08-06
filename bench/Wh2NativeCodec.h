@@ -359,10 +359,12 @@ private:
     Timing-ready receive-to-success fixture over an exact prepared
     K+receive_overhead_cap trace.
     Each Run() creates fresh decoder bookkeeping before the clock, then times
-    all feeds through first success plus full Recover.  WH2 uses the same
-    pure-GF(256) cold/resume solver path for certified and runtime candidates;
-    Wirehair1 uses its public fresh decoder.  Byte comparison occurs only after
-    the clock stops.
+    all feeds through first success plus full Recover.  WH2 uses the real
+    decoder's packed-residual crossover, allocator-selected per-prefix receive
+    capacities, and 25% checkpoint budget; a rejected checkpoint cold-solves
+    the next prefix.
+    Wirehair1 uses its public fresh decoder.  Byte comparison occurs only
+    after the clock stops.
 */
 class NativeReceiveFixture
 {

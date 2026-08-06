@@ -12,6 +12,8 @@
 
 namespace {
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+
 static const uint32_t kOverheadPackets = 8u;
 static const unsigned kSamples = 20u;
 
@@ -318,10 +320,25 @@ bool BenchmarkCase(uint32_t K, uint32_t block_bytes)
     return true;
 }
 
+#endif
+
 } // namespace
 
 int main()
 {
+#if !defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    // Cold does not request a checkpoint while warm does.  The adaptive
+    // production policy can therefore select packed versus byte residuals at
+    // this 1280-byte width and invalidate the resume-only initial-time ratio.
+    std::fprintf(stderr,
+        "resume benchmark requires WIREHAIR_V2_ENABLE_TEST_HOOKS\n");
+    return 2;
+#else
+    const int previous_mode =
+        wirehair_v2::PackedBinaryResidualModeForTesting();
+    if (!wirehair_v2::SetPackedBinaryResidualModeForTesting(-1)) {
+        return 1;
+    }
     const int cpu = PinToFirstAvailableCpu();
     if (cpu >= 0) {
         std::printf("resume benchmark pinned_cpu=%d\n", cpu);
@@ -331,9 +348,11 @@ int main()
     }
     const bool k1000 = BenchmarkCase(1000u, 1280u);
     const bool k10000 = BenchmarkCase(10000u, 1280u);
+    (void)wirehair_v2::SetPackedBinaryResidualModeForTesting(previous_mode);
     if (!k1000 || !k10000) {
         return 1;
     }
     std::printf("resume benchmark acceptance: PASS\n");
     return 0;
+#endif
 }

@@ -1860,6 +1860,93 @@ bool CheckFacadeModeTransitions()
     return true;
 }
 
+bool CheckDecoderPackedResidualDispatchSeam()
+{
+#if !defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    return true;
+#else
+    const uint32_t K = 1000u;
+    const uint32_t block_sizes[] = {
+        64u,
+        wirehair_v2::kDecoderPackedBinaryResidualMinBlockBytes - 1u,
+        wirehair_v2::kDecoderPackedBinaryResidualMinBlockBytes
+    };
+    wirehair_v2::SetDecoderIncrementalResumeEnabledForTesting(true);
+    for (uint32_t block_bytes : block_sizes)
+    {
+        const uint64_t message_bytes = (uint64_t)K * block_bytes;
+        const std::vector<uint8_t> message =
+            MakeMessage((size_t)message_bytes);
+        wirehair_v2::MessagePrecodeEncoder encoder;
+        if (!Check(
+                encoder.InitializeResult(
+                    message.data(), message_bytes, block_bytes) ==
+                    Wirehair_Success,
+                "decoder packed seam encoder initialization failed"))
+        {
+            return false;
+        }
+        wirehair_v2::MessagePrecodeDecoder decoder;
+        if (!Check(
+                decoder.InitializeResult(
+                    message_bytes, block_bytes, &encoder.Profile()) ==
+                    Wirehair_Success,
+                "decoder packed seam decoder initialization failed"))
+        {
+            return false;
+        }
+        wirehair_v2::ResetPackedBinaryResidualUsesForTesting();
+        std::vector<uint8_t> packet(block_bytes, 0u);
+        WirehairResult result = Wirehair_NeedMore;
+        for (uint32_t id = 0u; id < K; ++id)
+        {
+            uint32_t data_bytes = 0u;
+            if (!Check(
+                    encoder.EncodeResult(
+                        id,
+                        packet.data(),
+                        block_bytes,
+                        &data_bytes) == Wirehair_Success &&
+                        data_bytes == block_bytes,
+                    "decoder packed seam packet encode failed"))
+            {
+                return false;
+            }
+            result = decoder.DecodeResult(id, packet.data(), data_bytes);
+            const WirehairResult expected =
+                id + 1u == K ? Wirehair_Success : Wirehair_NeedMore;
+            if (!Check(
+                    result == expected,
+                    "decoder packed seam receive result mismatch"))
+            {
+                return false;
+            }
+        }
+        const uint64_t expected_uses =
+            block_bytes == 64u || block_bytes >=
+                    wirehair_v2::
+                        kDecoderPackedBinaryResidualMinBlockBytes ?
+                1u : 0u;
+        std::vector<uint8_t> recovered(message.size(), 0u);
+        if (!Check(
+                wirehair_v2::PackedBinaryResidualUsesForTesting() ==
+                    expected_uses,
+                "decoder packed seam selected wrong residual policy") ||
+            !Check(
+                decoder.RecoverResult(
+                    recovered.data(), recovered.size()) ==
+                        Wirehair_Success &&
+                    recovered == message,
+                "decoder packed seam recovered wrong message"))
+        {
+            return false;
+        }
+    }
+    std::printf("decoder packed residual budget/1279/1280 dispatch: PASS\n");
+    return true;
+#endif
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -1875,6 +1962,7 @@ int main(int argc, char** argv)
     if (!CheckPacketSlotTable() ||
         !CheckInvalidAndOom() ||
         !CheckFacadeModeTransitions() ||
+        !CheckDecoderPackedResidualDispatchSeam() ||
         !CheckIncrementalDecoderParity() ||
         !CheckColdDuplicateSlotLookup() ||
         !CheckDirectRecoveryOutput() ||

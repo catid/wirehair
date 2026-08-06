@@ -12,6 +12,31 @@
 
 namespace wirehair_v2 {
 
+static const uint32_t kDecoderInitialReceiveOverhead = 32u;
+static const uint32_t kDecoderMaximumReceiveOverhead = 1024u;
+
+/**
+    Requested cold-receive capacities shared by MessagePrecodeDecoder and the
+    native receive benchmark.  These model the initialized packet reserve and
+    one pending full block.  The block count must be in the public codec domain;
+    an invalid domain, overflow, or zero block width returns false.  A caller
+    that needs allocator-exact accounting must use the capacities reported by
+    its vectors after applying these requested reserves.
+*/
+bool DecoderInitialReceiveCapacities(
+    uint32_t block_count,
+    uint32_t block_bytes,
+    size_t& receive_block_capacity,
+    size_t& receive_id_capacity,
+    size_t& pending_block_capacity);
+
+/** Exact 25%-growth policy for the persistent resume state. */
+bool DecoderResumePersistentByteLimit(
+    size_t receive_block_capacity,
+    size_t receive_id_capacity,
+    size_t pending_block_capacity,
+    size_t& persistent_byte_limit);
+
 /**
     Bounded flat hash table used by the decoder's accepted-packet set.
 

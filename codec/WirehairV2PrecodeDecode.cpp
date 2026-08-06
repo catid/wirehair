@@ -12,6 +12,71 @@
 #include <utility>
 
 namespace wirehair_v2 {
+
+bool DecoderInitialReceiveCapacities(
+    uint32_t block_count,
+    uint32_t block_bytes,
+    size_t& receive_block_capacity,
+    size_t& receive_id_capacity,
+    size_t& pending_block_capacity)
+{
+    receive_block_capacity = 0u;
+    receive_id_capacity = 0u;
+    pending_block_capacity = 0u;
+    if (block_count < CAT_WIREHAIR_MIN_N ||
+        block_count > CAT_WIREHAIR_MAX_N ||
+        block_bytes == 0u ||
+        (size_t)block_count >
+            std::numeric_limits<size_t>::max() -
+                kDecoderInitialReceiveOverhead)
+    {
+        return false;
+    }
+    const size_t packet_capacity =
+        (size_t)block_count + kDecoderInitialReceiveOverhead;
+    if (packet_capacity >
+        std::numeric_limits<size_t>::max() / block_bytes)
+    {
+        return false;
+    }
+    receive_block_capacity = packet_capacity * block_bytes;
+    receive_id_capacity = packet_capacity;
+    pending_block_capacity = block_bytes;
+    return true;
+}
+
+bool DecoderResumePersistentByteLimit(
+    size_t receive_block_capacity,
+    size_t receive_id_capacity,
+    size_t pending_block_capacity,
+    size_t& persistent_byte_limit)
+{
+    persistent_byte_limit = 0u;
+    if (receive_id_capacity >
+            std::numeric_limits<size_t>::max() / sizeof(uint32_t))
+    {
+        return false;
+    }
+    const size_t id_bytes = receive_id_capacity * sizeof(uint32_t);
+    if (receive_block_capacity >
+        std::numeric_limits<size_t>::max() - id_bytes)
+    {
+        return false;
+    }
+    const size_t released_bytes = receive_block_capacity + id_bytes;
+    const size_t allowed_extra = released_bytes / 4u;
+    const size_t retained_limit =
+        allowed_extra >
+                std::numeric_limits<size_t>::max() - released_bytes ?
+            std::numeric_limits<size_t>::max() :
+            released_bytes + allowed_extra;
+    if (pending_block_capacity > retained_limit) {
+        return false;
+    }
+    persistent_byte_limit = retained_limit - pending_block_capacity;
+    return true;
+}
+
 namespace {
 
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
@@ -77,29 +142,14 @@ bool ResumeFitsMemoryPolicy(
     size_t receive_id_capacity,
     size_t pending_block_capacity)
 {
-    if (!state.Active ||
-        receive_id_capacity >
-            std::numeric_limits<size_t>::max() / sizeof(uint32_t))
-    {
-        return false;
-    }
-    const size_t id_bytes = receive_id_capacity * sizeof(uint32_t);
-    if (receive_block_capacity >
-        std::numeric_limits<size_t>::max() - id_bytes)
-    {
-        return false;
-    }
-    const size_t released_bytes = receive_block_capacity + id_bytes;
-    const size_t allowed_extra = released_bytes / 4u;
-    const size_t checkpoint_bytes = state.PersistentBytes();
-    if (checkpoint_bytes >
-        std::numeric_limits<size_t>::max() - pending_block_capacity)
-    {
-        return false;
-    }
-    const size_t retained_bytes = checkpoint_bytes + pending_block_capacity;
-    return retained_bytes <= released_bytes ||
-        retained_bytes - released_bytes <= allowed_extra;
+    size_t persistent_byte_limit = 0u;
+    return state.Active &&
+        DecoderResumePersistentByteLimit(
+            receive_block_capacity,
+            receive_id_capacity,
+            pending_block_capacity,
+            persistent_byte_limit) &&
+        state.PersistentBytes() <= persistent_byte_limit;
 }
 
 bool MemoryRangesOverlap(
@@ -476,21 +526,27 @@ WirehairResult MessagePrecodeDecoder::InitializeResult(
         {
             return Wirehair_InvalidInput;
         }
-        GuardedDecoderAllocation();
-        next.ReceivedBlockIds.reserve((size_t)block_count + 32u);
-        const uint64_t receive_capacity =
-            ((uint64_t)block_count + 32u) * block_bytes;
-        if (receive_capacity >
-            (uint64_t)std::numeric_limits<size_t>::max())
+        size_t receive_block_capacity = 0u;
+        size_t receive_id_capacity = 0u;
+        size_t pending_block_capacity = 0u;
+        if (!DecoderInitialReceiveCapacities(
+                block_count,
+                block_bytes,
+                receive_block_capacity,
+                receive_id_capacity,
+                pending_block_capacity))
         {
             return Wirehair_InvalidInput;
         }
+        (void)pending_block_capacity;
         GuardedDecoderAllocation();
-        next.ReceivedBlockStorage.reserve((size_t)receive_capacity);
+        next.ReceivedBlockIds.reserve(receive_id_capacity);
+        GuardedDecoderAllocation();
+        next.ReceivedBlockStorage.reserve(receive_block_capacity);
         GuardedDecoderAllocation();
         if (!next.ReceivedSlots.Initialize(
-                (size_t)block_count + 32u,
-                (size_t)block_count + 1024u))
+                receive_id_capacity,
+                (size_t)block_count + kDecoderMaximumReceiveOverhead))
         {
             return Wirehair_OOM;
         }
@@ -595,6 +651,18 @@ WirehairResult MessagePrecodeDecoder::AttemptSolve()
         // Keep the deterministic failure point at the solve boundary so the
         // test hook models a transient solver OOM (and counts as an attempt).
         GuardedDecoderAllocation();
+        const bool incremental_resume = IncrementalResumeEnabled();
+        size_t resume_persistent_byte_limit = 0u;
+        PrecodeSolveResumeState* resume_state_out = nullptr;
+        if (incremental_resume &&
+            DecoderResumePersistentByteLimit(
+                ReceivedBlockStorage.capacity(),
+                ReceivedBlockIds.capacity(),
+                BlockBytesValue,
+                resume_persistent_byte_limit))
+        {
+            resume_state_out = &resume_state;
+        }
         const WirehairResult result =
             SolvePrecodeSystemForValidatedSystemWithRuntime(
             SystemValue,
@@ -604,7 +672,9 @@ WirehairResult MessagePrecodeDecoder::AttemptSolve()
             BlockBytesValue,
             intermediate,
             &solve_stats,
-            IncrementalResumeEnabled() ? &resume_state : nullptr);
+            resume_state_out,
+            resume_persistent_byte_limit,
+            PackedBinaryResidualPolicy::DecoderReceive);
         solve_stats.PacketSeedAttempt = PacketSeedAttemptValue;
         SolveStatsValue = solve_stats;
         if (result == Wirehair_Success)
@@ -771,7 +841,8 @@ WirehairResult MessagePrecodeDecoder::DecodeResult(
             }
         }
         if (ReceivedSlots.Size() >=
-            (size_t)ProfileValue.BlockCount + 1024u)
+            (size_t)ProfileValue.BlockCount +
+                kDecoderMaximumReceiveOverhead)
         {
             return Wirehair_ExtraInsufficient;
         }
@@ -858,7 +929,8 @@ WirehairResult MessagePrecodeDecoder::DecodeResult(
     }
 
     if (ReceivedBlockIds.size() >=
-        (size_t)ProfileValue.BlockCount + 1024u)
+        (size_t)ProfileValue.BlockCount +
+            kDecoderMaximumReceiveOverhead)
     {
         return Wirehair_ExtraInsufficient;
     }

@@ -1045,6 +1045,7 @@ void CheckNativeReceiveTrustedResume()
     Check(receive.Initialize(arm, ids, 2u) == Wirehair_Success,
         "trusted receive fixture initialization failed");
     wirehair_v2::ResetResumeSystemFingerprintChecksForTesting();
+    wirehair_v2::ResetPackedBinaryResidualUsesForTesting();
     const wirehair_wh2_bench::TimedArmResult result = receive.Run();
     Check(result.Result == Wirehair_Success &&
               result.BytesVerified &&
@@ -1053,6 +1054,137 @@ void CheckNativeReceiveTrustedResume()
         "trusted receive fixture did not exercise rank-deficient resume");
     Check(wirehair_v2::ResumeSystemFingerprintChecksForTesting() == 0u,
         "native receive recomputed the immutable system fingerprint");
+    Check(wirehair_v2::PackedBinaryResidualUsesForTesting() == 0u,
+        "trusted receive unexpectedly cold-fell back under its budget");
+#endif
+}
+
+void CheckNativeReceivePackedDispatchSeam()
+{
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    const uint32_t K = 1000u;
+    const uint32_t block_sizes[] = {
+        64u,
+        wirehair_v2::kDecoderPackedBinaryResidualMinBlockBytes - 1u,
+        wirehair_v2::kDecoderPackedBinaryResidualMinBlockBytes
+    };
+    const NativeArmSpec spec =
+        wirehair_wh2_bench::MakeCertifiedWh2Arm(0u);
+    for (uint32_t block_bytes : block_sizes)
+    {
+        std::vector<uint8_t> source;
+        if (!Check(wirehair_wh2_bench::MakeDeterministicSource(
+                      K,
+                      block_bytes,
+                      UINT64_C(0x7f49d8e12ab630c5) ^ block_bytes,
+                      source),
+                "native receive seam source generation failed"))
+        {
+            return;
+        }
+        NativeArm arm;
+        if (!Check(
+                arm.Initialize(spec, K, block_bytes, source) ==
+                    Wirehair_Success,
+                "native receive seam arm initialization failed"))
+        {
+            return;
+        }
+        NativeReceiveFixture receive;
+        const std::vector<uint32_t> ids = ConsecutiveIds(K, 0u, 0u);
+        if (!Check(
+                receive.Initialize(arm, ids, 0u) == Wirehair_Success,
+                "native receive seam fixture initialization failed"))
+        {
+            return;
+        }
+        wirehair_v2::ResetPackedBinaryResidualUsesForTesting();
+        const wirehair_wh2_bench::TimedArmResult result = receive.Run();
+        const uint64_t expected_uses =
+            block_bytes == 64u || block_bytes >=
+                    wirehair_v2::
+                        kDecoderPackedBinaryResidualMinBlockBytes ?
+                1u : 0u;
+        Check(result.Result == Wirehair_Success && result.BytesVerified,
+            "native receive seam did not decode exact bytes");
+        Check(wirehair_v2::PackedBinaryResidualUsesForTesting() ==
+                  expected_uses,
+            "native receive seam selected wrong packed policy");
+    }
+#endif
+}
+
+void CheckNativeReceiveBudgetColdFallback()
+{
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    const uint32_t K = 1000u;
+    const uint32_t block_bytes = 64u;
+    const NativeArmSpec spec =
+        wirehair_wh2_bench::MakeCertifiedWh2Arm(0u);
+    wirehair_wh2_bench::ResolvedNativeWh2Configuration resolved;
+    wirehair_v2::PrecodeSystem system;
+    uint32_t collision_a = 0u;
+    uint32_t collision_b = 0u;
+    if (!Check(wirehair_wh2_bench::ResolveNativeWh2Configuration(
+                  spec, K, block_bytes, resolved) &&
+                  wirehair_v2::BuildPrecodeSystem(
+                      resolved.Params, system) &&
+                  FindFirstPacketRowCollision(
+                      system,
+                      resolved.PacketConfig,
+                      collision_a,
+                      collision_b),
+            "native budget fallback collision fixture failed"))
+    {
+        return;
+    }
+    std::vector<uint8_t> source;
+    if (!Check(wirehair_wh2_bench::MakeDeterministicSource(
+                  K,
+                  block_bytes,
+                  UINT64_C(0x3d98b12fa7406ce5),
+                  source),
+            "native budget fallback source generation failed"))
+    {
+        return;
+    }
+    NativeArm arm;
+    if (!Check(
+            arm.Initialize(spec, K, block_bytes, source) == Wirehair_Success,
+            "native budget fallback arm initialization failed"))
+    {
+        return;
+    }
+    std::vector<uint32_t> ids;
+    ids.reserve((size_t)K + 2u);
+    for (uint32_t id = 0u; id + 2u < K; ++id) {
+        ids.push_back(id);
+    }
+    ids.push_back(collision_a);
+    ids.push_back(collision_b);
+    ids.push_back(K - 2u);
+    ids.push_back(K - 1u);
+    NativeReceiveFixture receive;
+    if (!Check(
+            receive.Initialize(arm, ids, 2u) == Wirehair_Success,
+            "native budget fallback receive initialization failed"))
+    {
+        return;
+    }
+    wirehair_v2::ResetPackedBinaryResidualUsesForTesting();
+    const wirehair_wh2_bench::TimedArmResult result = receive.Run();
+    if (!Check(
+            result.Result == Wirehair_Success && result.BytesVerified &&
+                result.DecodedOverhead >= 1u &&
+                result.DecodedOverhead <= 2u,
+            "native budget fallback did not recover after deficient K") ||
+        !Check(
+            wirehair_v2::PackedBinaryResidualUsesForTesting() ==
+                (uint64_t)result.DecodedOverhead + 1u,
+            "native budget fallback retained a rejected checkpoint"))
+    {
+        return;
+    }
 #endif
 }
 
@@ -1274,6 +1406,8 @@ int main()
     CheckIsolatedSolveFixture();
     CheckOtherTimingScopes();
     CheckNativeReceiveTrustedResume();
+    CheckNativeReceivePackedDispatchSeam();
+    CheckNativeReceiveBudgetColdFallback();
     CheckTimingControlProbe();
     if (Failures != 0)
     {

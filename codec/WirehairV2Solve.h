@@ -25,7 +25,20 @@ static const uint32_t kMaxPacketSeedAttempts = 256u;
 static const uint32_t kMaxInactiveColumns = 4096u;
 static const uint32_t kMinPacketPrecodeCount = 2u;
 static const uint32_t kMaxPacketPrecodeCount = 65521u;
-static const uint32_t kBinaryQuotientMinBlockBytes = 2048u;
+// Generic checkpoint-producing solves retain the established 2048-byte seam:
+// below it the byte basis avoids materialization on a deficient tail.  The
+// decoder's measured receive-to-success policy promotes packed residuals at
+// 1280 bytes, while no-resume and checkpoint-budget-rejected solves are packed
+// at every width.  The forced byte reference keeps its legacy quotient seam.
+static const uint32_t kDecoderPackedBinaryResidualMinBlockBytes = 1280u;
+static const uint32_t kGenericPackedBinaryResidualMinBlockBytes = 2048u;
+static const uint32_t kLegacyByteQuotientMinBlockBytes = 2048u;
+
+enum class PackedBinaryResidualPolicy : uint8_t
+{
+    GenericCheckpoint = 0,
+    DecoderReceive = 1
+};
 
 struct PacketRowConfig
 {
@@ -154,6 +167,23 @@ void ResetHeavyProjectionOracleCountersForTesting();
 uint64_t HeavyProjectionOracleComparisonsForTesting();
 uint64_t HeavyProjectionLegacyFallbacksForTesting();
 
+/**
+    Select the binary-residual representation in the calling thread.
+
+    -1 forces the byte-expanded reference, zero restores production dispatch,
+    and +1 forces the packed GF(2) path.  Other values are rejected without
+    changing the active mode.
+*/
+bool SetPackedBinaryResidualModeForTesting(int mode);
+int PackedBinaryResidualModeForTesting();
+
+/** Reset/read production-or-forced packed residual selections in this thread. */
+void ResetPackedBinaryResidualUsesForTesting();
+uint64_t PackedBinaryResidualUsesForTesting();
+
+/** Exact byte/packed insertion oracle, including partial-word tail poison. */
+bool PackedBinaryResidualInsertionOracleForTesting();
+
 namespace test {
 
 /** Allocation-capable scopes exercised by the solve exception tests. */
@@ -166,7 +196,9 @@ enum class SolveAllocationFailurePoint : uint8_t
     VerifyValidation,
     VerifyValueScratch,
     VerifyPacketRow,
-    TinyDenseOracleValidation
+    TinyDenseOracleValidation,
+    PackedResumePivotMaterialization,
+    PackedResumeScratchMaterialization
 };
 
 enum class SolveAllocationFailureException : uint8_t
@@ -343,9 +375,9 @@ bool EvaluatePacketBlockForValidatedSystemWithRuntime(
     Solve the complete V2 system over GF(256).
 
     Binary staircase/dense constraints and packet equations are peeled first.
-    Unused binary rows are projected onto the inactivated columns.  The
-    solver expands them into a GF(256) residual before inserting its
-    Cauchy heavy equations.  On success
+    Unused binary rows are projected onto the inactivated columns.  The solver
+    factors them over GF(2), projects the Cauchy heavy equations onto the
+    remaining GF(256) quotient, and reconstructs the binary pivots.  On success
     `intermediate_blocks_out` contains all
     K+S+D2+H block values.  The exact residual solve is bounded to
     kMaxInactiveColumns to contain adversarial memory use.  NeedMore means the
@@ -391,6 +423,11 @@ WirehairResult SolvePrecodeSystemWithRuntime(
     Internal cold solve for an immutable system validated by construction.
     The caller must retain exclusive ownership of that trust boundary: unlike
     SolvePrecodeSystemWithRuntime(), this does not inspect the stored row graph.
+    `resume_persistent_byte_limit` bounds checkpoint publication and allows a
+    rejected checkpoint to skip packed-to-byte materialization.  The explicit
+    packed policy leaves generic/public checkpoint semantics at 2048 bytes;
+    MessagePrecodeDecoder and its receive benchmark use DecoderReceive's
+    measured 1280-byte crossover.
 */
 WirehairResult SolvePrecodeSystemForValidatedSystemWithRuntime(
     const PrecodeSystem& system,
@@ -400,7 +437,10 @@ WirehairResult SolvePrecodeSystemForValidatedSystemWithRuntime(
     uint32_t block_bytes,
     std::vector<uint8_t>& intermediate_blocks_out,
     PrecodeSolveStats* stats = nullptr,
-    PrecodeSolveResumeState* resume_state = nullptr);
+    PrecodeSolveResumeState* resume_state = nullptr,
+    size_t resume_persistent_byte_limit = (size_t)-1,
+    PackedBinaryResidualPolicy packed_residual_policy =
+        PackedBinaryResidualPolicy::GenericCheckpoint);
 
 /**
     Append one packet equation to a rank-deficient solve checkpoint.
