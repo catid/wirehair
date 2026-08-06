@@ -57,6 +57,7 @@ public:
 
     size_t Size() const { return EntryCount; }
     size_t Capacity() const { return Keys.size(); }
+    /** Saturating sum of all backing-vector capacities in bytes. */
     size_t StorageBytes() const;
 
 private:
@@ -194,7 +195,10 @@ public:
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     bool HasIncrementalResumeStateForTesting() const;
     size_t IncrementalResumeBytesForTesting() const;
+    /** Payload-plus-id capacity used as the resume-policy release basis. */
     size_t ColdReceiveCapacityBytesForTesting() const;
+    /** Saturating total of payload, id, and packet-slot allocations. */
+    size_t ColdReceiveAllocationBytesForTesting() const;
 #endif
 
 private:

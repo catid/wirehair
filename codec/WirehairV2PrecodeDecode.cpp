@@ -186,6 +186,20 @@ bool MemoryRangesOverlap(
     return first_begin < second_end && second_begin < first_end;
 }
 
+void AddCapacityBytes(
+    size_t count,
+    size_t width,
+    size_t& total) noexcept
+{
+    const size_t limit = std::numeric_limits<size_t>::max();
+    if (width != 0u && count > (limit - total) / width) {
+        total = limit;
+    }
+    else {
+        total += count * width;
+    }
+}
+
 } // namespace
 
 uint32_t PacketSlotTable::Hash(uint32_t packet_id)
@@ -396,8 +410,11 @@ void PacketSlotTable::Swap(PacketSlotTable& other) noexcept
 
 size_t PacketSlotTable::StorageBytes() const
 {
-    return Keys.capacity() * sizeof(uint32_t) +
-        Slots.capacity() * sizeof(uint32_t) + Occupied.capacity();
+    size_t bytes = 0u;
+    AddCapacityBytes(Keys.capacity(), sizeof(uint32_t), bytes);
+    AddCapacityBytes(Slots.capacity(), sizeof(uint32_t), bytes);
+    AddCapacityBytes(Occupied.capacity(), sizeof(uint8_t), bytes);
+    return bytes;
 }
 
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
@@ -1489,8 +1506,19 @@ size_t MessagePrecodeDecoder::IncrementalResumeBytesForTesting() const
 
 size_t MessagePrecodeDecoder::ColdReceiveCapacityBytesForTesting() const
 {
-    return ReceivedBlockStorage.capacity() +
-        ReceivedBlockIds.capacity() * sizeof(uint32_t);
+    size_t bytes = 0u;
+    AddCapacityBytes(
+        ReceivedBlockStorage.capacity(), sizeof(uint8_t), bytes);
+    AddCapacityBytes(
+        ReceivedBlockIds.capacity(), sizeof(uint32_t), bytes);
+    return bytes;
+}
+
+size_t MessagePrecodeDecoder::ColdReceiveAllocationBytesForTesting() const
+{
+    size_t bytes = ColdReceiveCapacityBytesForTesting();
+    AddCapacityBytes(1u, ReceivedSlots.StorageBytes(), bytes);
+    return bytes;
 }
 #endif
 
