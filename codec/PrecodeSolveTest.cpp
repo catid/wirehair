@@ -1498,12 +1498,21 @@ bool CheckTinyDenseOracle()
         (uint64_t)(coefficient_period - std::min(coefficient_period, L)) *
         system.Params.HeavyRows;
     // The equation-preserving dense basis peels the eleven two-column deltas
-    // directly, reducing the tiny residual completion work from 528.
-    static const uint64_t kExpectedExecutedMulAdds = 492u;
+    // directly, reducing the legacy tiny residual completion work from 528.
+    // The direct singleton path additionally skips all H muladds for each
+    // inactive column and one staging XOR for each peeled column at every
+    // block width.
+    static const uint64_t kLegacyExecutedMulAdds = 492u;
     static const uint32_t kBlockBytes[] = { 1u, block_bytes, 1280u };
-    uint64_t expected_muladds = UINT64_MAX;
-    for (uint32_t bytes : kBlockBytes)
+    static const uint64_t kExpectedDirectXors[] = { 43u, 43u, 30u };
+    static const uint64_t kExpectedLegacyXors[] = { 58u, 58u, 45u };
+    uint32_t expected_inactivated = UINT32_MAX;
+    uint64_t direct_muladds = UINT64_MAX;
+    for (size_t case_i = 0u;
+         case_i < sizeof(kBlockBytes) / sizeof(kBlockBytes[0]);
+         ++case_i)
     {
+        const uint32_t bytes = kBlockBytes[case_i];
         std::vector<uint8_t> message((size_t)K * bytes);
         for (size_t i = 0; i < message.size(); ++i) {
             message[i] = (uint8_t)(i * 29u + bytes * 7u + 3u);
@@ -1535,28 +1544,58 @@ bool CheckTinyDenseOracle()
                 attempt, bytes, (int)oracle_result);
             return false;
         }
-        if (stats.BlockMulAdds != kExpectedExecutedMulAdds ||
+        if (expected_inactivated == UINT32_MAX) {
+            expected_inactivated = stats.InactivatedColumns;
+        }
+        const uint64_t expected_muladds = kLegacyExecutedMulAdds -
+            (uint64_t)expected_inactivated * system.Params.HeavyRows;
+        if (stats.InactivatedColumns != expected_inactivated ||
+            stats.BlockMulAdds != expected_muladds ||
             stats.BlockMulAdds >= empty_residue_muladds ||
-            (expected_muladds != UINT64_MAX &&
-             stats.BlockMulAdds != expected_muladds))
+            stats.BlockXors != kExpectedDirectXors[case_i] ||
+            stats.BlockXors + (L - expected_inactivated) !=
+                kExpectedLegacyXors[case_i] ||
+            (direct_muladds != UINT64_MAX &&
+             stats.BlockMulAdds != direct_muladds))
         {
             std::fprintf(stderr,
-                "solve: tiny heavy residue work mismatch bb=%u muladds=%llu "
-                "empty_residue_muladds=%llu expected=%llu\n",
+                "solve: tiny heavy residue work mismatch bb=%u R=%u/%u "
+                "muladds=%llu/%llu xors=%llu/%llu legacy_xors=%llu "
+                "empty_residue_muladds=%llu\n",
                 bytes,
+                stats.InactivatedColumns,
+                expected_inactivated,
                 (unsigned long long)stats.BlockMulAdds,
-                (unsigned long long)empty_residue_muladds,
-                (unsigned long long)expected_muladds);
+                (unsigned long long)expected_muladds,
+                (unsigned long long)stats.BlockXors,
+                (unsigned long long)kExpectedDirectXors[case_i],
+                (unsigned long long)kExpectedLegacyXors[case_i],
+                (unsigned long long)empty_residue_muladds);
             return false;
         }
-        expected_muladds = stats.BlockMulAdds;
+        direct_muladds = stats.BlockMulAdds;
+    }
+    if (direct_muladds +
+            (uint64_t)expected_inactivated * system.Params.HeavyRows !=
+        kLegacyExecutedMulAdds)
+    {
+        std::fprintf(stderr,
+            "solve: tiny direct work delta mismatch R=%u "
+            "muladds=%llu legacy=%llu\n",
+            expected_inactivated,
+            (unsigned long long)direct_muladds,
+            (unsigned long long)kLegacyExecutedMulAdds);
+        return false;
     }
     std::printf(
-        "tiny heavy residues: L=%u period=%u skipped=%llu muladds=%llu: PASS\n",
+        "tiny heavy residues: L=%u period=%u skipped=%llu "
+        "removed_xors=%u muladds=%llu/%llu: PASS\n",
         L,
         coefficient_period,
         (unsigned long long)empty_residue_muladds,
-        (unsigned long long)expected_muladds);
+        L - expected_inactivated,
+        (unsigned long long)direct_muladds,
+        (unsigned long long)kLegacyExecutedMulAdds);
 
     wirehair_v2::PrecodeParams hashed_params = params;
     hashed_params.HeavyFamily =
@@ -1841,6 +1880,14 @@ bool CheckExactSystematicFailureClassification()
 bool CheckHeavyCoefficientBoundaryOracle()
 {
     wirehair_v2::ResetHeavyProjectionOracleCountersForTesting();
+    if (wirehair_v2::HeavyProjectionOracleComparisonsForTesting() != 0u ||
+        wirehair_v2::HeavyProjectionLegacyFallbacksForTesting() != 0u ||
+        wirehair_v2::TinyPeriodicHeavyUsesForTesting() != 0u)
+    {
+        std::fprintf(stderr,
+            "solve: heavy projection counters did not reset\n");
+        return false;
+    }
     struct Geometry
     {
         uint32_t DenseRows;
@@ -1956,18 +2003,23 @@ bool CheckHeavyCoefficientBoundaryOracle()
         wirehair_v2::HeavyProjectionOracleComparisonsForTesting();
     const uint64_t fallbacks =
         wirehair_v2::HeavyProjectionLegacyFallbacksForTesting();
-    if (comparisons != 0u || fallbacks == 0u)
+    const uint64_t tiny_uses =
+        wirehair_v2::TinyPeriodicHeavyUsesForTesting();
+    if (comparisons != 3u || fallbacks != 21u || tiny_uses != 9u)
     {
         std::fprintf(stderr,
             "solve: heavy projection fallback boundary mismatch "
-            "comparisons=%llu fallbacks=%llu\n",
+            "comparisons=%llu fallbacks=%llu tiny=%llu\n",
             (unsigned long long)comparisons,
-            (unsigned long long)fallbacks);
+            (unsigned long long)fallbacks,
+            (unsigned long long)tiny_uses);
         return false;
     }
     std::printf(
         "heavy H=0/1/11/12/13/128 and K=3/4 D/H candidates "
-        "periodic/hashed dense oracle fallbacks=%llu: PASS\n",
+        "periodic/hashed dense oracle comparisons=%llu fallbacks=%llu: "
+        "PASS\n",
+        (unsigned long long)comparisons,
         (unsigned long long)fallbacks);
     return true;
 }
@@ -3789,15 +3841,33 @@ bool CheckIncrementalResume()
 
 struct HeavyProjectionCase
 {
+    HeavyProjectionCase(
+        const char* name,
+        uint32_t k,
+        uint32_t heavy_rows,
+        wirehair_v2::DenseAnchorLayout dense_anchors,
+        uint32_t expected_l = 0u,
+        uint32_t block_bytes = 1u)
+        : Name(name)
+        , K(k)
+        , HeavyRows(heavy_rows)
+        , DenseAnchors(dense_anchors)
+        , ExpectedL(expected_l)
+        , BlockBytes(block_bytes)
+    {
+    }
+
     const char* Name;
     uint32_t K;
     uint32_t HeavyRows;
     wirehair_v2::DenseAnchorLayout DenseAnchors;
+    uint32_t ExpectedL;
+    uint32_t BlockBytes;
 };
 
 bool CheckHeavyProjectionCase(const HeavyProjectionCase& test_case)
 {
-    const uint32_t block_bytes = 1u;
+    const uint32_t block_bytes = test_case.BlockBytes;
     wirehair_v2::PrecodeParams params = wirehair_v2::MakeCertifiedParams(
         test_case.K,
         UINT64_C(0x4850524f4a454354) ^
@@ -3853,6 +3923,8 @@ bool CheckHeavyProjectionCase(const HeavyProjectionCase& test_case)
         wirehair_v2::HeavyProjectionOracleComparisonsForTesting();
     const uint64_t fallbacks_before =
         wirehair_v2::HeavyProjectionLegacyFallbacksForTesting();
+    const uint64_t tiny_uses_before =
+        wirehair_v2::TinyPeriodicHeavyUsesForTesting();
     WirehairResult checked_result = Wirehair_Error;
     {
         HeavyProjectionOracleScope oracle_scope;
@@ -3865,47 +3937,69 @@ bool CheckHeavyProjectionCase(const HeavyProjectionCase& test_case)
     const uint64_t fallback_delta =
         wirehair_v2::HeavyProjectionLegacyFallbacksForTesting() -
         fallbacks_before;
+    const uint64_t tiny_use_delta =
+        wirehair_v2::TinyPeriodicHeavyUsesForTesting() - tiny_uses_before;
     const uint32_t L = test_case.K + system.Params.Staircase +
         system.Params.DenseRows + system.Params.HeavyRows;
+    if (test_case.ExpectedL != 0u && L != test_case.ExpectedL)
+    {
+        std::fprintf(stderr,
+            "solve: heavy projection L mismatch case=%s L=%u/%u\n",
+            test_case.Name, L, test_case.ExpectedL);
+        return false;
+    }
     const bool optimized =
         system.Params.HeavyFamily ==
             wirehair_v2::HeavyCoefficientFamily::PeriodicCauchy &&
-        system.Params.HeavyRows == 12u && L >= 244u &&
+        system.Params.HeavyRows == 12u &&
         control_stats.InactivatedColumns != 0u;
     const uint64_t expected_comparisons = optimized ? 1u : 0u;
     const uint64_t expected_fallbacks =
         !optimized && control_stats.InactivatedColumns != 0u ? 1u : 0u;
+    const bool tiny_direct =
+        system.Params.HeavyFamily ==
+            wirehair_v2::HeavyCoefficientFamily::PeriodicCauchy &&
+        system.Params.HeavyRows == 12u && L < 244u &&
+        control_stats.InactivatedColumns != 0u;
+    const uint64_t expected_tiny_uses = tiny_direct ? 1u : 0u;
     if (checked_result != Wirehair_Success || checked != control ||
         !SameSolveStatsIgnoringTiming(control_stats, checked_stats) ||
         comparison_delta != expected_comparisons ||
         fallback_delta != expected_fallbacks ||
+        tiny_use_delta != expected_tiny_uses ||
         !wirehair_v2::VerifyPrecodeSolution(
             system, config, packets, checked.data(), block_bytes))
     {
         std::fprintf(stderr,
             "solve: heavy projection oracle mismatch case=%s result=%d "
-            "comparisons=%llu/%llu fallbacks=%llu/%llu R=%u L=%u\n",
+            "comparisons=%llu/%llu fallbacks=%llu/%llu "
+            "tiny=%llu/%llu R=%u L=%u\n",
             test_case.Name,
             (int)checked_result,
             (unsigned long long)comparison_delta,
             (unsigned long long)expected_comparisons,
             (unsigned long long)fallback_delta,
             (unsigned long long)expected_fallbacks,
+            (unsigned long long)tiny_use_delta,
+            (unsigned long long)expected_tiny_uses,
             control_stats.InactivatedColumns,
             L);
         return false;
     }
 
     static const uint32_t kSampleNumerators[] = { 0u, 1u, 2u };
-    uint8_t recovered = 0u;
+    std::vector<uint8_t> recovered(block_bytes, uint8_t{0});
     for (uint32_t numerator : kSampleNumerators)
     {
         const uint32_t id = numerator == 0u ? 0u :
             (numerator == 1u ? test_case.K / 2u : test_case.K - 1u);
         if (!wirehair_v2::EvaluatePacketBlockForValidatedSystem(
                 system, config, checked.data(), block_bytes, id,
-                &recovered) ||
-            recovered != message[id])
+                recovered.data()) ||
+            !std::equal(
+                recovered.begin(),
+                recovered.end(),
+                message.begin() + (size_t)id * block_bytes))
         {
             std::fprintf(stderr,
                 "solve: heavy projection replay mismatch case=%s id=%u\n",
@@ -3915,13 +4009,14 @@ bool CheckHeavyProjectionCase(const HeavyProjectionCase& test_case)
     }
     std::printf(
         "heavy projection case=%s K=%u H=%u layout=%u "
-        "comparisons=%llu fallbacks=%llu: PASS\n",
+        "comparisons=%llu fallbacks=%llu tiny=%llu: PASS\n",
         test_case.Name,
         test_case.K,
         test_case.HeavyRows,
         (unsigned)test_case.DenseAnchors,
         (unsigned long long)comparison_delta,
-        (unsigned long long)fallback_delta);
+        (unsigned long long)fallback_delta,
+        (unsigned long long)tiny_use_delta);
     return true;
 }
 
@@ -4035,6 +4130,16 @@ bool CheckHeavyProjectionPropagationOracle()
     static const HeavyProjectionCase kCases[] = {
         { "tiny-h12", 8u, 12u,
           wirehair_v2::DenseAnchorLayout::Disabled },
+        { "tiny-h12-wide", 8u, 12u,
+          wirehair_v2::DenseAnchorLayout::Disabled, 0u, 1280u },
+        { "tiny-h12-wide-k32", 32u, 12u,
+          wirehair_v2::DenseAnchorLayout::Disabled, 0u, 1280u },
+        { "tiny-periodic-L243", 189u, 12u,
+          wirehair_v2::DenseAnchorLayout::Disabled, 243u },
+        { "cached-periodic-L244", 190u, 12u,
+          wirehair_v2::DenseAnchorLayout::Disabled, 244u },
+        { "cached-periodic-L245", 191u, 12u,
+          wirehair_v2::DenseAnchorLayout::Disabled, 245u },
         { "middle-production", 1000u, 12u,
           wirehair_v2::DenseAnchorLayout::Disabled },
         { "middle-two07", 1000u, 12u,
@@ -5324,6 +5429,11 @@ bool CheckSolveAllocationExceptionContainment()
             ColdSolveEntryPoint::Public,
             ColdSolveEntryPoint::Runtime
         };
+        const ColdSolveEntryPoint storage_entries[] = {
+            ColdSolveEntryPoint::Public,
+            ColdSolveEntryPoint::Runtime,
+            ColdSolveEntryPoint::ValidatedRuntime
+        };
         for (ColdSolveEntryPoint entry : solve_entries)
         {
             std::vector<uint8_t> output(19u, 0xb6u);
@@ -5365,6 +5475,53 @@ bool CheckSolveAllocationExceptionContainment()
                 std::fprintf(stderr,
                     "solve: cold validation escaped/committed %s entry=%s "
                     "result=%d\n",
+                    exception_name, ColdSolveEntryPointName(entry),
+                    (int)result);
+                return false;
+            }
+        }
+
+        for (ColdSolveEntryPoint entry : storage_entries)
+        {
+            std::vector<uint8_t> output(21u, 0xc6u);
+            const std::vector<uint8_t> output_before = output;
+            const uint8_t* const output_data_before = output.data();
+            const size_t output_capacity_before = output.capacity();
+            wirehair_v2::PrecodeSolveStats stats = {};
+            stats.PacketRows = UINT32_C(0x50607080);
+            stats.BlockXors = UINT64_C(0x1020304050607080);
+            stats.BuildNanoseconds = UINT64_C(0x8070605040302010);
+            const wirehair_v2::PrecodeSolveStats stats_before = stats;
+            wirehair_v2::PrecodeSolveResumeState resume =
+                MakeStatsAliasSentinel(
+                    UINT32_C(0xc40) + (uint32_t)entry +
+                    (uint32_t)exception_i * 16u);
+            const wirehair_v2::PrecodeSolveResumeState resume_before = resume;
+            const ResumeStorageIdentity resume_storage_before =
+                CaptureResumeStorageIdentity(resume);
+            const size_t resume_bytes_before = resume.PersistentBytes();
+
+            SolveAllocationFailureScope failure(
+                SolveAllocationFailurePoint::TinyPeriodicHeavyStorage,
+                exception);
+            const WirehairResult result = CallColdSolve(
+                entry, system, config, runtime, packets, block_bytes,
+                output, &stats, &resume);
+            if (result != Wirehair_OOM ||
+                wirehair_v2::test::
+                    SolveAllocationFailureHitsForTesting() != 1u ||
+                output != output_before ||
+                output.data() != output_data_before ||
+                output.capacity() != output_capacity_before ||
+                !SameSolveStats(stats, stats_before) ||
+                !SameResumeState(resume, resume_before) ||
+                !SameResumeStorageIdentity(
+                    resume, resume_storage_before) ||
+                resume.PersistentBytes() != resume_bytes_before)
+            {
+                std::fprintf(stderr,
+                    "solve: tiny periodic storage escaped/committed %s "
+                    "entry=%s result=%d\n",
                     exception_name, ColdSolveEntryPointName(entry),
                     (int)result);
                 return false;

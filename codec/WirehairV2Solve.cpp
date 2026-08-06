@@ -466,6 +466,7 @@ std::atomic<uint64_t> BinaryPeelOracleComparisons(0u);
 std::atomic<uint32_t> HeavyProjectionOracleUsers(0u);
 std::atomic<uint64_t> HeavyProjectionOracleComparisons(0u);
 std::atomic<uint64_t> HeavyProjectionLegacyFallbacks(0u);
+std::atomic<uint64_t> TinyPeriodicHeavyUses(0u);
 std::atomic<uint64_t> ResumeSystemFingerprintChecks(0u);
 #endif
 
@@ -1194,6 +1195,139 @@ void ProjectCachedPeriodicHeavyByPeel(
     }
 }
 
+// Tiny H=12 systems visit fewer than one complete coefficient period.  Keep
+// their coefficient reuse path out of SolvePrecodeSystemImpl: adding table
+// ownership or per-column mode checks to that already-large routine measurably
+// perturbs disabled tiny/wide solves.  The caller selects this helper only for
+// PeriodicCauchy, H=12, and L<244, so HeavyCoefficient() is the exact equation
+// dispatch and each packed column also supplies the matching RHS residue.
+#if defined(_MSC_VER)
+#define WH2_TINY_PERIODIC_NOINLINE __declspec(noinline)
+#elif defined(__GNUC__) && defined(__ELF__)
+#define WH2_TINY_PERIODIC_NOINLINE \
+    __attribute__((noinline, section(".text.wh2_tiny_periodic")))
+#elif defined(__GNUC__) || defined(__clang__)
+#define WH2_TINY_PERIODIC_NOINLINE __attribute__((noinline))
+#else
+#define WH2_TINY_PERIODIC_NOINLINE
+#endif
+
+static WH2_TINY_PERIODIC_NOINLINE void PrepareTinyPeriodicHeavy(
+    const std::vector<uint32_t>& inactive_index,
+    const std::vector<uint64_t>& projection,
+    const std::vector<uint8_t>& values,
+    std::vector<uint64_t>& projected_heavy,
+    std::vector<uint8_t>& heavy_rhs,
+    PrecodeSolveStats& stats)
+{
+    static_assert(
+        kCachedPeriodicWords == 2u,
+        "the tiny production H=12 path requires two packed words");
+    const uint32_t L = (uint32_t)inactive_index.size();
+    const uint32_t R =
+        (uint32_t)(projected_heavy.size() / kCachedPeriodicWords);
+    const uint32_t words = PackedWordCount(R);
+    const uint32_t block_bytes =
+        (uint32_t)(heavy_rhs.size() / kCachedPeriodicHeavyRows);
+    CAT_DEBUG_ASSERT(L < kCachedPeriodicWindow);
+    CAT_DEBUG_ASSERT(
+        projection.size() == (size_t)L * words);
+    CAT_DEBUG_ASSERT(
+        projected_heavy.size() == (size_t)R * kCachedPeriodicWords);
+    CAT_DEBUG_ASSERT(
+        values.size() == (size_t)L * block_bytes);
+    CAT_DEBUG_ASSERT(
+        heavy_rhs.size() ==
+            (size_t)kCachedPeriodicHeavyRows * block_bytes);
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    test::TriggerSolveAllocationFailureForTesting(
+        test::SolveAllocationFailurePoint::TinyPeriodicHeavyStorage);
+#endif
+    std::vector<uint64_t> packed_heavy(
+        (size_t)L * kCachedPeriodicWords, uint64_t{0});
+    for (uint32_t column = 0u; column < L; ++column)
+    {
+        uint64_t* const column_heavy = packed_heavy.data() +
+            (size_t)column * kCachedPeriodicWords;
+        for (uint32_t heavy = 0;
+             heavy < kCachedPeriodicHeavyRows;
+             ++heavy)
+        {
+            column_heavy[heavy >> 3] |=
+                (uint64_t)HeavyCoefficient(
+                    heavy, column, kCachedPeriodicHeavyRows) <<
+                ((heavy & 7u) * 8u);
+        }
+        const auto xor_packed = [&](uint32_t index) {
+            uint64_t* const destination = projected_heavy.data() +
+                (size_t)index * kCachedPeriodicWords;
+            destination[0] ^= column_heavy[0];
+            destination[1] ^= column_heavy[1];
+        };
+        const uint32_t inactive = inactive_index[column];
+        if (inactive != UINT32_MAX) {
+            xor_packed(inactive);
+            continue;
+        }
+        const uint64_t* const bits =
+            projection.data() + (size_t)column * words;
+        for (uint32_t w = 0; w < words; ++w)
+        {
+            uint64_t word = bits[w];
+            while (word != 0u)
+            {
+                const uint32_t bit =
+                    wirehair::NonzeroLowestBitIndex64(word);
+                const uint32_t projected = (w << 6) + bit;
+                if (projected < R) {
+                    xor_packed(projected);
+                }
+                word &= word - 1u;
+            }
+        }
+    }
+
+    void* heavy_destinations[kCachedPeriodicHeavyRows];
+    uint8_t heavy_scales[kCachedPeriodicHeavyRows];
+    for (uint32_t heavy = 0;
+         heavy < kCachedPeriodicHeavyRows;
+         ++heavy)
+    {
+        heavy_destinations[heavy] =
+            heavy_rhs.data() + (size_t)heavy * block_bytes;
+    }
+    // L is shorter than the 244-column coefficient period, so each residue
+    // contains exactly one column.  Inactive columns have no constant value;
+    // skip them instead of issuing twelve muladds from an all-zero bucket.
+    // Peeled columns can feed their value directly, avoiding a redundant
+    // zero/fill/XOR pass through a temporary block.
+    for (uint32_t column = 0; column < L; ++column)
+    {
+        if (inactive_index[column] != UINT32_MAX) {
+            continue;
+        }
+        const uint64_t* const packed = packed_heavy.data() +
+            (size_t)column * kCachedPeriodicWords;
+        for (uint32_t heavy = 0;
+             heavy < kCachedPeriodicHeavyRows;
+             ++heavy)
+        {
+            heavy_scales[heavy] = (uint8_t)(
+                packed[heavy >> 3] >> ((heavy & 7u) * 8u));
+        }
+        AddScaledBlocks(
+            heavy_destinations,
+            heavy_scales,
+            kCachedPeriodicHeavyRows,
+            values.data() + (size_t)column * block_bytes,
+            block_bytes,
+            stats);
+    }
+}
+
+#undef WH2_TINY_PERIODIC_NOINLINE
+
 void AddScaledResidualCoefficients(
     uint8_t* destination,
     uint8_t scale,
@@ -1745,6 +1879,7 @@ void ResetHeavyProjectionOracleCountersForTesting()
 {
     HeavyProjectionOracleComparisons.store(0u, std::memory_order_relaxed);
     HeavyProjectionLegacyFallbacks.store(0u, std::memory_order_relaxed);
+    TinyPeriodicHeavyUses.store(0u, std::memory_order_relaxed);
 }
 
 uint64_t HeavyProjectionOracleComparisonsForTesting()
@@ -1755,6 +1890,11 @@ uint64_t HeavyProjectionOracleComparisonsForTesting()
 uint64_t HeavyProjectionLegacyFallbacksForTesting()
 {
     return HeavyProjectionLegacyFallbacks.load(std::memory_order_relaxed);
+}
+
+uint64_t TinyPeriodicHeavyUsesForTesting()
+{
+    return TinyPeriodicHeavyUses.load(std::memory_order_relaxed);
 }
 
 bool SetProjectionAVX2ModeForTesting(int mode)
@@ -3244,6 +3384,11 @@ static WirehairResult SolvePrecodeSystemImpl(
                 HeavyCoefficientFamily::PeriodicCauchy &&
             H == kCachedPeriodicHeavyRows &&
             L >= kCachedPeriodicWindow;
+        const bool tiny_periodic_direct =
+            system.Params.HeavyFamily ==
+                HeavyCoefficientFamily::PeriodicCauchy &&
+            H == kCachedPeriodicHeavyRows &&
+            L < kCachedPeriodicWindow;
         if (heavy_words != 0u &&
             (uint64_t)R * heavy_words >
                 (uint64_t)std::numeric_limits<size_t>::max() /
@@ -3343,7 +3488,7 @@ static WirehairResult SolvePrecodeSystemImpl(
             }
 #endif
         }
-        else
+        else if (!tiny_periodic_direct)
         {
             project_heavy_legacy(projected_heavy);
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
@@ -3363,7 +3508,33 @@ static WirehairResult SolvePrecodeSystemImpl(
             heavy_destinations[heavy] =
                 heavy_rhs.data() + (size_t)heavy * block_bytes;
         }
-        if (system.Params.HeavyFamily ==
+        if (tiny_periodic_direct)
+        {
+            PrepareTinyPeriodicHeavy(
+                inactive_index,
+                projection,
+                values,
+                projected_heavy,
+                heavy_rhs,
+                st);
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            TinyPeriodicHeavyUses.fetch_add(
+                1u, std::memory_order_relaxed);
+            if (HeavyProjectionOracleUsers.load(
+                    std::memory_order_relaxed) != 0u)
+            {
+                std::vector<uint64_t> legacy(
+                    (size_t)R * heavy_words, uint64_t{0});
+                project_heavy_legacy(legacy);
+                if (legacy != projected_heavy) {
+                    return terminal_error();
+                }
+                HeavyProjectionOracleComparisons.fetch_add(
+                    1u, std::memory_order_relaxed);
+            }
+#endif
+        }
+        else if (system.Params.HeavyFamily ==
             HeavyCoefficientFamily::PeriodicCauchy)
         {
             std::vector<uint8_t> residue_bucket(block_bytes, 0u);

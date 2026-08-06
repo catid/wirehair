@@ -162,10 +162,11 @@ uint64_t BinaryPeelOracleComparisonsForTesting();
 */
 void SetHeavyProjectionOracleForTesting(bool enabled);
 
-/** Reset/read optimized oracle comparisons and legacy-fallback observations. */
+/** Reset/read optimized, legacy-fallback, and tiny-direct observations. */
 void ResetHeavyProjectionOracleCountersForTesting();
 uint64_t HeavyProjectionOracleComparisonsForTesting();
 uint64_t HeavyProjectionLegacyFallbacksForTesting();
+uint64_t TinyPeriodicHeavyUsesForTesting();
 
 /**
     Select the portable x86 projection-XOR implementation in this thread.
@@ -216,6 +217,7 @@ enum class SolveAllocationFailurePoint : uint8_t
     VerifyValueScratch,
     VerifyPacketRow,
     TinyDenseOracleValidation,
+    TinyPeriodicHeavyStorage,
     PackedResumePivotMaterialization,
     PackedResumeScratchMaterialization
 };
