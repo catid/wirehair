@@ -769,6 +769,10 @@ static GF256_FORCE_INLINE void XorProjectionSourceBatch(
 {
     uint32_t word = 0u;
 #if defined(__AVX2__)
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    if (ProjectionAVX2TestMode >= 0)
+    {
+#endif
     for (; words - word >= 4u; word += 4u)
     {
         const __m256i destination0 = _mm256_loadu_si256(
@@ -778,6 +782,9 @@ static GF256_FORCE_INLINE void XorProjectionSourceBatch(
             ProjectionSourceBatch<Count>::Xor256(
                 destination0, sources, word));
     }
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    }
+#endif
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     if (word != 0u) {
         ++ProjectionAVX2BatchUseCount;
