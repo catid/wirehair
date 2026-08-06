@@ -31,6 +31,8 @@ set(_forbidden_symbols
     "ActiveEncodeAllocationFailure"
     "EncodeAllocationFailureHits"
     "DecoderAllocationFailureCountdown"
+    "DecoderColdSystematicReuseEnabled"
+    "ColdReceiveAllocationBytesForTesting"
     "DecoderIncrementalResumeEnabled"
     "DecoderReceiveCounters"
     "OddPacketPeelSeedXor"
