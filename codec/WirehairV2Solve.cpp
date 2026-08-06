@@ -36,6 +36,16 @@ thread_local test::SolveAllocationFailureException
 thread_local uint32_t ActiveSolveAllocationFailureHits = 0u;
 thread_local int PackedBinaryResidualTestMode = 0;
 thread_local uint64_t PackedBinaryResidualUseCount = 0u;
+thread_local int ProjectionAVX2TestMode = 0;
+thread_local uint64_t ProjectionAVX2BatchUseCount = 0u;
+thread_local uint64_t ProjectionFallbackBatchUseCount = 0u;
+#endif
+
+#if defined(GF256_TRY_TARGET_AVX2) && !defined(__AVX2__)
+// SolvePrecodeSystemImpl enables this only after gf256's shared x86/OS
+// capability check.  Keeping the choice per-thread makes nested or concurrent
+// solves independent without changing the portable gf256 context layout.
+thread_local bool TargetProjectionAVX2 = false;
 #endif
 
 PacketRowEquationIdentity CurrentPacketRowEquationIdentity() noexcept
@@ -725,6 +735,32 @@ struct ProjectionSourceBatch<0u>
 
 };
 
+#if defined(GF256_TRY_TARGET_AVX2) && !defined(__AVX2__)
+// Paired portable-build solves put the stable crossover at eight packed
+// words.  Four-to-seven-word rows do not amortize the target-helper call and
+// can slightly regress wide-RHS solves even when the isolated XOR is faster.
+constexpr uint32_t kTargetProjectionAVX2MinWords = 8u;
+
+template<uint32_t Count>
+static GF256_AVX2_TARGET uint32_t XorProjectionSourceBatchAVX2(
+    uint64_t* GF256_RESTRICT destination,
+    const uint64_t* const* GF256_RESTRICT sources,
+    uint32_t words)
+{
+    uint32_t word = 0u;
+    for (; words - word >= 4u; word += 4u)
+    {
+        const __m256i destination0 = _mm256_loadu_si256(
+            reinterpret_cast<const __m256i*>(destination + word));
+        _mm256_storeu_si256(
+            reinterpret_cast<__m256i*>(destination + word),
+            ProjectionSourceBatch<Count>::Xor256(
+                destination0, sources, word));
+    }
+    return word;
+}
+#endif
+
 template<uint32_t Count>
 static GF256_FORCE_INLINE void XorProjectionSourceBatch(
     uint64_t* GF256_RESTRICT destination,
@@ -741,6 +777,26 @@ static GF256_FORCE_INLINE void XorProjectionSourceBatch(
             reinterpret_cast<__m256i*>(destination + word),
             ProjectionSourceBatch<Count>::Xor256(
                 destination0, sources, word));
+    }
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    if (word != 0u) {
+        ++ProjectionAVX2BatchUseCount;
+    }
+#endif
+#elif defined(GF256_TRY_TARGET_AVX2)
+    if (TargetProjectionAVX2) {
+        word = XorProjectionSourceBatchAVX2<Count>(
+            destination, sources, words);
+    }
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    if (word != 0u) {
+        ++ProjectionAVX2BatchUseCount;
+    }
+#endif
+#endif
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    if (word == 0u) {
+        ++ProjectionFallbackBatchUseCount;
     }
 #endif
 #if defined(GF256_TARGET_X86_SIMD)
@@ -775,6 +831,58 @@ static GF256_FORCE_INLINE void XorProjectionSourceBatch(
             destination[word], sources, word);
     }
 }
+
+#if defined(GF256_TRY_TARGET_AVX2) && !defined(__AVX2__)
+static bool ShouldUseTargetProjectionAVX2()
+{
+    gf256_x86_cpu_features features = {};
+    gf256_get_active_x86_cpu_features(&features);
+    const bool available = features.AVX2 != 0;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    if (ProjectionAVX2TestMode < 0) {
+        return false;
+    }
+    // A forced request still observes the real CPU/OS capability boundary.
+#endif
+    return available;
+}
+
+class ScopedTargetProjectionAVX2
+{
+public:
+    ScopedTargetProjectionAVX2()
+        : Previous(TargetProjectionAVX2)
+    {
+        TargetProjectionAVX2 = false;
+    }
+
+    void SelectForWordCount(uint32_t words)
+    {
+        bool eligible = words >= kTargetProjectionAVX2MinWords;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        if (ProjectionAVX2TestMode > 0) {
+            // Forced differential coverage may exercise the helper below the
+            // measured crossover, but never on a sub-vector row.
+            eligible = words >= 4u;
+        }
+#endif
+        TargetProjectionAVX2 =
+            eligible && ShouldUseTargetProjectionAVX2();
+    }
+
+    ~ScopedTargetProjectionAVX2()
+    {
+        TargetProjectionAVX2 = Previous;
+    }
+
+    ScopedTargetProjectionAVX2(const ScopedTargetProjectionAVX2&) = delete;
+    ScopedTargetProjectionAVX2& operator=(
+        const ScopedTargetProjectionAVX2&) = delete;
+
+private:
+    bool Previous;
+};
+#endif
 
 class BatchedProjectionXorAccumulator
 {
@@ -1640,6 +1748,50 @@ uint64_t HeavyProjectionOracleComparisonsForTesting()
 uint64_t HeavyProjectionLegacyFallbacksForTesting()
 {
     return HeavyProjectionLegacyFallbacks.load(std::memory_order_relaxed);
+}
+
+bool SetProjectionAVX2ModeForTesting(int mode)
+{
+    if (mode < -1 || mode > 1) {
+        return false;
+    }
+    ProjectionAVX2TestMode = mode;
+    return true;
+}
+
+int ProjectionAVX2ModeForTesting()
+{
+    return ProjectionAVX2TestMode;
+}
+
+bool ProjectionAVX2AvailableForTesting()
+{
+#if defined(__AVX2__) || defined(GF256_TRY_TARGET_AVX2)
+    if (gf256_init() != 0) {
+        return false;
+    }
+    gf256_x86_cpu_features features = {};
+    gf256_get_active_x86_cpu_features(&features);
+    return features.AVX2 != 0;
+#else
+    return false;
+#endif
+}
+
+void ResetProjectionAVX2CountersForTesting()
+{
+    ProjectionAVX2BatchUseCount = 0u;
+    ProjectionFallbackBatchUseCount = 0u;
+}
+
+uint64_t ProjectionAVX2BatchesForTesting()
+{
+    return ProjectionAVX2BatchUseCount;
+}
+
+uint64_t ProjectionFallbackBatchesForTesting()
+{
+    return ProjectionFallbackBatchUseCount;
 }
 
 bool SetPackedBinaryResidualModeForTesting(int mode)
@@ -2606,6 +2758,9 @@ static WirehairResult SolvePrecodeSystemImpl(
     if (gf256_init() != 0) {
         return Wirehair_UnsupportedPlatform;
     }
+#if defined(GF256_TRY_TARGET_AVX2) && !defined(__AVX2__)
+    ScopedTargetProjectionAVX2 projection_avx2_scope;
+#endif
     const auto terminal_error = [&]() -> WirehairResult {
         if (stats) {
             *stats = st;
@@ -2730,6 +2885,9 @@ static WirehairResult SolvePrecodeSystemImpl(
         }
         phase_start = phase_end;
         const uint32_t words = PackedWordCount(R);
+#if defined(GF256_TRY_TARGET_AVX2) && !defined(__AVX2__)
+        projection_avx2_scope.SelectForWordCount(words);
+#endif
 
         std::vector<uint32_t> inactive_index(L, UINT32_MAX);
         for (uint32_t i = 0; i < R; ++i) {

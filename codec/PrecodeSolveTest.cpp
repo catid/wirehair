@@ -71,6 +71,27 @@ private:
     bool Valid;
 };
 
+class ProjectionAVX2ModeScope
+{
+public:
+    explicit ProjectionAVX2ModeScope(int mode)
+        : Previous(wirehair_v2::ProjectionAVX2ModeForTesting())
+        , Valid(wirehair_v2::SetProjectionAVX2ModeForTesting(mode))
+    {
+    }
+
+    ~ProjectionAVX2ModeScope()
+    {
+        (void)wirehair_v2::SetProjectionAVX2ModeForTesting(Previous);
+    }
+
+    bool IsValid() const { return Valid; }
+
+private:
+    int Previous;
+    bool Valid;
+};
+
 class SolveAllocationFailureScope
 {
 public:
@@ -4040,6 +4061,149 @@ bool CheckHeavyProjectionPropagationOracle()
     return true;
 }
 
+bool CheckPortableProjectionAVX2Differential()
+{
+#if !defined(GF256_TRY_TARGET_AVX2) || defined(__AVX2__)
+    std::printf(
+        "portable projection AVX2 differential: not applicable: PASS\n");
+    return true;
+#else
+    if (!wirehair_v2::ProjectionAVX2AvailableForTesting()) {
+        std::printf(
+            "portable projection AVX2 differential: host unavailable: "
+            "PASS\n");
+        return true;
+    }
+    if (!wirehair_v2::SetProjectionAVX2ModeForTesting(0) ||
+        wirehair_v2::SetProjectionAVX2ModeForTesting(-2) ||
+        wirehair_v2::SetProjectionAVX2ModeForTesting(2) ||
+        wirehair_v2::ProjectionAVX2ModeForTesting() != 0)
+    {
+        std::fprintf(stderr,
+            "solve: portable projection AVX2 mode validation failed\n");
+        return false;
+    }
+
+    const uint32_t K = 64000u;
+    const uint32_t block_bytes = 1u;
+    wirehair_v2::PrecodeParams params = wirehair_v2::MakeCertifiedParams(
+        K, UINT64_C(0x4156583250524f4a));
+    wirehair_v2::PacketRowConfig base_config;
+    base_config.PeelSeed = UINT32_C(0x41565832);
+    base_config.MixCount = wirehair_v2::kCertifiedPacketMixCount;
+    wirehair_v2::PrecodeSystem system;
+    wirehair_v2::PacketRowConfig config;
+    if (wirehair_v2::SelectSystematicConfiguration(
+            params, base_config, system, config) != Wirehair_Success)
+    {
+        std::fprintf(stderr,
+            "solve: portable projection AVX2 configuration failed\n");
+        return false;
+    }
+
+    std::vector<uint8_t> message(K);
+    std::vector<wirehair_v2::SolvePacket> packets(K);
+    for (uint32_t id = 0u; id < K; ++id)
+    {
+        message[id] = (uint8_t)(id * 173u + (id >> 7) + 0x5du);
+        packets[id].BlockId = id;
+        packets[id].Data = message.data() + id;
+    }
+
+    std::vector<uint8_t> fallback_output;
+    std::vector<uint8_t> avx2_output;
+    std::vector<uint8_t> automatic_output;
+    wirehair_v2::PrecodeSolveStats fallback_stats;
+    wirehair_v2::PrecodeSolveStats avx2_stats;
+    wirehair_v2::PrecodeSolveStats automatic_stats;
+
+    wirehair_v2::ResetProjectionAVX2CountersForTesting();
+    WirehairResult fallback_result = Wirehair_Error;
+    {
+        ProjectionAVX2ModeScope mode(-1);
+        if (!mode.IsValid()) {
+            return false;
+        }
+        fallback_result = wirehair_v2::SolvePrecodeSystem(
+            system, config, packets, block_bytes, fallback_output,
+            &fallback_stats);
+    }
+    const uint64_t fallback_avx2 =
+        wirehair_v2::ProjectionAVX2BatchesForTesting();
+    const uint64_t fallback_batches =
+        wirehair_v2::ProjectionFallbackBatchesForTesting();
+
+    wirehair_v2::ResetProjectionAVX2CountersForTesting();
+    WirehairResult avx2_result = Wirehair_Error;
+    {
+        ProjectionAVX2ModeScope mode(1);
+        if (!mode.IsValid()) {
+            return false;
+        }
+        avx2_result = wirehair_v2::SolvePrecodeSystem(
+            system, config, packets, block_bytes, avx2_output, &avx2_stats);
+    }
+    const uint64_t avx2_batches =
+        wirehair_v2::ProjectionAVX2BatchesForTesting();
+    const uint64_t avx2_fallback =
+        wirehair_v2::ProjectionFallbackBatchesForTesting();
+
+    wirehair_v2::ResetProjectionAVX2CountersForTesting();
+    WirehairResult automatic_result = Wirehair_Error;
+    {
+        ProjectionAVX2ModeScope mode(0);
+        if (!mode.IsValid()) {
+            return false;
+        }
+        automatic_result = wirehair_v2::SolvePrecodeSystem(
+            system, config, packets, block_bytes, automatic_output,
+            &automatic_stats);
+    }
+    const uint64_t automatic_avx2 =
+        wirehair_v2::ProjectionAVX2BatchesForTesting();
+    const uint64_t automatic_fallback =
+        wirehair_v2::ProjectionFallbackBatchesForTesting();
+
+    if (fallback_result != Wirehair_Success ||
+        avx2_result != Wirehair_Success ||
+        automatic_result != Wirehair_Success ||
+        fallback_output != avx2_output ||
+        fallback_output != automatic_output ||
+        !SameSolveStatsIgnoringTiming(fallback_stats, avx2_stats) ||
+        !SameSolveStatsIgnoringTiming(fallback_stats, automatic_stats) ||
+        fallback_stats.InactivatedColumns < 449u ||
+        fallback_avx2 != 0u || fallback_batches == 0u ||
+        avx2_batches == 0u || avx2_fallback != 0u ||
+        automatic_avx2 == 0u || automatic_fallback != 0u ||
+        !wirehair_v2::VerifyPrecodeSolution(
+            system, config, packets, avx2_output.data(), block_bytes))
+    {
+        std::fprintf(stderr,
+            "solve: portable projection AVX2 differential mismatch "
+            "results=%d/%d/%d R=%u fallback=%llu/%llu "
+            "avx2=%llu/%llu auto=%llu/%llu\n",
+            (int)fallback_result,
+            (int)avx2_result,
+            (int)automatic_result,
+            fallback_stats.InactivatedColumns,
+            (unsigned long long)fallback_avx2,
+            (unsigned long long)fallback_batches,
+            (unsigned long long)avx2_batches,
+            (unsigned long long)avx2_fallback,
+            (unsigned long long)automatic_avx2,
+            (unsigned long long)automatic_fallback);
+        return false;
+    }
+    std::printf(
+        "portable projection AVX2 differential K=%u R=%u "
+        "batches=%llu: PASS\n",
+        K,
+        fallback_stats.InactivatedColumns,
+        (unsigned long long)avx2_batches);
+    return true;
+#endif
+}
+
 bool CheckColdSolveStatsAlias()
 {
     const uint32_t K = 64u;
@@ -5834,6 +5998,7 @@ int main(int argc, char** argv)
     ok = CheckIncrementalResume() && ok;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     ok = CheckHeavyProjectionPropagationOracle() && ok;
+    ok = CheckPortableProjectionAVX2Differential() && ok;
     ok = CheckSolveAllocationExceptionContainment() && ok;
 #endif
     ok = CheckColdSolveStatsAlias() && ok;

@@ -168,6 +168,25 @@ uint64_t HeavyProjectionOracleComparisonsForTesting();
 uint64_t HeavyProjectionLegacyFallbacksForTesting();
 
 /**
+    Select the portable x86 projection-XOR implementation in this thread.
+
+    -1 forces the SSE2/scalar fallback, zero restores production runtime
+    dispatch, and +1 requests the target-qualified AVX2 helper when the host
+    and OS support AVX2.  A forced request never bypasses the capability
+    check.  Other values are rejected without changing the active mode.
+*/
+bool SetProjectionAVX2ModeForTesting(int mode);
+int ProjectionAVX2ModeForTesting();
+
+/** Report whether the target-qualified AVX2 projection helper is usable. */
+bool ProjectionAVX2AvailableForTesting();
+
+/** Reset/read projection batches handled by AVX2 or wholly by the fallback. */
+void ResetProjectionAVX2CountersForTesting();
+uint64_t ProjectionAVX2BatchesForTesting();
+uint64_t ProjectionFallbackBatchesForTesting();
+
+/**
     Select the binary-residual representation in the calling thread.
 
     -1 forces the byte-expanded reference, zero restores production dispatch,
