@@ -190,7 +190,11 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
     {
         const uint32_t hits = std::min(N1, S);
         const uint32_t mean = (K * hits) / S;
-        uint32_t slack = 2u;
+        // When integer division rounds the mean to zero, almost every row has
+        // only parity/link entries.  Preserve the prior three-entry request;
+        // letting the O(K) hit rows grow is cheaper than adding slack to tens
+        // of thousands of otherwise empty exotic rows.
+        uint32_t slack = mean == 0u ? 0u : 2u;
         while (slack * slack < 4u * mean) {
             ++slack;
         }

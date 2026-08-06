@@ -410,9 +410,10 @@ bool TestExactGraphGolden()
     // This digest was frozen from 95e6fd0 before the build-only allocation
     // cleanup.  It covers both sides of the inline scratch boundaries, the
     // N1 transition, the complete production range endpoints, three seeds,
-    // and every feasible identity-corner variant.  Allocation-only changes
-    // must reproduce the exact staircase and dense-basis column streams.
-    static const uint64_t kGolden = UINT64_C(0x3335f0057def6ed4);
+    // every feasible identity-corner variant, and a valid maximum-span
+    // zero-mean staircase geometry.  Allocation-only changes must reproduce
+    // the exact staircase and dense-basis column streams.
+    static const uint64_t kGolden = UINT64_C(0xc7924ce359571489);
     static const uint32_t kBlockCounts[] = {
         2u, 3u, 4u, 8u, 64u, 100u, 450u, 500u, 1000u, 1024u,
         1025u, 2048u, 10000u, 32000u, 64000u
@@ -444,6 +445,47 @@ bool TestExactGraphGolden()
             MixGraphFingerprint(hash, system);
         }
     }
+
+    wirehair_v2::PrecodeParams exotic;
+    exotic.BlockCount = 2u;
+    exotic.Staircase = 65533u;
+    exotic.DenseRows = 0u;
+    exotic.HeavyRows = 0u;
+    exotic.SourceHits = 1u;
+    exotic.Seed = UINT64_C(0x5a45524f4d45414e);
+    wirehair_v2::PrecodeSystem exotic_system;
+    if (!BuildPrecodeSystem(exotic, exotic_system)) {
+        return false;
+    }
+    std::vector<uint32_t> three_entry_capacity_probe;
+    three_entry_capacity_probe.reserve(3u);
+    const size_t zero_mean_capacity =
+        three_entry_capacity_probe.capacity();
+    std::vector<uint32_t> growth_capacity_probe;
+    growth_capacity_probe.reserve(3u);
+    growth_capacity_probe.push_back(0u);
+    growth_capacity_probe.push_back(1u);
+    growth_capacity_probe.push_back(2u);
+    growth_capacity_probe.push_back(3u);
+    const size_t one_growth_capacity = growth_capacity_probe.capacity();
+    uint64_t retained_capacity = 0u;
+    for (const std::vector<uint32_t>& row : exotic_system.StaircaseRows)
+    {
+        retained_capacity += row.capacity();
+    }
+    const uint64_t retained_capacity_limit =
+        (uint64_t)zero_mean_capacity * exotic.Staircase +
+        (uint64_t)(one_growth_capacity - zero_mean_capacity) *
+            exotic.BlockCount;
+    if (retained_capacity > retained_capacity_limit)
+    {
+        std::fprintf(stderr,
+            "zero-mean staircase retained %llu entries, want <= %llu\n",
+            (unsigned long long)retained_capacity,
+            (unsigned long long)retained_capacity_limit);
+        return false;
+    }
+    MixGraphFingerprint(hash, exotic_system);
     if (hash != kGolden)
     {
         std::fprintf(stderr,
