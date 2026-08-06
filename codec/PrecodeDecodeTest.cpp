@@ -21,10 +21,16 @@ bool Check(bool condition, const char* message)
 bool CheckPacketSlotTable()
 {
     wirehair_v2::PacketSlotTable table;
-    if (!Check(table.Initialize(37u, 37u),
+    if (!Check(table.StorageBytes() == 0u,
+            "empty packet slot table reported allocated storage") ||
+        !Check(table.Initialize(37u, 37u),
             "packet slot table init failed") ||
         !Check(table.Size() == 0u && table.Capacity() >= 74u,
             "packet slot table initial shape mismatch") ||
+        !Check(table.StorageBytes() >=
+                table.Capacity() *
+                    (2u * sizeof(uint32_t) + sizeof(uint8_t)),
+            "packet slot table storage accounting omitted a vector") ||
         !Check(table.Insert(UINT32_MAX, 7u),
             "packet slot table rejected UINT32_MAX") ||
         !Check(table.Insert(0u, UINT32_MAX),
@@ -210,7 +216,7 @@ bool CheckPacketSlotTable()
     table.ClearAndRelease();
     return Check(
         table.Size() == 0u && table.Capacity() == 0u &&
-            !table.Find(UINT32_MAX),
+            table.StorageBytes() == 0u && !table.Find(UINT32_MAX),
         "packet slot table clear retained state");
 }
 
@@ -588,7 +594,9 @@ bool CheckIncrementalDecoderParity()
                     adoption_packet.Id,
                     adoption_packet.Data.data(),
                     adoption_packet.Bytes) == Wirehair_NeedMore &&
-                adoption_decoder.HasIncrementalResumeStateForTesting(),
+                adoption_decoder.HasIncrementalResumeStateForTesting() &&
+                adoption_decoder.ColdReceiveCapacityBytesForTesting() == 0u &&
+                adoption_decoder.ColdReceiveAllocationBytesForTesting() != 0u,
             "checkpoint-slot OOM did not preserve a cold retry"))
     {
         return false;
@@ -1196,10 +1204,12 @@ bool CheckColdSystematicReuse()
     std::vector<uint8_t> message;
     wirehair_v2::MessagePrecodeEncoder encoder;
     wirehair_v2::MessagePrecodeDecoder decoder;
-    if (!InitializeCompletedRecoveryFixture(
+    if (!Check(decoder.ColdReceiveAllocationBytesForTesting() == 0u,
+            "empty decoder reported cold receive allocation") ||
+        !InitializeCompletedRecoveryFixture(
             K, block_bytes, tail_bytes, false, false,
             message, encoder, decoder) ||
-        !Check(decoder.ColdReceiveCapacityBytesForTesting() != 0u,
+        !Check(decoder.ColdReceiveAllocationBytesForTesting() != 0u,
             "cold systematic reuse did not retain receive storage"))
     {
         return false;
@@ -1220,7 +1230,7 @@ bool CheckColdSystematicReuse()
             counters.RecoveryColdPacketCopies == K &&
             counters.RecoveryColdPacketCopyBytes == message.size() &&
             counters.RecoveryColdStorageReleases == 1u &&
-            decoder.ColdReceiveCapacityBytesForTesting() == 0u,
+            decoder.ColdReceiveAllocationBytesForTesting() == 0u,
             "cold systematic reuse counters/release mismatch"))
     {
         return false;
@@ -1255,7 +1265,7 @@ bool CheckColdSystematicReuse()
         return false;
     }
     const size_t retained_bytes =
-        missing_final.ColdReceiveCapacityBytesForTesting();
+        missing_final.ColdReceiveAllocationBytesForTesting();
     recovered.assign(message.size(), 0xa7u);
     const std::vector<uint8_t> before = recovered;
     wirehair_v2::ResetDecoderReceivePathCountersForTesting();
@@ -1266,7 +1276,7 @@ bool CheckColdSystematicReuse()
     counters = wirehair_v2::DecoderReceivePathCountersForTesting();
     if (!Check(result == Wirehair_OOM && recovered == before &&
             retained_bytes != 0u &&
-            missing_final.ColdReceiveCapacityBytesForTesting() ==
+            missing_final.ColdReceiveAllocationBytesForTesting() ==
                 retained_bytes &&
             counters.RecoveryColdPacketCopies == 0u &&
             counters.RecoveryPacketEvaluations == 0u &&
@@ -1288,7 +1298,7 @@ bool CheckColdSystematicReuse()
                 (uint64_t)(K - 1u) * block_bytes &&
             counters.RecoveryPacketEvaluations == 1u &&
             counters.RecoveryColdStorageReleases == 1u &&
-            missing_final.ColdReceiveCapacityBytesForTesting() == 0u,
+            missing_final.ColdReceiveAllocationBytesForTesting() == 0u,
             "cold reuse partial-tail retry accounting mismatch"))
     {
         return false;
@@ -1303,7 +1313,7 @@ bool CheckColdSystematicReuse()
     if (!InitializeCompletedRecoveryFixture(
             K, block_bytes, tail_bytes, false, false,
             message, fallback_encoder, fallback) ||
-        !Check(fallback.ColdReceiveCapacityBytesForTesting() == 0u,
+        !Check(fallback.ColdReceiveAllocationBytesForTesting() == 0u,
             "disabled cold reuse retained receive storage"))
     {
         wirehair_v2::SetDecoderColdSystematicReuseEnabledForTesting(true);
@@ -1385,11 +1395,11 @@ bool CheckColdSystematicReuse()
         }
     }
     const size_t reverse_retained =
-        reverse_decoder.ColdReceiveCapacityBytesForTesting();
+        reverse_decoder.ColdReceiveAllocationBytesForTesting();
     if (!Check(reverse_decoder.DecodeResult(
             packet.Id, packet.Data.data(), packet.Bytes) == Wirehair_Success &&
             reverse_retained != 0u &&
-            reverse_decoder.ColdReceiveCapacityBytesForTesting() ==
+            reverse_decoder.ColdReceiveAllocationBytesForTesting() ==
                 reverse_retained,
             "post-decode validation consumed cold receive storage"))
     {
@@ -1405,7 +1415,7 @@ bool CheckColdSystematicReuse()
             counters.RecoveryColdPacketCopies == K &&
             counters.RecoveryColdPacketCopyBytes == message.size() &&
             counters.RecoveryColdStorageReleases == 1u &&
-            reverse_decoder.ColdReceiveCapacityBytesForTesting() == 0u,
+            reverse_decoder.ColdReceiveAllocationBytesForTesting() == 0u,
             "cold reuse arbitrary-order slot recovery mismatch"))
     {
         return false;
@@ -1472,7 +1482,7 @@ bool CheckColdSystematicReuse()
         }
         wirehair_v2::SetDecoderIncrementalResumeEnabledForTesting(true);
         const bool retained =
-            order_decoder.ColdReceiveCapacityBytesForTesting() != 0u;
+            order_decoder.ColdReceiveAllocationBytesForTesting() != 0u;
         if (!Check(feed_ok && order_result == Wirehair_Success &&
                 retained == expect_reuse,
                 "cold reuse systematic-count order gate mismatch"))
@@ -1498,7 +1508,7 @@ bool CheckColdSystematicReuse()
                     expected_copies * block_bytes &&
                 order_counters.RecoveryColdStorageReleases ==
                     (expect_reuse ? 1u : 0u) &&
-                order_decoder.ColdReceiveCapacityBytesForTesting() == 0u,
+                order_decoder.ColdReceiveAllocationBytesForTesting() == 0u,
                 "cold reuse systematic-count order recovery mismatch"))
         {
             return false;
@@ -1543,7 +1553,7 @@ bool CheckColdSystematicReuse()
     }
     wirehair_v2::SetDecoderIncrementalResumeEnabledForTesting(true);
     if (!Check(repair_encode_ok && result == Wirehair_Success &&
-            repair_decoder.ColdReceiveCapacityBytesForTesting() == 0u,
+            repair_decoder.ColdReceiveAllocationBytesForTesting() == 0u,
             "cold reuse repair-only stream did not preserve immediate release"))
     {
         return false;
@@ -1558,7 +1568,7 @@ bool CheckColdSystematicReuse()
             counters.RecoveryColdPacketCopies == 0u &&
             counters.RecoveryColdPacketCopyBytes == 0u &&
             counters.RecoveryColdStorageReleases == 0u &&
-            repair_decoder.ColdReceiveCapacityBytesForTesting() == 0u,
+            repair_decoder.ColdReceiveAllocationBytesForTesting() == 0u,
             "cold reuse repair-only fallback mismatch"))
     {
         return false;
