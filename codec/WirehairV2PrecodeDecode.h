@@ -76,6 +76,7 @@ private:
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 void SetDecoderAllocationFailureCountdownForTesting(int64_t countdown);
 void SetDecoderIncrementalResumeEnabledForTesting(bool enabled);
+void SetDecoderColdSystematicReuseEnabledForTesting(bool enabled);
 
 /**
     Coarse receive-path evidence for tests that must distinguish the real
@@ -98,6 +99,9 @@ struct DecoderReceivePathCounters
     uint64_t ResumeAttempts = 0u;
     uint64_t RecoveryPreflights = 0u;
     uint64_t RecoveryPacketEvaluations = 0u;
+    uint64_t RecoveryColdPacketCopies = 0u;
+    uint64_t RecoveryColdPacketCopyBytes = 0u;
+    uint64_t RecoveryColdStorageReleases = 0u;
 };
 
 void ResetDecoderReceivePathCountersForTesting();
@@ -173,7 +177,9 @@ public:
         Recover requires the exact initialized message size.  The output range
         must not overlap the decoder's intermediate-block storage; overlap is
         rejected before writing.  Allocation failure for a partial final block
-        also leaves the complete output range untouched.
+        also leaves the complete output range untouched.  The first successful
+        call may consume retained cold receive slots; later calls evaluate any
+        packets no longer available from that one-shot state.
     */
     WirehairResult RecoverResult(
         void* message_out,
@@ -231,13 +237,15 @@ private:
     PacketRowConfig PacketConfigValue = {};
     PacketRowRuntime PacketRuntimeValue = {};
     PrecodeSystem SystemValue = {};
-    std::vector<uint32_t> ReceivedBlockIds;
-    std::vector<uint8_t> ReceivedBlockStorage;
+    mutable std::vector<uint32_t> ReceivedBlockIds;
+    mutable std::vector<uint8_t> ReceivedBlockStorage;
     // Cold receive payloads are stored in fixed-width slots.  Mapping packet
     // id directly to its slot keeps duplicate validation O(1); after checkpoint
     // adoption the keys remain as the bounded received-id set while the slot
-    // values are no longer dereferenced.
-    PacketSlotTable ReceivedSlots;
+    // values are no longer dereferenced.  A successful source-headed cold
+    // solve may instead retain the complete table through the first successful
+    // RecoverResult call.
+    mutable PacketSlotTable ReceivedSlots;
     PrecodeSolveResumeState ResumeState;
     std::vector<uint8_t> PendingPacketStorage;
     uint32_t PendingPacketId = 0u;

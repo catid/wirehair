@@ -82,6 +82,7 @@ namespace {
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 thread_local int64_t DecoderAllocationFailureCountdown = -1;
 thread_local bool DecoderIncrementalResumeEnabled = true;
+thread_local bool DecoderColdSystematicReuseEnabled = true;
 thread_local DecoderReceivePathCounters DecoderReceiveCounters;
 
 void GuardedDecoderAllocation()
@@ -98,9 +99,15 @@ bool IncrementalResumeEnabled()
 {
     return DecoderIncrementalResumeEnabled;
 }
+
+bool ColdSystematicReuseEnabled()
+{
+    return DecoderColdSystematicReuseEnabled;
+}
 #else
 void GuardedDecoderAllocation() {}
 bool IncrementalResumeEnabled() { return true; }
+bool ColdSystematicReuseEnabled() { return true; }
 #endif
 
 bool MessageBlockCount(
@@ -397,6 +404,11 @@ void SetDecoderAllocationFailureCountdownForTesting(int64_t countdown)
 void SetDecoderIncrementalResumeEnabledForTesting(bool enabled)
 {
     DecoderIncrementalResumeEnabled = enabled;
+}
+
+void SetDecoderColdSystematicReuseEnabledForTesting(bool enabled)
+{
+    DecoderColdSystematicReuseEnabled = enabled;
 }
 
 void ResetDecoderReceivePathCountersForTesting()
@@ -844,9 +856,31 @@ WirehairResult MessagePrecodeDecoder::AttemptSolve()
             IntermediateBlockStorage.swap(intermediate);
             Decoded = true;
             ReceivedCountValue = (uint32_t)ReceivedBlockIds.size();
-            std::vector<uint32_t>().swap(ReceivedBlockIds);
-            std::vector<uint8_t>().swap(ReceivedBlockStorage);
-            ReceivedSlots.ClearAndRelease();
+            // With no separately allocated systematic cache, a source-headed
+            // stream retains its already-owned cold receive
+            // slots until the first successful recovery.  RecoverResult can
+            // copy received source packets from these slots and then releases
+            // them.  Requiring the first accepted packet to be systematic is
+            // an O(1) eligibility gate: repair-only streams preserve their
+            // original immediate-release path, while arbitrary schedules that
+            // start with repair data safely fall back to packet evaluation.
+            // This adds no receive-time payload copy or allocation and does
+            // not increase the solve peak: the cold buffers already coexist
+            // with `intermediate` here.
+            // Compute eligibility on both test arms so the same-binary OFF
+            // control differs only in the retention decision, not in whether
+            // it loads and classifies the first accepted packet.
+            const bool cold_systematic_eligible =
+                !SystematicPacketCache && !ReceivedBlockIds.empty() &&
+                ReceivedBlockIds.front() < K;
+            const bool retain_cold_systematic =
+                cold_systematic_eligible && ColdSystematicReuseEnabled();
+            if (!retain_cold_systematic)
+            {
+                std::vector<uint32_t>().swap(ReceivedBlockIds);
+                std::vector<uint8_t>().swap(ReceivedBlockStorage);
+                ReceivedSlots.ClearAndRelease();
+            }
         }
         else if (result == Wirehair_NeedMore && resume_state.Active)
         {
@@ -1221,11 +1255,61 @@ WirehairResult MessagePrecodeDecoder::RecoverResult(
             return Wirehair_InvalidInput;
         }
 
+        const bool cold_reuse = !cache_enabled &&
+            !ReceivedBlockIds.empty();
+        bool cold_ids_sorted = false;
+        if (cold_reuse)
+        {
+            if (ReceivedBlockIds.size() >
+                    std::numeric_limits<size_t>::max() / BlockBytesValue ||
+                ReceivedBlockStorage.size() !=
+                    ReceivedBlockIds.size() * BlockBytesValue ||
+                ReceivedSlots.Size() != ReceivedBlockIds.size())
+            {
+                return Wirehair_Error;
+            }
+            cold_ids_sorted = std::is_sorted(
+                ReceivedBlockIds.begin(), ReceivedBlockIds.end());
+            // Increasing packet schedules can use the vector's intrinsic
+            // slot order directly.  For arbitrary schedules, validate the
+            // complete private id-to-slot index before the first output byte
+            // is written, preserving the no-partial-write contract.
+            if (!cold_ids_sorted)
+            {
+                for (size_t slot = 0u; slot < ReceivedBlockIds.size(); ++slot)
+                {
+                    uint32_t indexed_slot = UINT32_MAX;
+                    if (!ReceivedSlots.Find(
+                            ReceivedBlockIds[slot], &indexed_slot) ||
+                        indexed_slot != slot)
+                    {
+                        return Wirehair_Error;
+                    }
+                }
+            }
+        }
+
         const uint32_t final_bytes = PacketDataBytes(
             MessageBytesValue, BlockBytesValue, K, K - 1u);
         const bool final_is_partial = final_bytes < BlockBytesValue;
-        const bool final_is_cached = cache_enabled &&
-            HaveSystematicPacket[K - 1u] != 0u;
+        bool final_is_cold = false;
+        if (cold_reuse)
+        {
+            if (cold_ids_sorted)
+            {
+                final_is_cold = std::binary_search(
+                    ReceivedBlockIds.begin(), ReceivedBlockIds.end(), K - 1u);
+            }
+            else
+            {
+                uint32_t final_cold_slot = UINT32_MAX;
+                final_is_cold = ReceivedSlots.Find(
+                    K - 1u, &final_cold_slot);
+            }
+        }
+        const bool final_is_cached =
+            (cache_enabled && HaveSystematicPacket[K - 1u] != 0u) ||
+            final_is_cold;
         std::vector<uint8_t> final_block;
         if (final_is_partial && !final_is_cached)
         {
@@ -1238,7 +1322,10 @@ WirehairResult MessagePrecodeDecoder::RecoverResult(
         uint8_t* output = static_cast<uint8_t*>(message_out);
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
         uint32_t evaluated_packets = 0u;
+        uint32_t copied_cold_packets = 0u;
+        uint64_t copied_cold_bytes = 0u;
 #endif
+        size_t cold_cursor = 0u;
         for (uint32_t block_id = 0; block_id < K; ++block_id)
         {
             const uint32_t bytes = PacketDataBytes(
@@ -1250,6 +1337,47 @@ WirehairResult MessagePrecodeDecoder::RecoverResult(
                     SystematicPacketCache.get() +
                         (size_t)block_id * BlockBytesValue,
                     bytes);
+                continue;
+            }
+            size_t cold_slot = 0u;
+            bool have_cold_packet = false;
+            if (cold_reuse)
+            {
+                if (cold_ids_sorted)
+                {
+                    while (cold_cursor < ReceivedBlockIds.size() &&
+                           ReceivedBlockIds[cold_cursor] < block_id)
+                    {
+                        ++cold_cursor;
+                    }
+                    if (cold_cursor < ReceivedBlockIds.size() &&
+                        ReceivedBlockIds[cold_cursor] == block_id)
+                    {
+                        cold_slot = cold_cursor;
+                        have_cold_packet = true;
+                    }
+                }
+                else
+                {
+                    uint32_t indexed_slot = UINT32_MAX;
+                    if (ReceivedSlots.Find(block_id, &indexed_slot))
+                    {
+                        cold_slot = indexed_slot;
+                        have_cold_packet = true;
+                    }
+                }
+            }
+            if (have_cold_packet)
+            {
+                std::memcpy(
+                    output + (size_t)block_id * BlockBytesValue,
+                    ReceivedBlockStorage.data() +
+                        (size_t)cold_slot * BlockBytesValue,
+                    bytes);
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+                ++copied_cold_packets;
+                copied_cold_bytes += bytes;
+#endif
                 continue;
             }
             uint8_t* const block_out =
@@ -1282,7 +1410,20 @@ WirehairResult MessagePrecodeDecoder::RecoverResult(
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
         DecoderReceiveCounters.RecoveryPacketEvaluations +=
             evaluated_packets;
+        DecoderReceiveCounters.RecoveryColdPacketCopies +=
+            copied_cold_packets;
+        DecoderReceiveCounters.RecoveryColdPacketCopyBytes +=
+            copied_cold_bytes;
 #endif
+        if (cold_reuse)
+        {
+            std::vector<uint32_t>().swap(ReceivedBlockIds);
+            std::vector<uint8_t>().swap(ReceivedBlockStorage);
+            ReceivedSlots.ClearAndRelease();
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            ++DecoderReceiveCounters.RecoveryColdStorageReleases;
+#endif
+        }
         return Wirehair_Success;
     }
     catch (const std::bad_alloc&) {
