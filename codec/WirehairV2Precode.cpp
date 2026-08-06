@@ -183,9 +183,18 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
     prng.Seed(params.Seed, K);
 
     // --- Staircase rows ---
-    // Reserve for the expected load: K*N1/S source hits + parity + link
+    // Reserve beyond the mean source load so rows in the ordinary upper tail
+    // do not reallocate while the random placements are appended.  Two
+    // standard deviations keeps the retained-capacity cost modest; the
+    // trailing three entries cover parity/link columns and integer rounding.
     {
-        const uint32_t expected = (K * N1) / S + 3u;
+        const uint32_t hits = std::min(N1, S);
+        const uint32_t mean = (K * hits) / S;
+        uint32_t slack = 2u;
+        while (slack * slack < 4u * mean) {
+            ++slack;
+        }
+        const uint32_t expected = mean + slack + 3u;
         for (uint32_t j = 0; j < S; ++j) {
             out.StaircaseRows[j].reserve(expected);
         }
@@ -251,10 +260,26 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
         const uint32_t deck_span =
             params.DenseIdentityCorner ? (K + S) : span;
         const uint32_t set_count = (deck_span + 1u) >> 1;
-        std::vector<uint16_t> deck(deck_span);
+        // Keep the small-K shuffle scratch inline.  Both arrays are fully
+        // initialized below, so the large-K vectors remain simple fallbacks
+        // and their initialization cannot affect the generated equations.
+        static const uint32_t kInlineDeckSpan = 512u;
+        uint16_t deck_inline[kInlineDeckSpan];
+        uint8_t anchor_flags_inline[kInlineDeckSpan];
+        std::vector<uint16_t> deck_heap;
+        std::vector<uint8_t> anchor_flags_heap;
+        uint16_t* deck = deck_inline;
+        uint8_t* anchor_flags = anchor_flags_inline;
+        if (deck_span > kInlineDeckSpan)
+        {
+            deck_heap.resize(deck_span);
+            anchor_flags_heap.resize(deck_span);
+            deck = deck_heap.data();
+            anchor_flags = anchor_flags_heap.data();
+        }
+        std::fill(anchor_flags, anchor_flags + deck_span, uint8_t{0});
         // One bit per anchor lets every balanced row be populated by the same
         // ascending column scan.  Four0369 is the largest accepted layout.
-        std::vector<uint8_t> anchor_flags(deck_span, 0u);
         uint32_t anchor_rows[4] = {};
         uint8_t anchor_bits[4] = {};
         uint32_t anchor_count = 0u;
@@ -288,7 +313,7 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
             ++row_i;
         };
 
-        UnbiasedShuffleDeck(prng, deck.data(), deck_span);
+        UnbiasedShuffleDeck(prng, deck, deck_span);
         mark_anchor();
 
         if (params.DenseAnchors != DenseAnchorLayout::Disabled)
@@ -296,13 +321,13 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
             // Row zero uses the initial balanced deck.  Each segment gets a
             // fresh deck: an additional anchor emits its balanced set-half,
             // while other rows consume one distinct set/clear flip pair.
-            UnbiasedShuffleDeck(prng, deck.data(), deck_span);
+            UnbiasedShuffleDeck(prng, deck, deck_span);
             uint32_t flip_index = 0u;
             while (row_i < D2)
             {
                 if (IsAdditionalDenseAnchor(params.DenseAnchors, row_i))
                 {
-                    UnbiasedShuffleDeck(prng, deck.data(), deck_span);
+                    UnbiasedShuffleDeck(prng, deck, deck_span);
                     flip_index = 0u;
                     mark_anchor();
                     continue;
@@ -320,7 +345,7 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
             };
             for (uint32_t half = 0; half < 2u; ++half)
             {
-                UnbiasedShuffleDeck(prng, deck.data(), deck_span);
+                UnbiasedShuffleDeck(prng, deck, deck_span);
                 for (uint32_t ii = 0; ii < halves[half]; ++ii)
                 {
                     // Deck entries at distinct positions are distinct
@@ -371,7 +396,20 @@ bool ValidatePrecodeSystem(const PrecodeSystem& system)
     }
 
     const uint32_t staircase_end = K + S;
-    std::vector<uint8_t> source_hits(K, 0u);
+    // Validation is part of every generated system build.  Avoid a heap
+    // allocation for the small-K range while retaining the same bounded
+    // heap fallback for larger block counts.
+    static const uint32_t kInlineSourceHits = 1024u;
+    uint8_t source_hits_inline[kInlineSourceHits];
+    std::vector<uint8_t> source_hits_heap;
+    uint8_t* source_hits = source_hits_inline;
+    if (K > kInlineSourceHits) {
+        source_hits_heap.assign(K, uint8_t{0});
+        source_hits = source_hits_heap.data();
+    }
+    else {
+        std::fill(source_hits, source_hits + K, uint8_t{0});
+    }
     for (uint32_t row_index = 0; row_index < S; ++row_index)
     {
         const std::vector<uint32_t>& row = system.StaircaseRows[row_index];
@@ -406,8 +444,8 @@ bool ValidatePrecodeSystem(const PrecodeSystem& system)
         }
     }
     const uint8_t expected_hits = (uint8_t)std::min(params.SourceHits, S);
-    for (uint8_t hits : source_hits) {
-        if (hits != expected_hits) {
+    for (uint32_t column = 0; column < K; ++column) {
+        if (source_hits[column] != expected_hits) {
             return false;
         }
     }

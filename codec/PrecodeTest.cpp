@@ -358,6 +358,103 @@ bool TestDeterminism(uint32_t K)
     return true;
 }
 
+void MixGraphFingerprintU32(uint64_t& hash, uint32_t value)
+{
+    for (uint32_t shift = 0u; shift < 32u; shift += 8u) {
+        hash ^= (uint8_t)(value >> shift);
+        hash *= UINT64_C(1099511628211);
+    }
+}
+
+void MixGraphFingerprintU64(uint64_t& hash, uint64_t value)
+{
+    MixGraphFingerprintU32(hash, (uint32_t)value);
+    MixGraphFingerprintU32(hash, (uint32_t)(value >> 32));
+}
+
+void MixGraphFingerprint(
+    uint64_t& hash,
+    const wirehair_v2::PrecodeSystem& system)
+{
+    const wirehair_v2::PrecodeParams& params = system.Params;
+    MixGraphFingerprintU32(hash, params.BlockCount);
+    MixGraphFingerprintU32(hash, params.Staircase);
+    MixGraphFingerprintU32(hash, params.DenseRows);
+    MixGraphFingerprintU32(hash, params.HeavyRows);
+    MixGraphFingerprintU32(hash, params.SourceHits);
+    MixGraphFingerprintU32(hash, params.DenseIdentityCorner ? 1u : 0u);
+    MixGraphFingerprintU32(hash, (uint32_t)params.DenseAnchors);
+    MixGraphFingerprintU32(hash, (uint32_t)params.HeavyFamily);
+    MixGraphFingerprintU64(hash, params.Seed);
+    MixGraphFingerprintU32(hash, (uint32_t)system.StaircaseRows.size());
+    for (const std::vector<uint32_t>& row : system.StaircaseRows) {
+        MixGraphFingerprintU32(hash, (uint32_t)row.size());
+        for (uint32_t column : row) {
+            MixGraphFingerprintU32(hash, column);
+        }
+    }
+    MixGraphFingerprintU32(
+        hash, (uint32_t)system.DenseBasisRowColumns.size());
+    for (const std::vector<uint32_t>& row :
+        system.DenseBasisRowColumns)
+    {
+        MixGraphFingerprintU32(hash, (uint32_t)row.size());
+        for (uint32_t column : row) {
+            MixGraphFingerprintU32(hash, column);
+        }
+    }
+}
+
+bool TestExactGraphGolden()
+{
+    // This digest was frozen from 95e6fd0 before the build-only allocation
+    // cleanup.  It covers both sides of the inline scratch boundaries, the
+    // N1 transition, the complete production range endpoints, three seeds,
+    // and every feasible identity-corner variant.  Allocation-only changes
+    // must reproduce the exact staircase and dense-basis column streams.
+    static const uint64_t kGolden = UINT64_C(0x3335f0057def6ed4);
+    static const uint32_t kBlockCounts[] = {
+        2u, 3u, 4u, 8u, 64u, 100u, 450u, 500u, 1000u, 1024u,
+        1025u, 2048u, 10000u, 32000u, 64000u
+    };
+    uint64_t hash = UINT64_C(14695981039346656037);
+    for (uint32_t K : kBlockCounts)
+    {
+        for (uint32_t seed = 0u; seed < 3u; ++seed)
+        {
+            wirehair_v2::PrecodeParams params =
+                wirehair_v2::MakeCertifiedParams(
+                    K, UINT64_C(0x50524f4245530000) ^ seed ^ K);
+            wirehair_v2::PrecodeSystem system;
+            if (!BuildPrecodeSystem(params, system)) {
+                return false;
+            }
+            MixGraphFingerprint(hash, system);
+
+            const bool identity_feasible =
+                K + params.Staircase >= 2u * (params.DenseRows >> 1);
+            if (!identity_feasible) {
+                continue;
+            }
+            params.Seed = UINT64_C(0x4944454e54495459) ^ seed ^ K;
+            params.DenseIdentityCorner = true;
+            if (!BuildPrecodeSystem(params, system)) {
+                return false;
+            }
+            MixGraphFingerprint(hash, system);
+        }
+    }
+    if (hash != kGolden)
+    {
+        std::fprintf(stderr,
+            "precode graph fingerprint=%016llx want=%016llx\n",
+            (unsigned long long)hash,
+            (unsigned long long)kGolden);
+        return false;
+    }
+    return true;
+}
+
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 uint64_t DenseRowsFingerprint(const wirehair_v2::PrecodeSystem& system)
 {
@@ -704,6 +801,9 @@ int main()
         return 1;
     }
     if (!TestCandidateGeometries()) {
+        return 1;
+    }
+    if (!TestExactGraphGolden()) {
         return 1;
     }
 
