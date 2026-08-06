@@ -1505,8 +1505,8 @@ bool CheckColdSystematicReuse()
         }
         return true;
     };
-    if (!run_order_case(1u, false, false) ||
-        !run_order_case(1u, true, false) ||
+    if (!run_order_case(systematic_threshold - 1u, false, false) ||
+        !run_order_case(systematic_threshold - 1u, true, false) ||
         !run_order_case(systematic_threshold, false, true) ||
         !run_order_case(systematic_threshold, true, true))
     {
