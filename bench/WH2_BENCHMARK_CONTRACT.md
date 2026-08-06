@@ -34,6 +34,16 @@ so the fair cross-codec metric is full receive-to-success time; timing only its
 last API call would hide Wirehair1 work.  Encoder initialization plus the first
 K symbols is measured separately.
 
+The receive-to-success scope constructs each decoder before the clock.  Its
+timed interval feeds every symbol through the codec's normal receive API and
+ends only after full message recovery: Wirehair2 uses
+`MessagePrecodeDecoder::DecodeResult()` plus `RecoverResult()` around the arm's
+exact validated native system/configuration/attempt, and Wirehair1 uses its
+public decode plus recover path.  A benchmark-local direct solve/resume model
+is not a valid substitute because it omits receive payload copies, packet-slot
+bookkeeping, cold packet assembly, checkpoint pending storage, and recovery
+preflight.
+
 ## Bounded development screen
 
 Every candidate first receives the exact 30-K `short` cohort.  Recovery pairs

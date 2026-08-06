@@ -259,46 +259,6 @@ bool VerifyWh2DecodedBytes(
     return true;
 }
 
-bool RecoverWh2DecodedBytesInto(
-    const wirehair_v2::PrecodeSystem& system,
-    const wirehair_v2::PacketRowConfig& config,
-    const wirehair_v2::PacketRowRuntime& runtime,
-    uint32_t block_bytes,
-    const std::vector<uint8_t>& intermediate,
-    uint8_t* recovered_out,
-    size_t recovered_bytes)
-{
-    const uint32_t K = system.Params.BlockCount;
-    size_t expected_source_bytes = 0u;
-    size_t expected_intermediate_bytes = 0u;
-    if (!recovered_out ||
-        !CheckedProduct(K, block_bytes, expected_source_bytes) ||
-        !CheckedProduct(
-            (uint64_t)K + PrecodeCount(system),
-            block_bytes,
-            expected_intermediate_bytes) ||
-        recovered_bytes != expected_source_bytes ||
-        intermediate.size() != expected_intermediate_bytes)
-    {
-        return false;
-    }
-    for (uint32_t block_id = 0u; block_id < K; ++block_id)
-    {
-        if (!wirehair_v2::EvaluatePacketBlockForValidatedSystemWithRuntime(
-                system,
-                config,
-                runtime,
-                intermediate.data(),
-                block_bytes,
-                block_id,
-                recovered_out + (size_t)block_id * block_bytes))
-        {
-            return false;
-        }
-    }
-    return true;
-}
-
 WirehairResult EncodePrefix(
     const NativeArm& arm,
     const std::vector<uint32_t>& packet_ids,
@@ -1393,12 +1353,6 @@ struct NativeReceiveFixture::Impl
     std::shared_ptr<const NativeArm::Impl> ArmState;
     std::vector<uint32_t> PacketIds;
     std::vector<uint8_t> PacketStorage;
-    // Actual allocator-selected decoder receive capacities for prefixes
-    // K..K+ReceiveOverheadCap.  Fixture initialization replays the same
-    // reserve/append sequence as MessagePrecodeDecoder outside the timer so
-    // Run() can apply the production checkpoint budget at each cold attempt.
-    std::vector<std::pair<size_t, size_t> > ReceiveCapacities;
-    size_t PendingBlockCapacity = 0u;
     uint32_t ReceiveOverheadCap = 0u;
     bool Initialized = false;
 };
@@ -1444,55 +1398,6 @@ WirehairResult NativeReceiveFixture::Initialize(
             return encode_result;
         }
 
-        if (arm.ImplValue->Kind != NativeArmKind::Wirehair1)
-        {
-            size_t requested_block_capacity = 0u;
-            size_t requested_id_capacity = 0u;
-            size_t requested_pending_capacity = 0u;
-            if (!wirehair_v2::DecoderInitialReceiveCapacities(
-                    arm.ImplValue->K,
-                    arm.ImplValue->BlockBytes,
-                    requested_block_capacity,
-                    requested_id_capacity,
-                    requested_pending_capacity))
-            {
-                return Wirehair_InvalidInput;
-            }
-            std::vector<uint8_t> receive_block_model;
-            std::vector<uint32_t> receive_id_model;
-            std::vector<uint8_t> pending_block_model(
-                requested_pending_capacity, uint8_t{0});
-            receive_block_model.reserve(requested_block_capacity);
-            receive_id_model.reserve(requested_id_capacity);
-            next->ReceiveCapacities.reserve(
-                (size_t)receive_overhead_cap + 1u);
-            const size_t receive_packet_count =
-                (size_t)arm.ImplValue->K + receive_overhead_cap;
-            for (size_t packet_index = 0u;
-                 packet_index < receive_packet_count;
-                 ++packet_index)
-            {
-                const uint8_t* packet_data = next->PacketStorage.data() +
-                    packet_index * arm.ImplValue->BlockBytes;
-                receive_block_model.insert(
-                    receive_block_model.end(),
-                    packet_data,
-                    packet_data + arm.ImplValue->BlockBytes);
-                receive_id_model.push_back(packet_ids[packet_index]);
-                if (packet_index + 1u >= arm.ImplValue->K)
-                {
-                    next->ReceiveCapacities.push_back(std::make_pair(
-                        receive_block_model.capacity(),
-                        receive_id_model.capacity()));
-                }
-            }
-            if (next->ReceiveCapacities.size() !=
-                    (size_t)receive_overhead_cap + 1u)
-            {
-                return Wirehair_Error;
-            }
-            next->PendingBlockCapacity = pending_block_model.capacity();
-        }
         next->Initialized = true;
         ImplValue.swap(next);
         return Wirehair_Success;
@@ -1575,111 +1480,39 @@ TimedArmResult NativeReceiveFixture::Run() const
         }
         else
         {
-            // This is the benchmark-local fresh decoder state.  Every storage
-            // reservation and the recovery destination are prepared before the
-            // clock; solver/resume allocations remain decoder work.
-            std::vector<wirehair_v2::SolvePacket> received_packets;
-            received_packets.reserve(receive_packet_count);
-            wirehair_v2::PrecodeSolveResumeState resume_state;
-            wirehair_v2::PrecodeSolveResumeState cold_resume;
-            std::vector<uint8_t> intermediate;
-
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            // Construct and initialize a fresh real decoder outside the
+            // measured interval, matching Wirehair1.  The exact-system seam
+            // preserves experimental systems/configurations/attempts while
+            // DecodeResult and RecoverResult perform all timed receive work.
+            wirehair_v2::MessagePrecodeDecoder decoder;
+            const WirehairResult initialize_result =
+                decoder.InitializeForValidatedSystemForTesting(
+                    (uint64_t)arm.Source.size(),
+                    arm.BlockBytes,
+                    arm.System,
+                    arm.PacketConfig,
+                    arm.Attempt);
+            if (initialize_result != Wirehair_Success) {
+                result.Result = initialize_result;
+                return result;
+            }
             const std::chrono::steady_clock::time_point start =
                 std::chrono::steady_clock::now();
             for (size_t packet_index = 0u;
                  packet_index < receive_packet_count;
                  ++packet_index)
             {
-                wirehair_v2::SolvePacket packet;
-                packet.BlockId = ImplValue->PacketIds[packet_index];
-                packet.Data = ImplValue->PacketStorage.data() +
-                    (size_t)packet_index * arm.BlockBytes;
-                received_packets.push_back(packet);
-                if (received_packets.size() < arm.K) {
-                    continue;
-                }
-
-                if (resume_state.Active)
-                {
-                    receive_result =
-                        wirehair_v2::ResumePrecodeSystemForValidatedSystem(
-                            arm.System,
-                            arm.PacketConfig,
-                            packet.BlockId,
-                            packet.Data,
-                            arm.BlockBytes,
-                            resume_state,
-                            intermediate);
-                }
-                else
-                {
-                    const size_t overhead =
-                        received_packets.size() - arm.K;
-                    if (overhead >= ImplValue->ReceiveCapacities.size()) {
-                        receive_result = Wirehair_Error;
-                        break;
-                    }
-                    const std::pair<size_t, size_t>& capacities =
-                        ImplValue->ReceiveCapacities[overhead];
-                    size_t resume_persistent_byte_limit = 0u;
-                    if (!wirehair_v2::DecoderResumePersistentByteLimit(
-                            capacities.first,
-                            capacities.second,
-                            arm.BlockBytes,
-                            resume_persistent_byte_limit))
-                    {
-                        receive_result = Wirehair_Error;
-                        break;
-                    }
-                    cold_resume.Clear();
-                    receive_result = wirehair_v2::
-                        SolvePrecodeSystemForValidatedSystemWithRuntime(
-                            arm.System,
-                            arm.PacketConfig,
-                            arm.PacketRuntime,
-                            received_packets,
-                            arm.BlockBytes,
-                            intermediate,
-                            nullptr,
-                            &cold_resume,
-                            resume_persistent_byte_limit,
-                            wirehair_v2::PackedBinaryResidualPolicy::
-                                DecoderReceive);
-                    if (receive_result == Wirehair_NeedMore &&
-                        cold_resume.Active)
-                    {
-                        size_t final_persistent_byte_limit = 0u;
-                        if (!wirehair_v2::DecoderResumePersistentByteLimit(
-                                capacities.first,
-                                capacities.second,
-                                ImplValue->PendingBlockCapacity,
-                                final_persistent_byte_limit))
-                        {
-                            receive_result = Wirehair_Error;
-                            break;
-                        }
-                        if (cold_resume.PersistentBytes() <=
-                                final_persistent_byte_limit)
-                        {
-                            resume_state.Swap(cold_resume);
-                        }
-                    }
-                }
-
+                receive_result = decoder.DecodeResult(
+                    ImplValue->PacketIds[packet_index],
+                    ImplValue->PacketStorage.data() +
+                        packet_index * arm.BlockBytes,
+                    arm.BlockBytes);
                 if (receive_result == Wirehair_Success)
                 {
                     success_packet_count = (uint32_t)packet_index + 1u;
-                    if (!RecoverWh2DecodedBytesInto(
-                            arm.System,
-                            arm.PacketConfig,
-                            arm.PacketRuntime,
-                            arm.BlockBytes,
-                            intermediate,
-                            recovered.data(),
-                            recovered.size()))
-                    {
-                        receive_result = Wirehair_Error;
-                    }
+                    receive_result = decoder.RecoverResult(
+                        recovered.data(), recovered.size());
                     break;
                 }
                 if (receive_result != Wirehair_NeedMore) {
@@ -1693,6 +1526,10 @@ TimedArmResult NativeReceiveFixture::Run() const
                     finish - start);
             result.ElapsedNanoseconds = elapsed.count() > 0 ?
                 (uint64_t)elapsed.count() : 0u;
+#else
+            result.Result = Wirehair_UnsupportedPlatform;
+            return result;
+#endif
         }
 
         result.Result = receive_result;

@@ -16,12 +16,11 @@ static const uint32_t kDecoderInitialReceiveOverhead = 32u;
 static const uint32_t kDecoderMaximumReceiveOverhead = 1024u;
 
 /**
-    Requested cold-receive capacities shared by MessagePrecodeDecoder and the
-    native receive benchmark.  These model the initialized packet reserve and
-    one pending full block.  The block count must be in the public codec domain;
-    an invalid domain, overflow, or zero block width returns false.  A caller
-    that needs allocator-exact accounting must use the capacities reported by
-    its vectors after applying these requested reserves.
+    Requested cold-receive capacities used by MessagePrecodeDecoder.  These
+    model the initialized packet reserve and one pending full block.  The block
+    count must be in the public codec domain; an invalid domain, overflow, or
+    zero block width returns false.  Allocator-exact accounting uses the
+    capacities reported by the decoder's vectors after these reserves.
 */
 bool DecoderInitialReceiveCapacities(
     uint32_t block_count,
@@ -77,6 +76,32 @@ private:
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 void SetDecoderAllocationFailureCountdownForTesting(int64_t countdown);
 void SetDecoderIncrementalResumeEnabledForTesting(bool enabled);
+
+/**
+    Coarse receive-path evidence for tests that must distinguish the real
+    message decoder from direct solver adapters.  Counters are thread-local
+    and updated only at coarse decoder phase boundaries, never on each
+    ordinary cold-receive packet.
+*/
+struct DecoderReceivePathCounters
+{
+    uint64_t ValidatedSystemInitializations = 0u;
+    uint32_t LastValidatedPacketSeedAttempt = UINT32_MAX;
+    uint64_t ColdSolveAttempts = 0u;
+    uint64_t ColdSolvePacketAssemblies = 0u;
+    uint64_t ColdSolveSlotEntries = 0u;
+    uint64_t ColdSolvePayloadBytes = 0u;
+    uint64_t CheckpointPendingAllocationAttempts = 0u;
+    uint64_t CheckpointAdoptions = 0u;
+    uint64_t PendingPacketCopies = 0u;
+    uint64_t PendingPacketCopyBytes = 0u;
+    uint64_t ResumeAttempts = 0u;
+    uint64_t RecoveryPreflights = 0u;
+    uint64_t RecoveryPacketEvaluations = 0u;
+};
+
+void ResetDecoderReceivePathCountersForTesting();
+DecoderReceivePathCounters DecoderReceivePathCountersForTesting();
 #endif
 
 /**
@@ -107,6 +132,22 @@ public:
         uint32_t block_bytes,
         const SeedProfile* seed_override = nullptr,
         const MessagePrecodeEncoderOptions* options = nullptr);
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    /**
+        Transactionally initialize the normal receive state around one exact,
+        already validated native equation system.  This test-only seam skips
+        public seed selection but otherwise shares decoder setup and every
+        DecodeResult/RecoverResult path with production.  The system is copied
+        so the initialized decoder does not borrow benchmark-arm storage.
+    */
+    WirehairResult InitializeForValidatedSystemForTesting(
+        uint64_t message_bytes,
+        uint32_t block_bytes,
+        const PrecodeSystem& system,
+        const PacketRowConfig& packet_config,
+        uint32_t packet_seed_attempt);
+#endif
 
     /** Identical duplicate ids are ignored; conflicting duplicates fail. */
     WirehairResult DecodeResult(
@@ -151,6 +192,14 @@ public:
 #endif
 
 private:
+    WirehairResult InitializeResolvedSystem(
+        uint64_t message_bytes,
+        uint32_t block_bytes,
+        SeedProfile profile,
+        MessagePrecodeEncoderOptions options,
+        PrecodeSystem&& system,
+        const PacketRowConfig& packet_config,
+        uint32_t packet_seed_attempt);
     WirehairResult AttemptSolve();
     void Swap(MessagePrecodeDecoder& other) noexcept;
 

@@ -82,6 +82,7 @@ namespace {
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 thread_local int64_t DecoderAllocationFailureCountdown = -1;
 thread_local bool DecoderIncrementalResumeEnabled = true;
+thread_local DecoderReceivePathCounters DecoderReceiveCounters;
 
 void GuardedDecoderAllocation()
 {
@@ -397,6 +398,16 @@ void SetDecoderIncrementalResumeEnabledForTesting(bool enabled)
 {
     DecoderIncrementalResumeEnabled = enabled;
 }
+
+void ResetDecoderReceivePathCountersForTesting()
+{
+    DecoderReceiveCounters = DecoderReceivePathCounters();
+}
+
+DecoderReceivePathCounters DecoderReceivePathCountersForTesting()
+{
+    return DecoderReceiveCounters;
+}
 #endif
 
 MessagePrecodeDecoder::MessagePrecodeDecoder()
@@ -503,16 +514,60 @@ WirehairResult MessagePrecodeDecoder::InitializeResult(
             }
         }
 
+        return InitializeResolvedSystem(
+            message_bytes,
+            block_bytes,
+            profile,
+            opts,
+            std::move(system),
+            selected_config,
+            packet_seed_attempt);
+    }
+    catch (const std::bad_alloc&) {
+        return Wirehair_OOM;
+    }
+    catch (const std::length_error&) {
+        return Wirehair_OOM;
+    }
+}
+
+WirehairResult MessagePrecodeDecoder::InitializeResolvedSystem(
+    uint64_t message_bytes,
+    uint32_t block_bytes,
+    SeedProfile profile,
+    MessagePrecodeEncoderOptions options,
+    PrecodeSystem&& system,
+    const PacketRowConfig& packet_config,
+    uint32_t packet_seed_attempt)
+{
+    uint32_t block_count = 0u;
+    if (message_bytes >
+            (uint64_t)std::numeric_limits<size_t>::max() ||
+        !MessageBlockCount(message_bytes, block_bytes, block_count) ||
+        profile.BlockCount != block_count ||
+        profile.BlockBytes != block_bytes ||
+        system.Params.BlockCount != block_count ||
+        packet_seed_attempt >= kMaxPacketSeedAttempts ||
+        options.RecoveryMixCount != packet_config.MixCount ||
+        options.DenseIdentityCorner !=
+            system.Params.DenseIdentityCorner ||
+        !HasValidPrecodeSystemShape(system))
+    {
+        return Wirehair_InvalidInput;
+    }
+
+    try
+    {
         MessagePrecodeDecoder next;
         next.ProfileValue = profile;
         BindMessagePrecodeProfile(
             next.ProfileValue,
-            opts,
+            options,
             system,
-            selected_config,
+            packet_config,
             packet_seed_attempt);
-        next.OptionsValue = opts;
-        next.PacketConfigValue = selected_config;
+        next.OptionsValue = options;
+        next.PacketConfigValue = packet_config;
         next.SystemValue = std::move(system);
         const uint64_t precode_count =
             (uint64_t)next.SystemValue.Params.Staircase +
@@ -522,7 +577,7 @@ WirehairResult MessagePrecodeDecoder::InitializeResult(
             !next.PacketRuntimeValue.Initialize(
                 block_count,
                 (uint32_t)precode_count,
-                selected_config.MixCount))
+                packet_config.MixCount))
         {
             return Wirehair_InvalidInput;
         }
@@ -550,7 +605,7 @@ WirehairResult MessagePrecodeDecoder::InitializeResult(
         {
             return Wirehair_OOM;
         }
-        if (opts.CacheReceivedSystematicPackets)
+        if (options.CacheReceivedSystematicPackets)
         {
             GuardedDecoderAllocation();
             next.SystematicPacketCache.reset(
@@ -573,6 +628,63 @@ WirehairResult MessagePrecodeDecoder::InitializeResult(
         return Wirehair_OOM;
     }
 }
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+WirehairResult MessagePrecodeDecoder::InitializeForValidatedSystemForTesting(
+    uint64_t message_bytes,
+    uint32_t block_bytes,
+    const PrecodeSystem& system,
+    const PacketRowConfig& packet_config,
+    uint32_t packet_seed_attempt)
+{
+    if (gf256_init() != 0) {
+        return Wirehair_UnsupportedPlatform;
+    }
+    uint32_t block_count = 0u;
+    if (message_bytes >
+            (uint64_t)std::numeric_limits<size_t>::max() ||
+        !MessageBlockCount(message_bytes, block_bytes, block_count) ||
+        system.Params.BlockCount != block_count ||
+        packet_seed_attempt >= kMaxPacketSeedAttempts)
+    {
+        return Wirehair_InvalidInput;
+    }
+
+    try
+    {
+        if (!ValidatePrecodeSystem(system)) {
+            return Wirehair_InvalidInput;
+        }
+        MessagePrecodeEncoderOptions options;
+        options.RecoveryMixCount = packet_config.MixCount;
+        options.DenseIdentityCorner = system.Params.DenseIdentityCorner;
+        SeedProfile profile = SelectSeedProfile(block_count, block_bytes);
+        GuardedDecoderAllocation();
+        PrecodeSystem owned_system(system);
+        const WirehairResult result = InitializeResolvedSystem(
+            message_bytes,
+            block_bytes,
+            profile,
+            options,
+            std::move(owned_system),
+            packet_config,
+            packet_seed_attempt);
+        if (result == Wirehair_Success)
+        {
+            ++DecoderReceiveCounters.ValidatedSystemInitializations;
+            DecoderReceiveCounters.LastValidatedPacketSeedAttempt =
+                packet_seed_attempt;
+        }
+        return result;
+    }
+    catch (const std::bad_alloc&) {
+        return Wirehair_OOM;
+    }
+    catch (const std::length_error&) {
+        return Wirehair_OOM;
+    }
+}
+#endif
 
 WirehairResult MessagePrecodeDecoder::AttemptSolve()
 {
@@ -601,6 +713,9 @@ WirehairResult MessagePrecodeDecoder::AttemptSolve()
             // cannot erase diagnostics while the algebra remains unchanged.
             PrecodeSolveStats solve_stats = SolveStatsValue;
             ++SolveAttemptCountValue;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            ++DecoderReceiveCounters.ResumeAttempts;
+#endif
             GuardedDecoderAllocation();
             const WirehairResult result =
                 ResumePrecodeSystemForValidatedSystem(
@@ -632,6 +747,9 @@ WirehairResult MessagePrecodeDecoder::AttemptSolve()
             return result;
         }
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        ++DecoderReceiveCounters.ColdSolveAttempts;
+#endif
         std::vector<SolvePacket> packets;
         packets.reserve(ReceivedBlockIds.size());
         for (size_t i = 0; i < ReceivedBlockIds.size(); ++i)
@@ -642,6 +760,13 @@ WirehairResult MessagePrecodeDecoder::AttemptSolve()
                 i * BlockBytesValue;
             packets.push_back(packet);
         }
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        DecoderReceiveCounters.ColdSolvePacketAssemblies += packets.size();
+        DecoderReceiveCounters.ColdSolveSlotEntries +=
+            ReceivedSlots.Size();
+        DecoderReceiveCounters.ColdSolvePayloadBytes +=
+            ReceivedBlockStorage.size();
+#endif
         std::vector<uint8_t> intermediate;
         // A cold solve has the same transactional stats contract: preserve
         // the last committed counters if the solver cannot allocate.
@@ -692,6 +817,9 @@ WirehairResult MessagePrecodeDecoder::AttemptSolve()
             // receive buffers.  The allocator-selected capacity, rather than
             // an assumed size, is included in the 25% policy.  Failure leaves
             // the complete cold state available for an identical retry.
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            ++DecoderReceiveCounters.CheckpointPendingAllocationAttempts;
+#endif
             GuardedDecoderAllocation();
             std::vector<uint8_t> pending_storage(BlockBytesValue, 0u);
             if (ResumeFitsMemoryPolicy(
@@ -704,6 +832,9 @@ WirehairResult MessagePrecodeDecoder::AttemptSolve()
                 PendingPacketStorage.swap(pending_storage);
                 std::vector<uint32_t>().swap(ReceivedBlockIds);
                 std::vector<uint8_t>().swap(ReceivedBlockStorage);
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+                ++DecoderReceiveCounters.CheckpointAdoptions;
+#endif
             }
         }
         LastSolveResult = result;
@@ -860,6 +991,10 @@ WirehairResult MessagePrecodeDecoder::DecodeResult(
                 PendingPacketStorage.begin() + data_bytes,
                 PendingPacketStorage.end(),
                 uint8_t{0});
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            ++DecoderReceiveCounters.PendingPacketCopies;
+            DecoderReceiveCounters.PendingPacketCopyBytes += data_bytes;
+#endif
             if (!ReceivedSlots.InsertImpl(block_id, UINT32_MAX)) {
                 return LastSolveResult;
             }
@@ -1001,6 +1136,9 @@ WirehairResult MessagePrecodeDecoder::RecoverResult(
     }
     try
     {
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        ++DecoderReceiveCounters.RecoveryPreflights;
+#endif
         const uint32_t K = ProfileValue.BlockCount;
         const bool cache_enabled = SystematicPacketCache != nullptr;
         if (cache_enabled &&
@@ -1061,6 +1199,9 @@ WirehairResult MessagePrecodeDecoder::RecoverResult(
         }
 
         uint8_t* output = static_cast<uint8_t*>(message_out);
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        uint32_t evaluated_packets = 0u;
+#endif
         for (uint32_t block_id = 0; block_id < K; ++block_id)
         {
             const uint32_t bytes = PacketDataBytes(
@@ -1092,12 +1233,19 @@ WirehairResult MessagePrecodeDecoder::RecoverResult(
                 // corrupted immutable decoder state.
                 return Wirehair_Error;
             }
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            ++evaluated_packets;
+#endif
             if (final_is_partial && block_id + 1u == K) {
                 std::memcpy(
                     output + (size_t)block_id * BlockBytesValue,
                     final_block.data(), bytes);
             }
         }
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        DecoderReceiveCounters.RecoveryPacketEvaluations +=
+            evaluated_packets;
+#endif
         return Wirehair_Success;
     }
     catch (const std::bad_alloc&) {

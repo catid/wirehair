@@ -359,10 +359,11 @@ private:
     Timing-ready receive-to-success fixture over an exact prepared
     K+receive_overhead_cap trace.
     Each Run() creates fresh decoder bookkeeping before the clock, then times
-    all feeds through first success plus full Recover.  WH2 uses the real
-    decoder's packed-residual crossover, allocator-selected per-prefix receive
-    capacities, and 25% checkpoint budget; a rejected checkpoint cold-solves
-    the next prefix.
+    all feeds through first success plus full Recover.  WH2 initializes the
+    real MessagePrecodeDecoder around the arm's exact validated native
+    system/configuration/attempt, then times DecodeResult and RecoverResult.
+    This includes receive payload copies, PacketSlotTable updates, cold packet
+    assembly, checkpoint adoption/pending copies, and recovery preflight.
     Wirehair1 uses its public fresh decoder.  Byte comparison occurs only
     after the clock stops.
 */

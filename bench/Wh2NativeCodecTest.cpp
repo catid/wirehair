@@ -1,5 +1,7 @@
 #include "Wh2NativeCodec.h"
 
+#include "../codec/WirehairV2PrecodeDecode.h"
+
 #include <wirehair/wirehair.h>
 
 #include <algorithm>
@@ -174,6 +176,104 @@ bool EncodePublicWh2(
         packets_out.swap(packets);
     }
     return valid;
+}
+
+struct PublicReceiveResult
+{
+    WirehairV2Result Result = WirehairV2_Error;
+    uint32_t DecodedOverhead = UINT32_MAX;
+    bool BytesVerified = false;
+};
+
+bool RunPublicWh2Receive(
+    const NativeArm& arm,
+    const std::vector<uint8_t>& source,
+    uint32_t attempt,
+    const std::vector<uint32_t>& packet_ids,
+    uint32_t receive_overhead_cap,
+    PublicReceiveResult& result_out)
+{
+    const uint64_t required =
+        (uint64_t)arm.BlockCount() + receive_overhead_cap;
+    if (!arm.IsInitialized() ||
+        arm.Kind() != NativeArmKind::Wirehair2Certified ||
+        attempt != arm.ConstructionAttempt() ||
+        source.size() !=
+            (size_t)arm.BlockCount() * arm.BlockBytes() ||
+        required > packet_ids.size())
+    {
+        return false;
+    }
+
+    WirehairV2Profile profile = {};
+    profile.struct_bytes = (uint32_t)sizeof(profile);
+    profile.profile_version = WIREHAIR_V2_PROFILE_VERSION;
+    profile.profile_id = WIREHAIR_V2_PROFILE_CERTIFIED_2026_07;
+    profile.message_bytes = source.size();
+    profile.block_bytes = arm.BlockBytes();
+    profile.seed_attempt = (uint8_t)attempt;
+    uint8_t serialized[WIREHAIR_V2_PROFILE_SERIALIZED_BYTES] = {};
+    uint32_t serialized_bytes = 0u;
+    if (wirehair_v2_profile_serialize(
+            &profile,
+            serialized,
+            sizeof(serialized),
+            &serialized_bytes) != WirehairV2_Success ||
+        serialized_bytes != sizeof(serialized))
+    {
+        return false;
+    }
+
+    WirehairV2Codec decoder = nullptr;
+    if (wirehair_v2_decoder_create(
+            serialized, sizeof(serialized), &decoder) !=
+        WirehairV2_Success)
+    {
+        return false;
+    }
+
+    PublicReceiveResult result;
+    std::vector<uint8_t> packet(arm.BlockBytes(), 0u);
+    std::vector<uint8_t> recovered(source.size(), 0u);
+    for (uint32_t packet_index = 0u;
+         packet_index < required;
+         ++packet_index)
+    {
+        if (arm.EncodeInto(
+                packet_ids[packet_index],
+                packet.data(),
+                arm.BlockBytes()) != Wirehair_Success)
+        {
+            wirehair_v2_free(decoder);
+            return false;
+        }
+        result.Result = wirehair_v2_decode(
+            decoder,
+            packet_ids[packet_index],
+            packet.data(),
+            arm.BlockBytes());
+        if (result.Result == WirehairV2_Success)
+        {
+            result.DecodedOverhead =
+                packet_index + 1u - arm.BlockCount();
+            uint64_t recovered_bytes = 0u;
+            result.Result = wirehair_v2_recover(
+                decoder,
+                recovered.data(),
+                recovered.size(),
+                &recovered_bytes);
+            result.BytesVerified =
+                result.Result == WirehairV2_Success &&
+                recovered_bytes == source.size() && recovered == source;
+            break;
+        }
+        if (result.Result != WirehairV2_NeedMore) {
+            break;
+        }
+    }
+    wirehair_v2_free(decoder);
+    result_out = result;
+    return true;
 }
 
 void CheckDeterministicSource()
@@ -986,6 +1086,9 @@ void CheckOtherTimingScopes()
                   Wirehair_InvalidInput &&
                   receive_fixture.IsInitialized(),
             "receive timing accepted an overflowing K+cap domain");
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        wirehair_v2::ResetDecoderReceivePathCountersForTesting();
+#endif
         const wirehair_wh2_bench::TimedArmResult receive_result =
             receive_fixture.Run();
         Check(receive_result.Result == Wirehair_Success &&
@@ -993,6 +1096,66 @@ void CheckOtherTimingScopes()
                   receive_result.ElapsedNanoseconds > 0u &&
                   receive_result.DecodedOverhead == 0u,
             "fresh receive-to-success timing scope failed");
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        const wirehair_v2::DecoderReceivePathCounters counters =
+            wirehair_v2::DecoderReceivePathCountersForTesting();
+        if (spec.Kind == NativeArmKind::Wirehair1)
+        {
+            Check(counters.ValidatedSystemInitializations == 0u &&
+                      counters.ColdSolveAttempts == 0u &&
+                      counters.RecoveryPreflights == 0u,
+                "Wirehair1 timing unexpectedly entered the WH2 decoder");
+        }
+        else
+        {
+            Check(counters.ValidatedSystemInitializations == 1u &&
+                      counters.LastValidatedPacketSeedAttempt ==
+                          spec.ConstructionAttempt,
+                "WH2 timing did not initialize its exact native attempt");
+            Check(counters.ColdSolveAttempts == 1u &&
+                      counters.ColdSolvePacketAssemblies == K &&
+                      counters.ColdSolveSlotEntries == K &&
+                      counters.ColdSolvePayloadBytes ==
+                          (uint64_t)K * block_bytes,
+                "WH2 timing bypassed receive storage or cold packet assembly");
+            Check(counters.CheckpointAdoptions == 0u &&
+                      counters.PendingPacketCopies == 0u &&
+                      counters.ResumeAttempts == 0u,
+                "full-rank systematic timing unexpectedly used a checkpoint");
+            Check(counters.RecoveryPreflights == 1u &&
+                      counters.RecoveryPacketEvaluations == K,
+                "WH2 timing bypassed full decoder recovery");
+
+            if (spec.Kind == NativeArmKind::Wirehair2Experiment)
+            {
+                // A systematic-only trace cannot distinguish packet-row
+                // configurations.  Require the transformed, nonzero-attempt
+                // arm to recover from its own repair-only symbols as well.
+                const std::vector<uint32_t> repair_ids =
+                    ConsecutiveIds(K, K, 64u);
+                NativeReceiveFixture repair_receive;
+                Check(repair_receive.Initialize(
+                          arm, repair_ids, 64u) == Wirehair_Success,
+                    "experimental repair-only receive setup failed");
+                wirehair_v2::ResetDecoderReceivePathCountersForTesting();
+                const wirehair_wh2_bench::TimedArmResult repair_result =
+                    repair_receive.Run();
+                const wirehair_v2::DecoderReceivePathCounters
+                    repair_counters =
+                        wirehair_v2::
+                            DecoderReceivePathCountersForTesting();
+                Check(repair_result.Result == Wirehair_Success &&
+                          repair_result.BytesVerified &&
+                          repair_result.DecodedOverhead <= 64u,
+                    "experimental exact configuration failed repair-only receive");
+                Check(repair_counters.ValidatedSystemInitializations == 1u &&
+                          repair_counters.LastValidatedPacketSeedAttempt ==
+                              spec.ConstructionAttempt &&
+                          repair_counters.RecoveryPreflights == 1u,
+                    "experimental repair-only receive lost exact attempt state");
+            }
+        }
+#endif
     }
 }
 
@@ -1046,6 +1209,7 @@ void CheckNativeReceiveTrustedResume()
         "trusted receive fixture initialization failed");
     wirehair_v2::ResetResumeSystemFingerprintChecksForTesting();
     wirehair_v2::ResetPackedBinaryResidualUsesForTesting();
+    wirehair_v2::ResetDecoderReceivePathCountersForTesting();
     const wirehair_wh2_bench::TimedArmResult result = receive.Run();
     Check(result.Result == Wirehair_Success &&
               result.BytesVerified &&
@@ -1056,6 +1220,35 @@ void CheckNativeReceiveTrustedResume()
         "native receive recomputed the immutable system fingerprint");
     Check(wirehair_v2::PackedBinaryResidualUsesForTesting() == 0u,
         "trusted receive unexpectedly cold-fell back under its budget");
+    const wirehair_v2::DecoderReceivePathCounters counters =
+        wirehair_v2::DecoderReceivePathCountersForTesting();
+    Check(counters.ValidatedSystemInitializations == 1u &&
+              counters.LastValidatedPacketSeedAttempt == 0u &&
+              counters.ColdSolveAttempts == 1u &&
+              counters.ColdSolvePacketAssemblies == K &&
+              counters.ColdSolveSlotEntries == K &&
+              counters.ColdSolvePayloadBytes ==
+                  (uint64_t)K * block_bytes,
+        "trusted receive bypassed exact decoder cold-receive work");
+    Check(counters.CheckpointPendingAllocationAttempts == 1u &&
+              counters.CheckpointAdoptions == 1u &&
+              counters.PendingPacketCopies == result.DecodedOverhead &&
+              counters.PendingPacketCopyBytes ==
+                  (uint64_t)result.DecodedOverhead * block_bytes &&
+              counters.ResumeAttempts == result.DecodedOverhead,
+        "trusted receive bypassed checkpoint pending-copy/resume work");
+    Check(counters.RecoveryPreflights == 1u &&
+              counters.RecoveryPacketEvaluations == K,
+        "trusted receive bypassed decoder recovery preflight");
+
+    PublicReceiveResult public_result;
+    Check(RunPublicWh2Receive(
+              arm, source, 0u, ids, 2u, public_result),
+        "trusted receive public differential setup failed");
+    Check(public_result.Result == WirehairV2_Success &&
+              public_result.BytesVerified &&
+              public_result.DecodedOverhead == result.DecodedOverhead,
+        "native exact-system receive differs from the public decoder");
 #endif
 }
 
@@ -1185,6 +1378,228 @@ void CheckNativeReceiveBudgetColdFallback()
     {
         return;
     }
+#endif
+}
+
+void CheckValidatedDecoderInitializationTransactionality()
+{
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    const uint32_t K = 36u;
+    const uint32_t block_bytes = 64u;
+    const NativeArmSpec spec =
+        wirehair_wh2_bench::MakeCertifiedWh2Arm(0u);
+    wirehair_wh2_bench::ResolvedNativeWh2Configuration resolved;
+    wirehair_v2::PrecodeSystem system;
+    std::vector<uint8_t> source;
+    NativeArm arm;
+    if (!Check(wirehair_wh2_bench::ResolveNativeWh2Configuration(
+                  spec, K, block_bytes, resolved) &&
+                  wirehair_v2::BuildPrecodeSystem(
+                      resolved.Params, system) &&
+                  wirehair_wh2_bench::MakeDeterministicSource(
+                      K,
+                      block_bytes,
+                      UINT64_C(0xd63b8a79f142c05e),
+                      source) &&
+                  arm.Initialize(
+                      spec, K, block_bytes, source) == Wirehair_Success,
+            "validated decoder transaction fixture setup failed"))
+    {
+        return;
+    }
+
+    wirehair_v2::MessagePrecodeDecoder decoder;
+    if (!Check(decoder.InitializeForValidatedSystemForTesting(
+                  source.size(),
+                  block_bytes,
+                  system,
+                  resolved.PacketConfig,
+                  resolved.PacketAttempt) == Wirehair_Success,
+            "validated decoder exact initialization failed"))
+    {
+        return;
+    }
+    const uint64_t preserved_seed = decoder.System().Params.Seed;
+    const uint32_t preserved_attempt = decoder.PacketSeedAttempt();
+
+    wirehair_v2::PrecodeSystem malformed(system);
+    malformed.StaircaseRows.pop_back();
+    Check(decoder.InitializeForValidatedSystemForTesting(
+              source.size(),
+              block_bytes,
+              malformed,
+              resolved.PacketConfig,
+              resolved.PacketAttempt) == Wirehair_InvalidInput &&
+              decoder.IsInitialized() && !decoder.IsDecoded() &&
+              decoder.System().Params.Seed == preserved_seed &&
+              decoder.PacketSeedAttempt() == preserved_attempt,
+        "invalid exact-system initialization modified prior decoder state");
+
+    wirehair_v2::PacketRowConfig invalid_config = resolved.PacketConfig;
+    invalid_config.MixCount = UINT32_MAX;
+    Check(decoder.InitializeForValidatedSystemForTesting(
+              source.size(),
+              block_bytes,
+              system,
+              invalid_config,
+              resolved.PacketAttempt) == Wirehair_InvalidInput &&
+              decoder.IsInitialized() && !decoder.IsDecoded() &&
+              decoder.System().Params.Seed == preserved_seed &&
+              decoder.PacketSeedAttempt() == preserved_attempt,
+        "invalid exact packet configuration modified prior decoder state");
+
+    for (int64_t failure = 0; failure < 4; ++failure)
+    {
+        wirehair_v2::SetDecoderAllocationFailureCountdownForTesting(failure);
+        const WirehairResult allocation_result =
+            decoder.InitializeForValidatedSystemForTesting(
+                source.size(),
+                block_bytes,
+                system,
+                resolved.PacketConfig,
+                resolved.PacketAttempt);
+        wirehair_v2::SetDecoderAllocationFailureCountdownForTesting(-1);
+        Check(allocation_result == Wirehair_OOM &&
+                  decoder.IsInitialized() && !decoder.IsDecoded() &&
+                  decoder.System().Params.Seed == preserved_seed &&
+                  decoder.PacketSeedAttempt() == preserved_attempt,
+            "exact-system initialization OOM modified prior decoder state");
+    }
+
+    std::vector<uint8_t> packet(block_bytes, 0u);
+    WirehairResult decode_result = Wirehair_NeedMore;
+    for (uint32_t block_id = 0u; block_id < K; ++block_id)
+    {
+        if (!Check(arm.EncodeInto(
+                      block_id, packet.data(), block_bytes) ==
+                      Wirehair_Success,
+                "preserved decoder packet encode failed"))
+        {
+            return;
+        }
+        decode_result = decoder.DecodeResult(
+            block_id, packet.data(), block_bytes);
+    }
+    std::vector<uint8_t> recovered(source.size(), 0u);
+    Check(decode_result == Wirehair_Success &&
+              decoder.RecoverResult(
+                  recovered.data(), recovered.size()) == Wirehair_Success &&
+              recovered == source,
+        "failed exact-system reinitialization corrupted prior decoder");
+#endif
+}
+
+void CheckNativeReceiveAllocationCoverage()
+{
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    const uint32_t K = 1000u;
+    const uint32_t block_bytes = 257u;
+    const NativeArmSpec spec =
+        wirehair_wh2_bench::MakeCertifiedWh2Arm(0u);
+    wirehair_wh2_bench::ResolvedNativeWh2Configuration resolved;
+    wirehair_v2::PrecodeSystem system;
+    uint32_t collision_a = 0u;
+    uint32_t collision_b = 0u;
+    std::vector<uint8_t> source;
+    NativeArm arm;
+    if (!Check(wirehair_wh2_bench::ResolveNativeWh2Configuration(
+                  spec, K, block_bytes, resolved) &&
+                  wirehair_v2::BuildPrecodeSystem(
+                      resolved.Params, system) &&
+                  FindFirstPacketRowCollision(
+                      system,
+                      resolved.PacketConfig,
+                      collision_a,
+                      collision_b) &&
+                  wirehair_wh2_bench::MakeDeterministicSource(
+                      K,
+                      block_bytes,
+                      UINT64_C(0xf067e3a29bc45d18),
+                      source) &&
+                  arm.Initialize(
+                      spec, K, block_bytes, source) == Wirehair_Success,
+            "native receive allocation fixture setup failed"))
+    {
+        return;
+    }
+
+    std::vector<uint32_t> ids;
+    ids.reserve((size_t)K + 2u);
+    for (uint32_t id = 0u; id + 2u < K; ++id) {
+        ids.push_back(id);
+    }
+    ids.push_back(collision_a);
+    ids.push_back(collision_b);
+    ids.push_back(K - 2u);
+    ids.push_back(K - 1u);
+    NativeReceiveFixture receive;
+    if (!Check(receive.Initialize(arm, ids, 2u) == Wirehair_Success,
+            "native receive allocation fixture initialization failed"))
+    {
+        return;
+    }
+
+    wirehair_v2::ResetDecoderReceivePathCountersForTesting();
+    wirehair_v2::SetDecoderAllocationFailureCountdownForTesting(0);
+    const wirehair_wh2_bench::TimedArmResult setup_oom = receive.Run();
+    wirehair_v2::SetDecoderAllocationFailureCountdownForTesting(-1);
+    const wirehair_v2::DecoderReceivePathCounters setup_counters =
+        wirehair_v2::DecoderReceivePathCountersForTesting();
+    Check(setup_oom.Result == Wirehair_OOM &&
+              setup_oom.ElapsedNanoseconds == 0u &&
+              setup_counters.ValidatedSystemInitializations == 0u &&
+              setup_counters.ColdSolveAttempts == 0u,
+        "native receive did not expose exact-decoder setup allocation failure");
+
+    // Four guarded allocations initialize the exact decoder (owned system,
+    // id reserve, payload reserve, slot table).  The fifth is the first cold
+    // solve boundary and must occur after K timed payload/slot insertions and
+    // SolvePacket assembly.
+    wirehair_v2::ResetDecoderReceivePathCountersForTesting();
+    wirehair_v2::SetDecoderAllocationFailureCountdownForTesting(4);
+    const wirehair_wh2_bench::TimedArmResult solve_oom = receive.Run();
+    wirehair_v2::SetDecoderAllocationFailureCountdownForTesting(-1);
+    const wirehair_v2::DecoderReceivePathCounters solve_counters =
+        wirehair_v2::DecoderReceivePathCountersForTesting();
+    Check(solve_oom.Result == Wirehair_OOM &&
+              solve_oom.ElapsedNanoseconds == 0u &&
+              solve_counters.ValidatedSystemInitializations == 1u &&
+              solve_counters.ColdSolveAttempts == 1u &&
+              solve_counters.ColdSolvePacketAssemblies == K &&
+              solve_counters.ColdSolveSlotEntries == K &&
+              solve_counters.ColdSolvePayloadBytes ==
+                  (uint64_t)K * block_bytes &&
+              solve_counters.RecoveryPreflights == 0u,
+        "native receive solve OOM bypassed timed receive bookkeeping");
+
+    // Let the deficient solve finish, then fail the production pending-slot
+    // allocation immediately before checkpoint adoption.
+    wirehair_v2::ResetDecoderReceivePathCountersForTesting();
+    wirehair_v2::SetDecoderAllocationFailureCountdownForTesting(5);
+    const wirehair_wh2_bench::TimedArmResult pending_oom = receive.Run();
+    wirehair_v2::SetDecoderAllocationFailureCountdownForTesting(-1);
+    const wirehair_v2::DecoderReceivePathCounters pending_counters =
+        wirehair_v2::DecoderReceivePathCountersForTesting();
+    Check(pending_oom.Result == Wirehair_OOM &&
+              pending_oom.ElapsedNanoseconds == 0u &&
+              pending_counters.ValidatedSystemInitializations == 1u &&
+              pending_counters.ColdSolveAttempts == 1u &&
+              pending_counters.CheckpointPendingAllocationAttempts == 1u &&
+              pending_counters.CheckpointAdoptions == 0u &&
+              pending_counters.PendingPacketCopies == 0u,
+        "native receive bypassed checkpoint pending-slot allocation");
+
+    wirehair_v2::ResetDecoderReceivePathCountersForTesting();
+    const wirehair_wh2_bench::TimedArmResult retry = receive.Run();
+    const wirehair_v2::DecoderReceivePathCounters retry_counters =
+        wirehair_v2::DecoderReceivePathCountersForTesting();
+    Check(retry.Result == Wirehair_Success && retry.BytesVerified &&
+              retry.DecodedOverhead >= 1u &&
+              retry.DecodedOverhead <= 2u &&
+              retry_counters.CheckpointAdoptions == 1u &&
+              retry_counters.PendingPacketCopies == retry.DecodedOverhead &&
+              retry_counters.RecoveryPreflights == 1u,
+        "native receive fixture was not reusable after allocation failures");
 #endif
 }
 
@@ -1408,6 +1823,8 @@ int main()
     CheckNativeReceiveTrustedResume();
     CheckNativeReceivePackedDispatchSeam();
     CheckNativeReceiveBudgetColdFallback();
+    CheckValidatedDecoderInitializationTransactionality();
+    CheckNativeReceiveAllocationCoverage();
     CheckTimingControlProbe();
     if (Failures != 0)
     {
