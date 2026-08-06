@@ -103,8 +103,20 @@ short byte count; repair packets remain full blocks.
 `MessagePrecodeDecoder` incrementally collects the same equations, peels the
 binary system, projects the unresolved residual, and solves it exactly over
 GF(256), including the Cauchy heavy coefficients and block right-hand sides.
-After a bounded rank failure it retains the peeled-column affine projection and
-reduced GF(256) pivots, then projects each new equation into that fixed basis.
+The cold solver keeps the projected binary residual as a packed GF(2) RREF and
+forms only the free-variable GF(256) quotient induced by the heavy rows.  A
+successful solve reconstructs the binary pivots directly from those packed
+relations.  This avoids expanding the ordinary binary region into a byte-wide
+GF(256) matrix; it does not change the equation system or recovery result.
+When a bounded rank failure needs an incremental checkpoint, the solver
+transactionally materializes the established byte-pivot representation and
+replays the small heavy-row set before publishing it.  The public/generic
+checkpoint path keeps the measured 2048-byte packed crossover, while the
+decoder receive-to-success path uses its measured 1280-byte crossover; solves
+without a checkpoint and checkpoints rejected by the memory budget always use
+the packed representation.
+After publication the decoder retains the peeled-column affine projection and
+reduced pivots, then projects each new equation into that fixed basis.
 This is equivalent to a cold solve even when the added row would change the
 peeling order, because the checkpoint represents the complete original row
 space rather than assuming that order remains optimal.  The receive payload
