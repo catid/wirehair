@@ -817,7 +817,7 @@ if(BUILD_TESTS)
             bench/Wh2PhaseAttribution.h
             bench/Wh2PhaseAttributionTest.cpp)
         target_link_libraries(wirehair_wh2_phase_attribution_test PRIVATE
-            wirehair_v2_policy)
+            wirehair_v2_timing_policy)
         wirehair_apply_project_options(wirehair_wh2_phase_attribution_test)
         add_test(
             NAME wirehair_wh2_phase_attribution_test
@@ -840,9 +840,24 @@ if(BUILD_TESTS)
         target_compile_definitions(wirehair_wh2_contract_worker PRIVATE
             "WIREHAIR_WH2_SOURCE_GIT_COMMIT=\"${WIREHAIR_WH2_SOURCE_GIT_COMMIT}\"")
         target_link_libraries(wirehair_wh2_contract_worker PRIVATE
-            wirehair_v2_policy
+            wirehair_v2_timing_policy
             Threads::Threads)
         wirehair_apply_project_options(wirehair_wh2_contract_worker)
+        if(CMAKE_NM)
+            add_test(
+                NAME wirehair_wh2_timing_policy_symbol_audit
+                COMMAND ${CMAKE_COMMAND}
+                    "-DNM=${CMAKE_NM}"
+                    "-DTIMING_POLICY=$<TARGET_FILE:wirehair_v2_timing_policy>"
+                    "-DCONTRACT_WORKER=$<TARGET_FILE:wirehair_wh2_contract_worker>"
+                    "-DPHASE_TIMING=$<TARGET_FILE:wirehair_wh2_phase_attribution_test>"
+                    -P ${PROJECT_SOURCE_DIR}/cmake/Wh2TimingPolicySymbolAudit.cmake)
+            set_tests_properties(
+                wirehair_wh2_timing_policy_symbol_audit
+                PROPERTIES
+                    TIMEOUT 30
+                    LABELS "wh2;benchmark;contract;timing;symbols")
+        endif()
     endif()
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT CMAKE_CROSSCOMPILING)
         if(BUILD_CODEC_V2)

@@ -121,7 +121,8 @@ bool ValidatePrecodeParams(const PrecodeParams& params)
         (uint64_t)params.BlockCount + params.Staircase;
     if (params.DenseAnchors != DenseAnchorLayout::Disabled)
     {
-#if !defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+#if !defined(WIREHAIR_V2_ENABLE_TEST_HOOKS) && \
+    !defined(WIREHAIR_V2_ENABLE_BENCHMARK_EQUATIONS)
         return false;
 #else
         if (params.DenseRows != 12u || params.HeavyRows != 12u ||

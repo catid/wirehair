@@ -2,6 +2,12 @@
 #define _GNU_SOURCE
 #endif
 
+#if !defined(WIREHAIR_V2_ENABLE_BENCHMARK_EQUATIONS)
+#error "contract worker requires counter-free benchmark equations"
+#elif defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+#error "contract worker must not compile with generic WH2 test hooks"
+#endif
+
 #include "Wh2FrozenTiming.h"
 #include "Wh2FrozenTrace.h"
 #include "Wh2NativeCodec.h"

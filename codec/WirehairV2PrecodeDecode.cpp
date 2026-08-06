@@ -637,6 +637,41 @@ WirehairResult MessagePrecodeDecoder::InitializeForValidatedSystemForTesting(
     const PacketRowConfig& packet_config,
     uint32_t packet_seed_attempt)
 {
+    return InitializeForValidatedSystem(
+        message_bytes,
+        block_bytes,
+        system,
+        packet_config,
+        packet_seed_attempt);
+}
+#endif
+
+#if defined(WIREHAIR_V2_ENABLE_BENCHMARK_EQUATIONS)
+WirehairResult MessagePrecodeDecoder::InitializeForValidatedSystemForBenchmark(
+    uint64_t message_bytes,
+    uint32_t block_bytes,
+    const PrecodeSystem& system,
+    const PacketRowConfig& packet_config,
+    uint32_t packet_seed_attempt)
+{
+    return InitializeForValidatedSystem(
+        message_bytes,
+        block_bytes,
+        system,
+        packet_config,
+        packet_seed_attempt);
+}
+#endif
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS) || \
+    defined(WIREHAIR_V2_ENABLE_BENCHMARK_EQUATIONS)
+WirehairResult MessagePrecodeDecoder::InitializeForValidatedSystem(
+    uint64_t message_bytes,
+    uint32_t block_bytes,
+    const PrecodeSystem& system,
+    const PacketRowConfig& packet_config,
+    uint32_t packet_seed_attempt)
+{
     if (gf256_init() != 0) {
         return Wirehair_UnsupportedPlatform;
     }
@@ -671,9 +706,11 @@ WirehairResult MessagePrecodeDecoder::InitializeForValidatedSystemForTesting(
             packet_seed_attempt);
         if (result == Wirehair_Success)
         {
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
             ++DecoderReceiveCounters.ValidatedSystemInitializations;
             DecoderReceiveCounters.LastValidatedPacketSeedAttempt =
                 packet_seed_attempt;
+#endif
         }
         return result;
     }

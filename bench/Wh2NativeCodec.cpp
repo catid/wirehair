@@ -10,6 +10,14 @@
 #include <stdexcept>
 #include <utility>
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS) && \
+    defined(WIREHAIR_V2_ENABLE_BENCHMARK_EQUATIONS)
+#error "native WH2 adapter cannot mix test hooks with benchmark equations"
+#elif !defined(WIREHAIR_V2_ENABLE_TEST_HOOKS) && \
+    !defined(WIREHAIR_V2_ENABLE_BENCHMARK_EQUATIONS)
+#error "native WH2 adapter requires one explicit equation capability"
+#endif
+
 namespace wirehair_wh2_bench {
 namespace {
 
@@ -123,7 +131,8 @@ bool ValidPrecodeParamsShape(
         (uint64_t)params.BlockCount + params.Staircase;
     bool valid_dense_anchors = params.DenseAnchors ==
         wirehair_v2::DenseAnchorLayout::Disabled;
-#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS) || \
+    defined(WIREHAIR_V2_ENABLE_BENCHMARK_EQUATIONS)
     valid_dense_anchors = valid_dense_anchors ||
         ((params.DenseAnchors == wirehair_v2::DenseAnchorLayout::Two07 ||
           params.DenseAnchors ==
@@ -1480,14 +1489,19 @@ TimedArmResult NativeReceiveFixture::Run() const
         }
         else
         {
-#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS) || \
+    defined(WIREHAIR_V2_ENABLE_BENCHMARK_EQUATIONS)
             // Construct and initialize a fresh real decoder outside the
             // measured interval, matching Wirehair1.  The exact-system seam
             // preserves experimental systems/configurations/attempts while
             // DecodeResult and RecoverResult perform all timed receive work.
             wirehair_v2::MessagePrecodeDecoder decoder;
             const WirehairResult initialize_result =
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
                 decoder.InitializeForValidatedSystemForTesting(
+#else
+                decoder.InitializeForValidatedSystemForBenchmark(
+#endif
                     (uint64_t)arm.Source.size(),
                     arm.BlockBytes,
                     arm.System,

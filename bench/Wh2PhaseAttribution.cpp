@@ -1,5 +1,11 @@
 #include "Wh2PhaseAttribution.h"
 
+#if !defined(WIREHAIR_V2_ENABLE_BENCHMARK_EQUATIONS)
+#error "phase timing requires counter-free benchmark equations"
+#elif defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+#error "phase timing must not compile with generic WH2 test hooks"
+#endif
+
 #include <limits>
 #include <new>
 #include <stdexcept>
@@ -10,6 +16,23 @@ namespace {
 
 static const uint64_t kMaxInt63 =
     static_cast<uint64_t>(std::numeric_limits<int64_t>::max());
+
+bool PhaseObservationCount(
+    uint32_t invocations_per_slot,
+    std::size_t& observation_count)
+{
+    observation_count = 0u;
+#if SIZE_MAX < UINT64_MAX
+    const uint64_t count_wide =
+        UINT64_C(2) + static_cast<uint64_t>(invocations_per_slot) * 4u;
+    if (count_wide > SIZE_MAX) {
+        return false;
+    }
+#endif
+    observation_count = 2u +
+        static_cast<std::size_t>(invocations_per_slot) * 4u;
+    return true;
+}
 
 bool KnownArm(PhaseSolveArm arm)
 {
@@ -272,13 +295,13 @@ bool ValidateAndAssemblePhasePanel(
     std::string& diagnostic)
 {
     diagnostic.clear();
+    std::size_t expected_observations = 0u;
     if ((expected_order != NativePanelOrder::ABBA &&
          expected_order != NativePanelOrder::BAAB) ||
         invocations_per_slot < 2u ||
-        invocations_per_slot >
-            (std::numeric_limits<std::size_t>::max() - 2u) / 4u ||
-        observations.size() !=
-            2u + static_cast<std::size_t>(invocations_per_slot) * 4u ||
+        !PhaseObservationCount(
+            invocations_per_slot, expected_observations) ||
+        observations.size() != expected_observations ||
         panel.Status != NativePanelStatus::Complete ||
         !panel.Diagnostic.empty() ||
         !panel.HasLeftPreflight || !panel.HasRightPreflight ||

@@ -1,5 +1,10 @@
 #pragma once
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS) && \
+    defined(WIREHAIR_V2_ENABLE_BENCHMARK_EQUATIONS)
+#error "WH2 test hooks and benchmark equations are mutually exclusive"
+#endif
+
 #include <stdint.h>
 
 #include <vector>

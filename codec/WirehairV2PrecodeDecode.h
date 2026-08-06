@@ -149,6 +149,20 @@ public:
         uint32_t packet_seed_attempt);
 #endif
 
+#if defined(WIREHAIR_V2_ENABLE_BENCHMARK_EQUATIONS)
+    /**
+        Benchmark-only counterpart of the exact validated-system initializer.
+        This narrow capability preserves experimental equations without
+        compiling generic test hooks or diagnostic counters into timed code.
+    */
+    WirehairResult InitializeForValidatedSystemForBenchmark(
+        uint64_t message_bytes,
+        uint32_t block_bytes,
+        const PrecodeSystem& system,
+        const PacketRowConfig& packet_config,
+        uint32_t packet_seed_attempt);
+#endif
+
     /** Identical duplicate ids are ignored; conflicting duplicates fail. */
     WirehairResult DecodeResult(
         uint32_t block_id,
@@ -192,6 +206,15 @@ public:
 #endif
 
 private:
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS) || \
+    defined(WIREHAIR_V2_ENABLE_BENCHMARK_EQUATIONS)
+    WirehairResult InitializeForValidatedSystem(
+        uint64_t message_bytes,
+        uint32_t block_bytes,
+        const PrecodeSystem& system,
+        const PacketRowConfig& packet_config,
+        uint32_t packet_seed_attempt);
+#endif
     WirehairResult InitializeResolvedSystem(
         uint64_t message_bytes,
         uint32_t block_bytes,
