@@ -4061,16 +4061,16 @@ bool CheckHeavyProjectionPropagationOracle()
     return true;
 }
 
-bool CheckPortableProjectionAVX2Differential()
+bool CheckProjectionAVX2Differential()
 {
-#if !defined(GF256_TRY_TARGET_AVX2) || defined(__AVX2__)
+#if !defined(GF256_TRY_TARGET_AVX2) && !defined(__AVX2__)
     std::printf(
-        "portable projection AVX2 differential: not applicable: PASS\n");
+        "projection AVX2 differential: not applicable: PASS\n");
     return true;
 #else
     if (!wirehair_v2::ProjectionAVX2AvailableForTesting()) {
         std::printf(
-            "portable projection AVX2 differential: host unavailable: "
+            "projection AVX2 differential: host unavailable: "
             "PASS\n");
         return true;
     }
@@ -4080,7 +4080,7 @@ bool CheckPortableProjectionAVX2Differential()
         wirehair_v2::ProjectionAVX2ModeForTesting() != 0)
     {
         std::fprintf(stderr,
-            "solve: portable projection AVX2 mode validation failed\n");
+            "solve: projection AVX2 mode validation failed\n");
         return false;
     }
 
@@ -4097,7 +4097,7 @@ bool CheckPortableProjectionAVX2Differential()
             params, base_config, system, config) != Wirehair_Success)
     {
         std::fprintf(stderr,
-            "solve: portable projection AVX2 configuration failed\n");
+            "solve: projection AVX2 configuration failed\n");
         return false;
     }
 
@@ -4179,7 +4179,7 @@ bool CheckPortableProjectionAVX2Differential()
             system, config, packets, avx2_output.data(), block_bytes))
     {
         std::fprintf(stderr,
-            "solve: portable projection AVX2 differential mismatch "
+            "solve: projection AVX2 differential mismatch "
             "results=%d/%d/%d R=%u fallback=%llu/%llu "
             "avx2=%llu/%llu auto=%llu/%llu\n",
             (int)fallback_result,
@@ -4195,11 +4195,17 @@ bool CheckPortableProjectionAVX2Differential()
         return false;
     }
     std::printf(
-        "portable projection AVX2 differential K=%u R=%u "
-        "batches=%llu: PASS\n",
+        "projection AVX2 differential K=%u R=%u "
+        "batches(avx2/fallback)=-1:%llu/%llu +1:%llu/%llu "
+        "0:%llu/%llu: PASS\n",
         K,
         fallback_stats.InactivatedColumns,
-        (unsigned long long)avx2_batches);
+        (unsigned long long)fallback_avx2,
+        (unsigned long long)fallback_batches,
+        (unsigned long long)avx2_batches,
+        (unsigned long long)avx2_fallback,
+        (unsigned long long)automatic_avx2,
+        (unsigned long long)automatic_fallback);
     return true;
 #endif
 }
@@ -5998,7 +6004,7 @@ int main(int argc, char** argv)
     ok = CheckIncrementalResume() && ok;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     ok = CheckHeavyProjectionPropagationOracle() && ok;
-    ok = CheckPortableProjectionAVX2Differential() && ok;
+    ok = CheckProjectionAVX2Differential() && ok;
     ok = CheckSolveAllocationExceptionContainment() && ok;
 #endif
     ok = CheckColdSolveStatsAlias() && ok;
