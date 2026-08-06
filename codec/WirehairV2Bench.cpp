@@ -3315,6 +3315,7 @@ const char* DenseAnchorLayoutName(wirehair_v2::DenseAnchorLayout layout)
     return "invalid";
 }
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 bool ParseDenseAnchorLayout(
     const char* text,
     wirehair_v2::DenseAnchorLayout& layout)
@@ -3333,6 +3334,7 @@ bool ParseDenseAnchorLayout(
     }
     return true;
 }
+#endif
 
 std::string CountHistogram(const std::map<uint32_t, uint32_t>& histogram)
 {
