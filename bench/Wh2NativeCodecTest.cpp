@@ -1123,8 +1123,12 @@ void CheckOtherTimingScopes()
                       counters.ResumeAttempts == 0u,
                 "full-rank systematic timing unexpectedly used a checkpoint");
             Check(counters.RecoveryPreflights == 1u &&
-                      counters.RecoveryPacketEvaluations == K,
-                "WH2 timing bypassed full decoder recovery");
+                      counters.RecoveryPacketEvaluations == 0u &&
+                      counters.RecoveryColdPacketCopies == K &&
+                      counters.RecoveryColdPacketCopyBytes ==
+                          (uint64_t)K * block_bytes &&
+                      counters.RecoveryColdStorageReleases == 1u,
+                "WH2 timing bypassed cold systematic recovery reuse");
 
             if (spec.Kind == NativeArmKind::Wirehair2Experiment)
             {
@@ -1238,7 +1242,9 @@ void CheckNativeReceiveTrustedResume()
               counters.ResumeAttempts == result.DecodedOverhead,
         "trusted receive bypassed checkpoint pending-copy/resume work");
     Check(counters.RecoveryPreflights == 1u &&
-              counters.RecoveryPacketEvaluations == K,
+              counters.RecoveryPacketEvaluations == K &&
+              counters.RecoveryColdPacketCopies == 0u &&
+              counters.RecoveryColdStorageReleases == 0u,
         "trusted receive bypassed decoder recovery preflight");
 
     PublicReceiveResult public_result;
