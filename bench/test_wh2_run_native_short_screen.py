@@ -6,10 +6,11 @@ from __future__ import annotations
 import copy
 from contextlib import ExitStack, redirect_stderr
 import csv
+import dis
 import errno
 import hashlib
 import inspect
-from io import StringIO
+from io import FileIO, StringIO
 import json
 import os
 from pathlib import Path
@@ -111,6 +112,34 @@ def sampler_row(monotonic_s: float) -> list:
     ]
 
 
+class _ManagedPauseFixture:
+    """Small exact-owner stand-in for full-run cleanup control-flow tests."""
+
+    def __init__(self) -> None:
+        self.records = [{
+            "pid": 101,
+            "process_start_ticks": 1001,
+            "cpu_affinity": [9],
+        }]
+        self.pause_calls = 0
+        self.resume_calls = 0
+        self.stopped = False
+        self.resumed = False
+
+    def pause(self, _pids, _sibling_cpus, _deadline) -> None:
+        self.pause_calls += 1
+        self.stopped = True
+
+    def resume(self, _deadline) -> None:
+        self.resume_calls += 1
+        self.stopped = False
+        self.resumed = True
+
+    @property
+    def cleanup_complete(self) -> bool:
+        return self.resumed
+
+
 class NativeRunnerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -119,6 +148,121 @@ class NativeRunnerTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    def _run_timing_cleanup_failure(
+            self, managed_paused: _ManagedPauseFixture,
+            body_failure: BaseException,
+            restore_affinity: mock.Mock,
+            finish_hard_wall=None):
+        """Reach T with mocks, own a stop, then fail the first guard check."""
+        contract = contract_api.load_contract()
+        qualification = mock.Mock(map_sha256="a" * 64)
+        description = {
+            "binary_sha256": "b" * 64,
+            "source_git_commit": "1" * 40,
+        }
+        guard = mock.Mock()
+        guard.check.side_effect = body_failure
+        args = mock.Mock(
+            deadline_seconds=60.0, contract=None, worker=Path("worker"),
+            sampler_cpu=99, sampler_pid=123,
+            sampler_script=Path("s.py"),
+            sampler_csv=Path("thermal.csv"), cpus=None,
+            controller_cpu=None, pause_sibling_pids="101",
+            output_dir=self.root / "cleanup-control-flow")
+        patches = (
+            mock.patch.object(
+                contract_api, "load_contract", return_value=contract),
+            mock.patch.object(
+                subject, "describe_worker", return_value=description),
+            mock.patch.object(
+                subject.os, "sched_getaffinity",
+                return_value=set(range(12))),
+            mock.patch.object(
+                subject, "_cpu_topology",
+                side_effect=lambda cpu, _root: (0, cpu)),
+            mock.patch.object(subject, "_development_timing_shape"),
+            mock.patch.object(subject, "_preflight_sampler"),
+            mock.patch.object(subject, "_git_head", return_value="1" * 40),
+            mock.patch.object(subject, "_require_worker_source_commit"),
+            mock.patch.object(
+                subject, "_create_output_dir", return_value=args.output_dir),
+            mock.patch.object(
+                subject, "_timing_qualification_controls", return_value=[]),
+            mock.patch.object(
+                subject, "choose_new_sampler_start", return_value=1000000000),
+            mock.patch.object(subject, "spawn_workers", return_value=[]),
+            mock.patch.object(
+                subject, "run_timing_qualification",
+                return_value=(self.root / "qualification-native.jsonl",
+                              1500000000)),
+            mock.patch.object(
+                native_api, "assemble_timing_qualification",
+                return_value=(qualification, {}, "c" * 64)),
+            mock.patch.object(subject, "quit_workers"),
+            mock.patch.object(
+                subject, "_wait_for_sampler_sample",
+                return_value=2000000000),
+            mock.patch.object(native_api, "write_sampler_attestation"),
+            mock.patch.object(
+                contract_api, "load_timing_qualification_map",
+                return_value=qualification),
+            mock.patch.object(
+                subject, "select_cpu_layout",
+                return_value=(list(range(8)), 8)),
+            mock.patch.object(
+                native_api, "publish_timing_trace_manifest",
+                return_value="d" * 64),
+            mock.patch.object(
+                subject, "write_development_timing_freeze",
+                return_value={"trace_manifest_sha256": "d" * 64}),
+            mock.patch.object(subject, "_pin_controller"),
+            mock.patch.object(
+                subject, "_restore_controller_affinity",
+                side_effect=restore_affinity),
+            mock.patch.object(
+                native_api, "timing_sibling_cpus", return_value=[9]),
+            mock.patch.object(
+                subject, "ManagedPausedSiblingProcesses",
+                return_value=managed_paused),
+            mock.patch.object(
+                subject, "SiblingIsolationGuard", return_value=guard),
+        )
+        with ExitStack() as stack:
+            for patcher in patches:
+                stack.enter_context(patcher)
+            return subject.run_short_screen(args, finish_hard_wall)
+
+    def _inner_cleanup_entry_offset(self) -> tuple:
+        """Return and structurally verify the direct timing-cleanup entry."""
+        lines, first_line = inspect.getsourcelines(subject.run_short_screen)
+        capture_index = next(
+            index for index, line in enumerate(lines)
+            if "cleanup_primary = sys.exc_info()[1]" in line)
+        capture_line = first_line + capture_index
+        instructions = list(dis.get_instructions(subject.run_short_screen))
+        candidates = [
+            (index, instruction)
+            for index, instruction in enumerate(instructions)
+            if instruction.starts_line == capture_line and
+            instruction.opname == "LOAD_GLOBAL" and
+            instruction.argval == "sys"
+        ]
+        self.assertTrue(candidates)
+        index, target = max(
+            candidates, key=lambda value: value[1].offset)
+        if sys.version_info >= (3, 11):
+            # The exception-path copy must begin immediately after the finally
+            # unwinder state.  A nested try would insert the unsafe NOP here.
+            self.assertEqual(instructions[index - 1].opname, "PUSH_EXC_INFO")
+            self.assertTrue(any(
+                entry.start <= target.offset < entry.end
+                for entry in dis.Bytecode(
+                    subject.run_short_screen).exception_entries))
+        else:
+            # Python 3.8 uses CALL_FINALLY and jumps directly to this opcode.
+            self.assertTrue(target.is_jump_target)
+        return target.offset, target.opname
 
     def _topology(self, values: Mapping[int, tuple]) -> Path:
         root = self.root / "sysfs"
@@ -453,6 +597,135 @@ class NativeRunnerTests(unittest.TestCase):
         self.assertTrue(marker.exists())
         self.assertEqual(len(timer_calls), 2)
 
+    def test_inner_cleanup_entry_interrupt_runs_full_outer_cleanup(self) \
+            -> None:
+        managed = _ManagedPauseFixture()
+        restore_affinity = mock.Mock()
+        body_failure = subject.RunnerError("injected timing body failure")
+        cleanup_interrupt = subject.RunnerError(
+            "injected first inner-finally opcode interrupt")
+        target_offset, target_opname = self._inner_cleanup_entry_offset()
+        injected = [False]
+        if hasattr(sys, "monitoring"):
+            monitoring = sys.monitoring
+            tool_id = next(
+                candidate for candidate in range(5, -1, -1)
+                if monitoring.get_tool(candidate) is None)
+            monitoring.use_tool_id(tool_id, "wh2 cleanup-entry test")
+
+            def instruction(_code, offset):
+                if offset == target_offset and not injected[0]:
+                    injected[0] = True
+                    raise cleanup_interrupt
+
+            monitoring.register_callback(
+                tool_id, monitoring.events.INSTRUCTION, instruction)
+            monitoring.set_local_events(
+                tool_id, subject.run_short_screen.__code__,
+                monitoring.events.INSTRUCTION)
+            try:
+                with self.assertRaises(subject.RunnerError) as raised:
+                    self._run_timing_cleanup_failure(
+                        managed, body_failure, restore_affinity)
+            finally:
+                monitoring.set_local_events(
+                    tool_id, subject.run_short_screen.__code__, 0)
+                monitoring.register_callback(
+                    tool_id, monitoring.events.INSTRUCTION, None)
+                monitoring.free_tool_id(tool_id)
+        else:
+            previous_trace = sys.gettrace()
+
+            def trace(frame, event, _arg):
+                if frame.f_code is subject.run_short_screen.__code__:
+                    frame.f_trace_opcodes = True
+                    if (event == "opcode" and
+                            frame.f_lasti == target_offset and
+                            not injected[0]):
+                        injected[0] = True
+                        raise cleanup_interrupt
+                return trace
+
+            sys.settrace(trace)
+            try:
+                with self.assertRaises(subject.RunnerError) as raised:
+                    self._run_timing_cleanup_failure(
+                        managed, body_failure, restore_affinity)
+            finally:
+                sys.settrace(previous_trace)
+        self.assertTrue(injected[0], target_opname)
+        self.assertFalse(managed.stopped)
+        self.assertTrue(managed.cleanup_complete)
+        self.assertGreaterEqual(managed.resume_calls, 1)
+        restore_affinity.assert_called()
+        self.assertIn("injected timing body failure", str(raised.exception))
+        self.assertIn(
+            "injected first inner-finally opcode interrupt",
+            str(raised.exception))
+
+    def test_cleanup_error_preserves_authoritative_keyboard_interrupt(
+            self) -> None:
+        managed = _ManagedPauseFixture()
+        restore_affinity = mock.Mock()
+        primary = KeyboardInterrupt("authoritative timing interrupt")
+        cleanup_error = subject.RunnerError(
+            "injected cleanup-entry failure after resume")
+        real_finish = subject._finish_timing_cleanup
+        finish_calls = [0]
+
+        def finish_then_fail(*args, **kwargs):
+            finish_calls[0] += 1
+            if finish_calls[0] == 1:
+                managed.resume(args[-1])
+                raise cleanup_error
+            return real_finish(*args, **kwargs)
+
+        with mock.patch.object(
+                subject, "_finish_timing_cleanup",
+                side_effect=finish_then_fail), \
+                self.assertRaises(KeyboardInterrupt) as raised:
+            self._run_timing_cleanup_failure(
+                managed, primary, restore_affinity)
+        self.assertIs(raised.exception, primary)
+        self.assertFalse(managed.stopped)
+        self.assertTrue(managed.cleanup_complete)
+        self.assertGreaterEqual(finish_calls[0], 2)
+        restore_affinity.assert_called()
+        self.assertIsInstance(primary.__cause__, subject.RunnerError)
+        self.assertIn(
+            "injected cleanup-entry failure after resume",
+            str(primary.__cause__))
+
+    def test_interrupted_primary_capture_recovers_body_failure(self) -> None:
+        managed = _ManagedPauseFixture()
+        restore_affinity = mock.Mock()
+        body_failure = subject.RunnerError(
+            "injected body failure before capture")
+        capture_interrupt = subject.RunnerError(
+            "injected primary-capture interrupt")
+        real_exc_info = sys.exc_info
+        injected = [False]
+
+        def interrupt_capture_once():
+            if managed.stopped and not injected[0]:
+                injected[0] = True
+                raise capture_interrupt
+            return real_exc_info()
+
+        with mock.patch.object(
+                subject.sys, "exc_info", side_effect=interrupt_capture_once), \
+                self.assertRaises(subject.RunnerError) as raised:
+            self._run_timing_cleanup_failure(
+                managed, body_failure, restore_affinity)
+        self.assertTrue(injected[0])
+        self.assertFalse(managed.stopped)
+        self.assertTrue(managed.cleanup_complete)
+        restore_affinity.assert_called()
+        self.assertIn(
+            "injected body failure before capture", str(raised.exception))
+        self.assertIn(
+            "injected primary-capture interrupt", str(raised.exception))
+
     def test_cpu_parser_and_physical_core_selection(self) -> None:
         topology = self._topology({
             0: (0, 0, 0),
@@ -464,9 +737,15 @@ class NativeRunnerTests(unittest.TestCase):
             11: (0, 1, 0),
         })
         self.assertEqual(subject.parse_cpu_list("0,3,7"), [0, 3, 7])
+        self.assertEqual(subject.parse_pid_list("1,3,7"), [1, 3, 7])
         for invalid in ("", "00", "0,0", "1,0", "0, 1", "+1"):
             with self.assertRaises(subject.RunnerError):
                 subject.parse_cpu_list(invalid)
+        for invalid in (
+                "", "0", "01", "1,1", "2,1", "1, 2", "+1",
+                str(subject.MAX_LINUX_PID + 1), "9" * 10000):
+            with self.assertRaises(subject.RunnerError):
+                subject.parse_pid_list(invalid)
         affinity = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11]
         self.assertEqual(subject.select_cpu_layout(
             0, explicit_controller=9, affinity=affinity,
@@ -651,6 +930,785 @@ class NativeRunnerTests(unittest.TestCase):
         finally:
             subject._restore_controller_affinity(original)
         self.assertEqual(os.sched_getaffinity(0), original)
+
+    def test_sibling_guard_rejects_exact_affinity_occupant_and_attests_clean(
+            self) -> None:
+        values = {cpu: (0, cpu, cpu) for cpu in range(10)}
+        values[11] = (0, 1, 1)
+        topology = self._topology(values)
+        workers = list(range(1, 9))
+        foreign = [{
+            "pid": 1234, "tid": 1234, "process_start_ticks": 99,
+            "cpu_affinity": [11], "state": "R",
+        }]
+        guard = subject.SiblingIsolationGuard(
+            workers, 9, scan=lambda _cpus: foreign,
+            sysfs_root=topology)
+        self.assertEqual(guard.sibling_cpus, [11])
+        with self.assertRaisesRegex(
+                subject.RunnerError, "foreign exact-affinity task"):
+            guard.check("before-worker-spawn")
+
+        controller_thread = [{
+            "pid": os.getpid(), "tid": os.getpid() + 1,
+            "process_start_ticks": 77,
+            "cpu_affinity": [11], "state": "R",
+        }]
+        guard = subject.SiblingIsolationGuard(
+            workers, 9, scan=lambda _cpus: controller_thread,
+            sysfs_root=topology)
+        with self.assertRaisesRegex(
+                subject.RunnerError, "foreign exact-affinity task"):
+            guard.check("before-worker-spawn")
+
+        misplaced_controller = [{
+            "pid": os.getpid(), "tid": os.getpid(),
+            "process_start_ticks": 77,
+            "cpu_affinity": [workers[0]], "state": "R",
+        }]
+        guard = subject.SiblingIsolationGuard(
+            workers, 9, scan=lambda _cpus: misplaced_controller,
+            sysfs_root=topology)
+        with self.assertRaisesRegex(
+                subject.RunnerError, "foreign exact-affinity task"):
+            guard.check("before-timing-wave-0")
+
+        pinned_controller = copy.deepcopy(misplaced_controller)
+        pinned_controller[0]["cpu_affinity"] = [9]
+        guard = subject.SiblingIsolationGuard(
+            workers, 9, scan=lambda _cpus: pinned_controller,
+            sysfs_root=topology)
+        guard.check("before-timing-wave-0")
+
+        worker_processes = []
+        for cpu in workers:
+            worker = mock.Mock()
+            worker.cpu = cpu
+            worker.process.pid = 3000 + cpu
+            worker.start_ticks = 7000 + cpu
+            worker_processes.append(worker)
+        unexpected_worker_thread = [{
+            "pid": worker_processes[0].process.pid,
+            "tid": worker_processes[0].process.pid + 100,
+            "process_start_ticks": worker_processes[0].start_ticks,
+            "cpu_affinity": [worker_processes[0].cpu], "state": "R",
+        }]
+        guard = subject.SiblingIsolationGuard(
+            workers, 9, scan=lambda _cpus: unexpected_worker_thread,
+            sysfs_root=topology)
+        guard.bind_workers(worker_processes)
+        with self.assertRaisesRegex(
+                subject.RunnerError, "foreign exact-affinity task"):
+            guard.check("before-timing-wave-0")
+
+        clean = subject.SiblingIsolationGuard(
+            workers, 9, scan=lambda _cpus: [], sysfs_root=topology)
+        clean.check("before-worker-spawn")
+        first = clean._checks[0]["monotonic_ns"]
+        clean.check("after-timing-interval")
+        last = clean._checks[-1]["monotonic_ns"]
+        attestation = clean.attestation()
+        validated = native_api.validate_sibling_isolation(
+            attestation, first, last, workers, 9, topology)
+        self.assertEqual(validated, attestation)
+        bool_cpu = copy.deepcopy(attestation)
+        bool_cpu["worker_cpus"][0] = True
+        with self.assertRaises(native_api.NativeEvidenceError):
+            native_api.validate_sibling_isolation(
+                bool_cpu, first, last, workers, 9, topology)
+        bool_ordinal = copy.deepcopy(attestation)
+        bool_ordinal["checks"][0]["ordinal"] = False
+        bool_ordinal["checks_sha256"] = contract_api.sha256_json(
+            bool_ordinal["checks"])
+        with self.assertRaises(native_api.NativeEvidenceError):
+            native_api.validate_sibling_isolation(
+                bool_ordinal, first, last, workers, 9, topology)
+
+    def test_exact_affinity_scan_fails_closed_on_pid_reuse(self) -> None:
+        proc_root = self.root / "proc"
+        process_root = proc_root / "4242"
+        process_root.mkdir(parents=True)
+        (process_root / "exe").write_bytes(b"executable")
+        with mock.patch.object(
+                subject, "_process_start_ticks",
+                side_effect=(111, 222)), mock.patch.object(
+                    subject, "_process_task_states",
+                    return_value=[(4242, "R")]), mock.patch.object(
+                        os, "sched_getaffinity", return_value={7}), \
+                self.assertRaisesRegex(
+                    subject.RunnerError,
+                    "changed identity during SMT isolation scan"):
+            subject._scan_exact_affinity_tasks({7}, proc_root)
+
+        with mock.patch.object(
+                subject, "_process_start_ticks",
+                side_effect=(111, 111)), mock.patch.object(
+                    subject, "_process_task_states",
+                    return_value=[(4242, "R")]), mock.patch.object(
+                        os, "sched_getaffinity", return_value={7}):
+            self.assertEqual(
+                subject._scan_exact_affinity_tasks({7}, proc_root),
+                [{"pid": 4242, "tid": 4242,
+                  "process_start_ticks": 111,
+                  "cpu_affinity": [7], "state": "R"}])
+
+    def test_exact_affinity_scan_retains_observed_process_on_exit(self) \
+            -> None:
+        proc_root = self.root / "proc-exit"
+        process_root = proc_root / "4242"
+        process_root.mkdir(parents=True)
+        (process_root / "exe").write_bytes(b"executable")
+        with mock.patch.object(
+                subject, "_process_start_ticks",
+                side_effect=(111, ProcessLookupError())), mock.patch.object(
+                    subject, "_process_task_states",
+                    return_value=[(4242, "R")]), mock.patch.object(
+                        os, "sched_getaffinity", return_value={7}):
+            self.assertEqual(
+                subject._scan_exact_affinity_tasks({7}, proc_root),
+                [{"pid": 4242, "tid": 4242,
+                  "process_start_ticks": 111,
+                  "cpu_affinity": [7], "state": "R"}])
+
+    def test_managed_sibling_process_is_resumed_after_guard_window(self) -> None:
+        if (not hasattr(os, "pidfd_open") or
+                not hasattr(signal, "pidfd_send_signal")):
+            self.skipTest("Linux pidfd signal support is required")
+        allowed = sorted(os.sched_getaffinity(0))
+        if not allowed:
+            self.skipTest("one schedulable CPU is required")
+        cpu = allowed[0]
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL)
+        manager = None
+        try:
+            os.sched_setaffinity(process.pid, {cpu})
+            manager = subject.ManagedPausedSiblingProcesses()
+            manager.pause([process.pid], [cpu], time.monotonic() + 5.0)
+            states = subject._process_task_states(process.pid)
+            self.assertTrue(states)
+            self.assertTrue(all(state in ("T", "t")
+                                for _, state in states))
+            manager.resume(time.monotonic() + 5.0)
+            states = subject._process_task_states(process.pid)
+            self.assertTrue(states)
+            self.assertTrue(all(state not in ("T", "t")
+                                for _, state in states))
+            self.assertIsNone(process.poll())
+        finally:
+            if manager is not None:
+                manager.resume(time.monotonic() + 5.0)
+            if process.poll() is None:
+                process.terminate()
+            process.wait(timeout=5.0)
+
+    def test_managed_sibling_pause_rollback_resumes_earlier_process(self) \
+            -> None:
+        if (not hasattr(os, "pidfd_open") or
+                not hasattr(signal, "pidfd_send_signal")):
+            self.skipTest("Linux pidfd signal support is required")
+        allowed = sorted(os.sched_getaffinity(0))
+        if len(allowed) < 2:
+            self.skipTest("two schedulable CPUs are required")
+        processes = [
+            subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(60)"],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL)
+            for _ in range(2)
+        ]
+        try:
+            os.sched_setaffinity(processes[0].pid, {allowed[0]})
+            os.sched_setaffinity(processes[1].pid, {allowed[1]})
+            manager = subject.ManagedPausedSiblingProcesses()
+            with self.assertRaisesRegex(
+                    subject.RunnerError, "not pinned only to T siblings"):
+                manager.pause(
+                    [process.pid for process in processes], [allowed[0]],
+                    time.monotonic() + 5.0)
+            states = subject._process_task_states(processes[0].pid)
+            self.assertTrue(states)
+            self.assertTrue(all(state not in ("T", "t")
+                                for _, state in states))
+            self.assertIsNone(processes[0].poll())
+        finally:
+            for process in processes:
+                try:
+                    os.kill(process.pid, signal.SIGCONT)
+                except ProcessLookupError:
+                    pass
+                if process.poll() is None:
+                    process.terminate()
+                process.wait(timeout=5.0)
+
+    def test_stop_deadline_rollback_uses_fresh_resume_grace(self) -> None:
+        if (not hasattr(os, "pidfd_open") or
+                not hasattr(signal, "pidfd_send_signal")):
+            self.skipTest("Linux pidfd signal support is required")
+        allowed = sorted(os.sched_getaffinity(0))
+        if not allowed:
+            self.skipTest("one schedulable CPU is required")
+        cpu = allowed[0]
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL)
+        original_states = subject._process_task_states
+        state_calls = 0
+
+        def staged_states(pid: int, *args, **kwargs):
+            nonlocal state_calls
+            state_calls += 1
+            if state_calls == 2:
+                return [(pid, "R")]
+            if state_calls == 3:
+                return [(pid, "T")]
+            return original_states(pid, *args, **kwargs)
+
+        try:
+            os.sched_setaffinity(process.pid, {cpu})
+            manager = subject.ManagedPausedSiblingProcesses()
+            with mock.patch.object(
+                    subject, "_process_task_states",
+                    side_effect=staged_states), self.assertRaisesRegex(
+                        subject.RunnerError,
+                        "hard wall expired during stopping managed") as raised:
+                manager.pause(
+                    [process.pid], [cpu], time.monotonic() - 1.0)
+            self.assertNotIn("rollback failed", str(raised.exception))
+            states = original_states(process.pid)
+            self.assertTrue(states)
+            self.assertTrue(all(state not in ("T", "t")
+                                for _, state in states))
+        finally:
+            try:
+                os.kill(process.pid, signal.SIGCONT)
+            except ProcessLookupError:
+                pass
+            if process.poll() is None:
+                process.terminate()
+            process.wait(timeout=5.0)
+
+    def test_pid_reuse_rollback_resumes_exact_signaled_process(self) -> None:
+        if (not hasattr(os, "pidfd_open") or
+                not hasattr(signal, "pidfd_send_signal")):
+            self.skipTest("Linux pidfd signal support is required")
+        allowed = sorted(os.sched_getaffinity(0))
+        if not allowed:
+            self.skipTest("one schedulable CPU is required")
+        cpu = allowed[0]
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL)
+        real_start_ticks = subject._process_start_ticks
+        real_pidfd_signal = signal.pidfd_send_signal
+        start_calls = 0
+        observed_signals = []
+
+        def changed_identity(pid: int, *args, **kwargs):
+            nonlocal start_calls
+            start_calls += 1
+            value = real_start_ticks(pid, *args, **kwargs)
+            return value + 1 if start_calls == 2 else value
+
+        def record_signal(pidfd, sig, siginfo=None, flags=0):
+            observed_signals.append(sig)
+            return real_pidfd_signal(pidfd, sig, siginfo, flags)
+
+        try:
+            os.sched_setaffinity(process.pid, {cpu})
+            manager = subject.ManagedPausedSiblingProcesses()
+            with mock.patch.object(
+                    subject, "_process_start_ticks",
+                    side_effect=changed_identity), mock.patch.object(
+                        signal, "pidfd_send_signal",
+                        side_effect=record_signal), self.assertRaisesRegex(
+                            subject.RunnerError,
+                            "changed identity while stopping"):
+                manager.pause(
+                    [process.pid], [cpu], time.monotonic() + 5.0)
+            self.assertIn(signal.SIGSTOP, observed_signals)
+            self.assertIn(signal.SIGCONT, observed_signals)
+            states = subject._process_task_states(process.pid)
+            self.assertTrue(states)
+            self.assertTrue(all(state not in ("T", "t")
+                                for _, state in states))
+        finally:
+            try:
+                os.kill(process.pid, signal.SIGCONT)
+            except ProcessLookupError:
+                pass
+            if process.poll() is None:
+                process.terminate()
+            process.wait(timeout=5.0)
+
+    def test_partial_resume_failure_retains_every_exact_handle_for_retry(
+            self) -> None:
+        records = [
+            {"pid": 101, "process_start_ticks": 1001,
+             "cpu_affinity": [11]},
+            {"pid": 202, "process_start_ticks": 2002,
+             "cpu_affinity": [12]},
+        ]
+        manager = subject.ManagedPausedSiblingProcesses(records)
+        first = FileIO(os.open(os.devnull, os.O_RDONLY), "rb", closefd=True)
+        second = FileIO(os.open(os.devnull, os.O_RDONLY), "rb", closefd=True)
+        self.addCleanup(first.close)
+        self.addCleanup(second.close)
+        first_fd = first.fileno()
+        second_fd = second.fileno()
+        manager._pidfds = {101: first, 202: second}
+        failed_once = False
+        signals = []
+
+        def signal_with_one_failure(pidfd, sig, siginfo=None, flags=0):
+            nonlocal failed_once
+            signals.append((pidfd, sig))
+            if pidfd == second_fd and not failed_once:
+                failed_once = True
+                raise OSError(errno.EIO, "injected resume failure")
+
+        def start_ticks(pid, *args, **kwargs):
+            return 1001 if pid == 101 else 2002
+
+        with mock.patch.object(
+                signal, "pidfd_send_signal",
+                side_effect=signal_with_one_failure,
+                create=True), mock.patch.object(
+                    subject, "_process_start_ticks",
+                    side_effect=start_ticks), mock.patch.object(
+                    subject, "_process_task_states",
+                        return_value=[(1, "R")]):
+            manager.resume(time.monotonic() + 5.0)
+            self.assertTrue(manager._resumed)
+            self.assertEqual(manager._pidfds, {})
+            self.assertEqual(
+                signals,
+                [(first_fd, signal.SIGCONT),
+                 (second_fd, signal.SIGCONT),
+                 (second_fd, signal.SIGCONT)])
+            self.assertTrue(first.closed)
+            self.assertTrue(second.closed)
+
+    def test_resume_defers_control_flow_until_every_pid_is_continued(
+            self) -> None:
+        class ResumeInterrupt(BaseException):
+            pass
+
+        records = [
+            {"pid": 101, "process_start_ticks": 1001,
+             "cpu_affinity": [11]},
+            {"pid": 202, "process_start_ticks": 2002,
+             "cpu_affinity": [12]},
+        ]
+        manager = subject.ManagedPausedSiblingProcesses(records)
+        first = FileIO(os.open(os.devnull, os.O_RDONLY), "rb", closefd=True)
+        second = FileIO(os.open(os.devnull, os.O_RDONLY), "rb", closefd=True)
+        self.addCleanup(first.close)
+        self.addCleanup(second.close)
+        first_fd = first.fileno()
+        second_fd = second.fileno()
+        manager._pidfds = {101: first, 202: second}
+        control = ResumeInterrupt("injected one-shot resume interrupt")
+        signals = []
+
+        def signal_with_interrupt(pidfd, sig, siginfo=None, flags=0):
+            signals.append((pidfd, sig))
+            if (pidfd == second_fd and
+                    signals.count((second_fd, sig)) == 1):
+                raise control
+
+        def start_ticks(pid, *args, **kwargs):
+            return 1001 if pid == 101 else 2002
+
+        with mock.patch.object(
+                signal, "pidfd_send_signal",
+                side_effect=signal_with_interrupt,
+                create=True), mock.patch.object(
+                    subject, "_process_start_ticks",
+                    side_effect=start_ticks), mock.patch.object(
+                    subject, "_process_task_states",
+                        return_value=[(1, "R")]), self.assertRaises(
+                                ResumeInterrupt) as raised:
+            manager.resume(time.monotonic() + 5.0)
+        self.assertIs(raised.exception, control)
+        self.assertTrue(manager._resumed)
+        self.assertEqual(manager._pidfds, {})
+        self.assertEqual(
+            signals,
+            [(first_fd, signal.SIGCONT),
+             (second_fd, signal.SIGCONT),
+             (second_fd, signal.SIGCONT)])
+        self.assertTrue(first.closed)
+        self.assertTrue(second.closed)
+        manager.resume(time.monotonic() + 5.0)
+
+    def test_pidfd_close_interrupt_leaves_resume_state_converged(self) -> None:
+        class CloseInterrupt(BaseException):
+            pass
+
+        records = [{
+            "pid": 101, "process_start_ticks": 1001,
+            "cpu_affinity": [11],
+        }, {
+            "pid": 202, "process_start_ticks": 2002,
+            "cpu_affinity": [12],
+        }]
+        manager = subject.ManagedPausedSiblingProcesses(records)
+        control = CloseInterrupt("injected pidfd close interrupt")
+
+        class InterruptAfterClose(FileIO):
+            armed = True
+
+            def close(self):
+                super().close()
+                if self.armed:
+                    self.armed = False
+                    raise control
+
+        first = InterruptAfterClose(
+            os.open(os.devnull, os.O_RDONLY), "rb", closefd=True)
+        second = FileIO(
+            os.open(os.devnull, os.O_RDONLY), "rb", closefd=True)
+        self.addCleanup(first.close)
+        self.addCleanup(second.close)
+        manager._pidfds = {101: first, 202: second}
+
+        with mock.patch.object(
+                signal, "pidfd_send_signal", create=True), mock.patch.object(
+                    subject, "_process_start_ticks",
+                    side_effect=lambda pid: 1001 if pid == 101 else 2002), \
+                mock.patch.object(
+                    subject, "_process_task_states",
+                    return_value=[(1, "R")]), \
+                self.assertRaises(CloseInterrupt) as raised:
+            manager.resume(time.monotonic() + 5.0)
+        self.assertIs(raised.exception, control)
+        self.assertTrue(first.closed)
+        self.assertTrue(second.closed)
+        self.assertTrue(manager._resumed)
+        self.assertEqual(manager._pidfds, {})
+        manager.resume(time.monotonic() + 5.0)
+
+    def test_resume_state_store_interrupt_keeps_exact_close_ownership(
+            self) -> None:
+        class StateInterrupt(BaseException):
+            pass
+
+        control = StateInterrupt("injected resume-state store interrupt")
+
+        class InterruptingManager(
+                subject.ManagedPausedSiblingProcesses):
+            armed = False
+
+            def __setattr__(self, name, value):
+                if name == "_resumed" and value is True and self.armed:
+                    object.__setattr__(self, "armed", False)
+                    raise control
+                super().__setattr__(name, value)
+
+        manager = InterruptingManager([{
+            "pid": 101, "process_start_ticks": 1001,
+            "cpu_affinity": [11],
+        }])
+        handle = FileIO(
+            os.open(os.devnull, os.O_RDONLY), "rb", closefd=True)
+        self.addCleanup(handle.close)
+        manager._pidfds = {101: handle}
+        manager.armed = True
+        with mock.patch.object(
+                signal, "pidfd_send_signal", create=True), mock.patch.object(
+                    subject, "_process_start_ticks", return_value=1001), \
+                mock.patch.object(
+                    subject, "_process_task_states",
+                    return_value=[(1, "R")]), self.assertRaises(
+                            StateInterrupt) as raised:
+            manager.resume(time.monotonic() + 5.0)
+        self.assertIs(raised.exception, control)
+        self.assertTrue(manager._resumed)
+        self.assertEqual(manager._pidfds, {})
+        self.assertTrue(handle.closed)
+        manager.resume(time.monotonic() + 5.0)
+
+    def test_pre_drain_interrupt_retries_persistent_close_roster(self) -> None:
+        class DrainInterrupt(BaseException):
+            pass
+
+        control = DrainInterrupt("injected pre-drain interrupt")
+
+        class InterruptingManager(
+                subject.ManagedPausedSiblingProcesses):
+            armed = True
+
+            def _drain_resumed_pidfds(self):
+                if self.armed:
+                    self.armed = False
+                    raise control
+                return super()._drain_resumed_pidfds()
+
+        manager = InterruptingManager([{
+            "pid": 101, "process_start_ticks": 1001,
+            "cpu_affinity": [11],
+        }])
+        handle = FileIO(
+            os.open(os.devnull, os.O_RDONLY), "rb", closefd=True)
+        self.addCleanup(handle.close)
+        manager._pidfds = {101: handle}
+        with mock.patch.object(
+                signal, "pidfd_send_signal", create=True), mock.patch.object(
+                    subject, "_process_start_ticks", return_value=1001), \
+                mock.patch.object(
+                    subject, "_process_task_states",
+                    return_value=[(1, "R")]), self.assertRaises(
+                            DrainInterrupt) as raised:
+            manager.resume(time.monotonic() + 5.0)
+        self.assertIs(raised.exception, control)
+        self.assertTrue(manager._resumed)
+        self.assertEqual(manager._pidfds, {})
+        self.assertTrue(handle.closed)
+        manager.resume(time.monotonic() + 5.0)
+
+    def test_post_close_interrupt_never_retries_reused_descriptor(self) \
+            -> None:
+        class PostCloseInterrupt(BaseException):
+            pass
+
+        control = PostCloseInterrupt("injected interrupt after real close")
+        descriptor = os.open(os.devnull, os.O_RDONLY)
+
+        class InterruptAfterClose(FileIO):
+            armed = True
+
+            def close(self):
+                super().close()
+                if self.armed:
+                    self.armed = False
+                    raise control
+
+        handle = InterruptAfterClose(descriptor, "rb", closefd=True)
+        self.addCleanup(lambda: FileIO.close(handle))
+        manager = subject.ManagedPausedSiblingProcesses([{
+            "pid": 101, "process_start_ticks": 1001,
+            "cpu_affinity": [11],
+        }])
+        manager._pidfds = {101: handle}
+
+        replacement = -1
+        try:
+            with mock.patch.object(
+                    signal, "pidfd_send_signal", create=True), \
+                    mock.patch.object(
+                        subject, "_process_start_ticks",
+                        return_value=1001), mock.patch.object(
+                            subject, "_process_task_states",
+                            return_value=[(1, "R")]), \
+                    self.assertRaises(PostCloseInterrupt) as raised:
+                manager.resume(time.monotonic() + 5.0)
+            self.assertIs(raised.exception, control)
+            self.assertEqual(manager._pidfds, {})
+            self.assertTrue(handle.closed)
+            replacement = os.open(os.devnull, os.O_RDONLY)
+            self.assertEqual(replacement, descriptor)
+            manager.resume(time.monotonic() + 5.0)
+            os.fstat(replacement)
+        finally:
+            if replacement >= 0:
+                os.close(replacement)
+
+    def test_pre_close_interrupt_retains_exact_pidfd_owner(self) -> None:
+        class PreCloseInterrupt(BaseException):
+            pass
+
+        control = PreCloseInterrupt("injected interrupt before FileIO close")
+
+        class InterruptBeforeClose(FileIO):
+            armed = True
+
+            def close(self):
+                if self.armed:
+                    self.armed = False
+                    raise control
+                return super().close()
+
+        handle = InterruptBeforeClose(
+            os.open(os.devnull, os.O_RDONLY), "rb", closefd=True)
+        self.addCleanup(lambda: FileIO.close(handle))
+        manager = subject.ManagedPausedSiblingProcesses()
+        manager._resumed = True
+        manager._pidfds = {101: handle}
+        with self.assertRaises(PreCloseInterrupt) as raised:
+            manager._drain_resumed_pidfds()
+        self.assertIs(raised.exception, control)
+        self.assertIs(manager._pidfds.get(101), handle)
+        self.assertFalse(handle.closed)
+        self.assertFalse(manager.cleanup_complete)
+        manager._drain_resumed_pidfds()
+        self.assertTrue(handle.closed)
+        self.assertTrue(manager.cleanup_complete)
+
+    def test_pidfd_drain_identity_pop_preserves_swapped_owner(self) -> None:
+        manager = subject.ManagedPausedSiblingProcesses()
+        manager._resumed = True
+        replacement = FileIO(
+            os.open(os.devnull, os.O_RDONLY), "rb", closefd=True)
+        self.addCleanup(replacement.close)
+
+        class SwapOwnerAfterClose(FileIO):
+            armed = True
+
+            def close(self):
+                super().close()
+                if self.armed:
+                    self.armed = False
+                    manager._pidfds[101] = replacement
+
+        original = SwapOwnerAfterClose(
+            os.open(os.devnull, os.O_RDONLY), "rb", closefd=True)
+        self.addCleanup(lambda: FileIO.close(original))
+        manager._pidfds = {101: original}
+        manager._drain_resumed_pidfds()
+        self.assertTrue(original.closed)
+        self.assertIs(manager._pidfds.get(101), replacement)
+        self.assertFalse(replacement.closed)
+        manager._drain_resumed_pidfds()
+        self.assertTrue(replacement.closed)
+        self.assertTrue(manager.cleanup_complete)
+
+    def test_pidfd_drain_persistent_failure_is_bounded(self) -> None:
+        class PersistentDrainFailure(subject.ManagedPausedSiblingProcesses):
+            drain_calls = 0
+
+            def _drain_resumed_pidfds(self):
+                self.drain_calls += 1
+                raise subject.RunnerError("injected persistent drain failure")
+
+        for future_deadline, expected_calls in ((False, 2), (True, 8)):
+            with self.subTest(future_deadline=future_deadline):
+                manager = PersistentDrainFailure()
+                manager._resumed = True
+                handle = FileIO(
+                    os.open(os.devnull, os.O_RDONLY),
+                    "rb", closefd=True)
+                self.addCleanup(handle.close)
+                manager._pidfds = {101: handle}
+                deadline = time.monotonic() + (60.0 if future_deadline else -1.0)
+                with self.assertRaisesRegex(
+                        subject.RunnerError, "did not converge"):
+                    manager.resume(deadline)
+                self.assertEqual(manager.drain_calls, expected_calls)
+                self.assertIs(manager._pidfds.get(101), handle)
+                self.assertFalse(handle.closed)
+                self.assertFalse(manager.cleanup_complete)
+                handle.close()
+                manager._pidfds.clear()
+
+    def test_timing_cleanup_gives_paused_load_a_fresh_grace_period(self) \
+            -> None:
+        manager = mock.Mock()
+        manager.cleanup_complete = False
+
+        def resume(_deadline):
+            manager.cleanup_complete = True
+
+        manager.resume.side_effect = resume
+        subject._finish_timing_cleanup(
+            [], True, False, set(), None, manager, False,
+            time.monotonic() - 60.0)
+        self.assertGreater(
+            manager.resume.call_args.args[0], time.monotonic() + 4.0)
+
+    def test_timing_cleanup_retries_pre_body_resume_failure(self) -> None:
+        primary = subject.RunnerError("injected campaign failure")
+        interruption = subject.RunnerError(
+            "injected pre-body resume interruption")
+
+        class InterruptedManager(
+                subject.ManagedPausedSiblingProcesses):
+            resume_calls = 0
+
+            def resume(self, deadline):
+                self.resume_calls += 1
+                if self.resume_calls == 1:
+                    raise interruption
+                return super().resume(deadline)
+
+        manager = InterruptedManager([{
+            "pid": 101, "process_start_ticks": 1001,
+            "cpu_affinity": [11],
+        }])
+        handle = FileIO(
+            os.open(os.devnull, os.O_RDONLY), "rb", closefd=True)
+        self.addCleanup(handle.close)
+        descriptor = handle.fileno()
+        manager._pidfds = {101: handle}
+        signals = []
+
+        def send_signal(pidfd, sig, siginfo=None, flags=0):
+            signals.append((pidfd, sig))
+
+        with mock.patch.object(
+                signal, "pidfd_send_signal", side_effect=send_signal,
+                create=True), mock.patch.object(
+                    subject, "_process_start_ticks", return_value=1001), \
+                mock.patch.object(
+                    subject, "_process_task_states",
+                    return_value=[(1, "R")]), self.assertRaises(
+                            subject.RunnerError) as raised:
+            subject._finish_timing_cleanup(
+                [], True, False, set(), primary, manager, False,
+                time.monotonic() - 60.0)
+        self.assertIs(raised.exception.__cause__, primary)
+        self.assertIn("pre-body resume interruption", str(raised.exception))
+        self.assertEqual(manager.resume_calls, 2)
+        self.assertEqual(signals, [(descriptor, signal.SIGCONT)])
+        self.assertTrue(manager.cleanup_complete)
+        self.assertEqual(manager._pidfds, {})
+        self.assertTrue(handle.closed)
+
+    def test_live_exact_affinity_sibling_occupant_fails_before_timing(self) \
+            -> None:
+        if os.geteuid() != 0:
+            self.skipTest("root is required for a fail-closed all-/proc scan")
+        allowed = sorted(os.sched_getaffinity(0))
+        by_core: Dict[tuple, List[int]] = {}
+        for cpu in allowed:
+            by_core.setdefault(
+                subject._cpu_topology(cpu, subject.CPU_SYSFS_ROOT), []).append(cpu)
+        pair = next((sorted(cpus) for cpus in by_core.values()
+                     if len(cpus) >= 2), None)
+        if pair is None:
+            self.skipTest("an allowed SMT sibling pair is required")
+        worker_cpu, occupied_sibling = pair[:2]
+        controller_cpu = next((
+            cpu for cpu in allowed
+            if subject._cpu_topology(cpu, subject.CPU_SYSFS_ROOT) !=
+                subject._cpu_topology(worker_cpu, subject.CPU_SYSFS_ROOT)), None)
+        if controller_cpu is None:
+            self.skipTest("a separate controller core is required")
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL)
+        original_affinity = set(os.sched_getaffinity(0))
+        try:
+            os.sched_setaffinity(process.pid, {occupied_sibling})
+            subject._pin_controller(controller_cpu)
+            guard = subject.SiblingIsolationGuard(
+                [worker_cpu], controller_cpu)
+            self.assertIn(occupied_sibling, guard.sibling_cpus)
+            with self.assertRaisesRegex(
+                    subject.RunnerError,
+                    "pid={}.*cpus={}".format(
+                        process.pid, occupied_sibling)):
+                guard.check("before-worker-spawn")
+        finally:
+            subject._restore_controller_affinity(original_affinity)
+            if process.poll() is None:
+                process.terminate()
+            process.wait(timeout=5.0)
 
     def test_timing_freeze_is_published_before_result_sink(self) -> None:
         worker = self._fake_worker()
@@ -1791,7 +2849,13 @@ class NativeRunnerTests(unittest.TestCase):
             deadline_seconds=60.0, contract=None, worker=Path("worker"),
             sampler_cpu=99, sampler_pid=123, sampler_script=Path("s.py"),
             sampler_csv=Path("thermal.csv"), cpus=None, controller_cpu=None,
+            pause_sibling_pids=None,
             output_dir=self.root / "run")
+        managed_paused = mock.Mock(records=[])
+        managed_paused.resume.side_effect = \
+            lambda _deadline: lifecycle.append("sibling_load_resumed")
+        sibling_guard = mock.Mock()
+        sibling_guard.attestation.return_value = {"terminal_status": "clean"}
         patches = (
             mock.patch.object(
                 contract_api, "load_contract", return_value=contract),
@@ -1830,6 +2894,14 @@ class NativeRunnerTests(unittest.TestCase):
             mock.patch.object(
                 subject, "select_cpu_layout",
                 return_value=(list(range(8)), 8)),
+            mock.patch.object(
+                native_api, "timing_sibling_cpus", return_value=[]),
+            mock.patch.object(
+                subject, "ManagedPausedSiblingProcesses",
+                return_value=managed_paused),
+            mock.patch.object(
+                subject, "SiblingIsolationGuard",
+                return_value=sibling_guard),
             mock.patch.object(
                 native_api, "publish_timing_trace_manifest",
                 return_value="e" * 64),
@@ -1888,6 +2960,9 @@ class NativeRunnerTests(unittest.TestCase):
             lifecycle.index("affinity_restored"))
         self.assertLess(
             lifecycle.index("affinity_restored"),
+            lifecycle.index("sibling_load_resumed"))
+        self.assertLess(
+            lifecycle.index("sibling_load_resumed"),
             lifecycle.index("post_shutdown_validation"))
         self.assertLess(
             lifecycle.index("post_shutdown_validation"),
@@ -1950,8 +3025,13 @@ class NativeRunnerTests(unittest.TestCase):
                 sampler_script=Path("s.py"),
                 sampler_csv=Path("thermal.csv"), cpus=None,
                 controller_cpu=None,
+                pause_sibling_pids=None,
                 output_dir=self.root / ("run-" + message.replace(" ", "-")))
             summary_writer = mock.Mock()
+            managed_paused = mock.Mock(records=[])
+            sibling_guard = mock.Mock()
+            sibling_guard.attestation.return_value = {
+                "terminal_status": "clean"}
             patches = (
                 mock.patch.object(
                     contract_api, "load_contract", return_value=contract),
@@ -1996,6 +3076,14 @@ class NativeRunnerTests(unittest.TestCase):
                 mock.patch.object(
                     subject, "select_cpu_layout",
                     return_value=(list(range(8)), 8)),
+                mock.patch.object(
+                    native_api, "timing_sibling_cpus", return_value=[]),
+                mock.patch.object(
+                    subject, "ManagedPausedSiblingProcesses",
+                    return_value=managed_paused),
+                mock.patch.object(
+                    subject, "SiblingIsolationGuard",
+                    return_value=sibling_guard),
                 mock.patch.object(
                     native_api, "publish_timing_trace_manifest",
                     return_value="e" * 64),
@@ -2605,6 +3693,7 @@ class NativeRunnerTests(unittest.TestCase):
         try:
             workers = subject.spawn_workers(
                 description, cpus, time.monotonic() + 5.0)
+            sibling_guard = mock.Mock()
             with mock.patch.object(
                     contract_api, "timing_panels", return_value=[]), \
                     mock.patch.object(
@@ -2615,7 +3704,7 @@ class NativeRunnerTests(unittest.TestCase):
                         return_value=self._validator):
                 path, _ = subject._run_timing_jobs(
                     {}, {}, mock.Mock(), description, workers,
-                    self.root, 0, time.monotonic() + 5.0)
+                    self.root, 0, time.monotonic() + 5.0, sibling_guard)
             subject.quit_workers(workers, time.monotonic() + 5.0)
             workers = []
         finally:
@@ -2631,6 +3720,9 @@ class NativeRunnerTests(unittest.TestCase):
         self.assertEqual(path, self.root / "timing-native-results.jsonl")
         self.assertFalse(
             (self.root / "recovery-native-results.jsonl").exists())
+        self.assertEqual(
+            [call.args[0] for call in sibling_guard.check.call_args_list],
+            ["before-timing-wave-0", "after-timing-wave-0"])
 
     def test_qualification_adaptive_tail_retries_only_one_unresolved_cell(
             self) -> None:

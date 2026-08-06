@@ -76,6 +76,56 @@ class BuiltQualification(NamedTuple):
 def timing_evidence_kwargs(value: BuiltEvidence) -> Dict[str, Any]:
     if value.qualification is None:
         return {}
+    freeze = json.loads(value.freeze.read_text(encoding="utf-8"))
+    worker_cpus = sorted({row["cpu"] for row in value.records})
+    controller_cpu = freeze["host_identity"]["controller_cpu"]
+    protected_cpus = sorted(worker_cpus + [controller_cpu])
+    first = min(row["started_monotonic_ns"] for row in value.records)
+    last = max(row["finished_monotonic_ns"] for row in value.records)
+    if first < 3 or len(value.records) % len(worker_cpus) != 0:
+        raise AssertionError("timing isolation fixture has invalid waves")
+    checks = [
+        {"ordinal": 0, "stage": "before-worker-spawn",
+         "monotonic_ns": first - 3, "foreign_task_count": 0},
+        {"ordinal": 1, "stage": "before-timing-window",
+         "monotonic_ns": first - 2, "foreign_task_count": 0},
+    ]
+    chronological = sorted(
+        value.records, key=lambda row: row["started_monotonic_ns"])
+    wave_rows = [
+        chronological[offset:offset + len(worker_cpus)]
+        for offset in range(0, len(chronological), len(worker_cpus))
+    ]
+    for wave_ordinal, rows in enumerate(wave_rows):
+        wave_start = min(row["started_monotonic_ns"] for row in rows)
+        wave_end = max(row["finished_monotonic_ns"] for row in rows)
+        checks.extend((
+            {"ordinal": len(checks),
+             "stage": "before-timing-wave-{}".format(wave_ordinal),
+             "monotonic_ns": wave_start - 1, "foreign_task_count": 0},
+            {"ordinal": len(checks) + 1,
+             "stage": "after-timing-wave-{}".format(wave_ordinal),
+             "monotonic_ns": wave_end + 1, "foreign_task_count": 0},
+        ))
+    checks.append({
+        "ordinal": len(checks), "stage": "after-timing-interval",
+        "monotonic_ns": last + 2, "foreign_task_count": 0,
+    })
+    isolation = {
+        "schema": subject.SIBLING_ISOLATION_SCHEMA,
+        "policy": "exact-affinity-wave-boundary-v1",
+        "worker_cpus": worker_cpus,
+        "controller_cpu": controller_cpu,
+        "protected_cpus": protected_cpus,
+        "sibling_cpus": subject.timing_sibling_cpus(protected_cpus),
+        "paused_processes": [],
+        "checks": checks,
+        "check_count": len(checks),
+        "checks_sha256": contract_api.sha256_json(checks),
+        "first_check_monotonic_ns": checks[0]["monotonic_ns"],
+        "last_check_monotonic_ns": checks[-1]["monotonic_ns"],
+        "terminal_status": "clean",
+    }
     return {
         "timing_qualification_map_path": value.qualification_map,
         "timing_qualification_audit_path": value.qualification_audit,
@@ -87,6 +137,7 @@ def timing_evidence_kwargs(value: BuiltEvidence) -> Dict[str, Any]:
             value.qualification_execution_receipt,
         "timing_qualification_execution_receipt_sha256":
             value.qualification_execution_receipt_sha256,
+        "sibling_isolation": isolation,
     }
 
 
@@ -836,10 +887,14 @@ class NativeShortScreenTests(unittest.TestCase):
                 receipt["qualification_thermal"][
                     "window_end_monotonic_ns"],
                 receipt["thermal"]["window_start_monotonic_ns"])
+            self.assertEqual(
+                receipt["sibling_isolation"],
+                timing_evidence_kwargs(built)["sibling_isolation"])
 
             for missing in (
                     "timing_qualification_execution_receipt_path",
-                    "timing_qualification_execution_receipt_sha256"):
+                    "timing_qualification_execution_receipt_sha256",
+                    "sibling_isolation"):
                 kwargs = timing_evidence_kwargs(built)
                 kwargs[missing] = None
                 missing_result = root / (missing + "-result.jsonl")
@@ -853,6 +908,70 @@ class NativeShortScreenTests(unittest.TestCase):
                         verify_live_sampler=False, **kwargs)
                 self.assertFalse(missing_result.exists())
                 self.assertFalse(missing_receipt.exists())
+
+            changed = copy.deepcopy(receipt)
+            changed["sibling_isolation"]["checks"][0][
+                "foreign_task_count"] = 1
+            changed["sibling_isolation"]["checks_sha256"] = \
+                contract_api.sha256_json(
+                    changed["sibling_isolation"]["checks"])
+            changed["receipt_sha256"] = contract_api.sha256_json({
+                key: item for key, item in changed.items()
+                if key != "receipt_sha256"
+            })
+            mutant = root / "sibling-isolation-receipt.json"
+            canonical_file(mutant, changed)
+            with self.assertRaisesRegex(
+                    subject.NativeEvidenceError, "sibling-isolation check"):
+                subject.validate_execution_receipt(
+                    self.contract, "timing", "development",
+                    built.freeze, built.traces, built.native, result_path,
+                    mutant, verify_live_sampler=False,
+                    sampler_path=built.sampler,
+                    **timing_evidence_kwargs(built))
+
+            incomplete = copy.deepcopy(receipt)
+            del incomplete["sibling_isolation"]["checks"][2]
+            incomplete["sibling_isolation"]["check_count"] -= 1
+            incomplete["sibling_isolation"]["checks_sha256"] = \
+                contract_api.sha256_json(
+                    incomplete["sibling_isolation"]["checks"])
+            incomplete["receipt_sha256"] = contract_api.sha256_json({
+                key: item for key, item in incomplete.items()
+                if key != "receipt_sha256"
+            })
+            incomplete_path = root / "incomplete-sibling-wave-receipt.json"
+            canonical_file(incomplete_path, incomplete)
+            with self.assertRaisesRegex(
+                    subject.NativeEvidenceError, "wave checks are incomplete"):
+                subject.validate_execution_receipt(
+                    self.contract, "timing", "development",
+                    built.freeze, built.traces, built.native, result_path,
+                    incomplete_path, verify_live_sampler=False,
+                    sampler_path=built.sampler,
+                    **timing_evidence_kwargs(built))
+
+            missed_wave = copy.deepcopy(receipt)
+            first_before = missed_wave["sibling_isolation"]["checks"][2]
+            first_after = missed_wave["sibling_isolation"]["checks"][3]
+            first_after["monotonic_ns"] = first_before["monotonic_ns"] + 1
+            missed_wave["sibling_isolation"]["checks_sha256"] = \
+                contract_api.sha256_json(
+                    missed_wave["sibling_isolation"]["checks"])
+            missed_wave["receipt_sha256"] = contract_api.sha256_json({
+                key: item for key, item in missed_wave.items()
+                if key != "receipt_sha256"
+            })
+            missed_wave_path = root / "missed-native-wave-receipt.json"
+            canonical_file(missed_wave_path, missed_wave)
+            with self.assertRaisesRegex(
+                    subject.NativeEvidenceError, "misses its native wave"):
+                subject.validate_execution_receipt(
+                    self.contract, "timing", "development",
+                    built.freeze, built.traces, built.native, result_path,
+                    missed_wave_path, verify_live_sampler=False,
+                    sampler_path=built.sampler,
+                    **timing_evidence_kwargs(built))
 
             mutations = {
                 "base_domain": ("timing_base_domain_sha256", digest("bad")),

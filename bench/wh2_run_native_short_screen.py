@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 import csv
+import errno
 import hashlib
 import io
 import math
@@ -81,6 +82,8 @@ ZERO_SHA256 = "0" * 64
 CPU_TOKEN = re.compile(r"(?:0|[1-9][0-9]*)\Z")
 CACHE_INDEX_TOKEN = re.compile(r"index(?:0|[1-9][0-9]*)\Z")
 POSITIVE_TOKEN = re.compile(r"[1-9][0-9]*\Z")
+MAX_LINUX_PID = (1 << 31) - 1
+MAX_LINUX_PID_TEXT = str(MAX_LINUX_PID)
 CPU_SYSFS_ROOT = Path("/sys/devices/system/cpu")
 
 # The producer admits every retry offset in [0,255] independently for all
@@ -757,6 +760,24 @@ def parse_cpu_list(text: str) -> List[int]:
     return values
 
 
+def parse_pid_list(text: str) -> List[int]:
+    """Parse an optional strictly increasing list of controller-owned PIDs."""
+    if not isinstance(text, str) or not text:
+        fail("--pause-sibling-pids must be a nonempty comma-separated PID list")
+    tokens = text.split(",")
+    if any(POSITIVE_TOKEN.fullmatch(token) is None for token in tokens):
+        fail("--pause-sibling-pids contains a noncanonical PID")
+    if any(len(token) > len(MAX_LINUX_PID_TEXT) or
+           (len(token) == len(MAX_LINUX_PID_TEXT) and
+            token > MAX_LINUX_PID_TEXT)
+           for token in tokens):
+        fail("--pause-sibling-pids contains a PID outside Linux pid_t")
+    values = [int(token) for token in tokens]
+    if values != sorted(set(values)):
+        fail("--pause-sibling-pids must be strictly increasing and unique")
+    return values
+
+
 def _cpu_topology(cpu: int, sysfs_root: Path) -> Tuple[int, int]:
     topology = sysfs_root / "cpu{}".format(cpu) / "topology"
     values = []
@@ -949,6 +970,493 @@ def select_cpu_layout(
             controller_core in {topology[cpu] for cpu in workers}):
         fail("controller/worker/sampler CPU layout is not physically isolated")
     return workers, controller_cpu
+
+
+def _proc_race(exc: BaseException) -> bool:
+    return isinstance(exc, OSError) and exc.errno in (errno.ENOENT, errno.ESRCH)
+
+
+def _read_proc_task_state(path: Path) -> str:
+    try:
+        raw = path.read_text(encoding="ascii")
+    except (OSError, UnicodeError) as exc:
+        if _proc_race(exc):
+            raise FileNotFoundError(str(path)) from exc
+        fail("cannot read task state {}: {}".format(path, exc))
+    close = raw.rfind(")")
+    fields = raw[close + 1:].split() if close >= 0 else []
+    if len(fields) < 20 or len(fields[0]) != 1:
+        fail("task state {} is malformed".format(path))
+    return fields[0]
+
+
+def _process_task_states(pid: int, proc_root: Path = Path("/proc")) \
+        -> List[Tuple[int, str]]:
+    task_root = proc_root / str(pid) / "task"
+    try:
+        entries = sorted(
+            (entry for entry in task_root.iterdir()
+             if entry.name.isascii() and entry.name.isdecimal()),
+            key=lambda entry: int(entry.name))
+    except OSError as exc:
+        if _proc_race(exc):
+            return []
+        fail("cannot enumerate process {} tasks: {}".format(pid, exc))
+    result = []
+    for entry in entries:
+        try:
+            result.append((
+                int(entry.name), _read_proc_task_state(entry / "stat")))
+        except FileNotFoundError:
+            continue
+    return result
+
+
+def _process_start_ticks(pid: int, proc_root: Path = Path("/proc")) -> int:
+    stat_path = proc_root / str(pid) / "stat"
+    try:
+        raw = stat_path.read_text(encoding="ascii")
+    except (OSError, UnicodeError) as exc:
+        if _proc_race(exc):
+            raise ProcessLookupError(pid) from exc
+        fail("cannot read process {} identity: {}".format(pid, exc))
+    close = raw.rfind(")")
+    fields = raw[close + 1:].split() if close >= 0 else []
+    if len(fields) < 20 or not fields[19].isascii() or \
+            not fields[19].isdecimal():
+        fail("process {} identity is malformed".format(pid))
+    value = int(fields[19])
+    if value <= 0:
+        fail("process {} has an invalid start time".format(pid))
+    return value
+
+
+def _scan_exact_affinity_tasks(
+        exclusive_cpus: Set[int], proc_root: Path = Path("/proc"),
+        ) -> List[Mapping[str, Any]]:
+    """Find executable tasks whose entire scheduler affinity is T-owned CPUs."""
+    if (not exclusive_cpus or
+            any(type(cpu) is not int or cpu < 0 for cpu in exclusive_cpus)):
+        fail("SMT isolation scan requires nonempty valid exclusive CPUs")
+    try:
+        processes = sorted(
+            (entry for entry in proc_root.iterdir()
+             if entry.name.isascii() and entry.name.isdecimal()),
+            key=lambda entry: int(entry.name))
+    except OSError as exc:
+        fail("cannot enumerate /proc for SMT isolation: {}".format(exc))
+    found: List[Mapping[str, Any]] = []
+    for process in processes:
+        pid = int(process.name)
+        try:
+            # Kernel threads have no executable link and are not schedulable
+            # user workloads.  Every executable process must remain inspectable.
+            info = (process / "exe").stat()
+            if not stat.S_ISREG(info.st_mode):
+                continue
+            start_ticks = _process_start_ticks(pid, proc_root)
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        except OSError as exc:
+            if _proc_race(exc):
+                continue
+            fail("cannot inspect process {} executable: {}".format(pid, exc))
+        process_found: List[Mapping[str, Any]] = []
+        for tid, state in _process_task_states(pid, proc_root):
+            try:
+                affinity = set(os.sched_getaffinity(tid))
+            except (AttributeError, OSError) as exc:
+                if _proc_race(exc):
+                    continue
+                fail("cannot inspect task {} affinity: {}".format(tid, exc))
+            if affinity and affinity.issubset(exclusive_cpus):
+                process_found.append({
+                    "pid": pid,
+                    "tid": tid,
+                    "process_start_ticks": start_ticks,
+                    "cpu_affinity": sorted(affinity),
+                    "state": state,
+                })
+        try:
+            final_start_ticks = _process_start_ticks(pid, proc_root)
+        except ProcessLookupError:
+            # A task that was exact-pinned to the protected roster was real
+            # contamination at the instant we observed it.  Process exit does
+            # not erase that evidence; retaining it keeps the boundary scan
+            # fail-closed.  Races involving processes with no matching task
+            # remain irrelevant and may be skipped.
+            found.extend(process_found)
+            continue
+        if final_start_ticks != start_ticks:
+            fail("process {} changed identity during SMT isolation scan".
+                 format(pid))
+        found.extend(process_found)
+    return found
+
+
+class ManagedPausedSiblingProcesses:
+    """Own SIGSTOP/SIGCONT cleanup for explicitly declared load workers."""
+
+    def __init__(
+            self, records: Sequence[Mapping[str, Any]] = ()) -> None:
+        self._records = [dict(record) for record in records]
+        self._pidfds: Dict[int, io.FileIO] = {}
+        self._resumed = False
+
+    def _drain_resumed_pidfds(self) -> None:
+        """Attempt each idempotent close and retire only proven-closed owners."""
+        failures: List[CleanupFailure] = []
+        for pid in sorted(list(self._pidfds)):
+            handle = self._pidfds.get(pid)
+            if not isinstance(handle, io.FileIO):
+                failures.append((
+                    "managed sibling PID {} pidfd owner is invalid".format(
+                        pid),
+                    RunnerError("managed sibling pidfd owner type changed")))
+                continue
+            try:
+                try:
+                    handle.close()
+                finally:
+                    # An exception before close leaves the same open object in
+                    # the map.  An exception during/after FileIO.close leaves a
+                    # closed object whose repeated close is idempotent.  Only
+                    # remove the exact object after its C owner says closed.
+                    if (handle.closed and
+                            self._pidfds.get(pid) is handle):
+                        self._pidfds.pop(pid)
+            except BaseException as cleanup:
+                failures.append((
+                    "managed sibling PID {} pidfd cleanup failed".format(pid),
+                    cleanup))
+        _raise_after_cleanup(None, failures)
+
+    def pause(self, pids: Sequence[int], sibling_cpus: Sequence[int],
+              deadline: float) -> None:
+        if self._records or self._pidfds or self._resumed:
+            fail("managed sibling pause owner is not pristine")
+        if (any(type(pid) is not int or pid <= 0 for pid in pids) or
+                list(pids) != sorted(set(pids))):
+            fail("managed sibling PIDs must be sorted unique positive integers")
+        siblings = set(sibling_cpus)
+        if pids and not siblings:
+            fail("cannot pause sibling load when the timing roster has no SMT")
+        if pids and (not callable(getattr(os, "pidfd_open", None)) or
+                     not callable(getattr(signal, "pidfd_send_signal", None))):
+            fail("managed sibling pause requires Linux pidfd signal support")
+        owner_uid = os.geteuid()
+        sudo_uid = os.environ.get("SUDO_UID")
+        if sudo_uid is not None:
+            if (not sudo_uid.isascii() or not sudo_uid.isdecimal() or
+                    (len(sudo_uid) > 1 and sudo_uid.startswith("0"))):
+                fail("SUDO_UID is not a canonical user ID")
+            owner_uid = int(sudo_uid)
+        try:
+            for pid in pids:
+                if pid == os.getpid():
+                    fail("controller cannot pause itself as sibling load")
+                try:
+                    # The only raw-integer interval is pidfd_open's CALL return
+                    # to FileIO's CALL entry, before any SIGSTOP ownership is
+                    # published.  Once FileIO returns, C-level descriptor state
+                    # makes every later close idempotent across Python async
+                    # instruction boundaries.  Do not retry a constructor
+                    # failure with raw os.close: adoption state is ambiguous.
+                    pidfd = io.FileIO(
+                        os.pidfd_open(pid, 0), mode="rb", closefd=True)
+                    self._pidfds[pid] = pidfd
+                    process_info = Path("/proc/{}".format(pid)).stat()
+                    executable_info = Path(
+                        "/proc/{}/exe".format(pid)).stat()
+                    start_ticks = _process_start_ticks(pid)
+                    tasks = _process_task_states(pid)
+                except (OSError, ProcessLookupError) as exc:
+                    fail("cannot inspect managed sibling PID {}: {}".format(
+                        pid, exc))
+                if (process_info.st_uid != owner_uid or
+                        not stat.S_ISREG(executable_info.st_mode) or
+                        not tasks):
+                    fail("managed sibling PID is not a live controller-owned process")
+                process_affinity: Optional[List[int]] = None
+                for tid, state in tasks:
+                    if state in ("T", "t"):
+                        fail("managed sibling PID was already stopped")
+                    try:
+                        affinity = set(os.sched_getaffinity(tid))
+                    except (AttributeError, OSError) as exc:
+                        fail("cannot inspect managed sibling PID affinity: {}".
+                             format(exc))
+                    if not affinity or not affinity.issubset(siblings):
+                        fail("managed sibling PID is not pinned only to T siblings")
+                    canonical_affinity = sorted(affinity)
+                    if process_affinity is None:
+                        process_affinity = canonical_affinity
+                    elif canonical_affinity != process_affinity:
+                        fail("managed sibling PID tasks have different affinities")
+                if process_affinity is None:
+                    fail("managed sibling PID has no inspectable tasks")
+                try:
+                    signal.pidfd_send_signal(pidfd.fileno(), 0, None, 0)
+                except OSError as exc:
+                    fail("managed sibling PID exited before stop: {}".format(
+                        exc))
+                record = {
+                    "pid": pid,
+                    "process_start_ticks": start_ticks,
+                    "cpu_affinity": process_affinity,
+                }
+                # Publish provisional ownership before SIGSTOP: every failure
+                # after the signal must route this exact identity through the
+                # SIGCONT rollback path.
+                self._records.append(record)
+                signal.pidfd_send_signal(
+                    pidfd.fileno(), signal.SIGSTOP, None, 0)
+                while True:
+                    try:
+                        current_ticks = _process_start_ticks(pid)
+                    except ProcessLookupError:
+                        fail("managed sibling PID exited while stopping")
+                    if current_ticks != start_ticks:
+                        fail("managed sibling PID changed identity while stopping")
+                    current = _process_task_states(pid)
+                    if current and all(state in ("T", "t")
+                                       for _, state in current):
+                        break
+                    _remaining(deadline, "stopping managed sibling load")
+                    time.sleep(0.01)
+                if _process_start_ticks(pid) != start_ticks:
+                    fail("managed sibling PID changed identity while stopping")
+            return
+        except BaseException as primary:
+            try:
+                # A stop-time hard-wall failure must not donate its expired
+                # deadline to rollback.  The manager already owns every PID
+                # that may have observed SIGSTOP, so reserve a fresh SIGCONT
+                # grace period before propagating the primary failure.
+                self.resume(max(time.monotonic() + 5.0, deadline))
+            except BaseException as cleanup:
+                _raise_after_cleanup(
+                    primary,
+                    [("managed sibling load rollback failed", cleanup)])
+            raise
+
+    @property
+    def records(self) -> List[Mapping[str, Any]]:
+        return [dict(record) for record in self._records]
+
+    @property
+    def cleanup_complete(self) -> bool:
+        """Return whether no stopped-process or pidfd cleanup remains."""
+        return self._resumed and not self._pidfds
+
+    def resume(self, deadline: float) -> None:
+        deferred_control: Optional[BaseException] = None
+        if not self._resumed:
+            pending = {record["pid"]: record for record in self._records}
+            last_failures: Dict[int, BaseException] = {}
+            attempt = 0
+            while pending:
+                attempt += 1
+                for pid, record in list(pending.items()):
+                    try:
+                        pidfd = self._pidfds.get(pid)
+                        if (not isinstance(pidfd, io.FileIO) or
+                                pidfd.closed):
+                            fail("managed sibling PID lost its exact signal handle")
+                        try:
+                            signal.pidfd_send_signal(
+                                pidfd.fileno(), signal.SIGCONT, None, 0)
+                        except OSError as exc:
+                            if _proc_race(exc):
+                                pending.pop(pid)
+                                last_failures.pop(pid, None)
+                                continue
+                            raise
+                        while True:
+                            try:
+                                current_ticks = _process_start_ticks(pid)
+                            except ProcessLookupError:
+                                break
+                            if current_ticks != record["process_start_ticks"]:
+                                break
+                            states = _process_task_states(pid)
+                            if not states or all(state not in ("T", "t")
+                                                 for _, state in states):
+                                break
+                            _remaining(
+                                deadline, "resuming managed sibling load")
+                            time.sleep(0.01)
+                        pending.pop(pid)
+                        last_failures.pop(pid, None)
+                    except BaseException as cleanup:
+                        last_failures[pid] = cleanup
+                        if (deferred_control is None and
+                                not isinstance(cleanup, Exception)):
+                            deferred_control = cleanup
+                if not pending:
+                    break
+                now = time.monotonic()
+                # Every exact handle receives at least two attempts, even if
+                # the cleanup deadline is already expired.
+                if attempt >= 2 and now >= deadline:
+                    break
+                try:
+                    time.sleep(min(0.01, max(0.0, deadline - now)))
+                except BaseException as cleanup:
+                    if (deferred_control is None and
+                            not isinstance(cleanup, Exception)):
+                        deferred_control = cleanup
+
+            if pending:
+                failures = [
+                    ("managed sibling PID {} resume failed".format(pid),
+                     last_failures[pid])
+                    for pid in sorted(pending)
+                ]
+                _raise_after_cleanup(deferred_control, failures)
+                raise AssertionError("unreachable")
+
+            # Once every stopped record is confirmed continued (or exited),
+            # this one state bit switches the same durable handle map from
+            # signal ownership to idempotent close ownership.
+            transition_attempts = 0
+            while not self._resumed:
+                try:
+                    self._resumed = True
+                except BaseException as cleanup:
+                    transition_attempts += 1
+                    if (deferred_control is None and
+                            not isinstance(cleanup, Exception)):
+                        deferred_control = cleanup
+                    if (not isinstance(cleanup, Exception) and
+                            transition_attempts < 8):
+                        continue
+                    raise
+
+        drain_failures: List[CleanupFailure] = []
+        drain_attempts = 0
+        while self._pidfds and drain_attempts < 8:
+            drain_attempts += 1
+            try:
+                self._drain_resumed_pidfds()
+            except BaseException as cleanup:
+                drain_failures.append((
+                    "managed sibling pidfd drain attempt {} failed".format(
+                        drain_attempts), cleanup))
+            if not self._pidfds:
+                break
+            if drain_attempts >= 2 and time.monotonic() >= deadline:
+                break
+        if self._pidfds:
+            drain_failures.append((
+                "managed sibling pidfd drain did not converge",
+                RunnerError(
+                    "managed sibling cleanup still owns {} pidfd handles "
+                    "after {} drain attempts".format(
+                        len(self._pidfds), drain_attempts))))
+        if drain_failures:
+            _raise_after_cleanup(
+                deferred_control, drain_failures)
+        if deferred_control is not None:
+            raise deferred_control
+
+
+class SiblingIsolationGuard:
+    """Fail every T wave boundary if a foreign exact-affinity task appears."""
+
+    def __init__(
+            self, worker_cpus: Sequence[int], controller_cpu: int,
+            paused_processes: Sequence[Mapping[str, Any]] = (),
+            scan: Callable[[Set[int]], List[Mapping[str, Any]]] =
+                _scan_exact_affinity_tasks,
+            sysfs_root: Path = CPU_SYSFS_ROOT) -> None:
+        self.worker_cpus = list(worker_cpus)
+        self.controller_cpu = controller_cpu
+        self.protected_cpus = sorted(self.worker_cpus + [controller_cpu])
+        self.sibling_cpus = native_api.timing_sibling_cpus(
+            self.protected_cpus, sysfs_root)
+        self.exclusive_cpus = set(
+            self.protected_cpus + self.sibling_cpus)
+        self.paused_processes = [dict(value) for value in paused_processes]
+        self._paused = {
+            (value["pid"], value["process_start_ticks"]): value
+            for value in self.paused_processes
+        }
+        self._workers: Dict[Tuple[int, int], int] = {}
+        self._checks: List[Mapping[str, Any]] = []
+        self._scan = scan
+
+    def bind_workers(self, workers: Sequence["PersistentWorker"]) -> None:
+        expected = set(self.worker_cpus)
+        if (len(workers) != len(self.worker_cpus) or
+                {worker.cpu for worker in workers} != expected or
+                any(worker.start_ticks <= 0 for worker in workers)):
+            fail("cannot bind an incomplete timing worker roster to SMT guard")
+        self._workers = {
+            (worker.process.pid, worker.start_ticks): worker.cpu
+            for worker in workers
+        }
+        if len(self._workers) != len(workers):
+            fail("timing worker roster reuses a process identity")
+
+    def check(self, stage: str) -> None:
+        if not isinstance(stage, str) or not stage or len(stage) > 128:
+            fail("SMT isolation check stage is invalid")
+        foreign = []
+        for task in self._scan(self.exclusive_cpus):
+            identity = (task["pid"], task["process_start_ticks"])
+            # The controller leader is trusted and separately singleton-pinned
+            # before T.  Do not exempt arbitrary threads that happen to share
+            # its PID: an unexpected helper pinned to an exclusive sibling is
+            # just as capable of contaminating timing as another process.
+            if task["pid"] == os.getpid() and task["tid"] == os.getpid():
+                if task["cpu_affinity"] == [self.controller_cpu]:
+                    continue
+                foreign.append(task)
+                continue
+            worker_cpu = self._workers.get(identity)
+            if (worker_cpu is not None and task["tid"] == task["pid"] and
+                    task["cpu_affinity"] == [worker_cpu]):
+                continue
+            paused = self._paused.get(identity)
+            if (paused is not None and task["state"] in ("T", "t") and
+                    task["cpu_affinity"] == paused["cpu_affinity"]):
+                continue
+            foreign.append(task)
+        now = time.monotonic_ns()
+        self._checks.append({
+            "ordinal": len(self._checks),
+            "stage": stage,
+            "monotonic_ns": now,
+            "foreign_task_count": len(foreign),
+        })
+        if foreign:
+            task = foreign[0]
+            fail("timing SMT isolation found foreign exact-affinity task "
+                 "pid={} tid={} cpus={}".format(
+                     task["pid"], task["tid"],
+                     ",".join(str(cpu) for cpu in task["cpu_affinity"])))
+
+    def attestation(self) -> Mapping[str, Any]:
+        if len(self._checks) < 2 or any(
+                check["foreign_task_count"] != 0 for check in self._checks):
+            fail("cannot attest incomplete timing SMT isolation")
+        checks = [dict(value) for value in self._checks]
+        return {
+            "schema": native_api.SIBLING_ISOLATION_SCHEMA,
+            "policy": "exact-affinity-wave-boundary-v1",
+            "worker_cpus": list(self.worker_cpus),
+            "controller_cpu": self.controller_cpu,
+            "protected_cpus": list(self.protected_cpus),
+            "sibling_cpus": list(self.sibling_cpus),
+            "paused_processes": self.paused_processes,
+            "checks": checks,
+            "check_count": len(checks),
+            "checks_sha256": contract_api.sha256_json(checks),
+            "first_check_monotonic_ns": checks[0]["monotonic_ns"],
+            "last_check_monotonic_ns": checks[-1]["monotonic_ns"],
+            "terminal_status": "clean",
+        }
 
 
 def _pin_controller(cpu: int) -> None:
@@ -2134,6 +2642,7 @@ def _run_timing_jobs(
         timing_qualification: contract_api.TimingQualification,
         description: Mapping[str, Any], workers: Sequence[PersistentWorker],
         output_dir: Path, window_start_ns: int, deadline: float,
+        sibling_guard: Optional[SiblingIsolationGuard] = None,
         ) -> Tuple[Path, int]:
     if len(workers) != TIMING_WORKER_COUNT:
         fail("native short screen requires exactly eight timing workers")
@@ -2156,10 +2665,16 @@ def _run_timing_jobs(
             contract, freeze, "timing", description,
             window_start_ns, timing_qualification)
         for wave_ordinal, (rotation, jobs) in enumerate(timing_waves):
+            if sibling_guard is not None:
+                sibling_guard.check(
+                    "before-timing-wave-{}".format(wave_ordinal))
             end, used = run_job_batch(
                 workers, jobs, rotation, timing_sink,
                 deadline, timing_validator,
                 MAX_TIMING_NATIVE_RECORD_BYTES)
+            if sibling_guard is not None:
+                sibling_guard.check(
+                    "after-timing-wave-{}".format(wave_ordinal))
             if used != expected_timing_cpus:
                 fail("timing wave {} did not use every frozen CPU".format(
                     wave_ordinal))
@@ -2838,10 +3353,63 @@ def load_completed_timing_screen(
     return validated_result
 
 
+def _resume_managed_sibling_cleanup(
+        managed_paused: ManagedPausedSiblingProcesses,
+        cleanup_deadline: float) -> List[CleanupFailure]:
+    """Converge managed SIGCONT ownership despite one-shot interruptions."""
+    failures: List[CleanupFailure] = []
+    complete = False
+    attempts = 0
+    while attempts < 8:
+        try:
+            complete = managed_paused.cleanup_complete
+        except BaseException as cleanup:
+            failures.append((
+                "managed sibling cleanup-state inspection failed", cleanup))
+            complete = False
+        if complete:
+            break
+
+        attempts += 1
+        try:
+            managed_paused.resume(cleanup_deadline)
+        except BaseException as cleanup:
+            failures.append((
+                "managed sibling load resume attempt {} failed".format(
+                    attempts), cleanup))
+
+        try:
+            complete = managed_paused.cleanup_complete
+        except BaseException as cleanup:
+            failures.append((
+                "managed sibling cleanup-state inspection failed", cleanup))
+            complete = False
+        if complete:
+            break
+
+        # Even an expired grace period cannot suppress the second whole call:
+        # a one-shot signal may have landed before resume() entered its own
+        # retry state machine.  Later attempts remain bounded by both a small
+        # fixed cap and the fresh cleanup deadline.
+        if attempts >= 2 and time.monotonic() >= cleanup_deadline:
+            break
+
+    if not complete:
+        failures.append((
+            "managed sibling load cleanup did not converge",
+            RunnerError(
+                "managed sibling load still owns resume state after {} "
+                "cleanup attempts".format(attempts))))
+    return failures
+
+
 def _finish_timing_cleanup(
         workers: Sequence[PersistentWorker], clean_shutdown: bool,
         controller_pinned: bool, original_affinity: Set[int],
-        primary: Optional[BaseException]) -> None:
+        primary: Optional[BaseException],
+        managed_paused: Optional[ManagedPausedSiblingProcesses] = None,
+        paused_resumed: bool = False,
+        deadline: Optional[float] = None) -> None:
     """Attempt every cleanup and preserve ordinary and control-flow failures."""
     cleanup_failures: List[Tuple[str, BaseException]] = []
     if workers and not clean_shutdown:
@@ -2855,6 +3423,19 @@ def _finish_timing_cleanup(
         except BaseException as cleanup:
             cleanup_failures.append(
                 ("controller affinity cleanup failed", cleanup))
+    if managed_paused is not None and not paused_resumed:
+        try:
+            # Cleanup owns a fresh grace period even when the campaign hard
+            # wall caused the primary failure.  SIGCONT must never inherit an
+            # already-expired benchmark deadline and strand stopped load.
+            cleanup_deadline = max(
+                time.monotonic() + 5.0,
+                deadline if deadline is not None else 0.0)
+            cleanup_failures.extend(_resume_managed_sibling_cleanup(
+                managed_paused, cleanup_deadline))
+        except BaseException as cleanup:
+            cleanup_failures.append(
+                ("managed sibling load cleanup failed", cleanup))
     _raise_after_cleanup(primary, cleanup_failures)
 
 
@@ -2987,188 +3568,261 @@ def run_short_screen(
     workers: List[PersistentWorker] = []
     clean_shutdown = False
     controller_pinned = False
+    managed_paused: Optional[ManagedPausedSiblingProcesses] = \
+        ManagedPausedSiblingProcesses()
+    paused_resumed = False
+    sibling_guard: Optional[SiblingIsolationGuard] = None
+    cleanup_primary: Optional[BaseException] = None
+    cleanup_capture_complete = False
     try:
-        # The validated timing freeze exists before the first T command.
-        workers = spawn_workers(description, cpus, deadline)
-        controller_pinned = True
-        _pin_controller(controller_cpu)
-        timing_window_start_ns = choose_new_sampler_start(
-            args.sampler_csv, deadline)
-        native_path, maximum_worker_end = _run_timing_jobs(
-            contract, freeze, timing_qualification, description, workers,
-            output_dir,
-            timing_window_start_ns, deadline)
-        window_end_ns = _wait_for_sampler_sample(
-            args.sampler_csv, deadline,
-            at_or_after_ns=maximum_worker_end)
-        if _git_head(deadline) != source_commit:
-            fail("codec source commit changed during the native screen")
-        sampler_path = output_dir / "sampler-attestation.json"
         try:
-            native_api.write_sampler_attestation(
-                args.sampler_pid, args.sampler_cpu,
-                args.sampler_script, args.sampler_csv,
-                timing_window_start_ns, window_end_ns, sampler_path)
-        except native_api.NativeEvidenceError as exc:
-            fail(str(exc))
+            # Establish caller-visible affinity cleanup ownership before the first
+            # isolation scan.  The controller is therefore exact-pinned at every
+            # attested stage, including a cpuset containing only T cores/siblings.
+            controller_pinned = True
+            _pin_controller(controller_cpu)
+            pause_text = getattr(args, "pause_sibling_pids", None)
+            pause_pids = parse_pid_list(pause_text) \
+                if pause_text is not None else []
+            protected_cpus = sorted(list(cpus) + [controller_cpu])
+            sibling_cpus = native_api.timing_sibling_cpus(protected_cpus)
+            managed_paused.pause(pause_pids, sibling_cpus, deadline)
+            sibling_guard = SiblingIsolationGuard(
+                cpus, controller_cpu, managed_paused.records)
+            sibling_guard.check("before-worker-spawn")
+            # The validated timing freeze exists before the first T command.
+            workers = spawn_workers(description, cpus, deadline)
+            sibling_guard.bind_workers(workers)
+            sibling_guard.check("before-timing-window")
+            timing_window_start_ns = choose_new_sampler_start(
+                args.sampler_csv, deadline)
+            native_path, maximum_worker_end = _run_timing_jobs(
+                contract, freeze, timing_qualification, description, workers,
+                output_dir,
+                timing_window_start_ns, deadline, sibling_guard)
+            sibling_guard.check("after-timing-interval")
+            sibling_isolation = sibling_guard.attestation()
+            window_end_ns = _wait_for_sampler_sample(
+                args.sampler_csv, deadline,
+                at_or_after_ns=maximum_worker_end)
+            if _git_head(deadline) != source_commit:
+                fail("codec source commit changed during the native screen")
+            sampler_path = output_dir / "sampler-attestation.json"
+            try:
+                native_api.write_sampler_attestation(
+                    args.sampler_pid, args.sampler_cpu,
+                    args.sampler_script, args.sampler_csv,
+                    timing_window_start_ns, window_end_ns, sampler_path)
+            except native_api.NativeEvidenceError as exc:
+                fail(str(exc))
 
-        result_path = output_dir / "timing-results.jsonl"
-        receipt_path = output_dir / "timing-execution.json"
+            result_path = output_dir / "timing-results.jsonl"
+            receipt_path = output_dir / "timing-execution.json"
+            try:
+                assembled = native_api.assemble_results(
+                    contract, "timing", "development", freeze_path,
+                    timing_trace_path, native_path, sampler_path,
+                    result_path, receipt_path, verify_live_sampler=True,
+                    timing_qualification_map_path=qualification_map_path,
+                    timing_qualification_audit_path=qualification_audit_path,
+                    timing_qualification_map_sha256=qualification_map_sha256,
+                    timing_qualification_native_path=qualification_native_path,
+                    timing_qualification_sampler_path=qualification_sampler_path,
+                    timing_qualification_execution_receipt_path=
+                        qualification_execution_receipt_path,
+                    timing_qualification_execution_receipt_sha256=
+                        qualification_execution_receipt_sha256,
+                    sibling_isolation=sibling_isolation)
+                _remaining(deadline, "assembling timing results")
+                terminal = native_api.validate_execution_receipt(
+                    contract, "timing", "development", freeze_path,
+                    timing_trace_path, native_path, result_path,
+                    receipt_path, verify_live_sampler=True,
+                    sampler_path=sampler_path,
+                    timing_qualification_map_path=qualification_map_path,
+                    timing_qualification_audit_path=qualification_audit_path,
+                    timing_qualification_map_sha256=qualification_map_sha256,
+                    timing_qualification_native_path=qualification_native_path,
+                    timing_qualification_sampler_path=qualification_sampler_path,
+                    timing_qualification_execution_receipt_path=
+                        qualification_execution_receipt_path,
+                    timing_qualification_execution_receipt_sha256=
+                        qualification_execution_receipt_sha256)
+                _remaining(deadline, "validating timing execution")
+            except (native_api.NativeEvidenceError,
+                    contract_api.ContractError) as exc:
+                fail(str(exc))
+            if contract_api.canonical_json(terminal) != \
+                    contract_api.canonical_json(assembled):
+                fail("terminal timing execution differs from assembled evidence")
+            quit_workers(workers, deadline)
+            clean_shutdown = True
+            if controller_pinned:
+                _restore_controller_affinity(original_affinity)
+                controller_pinned = False
+            if managed_paused is not None:
+                managed_paused.resume(deadline)
+                paused_resumed = True
+
+            # Q/reap and affinity restoration are part of the evidence boundary.
+            # Revalidate every bound dependency after both have completed so a
+            # mutation in that interval cannot be covered by a complete marker.
+            if _git_head(deadline) != source_commit:
+                fail("codec source commit changed before terminal publication")
+            try:
+                post_shutdown = native_api.validate_execution_receipt(
+                    contract, "timing", "development", freeze_path,
+                    timing_trace_path, native_path, result_path,
+                    receipt_path, verify_live_sampler=False,
+                    sampler_path=sampler_path,
+                    timing_qualification_map_path=qualification_map_path,
+                    timing_qualification_audit_path=qualification_audit_path,
+                    timing_qualification_map_sha256=qualification_map_sha256,
+                    timing_qualification_native_path=qualification_native_path,
+                    timing_qualification_sampler_path=qualification_sampler_path,
+                    timing_qualification_execution_receipt_path=
+                        qualification_execution_receipt_path,
+                    timing_qualification_execution_receipt_sha256=
+                        qualification_execution_receipt_sha256)
+                post_shutdown_freeze = contract_api.load_freeze_manifest(
+                    contract, "development", freeze_path, "timing",
+                    timing_qualification)
+                _remaining(deadline, "post-shutdown timing validation")
+            except (native_api.NativeEvidenceError,
+                    contract_api.ContractError) as exc:
+                fail(str(exc))
+            if (contract_api.canonical_json(post_shutdown) !=
+                    contract_api.canonical_json(assembled) or
+                    contract_api.canonical_json(post_shutdown_freeze) !=
+                    contract_api.canonical_json(freeze)):
+                fail("post-shutdown timing evidence differs from assembled evidence")
+            if _git_head(deadline) != source_commit:
+                fail("codec source commit changed during terminal validation")
+
+            timing_receipt = post_shutdown["execution_receipt"]
+            timing_validator_summary = post_shutdown["summary"]
+            thermal = timing_receipt["thermal"]
+            qualification_thermal = timing_receipt["qualification_thermal"]
+            qualification_retry_offsets = list(
+                timing_qualification.retry_offsets)
+            summary = {
+                "schema": SUMMARY_SCHEMA,
+                "status": "complete",
+                "output_dir": str(output_dir),
+                "source_git_commit": source_commit,
+                "contract_sha256": contract_api.contract_sha256(contract),
+                "worker_binary_sha256": description["binary_sha256"],
+                "controller_cpu": controller_cpu,
+                "worker_cpus": list(cpus),
+                "qualification_worker_cpus": qualification_cpus,
+                "timing_qualification_map_sha256": qualification_map_sha256,
+                "timing_qualification_execution_receipt_sha256":
+                    qualification_execution_receipt_sha256,
+                "timing_qualified_domain_sha256":
+                    timing_qualification.qualified_domain_sha256,
+                "qualification_attempt_count":
+                    qualification_metadata["qualification_attempt_count"],
+                "qualification_retried_cell_count": sum(
+                    1 for retry in qualification_retry_offsets if retry > 0),
+                "qualification_max_retry_offset": max(
+                    qualification_retry_offsets, default=0),
+                "qualification_sum_retry_offsets": sum(
+                    qualification_retry_offsets),
+                "timing_records": timing_receipt["record_count"],
+                "timing_trace_manifest_sha256":
+                    freeze["trace_manifest_sha256"],
+                "timing_freeze_sha256": timing_receipt["freeze_manifest_sha256"],
+                "timing_architecture_artifact_sha256":
+                    contract_api.architecture_artifact_sha256(freeze),
+                "timing_result_sha256": timing_receipt["result_stream_sha256"],
+                "timing_execution_receipt_sha256":
+                    timing_receipt["receipt_sha256"],
+                "timing_validator_summary_sha256":
+                    timing_receipt["validator_summary_sha256"],
+                "thermal_samples": thermal["sample_count"],
+                "cpu_tctl_max_millic": thermal["cpu_tctl_max_millic"],
+                "dimm_max_millic": thermal["dimm_max_millic"],
+                "timing_thermal_samples": thermal["sample_count"],
+                "timing_cpu_tctl_max_millic":
+                    thermal["cpu_tctl_max_millic"],
+                "timing_dimm_max_millic": thermal["dimm_max_millic"],
+                "qualification_thermal_samples":
+                    qualification_thermal["sample_count"],
+                "qualification_cpu_tctl_max_millic":
+                    qualification_thermal["cpu_tctl_max_millic"],
+                "qualification_dimm_max_millic":
+                    qualification_thermal["dimm_max_millic"],
+                "overall_cpu_tctl_max_millic": max(
+                    thermal["cpu_tctl_max_millic"],
+                    qualification_thermal["cpu_tctl_max_millic"]),
+                "overall_dimm_max_millic": max(
+                    thermal["dimm_max_millic"],
+                    qualification_thermal["dimm_max_millic"]),
+            }
+            summary["summary_sha256"] = contract_api.sha256_json(summary)
+            if (set(summary) != SUMMARY_FIELDS or
+                    summary["timing_validator_summary_sha256"] !=
+                        contract_api.sha256_json(timing_validator_summary)):
+                fail("internal timing run summary schema mismatch")
+            _commit_completed_timing_screen(
+                contract, output_dir, summary, post_shutdown_freeze,
+                timing_validator_summary, timing_receipt, timing_qualification,
+                finish_hard_wall)
+            # The successful transaction is the final fallible action.  Do not add
+            # a deadline/provenance check after it without extending its rollback
+            # boundary around that check.
+            return summary
+        finally:
+            # Keep the first cleanup suite direct: on CPython 3.11+ a nested
+            # try here starts with an uncovered exception-path NOP.  The direct
+            # first opcode is protected by the finally unwinder and therefore
+            # reaches the outer full-cleanup handler if it is interrupted.
+            cleanup_primary = sys.exc_info()[1]
+            cleanup_capture_complete = True
+            # Retire the campaign's one-shot SIGALRM before any cleanup.  If
+            # this call is interrupted, its handler disables the timer and the
+            # outer fallback gets an interruption-free retry.
+            if finish_hard_wall is not None:
+                finish_hard_wall()
+            _finish_timing_cleanup(
+                workers, clean_shutdown, controller_pinned,
+                original_affinity, cleanup_primary, managed_paused,
+                paused_resumed, deadline)
+    except BaseException as cleanup:
+        # Capture can itself be interrupted before its assignment completes.
+        # In that case Python chains the displaced body failure as context.
+        active_primary = cleanup_primary
+        if active_primary is None and not cleanup_capture_complete:
+            active_primary = cleanup.__context__
+
+        fallback_failures: List[CleanupFailure] = []
+        if cleanup is not active_primary:
+            fallback_failures.append((
+                "timing cleanup interrupted", cleanup))
         try:
-            assembled = native_api.assemble_results(
-                contract, "timing", "development", freeze_path,
-                timing_trace_path, native_path, sampler_path,
-                result_path, receipt_path, verify_live_sampler=True,
-                timing_qualification_map_path=qualification_map_path,
-                timing_qualification_audit_path=qualification_audit_path,
-                timing_qualification_map_sha256=qualification_map_sha256,
-                timing_qualification_native_path=qualification_native_path,
-                timing_qualification_sampler_path=qualification_sampler_path,
-                timing_qualification_execution_receipt_path=
-                    qualification_execution_receipt_path,
-                timing_qualification_execution_receipt_sha256=
-                    qualification_execution_receipt_sha256)
-            _remaining(deadline, "assembling timing results")
-            terminal = native_api.validate_execution_receipt(
-                contract, "timing", "development", freeze_path,
-                timing_trace_path, native_path, result_path,
-                receipt_path, verify_live_sampler=True,
-                sampler_path=sampler_path,
-                timing_qualification_map_path=qualification_map_path,
-                timing_qualification_audit_path=qualification_audit_path,
-                timing_qualification_map_sha256=qualification_map_sha256,
-                timing_qualification_native_path=qualification_native_path,
-                timing_qualification_sampler_path=qualification_sampler_path,
-                timing_qualification_execution_receipt_path=
-                    qualification_execution_receipt_path,
-                timing_qualification_execution_receipt_sha256=
-                    qualification_execution_receipt_sha256)
-            _remaining(deadline, "validating timing execution")
-        except (native_api.NativeEvidenceError,
-                contract_api.ContractError) as exc:
-            fail(str(exc))
-        if contract_api.canonical_json(terminal) != \
-                contract_api.canonical_json(assembled):
-            fail("terminal timing execution differs from assembled evidence")
-        quit_workers(workers, deadline)
-        clean_shutdown = True
-        if controller_pinned:
-            _restore_controller_affinity(original_affinity)
-            controller_pinned = False
-
-        # Q/reap and affinity restoration are part of the evidence boundary.
-        # Revalidate every bound dependency after both have completed so a
-        # mutation in that interval cannot be covered by a complete marker.
-        if _git_head(deadline) != source_commit:
-            fail("codec source commit changed before terminal publication")
+            if finish_hard_wall is not None:
+                finish_hard_wall()
+        except BaseException as disarm:
+            fallback_failures.append((
+                "timing hard-wall disarm fallback failed", disarm))
         try:
-            post_shutdown = native_api.validate_execution_receipt(
-                contract, "timing", "development", freeze_path,
-                timing_trace_path, native_path, result_path,
-                receipt_path, verify_live_sampler=False,
-                sampler_path=sampler_path,
-                timing_qualification_map_path=qualification_map_path,
-                timing_qualification_audit_path=qualification_audit_path,
-                timing_qualification_map_sha256=qualification_map_sha256,
-                timing_qualification_native_path=qualification_native_path,
-                timing_qualification_sampler_path=qualification_sampler_path,
-                timing_qualification_execution_receipt_path=
-                    qualification_execution_receipt_path,
-                timing_qualification_execution_receipt_sha256=
-                    qualification_execution_receipt_sha256)
-            post_shutdown_freeze = contract_api.load_freeze_manifest(
-                contract, "development", freeze_path, "timing",
-                timing_qualification)
-            _remaining(deadline, "post-shutdown timing validation")
-        except (native_api.NativeEvidenceError,
-                contract_api.ContractError) as exc:
-            fail(str(exc))
-        if (contract_api.canonical_json(post_shutdown) !=
-                contract_api.canonical_json(assembled) or
-                contract_api.canonical_json(post_shutdown_freeze) !=
-                contract_api.canonical_json(freeze)):
-            fail("post-shutdown timing evidence differs from assembled evidence")
-        if _git_head(deadline) != source_commit:
-            fail("codec source commit changed during terminal validation")
+            # This is deliberately the whole cleanup, not only SIGCONT:
+            # interruption may precede worker termination or affinity restore.
+            _finish_timing_cleanup(
+                workers, clean_shutdown, controller_pinned, original_affinity,
+                None, managed_paused, paused_resumed, deadline)
+        except BaseException as fallback:
+            fallback_failures.append((
+                "full timing cleanup fallback failed", fallback))
 
-        timing_receipt = post_shutdown["execution_receipt"]
-        timing_validator_summary = post_shutdown["summary"]
-        thermal = timing_receipt["thermal"]
-        qualification_thermal = timing_receipt["qualification_thermal"]
-        qualification_retry_offsets = list(
-            timing_qualification.retry_offsets)
-        summary = {
-            "schema": SUMMARY_SCHEMA,
-            "status": "complete",
-            "output_dir": str(output_dir),
-            "source_git_commit": source_commit,
-            "contract_sha256": contract_api.contract_sha256(contract),
-            "worker_binary_sha256": description["binary_sha256"],
-            "controller_cpu": controller_cpu,
-            "worker_cpus": list(cpus),
-            "qualification_worker_cpus": qualification_cpus,
-            "timing_qualification_map_sha256": qualification_map_sha256,
-            "timing_qualification_execution_receipt_sha256":
-                qualification_execution_receipt_sha256,
-            "timing_qualified_domain_sha256":
-                timing_qualification.qualified_domain_sha256,
-            "qualification_attempt_count":
-                qualification_metadata["qualification_attempt_count"],
-            "qualification_retried_cell_count": sum(
-                1 for retry in qualification_retry_offsets if retry > 0),
-            "qualification_max_retry_offset": max(
-                qualification_retry_offsets, default=0),
-            "qualification_sum_retry_offsets": sum(
-                qualification_retry_offsets),
-            "timing_records": timing_receipt["record_count"],
-            "timing_trace_manifest_sha256":
-                freeze["trace_manifest_sha256"],
-            "timing_freeze_sha256": timing_receipt["freeze_manifest_sha256"],
-            "timing_architecture_artifact_sha256":
-                contract_api.architecture_artifact_sha256(freeze),
-            "timing_result_sha256": timing_receipt["result_stream_sha256"],
-            "timing_execution_receipt_sha256":
-                timing_receipt["receipt_sha256"],
-            "timing_validator_summary_sha256":
-                timing_receipt["validator_summary_sha256"],
-            "thermal_samples": thermal["sample_count"],
-            "cpu_tctl_max_millic": thermal["cpu_tctl_max_millic"],
-            "dimm_max_millic": thermal["dimm_max_millic"],
-            "timing_thermal_samples": thermal["sample_count"],
-            "timing_cpu_tctl_max_millic":
-                thermal["cpu_tctl_max_millic"],
-            "timing_dimm_max_millic": thermal["dimm_max_millic"],
-            "qualification_thermal_samples":
-                qualification_thermal["sample_count"],
-            "qualification_cpu_tctl_max_millic":
-                qualification_thermal["cpu_tctl_max_millic"],
-            "qualification_dimm_max_millic":
-                qualification_thermal["dimm_max_millic"],
-            "overall_cpu_tctl_max_millic": max(
-                thermal["cpu_tctl_max_millic"],
-                qualification_thermal["cpu_tctl_max_millic"]),
-            "overall_dimm_max_millic": max(
-                thermal["dimm_max_millic"],
-                qualification_thermal["dimm_max_millic"]),
-        }
-        summary["summary_sha256"] = contract_api.sha256_json(summary)
-        if (set(summary) != SUMMARY_FIELDS or
-                summary["timing_validator_summary_sha256"] !=
-                    contract_api.sha256_json(timing_validator_summary)):
-            fail("internal timing run summary schema mismatch")
-        _commit_completed_timing_screen(
-            contract, output_dir, summary, post_shutdown_freeze,
-            timing_validator_summary, timing_receipt, timing_qualification,
-            finish_hard_wall)
-        # The successful transaction is the final fallible action.  Do not add
-        # a deadline/provenance check after it without extending its rollback
-        # boundary around that check.
-        return summary
-    finally:
-        primary = sys.exc_info()[1]
-        _finish_timing_cleanup(
-            workers, clean_shutdown, controller_pinned, original_affinity,
-            primary)
+        if fallback_failures:
+            _raise_after_cleanup(active_primary, fallback_failures)
+            raise AssertionError("unreachable")
+        if cleanup is active_primary:
+            raise
+        if active_primary is not None:
+            raise active_primary
+        raise
 
 
 def main(argv: Sequence[str] = ()) -> int:
@@ -3188,6 +3842,9 @@ def main(argv: Sequence[str] = ()) -> int:
     parser.add_argument(
         "--controller-cpu", type=int,
         help="dedicated non-worker, non-sampler physical core")
+    parser.add_argument(
+        "--pause-sibling-pids",
+        help="explicit controller-owned exact-affinity load PIDs to stop for T")
     parser.add_argument(
         "--deadline-seconds", type=float, default=MAX_WALL_SECONDS)
     args = parser.parse_args(argv if argv else None)

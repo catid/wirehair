@@ -151,6 +151,19 @@ The development short-screen controller is timing-only. Its exact roster is
 production WH2, Wirehair1, and Two07; it emits only timing (`T`) worker
 commands and never emits, synthesizes, or validates recovery output. The
 four-arm recovery campaign is produced by the dedicated recovery controller.
+Before spawning the timing workers, the controller enumerates executable tasks
+whose complete affinity is contained in the worker/controller cores or their
+online SMT siblings. It repeats that fail-closed check at every timing-wave
+boundary and binds the clean check ledger into the v2 timing execution receipt;
+the validator requires each before/after timestamp to bracket its corresponding
+native wave interval, not merely the outer timing window.
+Explicit background-load PIDs may be paused only when they are owned by the
+invoking user, all their tasks share one sibling-only affinity, and the
+controller retains an exact Linux pidfd for SIGSTOP/SIGCONT cleanup, so PID
+reuse cannot redirect or suppress resume. A fresh cleanup grace period is
+reserved even after the campaign hard wall expires. Qualification remains a
+separate all-logical-CPU saturation phase and is reaped before this timing
+isolation boundary.
 `load_completed_timing_screen` reopens the fixed timing freeze, trace, native
 stream, result, execution receipt, qualification map/audit/native stream,
 qualification receipt, sampler attestations, and the self-hashed v2 run
