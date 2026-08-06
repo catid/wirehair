@@ -1,6 +1,7 @@
 #include "WirehairV2PrecodeDecode.h"
 #include "WirehairV2PrecodeEncode.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -116,6 +117,25 @@ bool CheckK(uint32_t K, uint32_t expected_attempt, uint32_t& attempt_out)
         }
     }
     std::vector<uint8_t> recovered(K, 0u);
+    if (decoder.RecoverResult(recovered.data(), K) != Wirehair_Success ||
+        recovered != message)
+    {
+        std::fprintf(stderr,
+            "seed selection: direct roundtrip mismatch K=%u\n", K);
+        return false;
+    }
+    uint32_t repair_bytes = 0u;
+    if (!encoder.Encode(K, &block, 1u, &repair_bytes) ||
+        repair_bytes != 1u ||
+        decoder.DecodeResult(K, &block, repair_bytes) != Wirehair_Success ||
+        decoder.IntermediateBlocks() == nullptr)
+    {
+        std::fprintf(stderr,
+            "seed selection: repair validation failed K=%u attempt=%u\n",
+            K, attempt);
+        return false;
+    }
+    std::fill(recovered.begin(), recovered.end(), uint8_t{0});
     if (decoder.RecoverResult(recovered.data(), K) != Wirehair_Success ||
         recovered != message)
     {

@@ -1112,12 +1112,14 @@ void CheckOtherTimingScopes()
                       counters.LastValidatedPacketSeedAttempt ==
                           spec.ConstructionAttempt,
                 "WH2 timing did not initialize its exact native attempt");
-            Check(counters.ColdSolveAttempts == 1u &&
-                      counters.ColdSolvePacketAssemblies == K &&
-                      counters.ColdSolveSlotEntries == K &&
-                      counters.ColdSolvePayloadBytes ==
-                          (uint64_t)K * block_bytes,
-                "WH2 timing bypassed receive storage or cold packet assembly");
+            Check(counters.DirectSystematicCompletions == 1u &&
+                      counters.DirectSystematicCanonicalizations == 1u &&
+                      counters.DirectSystematicMaterializationAttempts == 0u &&
+                      counters.ColdSolveAttempts == 0u &&
+                      counters.ColdSolvePacketAssemblies == 0u &&
+                      counters.ColdSolveSlotEntries == 0u &&
+                      counters.ColdSolvePayloadBytes == 0u,
+                "WH2 systematic timing did not use direct completion");
             Check(counters.CheckpointAdoptions == 0u &&
                       counters.PendingPacketCopies == 0u &&
                       counters.ResumeAttempts == 0u,
@@ -1127,8 +1129,8 @@ void CheckOtherTimingScopes()
                       counters.RecoveryColdPacketCopies == K &&
                       counters.RecoveryColdPacketCopyBytes ==
                           (uint64_t)K * block_bytes &&
-                      counters.RecoveryColdStorageReleases == 1u,
-                "WH2 timing bypassed cold systematic recovery reuse");
+                      counters.RecoveryColdStorageReleases == 0u,
+                "WH2 timing bypassed repeatable direct recovery reuse");
 
             if (spec.Kind == NativeArmKind::Wirehair2Experiment)
             {
@@ -1290,9 +1292,16 @@ void CheckNativeReceivePackedDispatchSeam()
             return;
         }
         NativeReceiveFixture receive;
-        const std::vector<uint32_t> ids = ConsecutiveIds(K, 0u, 0u);
+        std::vector<uint32_t> ids;
+        ids.reserve((size_t)K + 64u);
+        for (uint32_t id = 0u; id + 1u < K; ++id) {
+            ids.push_back(id);
+        }
+        for (uint32_t repair = 0u; repair < 65u; ++repair) {
+            ids.push_back(K + repair);
+        }
         if (!Check(
-                receive.Initialize(arm, ids, 0u) == Wirehair_Success,
+                receive.Initialize(arm, ids, 64u) == Wirehair_Success,
                 "native receive seam fixture initialization failed"))
         {
             return;

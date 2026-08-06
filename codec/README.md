@@ -103,6 +103,17 @@ short byte count; repair packets remain full blocks.
 `MessagePrecodeDecoder` incrementally collects the same equations, peels the
 binary system, projects the unresolved residual, and solves it exactly over
 GF(256), including the Cauchy heavy coefficients and block right-hand sides.
+An exact set of K unique systematic packets is already the decoded message, so
+the decoder skips that fixed solve and retains the copied payload for repeatable
+direct recovery.  The first successful recovery canonicalizes arrival-ordered
+slots into source order and releases materially sized id/hash metadata; a tiny
+map may remain allocated but is no longer consulted.  Subsequent direct
+recoveries are one bulk copy.  `IntermediateBlocks()` is null in this decoded
+state.  A later repair packet transactionally materializes the ordinary
+intermediate solution, synthesizing source IDs independently of any retained
+mapping, before validating the packet.  Allocation failure leaves the direct
+message recoverable and retryable.  Sets containing any repair packet always
+take the ordinary solve path, so an accepted repair is never silently ignored.
 The cold solver keeps the projected binary residual as a packed GF(2) RREF and
 forms only the free-variable GF(256) quotient induced by the heavy rows.  A
 successful solve reconstructs the binary pivots directly from those packed

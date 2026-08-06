@@ -1156,6 +1156,49 @@ class ContractWorkerCliTest(unittest.TestCase):
 
     @unittest.skipUnless(
         hasattr(os, "sched_getaffinity"), "Linux CPU affinity is required")
+    def test_counter_free_receive_to_success_panel_executes(self):
+        affinity = os.sched_getaffinity(0)
+        self.assertTrue(affinity)
+        cpu = str(min(affinity))
+        # Packed item 5 * 256 + 2 selects the candidate receive-to-success A/A
+        # panel for the smallest frozen timing cell.  Frozen retry two delivers
+        # all K=8 systematic ids first, exercising direct completion without
+        # relying on in-process test hooks.
+        result = self.run_worker(
+            "--worker", cpu, stdin="T 0 1282\nQ\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        lines = result.stdout.splitlines()
+        self.assertEqual(len(lines), 1)
+        record = json.loads(lines[0])
+        self.assertEqual(lines[0], canonical_json(record))
+
+        payload = record["payload"]
+        self.assertEqual(record["schema"], TIMING_SCHEMA)
+        self.assertEqual(record["ordinal"], 5)
+        self.assertEqual(record["cpu"], int(cpu))
+        self.assertEqual(payload["K"], 8)
+        self.assertEqual(payload["block_bytes"], 64)
+        self.assertEqual(payload["panel_kind"], "AA")
+        self.assertEqual(payload["scope"], "receive_to_success")
+        self.assertEqual(payload["loss_retry_offset"], 2)
+        self.assertEqual(payload["left_arm"], TIMING_CANDIDATE["arm"])
+        self.assertEqual(payload["right_arm"], TIMING_CANDIDATE["arm"])
+        self.assertEqual(payload["left_outcome"], "success")
+        self.assertEqual(payload["right_outcome"], "success")
+        self.assertEqual(payload["left_decoded_extra"], 0)
+        self.assertEqual(payload["right_decoded_extra"], 0)
+        for key in ("left_decoded_extra", "right_decoded_extra"):
+            self.assertIs(type(payload[key]), int)
+            self.assertGreaterEqual(payload[key], 0)
+            self.assertLessEqual(payload[key], payload["receive_overhead_cap"])
+        self.assertEqual(len(payload["elapsed_ns"]), 8)
+        self.assertTrue(all(
+            type(value) is int and value > 0
+            for value in payload["elapsed_ns"]))
+
+    @unittest.skipUnless(
+        hasattr(os, "sched_getaffinity"), "Linux CPU affinity is required")
     def test_timing_candidate_executes_enabled_two_anchor_codec(self):
         affinity = os.sched_getaffinity(0)
         self.assertTrue(affinity)

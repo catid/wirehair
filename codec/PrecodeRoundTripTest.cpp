@@ -403,7 +403,7 @@ bool RunUnauthenticatedCorruptionBoundary()
     if (result != Wirehair_Success ||
         decoder.RecoverResult(recovered.data(), recovered.size()) !=
             Wirehair_Success ||
-        recovered == message)
+        recovered == message || decoder.IntermediateBlocks() != nullptr)
     {
         std::fprintf(stderr,
             "integrity boundary: K-row corruption contract changed\n");
@@ -413,7 +413,8 @@ bool RunUnauthenticatedCorruptionBoundary()
     uint32_t bytes = 0u;
     if (encoder.Encode(K, block.data(), block_bytes, &bytes) !=
             Wirehair_Success ||
-        decoder.DecodeResult(K, block.data(), bytes) != Wirehair_Error)
+        decoder.DecodeResult(K, block.data(), bytes) != Wirehair_Error ||
+        decoder.IntermediateBlocks() == nullptr)
     {
         std::fprintf(stderr,
             "integrity boundary: overdetermined conflict was not rejected\n");

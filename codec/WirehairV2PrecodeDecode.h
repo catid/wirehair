@@ -89,6 +89,9 @@ struct DecoderReceivePathCounters
 {
     uint64_t ValidatedSystemInitializations = 0u;
     uint32_t LastValidatedPacketSeedAttempt = UINT32_MAX;
+    uint64_t DirectSystematicCompletions = 0u;
+    uint64_t DirectSystematicCanonicalizations = 0u;
+    uint64_t DirectSystematicMaterializationAttempts = 0u;
     uint64_t ColdSolveAttempts = 0u;
     uint64_t ColdSolvePacketAssemblies = 0u;
     uint64_t ColdSolveSlotEntries = 0u;
@@ -176,11 +179,16 @@ public:
 
     /**
         Recover requires the exact initialized message size.  The output range
-        must not overlap the decoder's intermediate-block storage; overlap is
-        rejected before writing.  Allocation failure for a partial final block
-        also leaves the complete output range untouched.  The first successful
-        call may consume retained cold receive slots; later calls evaluate any
-        packets no longer available from that one-shot state.
+        must not overlap decoder-owned payload or intermediate-block storage;
+        overlap is rejected before writing.  Allocation failure for a partial
+        final block also leaves the complete output range untouched.  An exact
+        all-systematic completion retains its source payload for repeatable
+        direct recovery.  Its first successful recovery canonicalizes arrival-
+        ordered slots; materially sized id/hash metadata is released while a
+        bounded tiny map may remain allocated but unused.  Later direct
+        recoveries are one bulk copy.  After an ordinary solve, the first
+        successful call may consume retained cold receive slots; later calls
+        evaluate packets no longer available from that one-shot state.
     */
     WirehairResult RecoverResult(
         void* message_out,
@@ -198,6 +206,10 @@ public:
     const MessagePrecodeEncoderOptions& Options() const;
     const PrecodeSolveStats& SolveStats() const;
     const PrecodeSystem& System() const;
+    /**
+        Returns null for a decoded all-systematic message until a later repair
+        packet requires lazy materialization of the ordinary solution.
+    */
     const uint8_t* IntermediateBlocks() const;
 
     /** Release the optional received-systematic cache; idempotent. */
@@ -213,6 +225,19 @@ public:
     size_t ColdReceiveCapacityBytesForTesting() const;
     /** Saturating total of payload, id, and packet-slot allocations. */
     size_t ColdReceiveAllocationBytesForTesting() const;
+    /** Saturating total of id and packet-slot mapping allocations. */
+    size_t ColdReceiveMetadataBytesForTesting() const;
+    /** Borrowed cold-payload pointer; invalidated by decoder mutation. */
+    const uint8_t* ColdReceiveStorageForTesting() const
+    {
+        return ReceivedBlockStorage.empty() ?
+            nullptr : ReceivedBlockStorage.data();
+    }
+    /** Borrowed optional systematic-cache pointer; null when disabled. */
+    const uint8_t* SystematicPacketCacheDataForTesting() const
+    {
+        return SystematicPacketCache.get();
+    }
 #endif
 
 private:
@@ -234,6 +259,14 @@ private:
         const PacketRowConfig& packet_config,
         uint32_t packet_seed_attempt);
     WirehairResult AttemptSolve();
+    WirehairResult MaterializeDirectSystematic();
+    WirehairResult ValidateDecodedPacketResult(
+        uint32_t block_id,
+        const void* block_in,
+        uint32_t data_bytes);
+    WirehairResult RecoverDirectSystematicResult(
+        void* message_out,
+        uint64_t message_bytes) const;
     void Swap(MessagePrecodeDecoder& other) noexcept;
 
     SeedProfile ProfileValue = {};
@@ -261,7 +294,11 @@ private:
     PrecodeSolveStats SolveStatsValue = {};
     uint64_t MessageBytesValue = 0;
     uint32_t BlockBytesValue = 0;
-    uint32_t ReceivedCountValue = 0;
+    // Before ordinary decode this stores the accepted systematic count.  Two
+    // private high bits distinguish direct decoded/source-ordered states;
+    // public ReceivedCount() masks them.  Ordinary solve completion replaces
+    // the value with the accepted packet count, preserving the legacy layout.
+    mutable uint32_t ReceivedCountValue = 0;
     uint32_t SolveAttemptCountValue = 0;
     uint32_t PacketSeedAttemptValue = 0;
     WirehairResult LastSolveResult = Wirehair_NeedMore;
