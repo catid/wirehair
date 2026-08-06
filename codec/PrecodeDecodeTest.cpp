@@ -1411,8 +1411,110 @@ bool CheckColdSystematicReuse()
         return false;
     }
 
+    // Retention depends on the number of reusable systematics, never their
+    // arrival position.  Replay identical full-rank equation sets with source
+    // packets before and after repairs, both just below and exactly at the
+    // max(2, ceil(K/8)) threshold.
+    const uint32_t systematic_threshold =
+        std::max<uint32_t>(2u, (K + 7u) / 8u);
+    const auto run_order_case = [&](uint32_t systematic_count,
+                                    bool repair_first,
+                                    bool expect_reuse) -> bool
+    {
+        wirehair_v2::MessagePrecodeDecoder order_decoder;
+        if (order_decoder.InitializeResult(
+                exact_message_bytes,
+                block_bytes,
+                &reverse_encoder.Profile()) != Wirehair_Success)
+        {
+            return false;
+        }
+        std::vector<uint32_t> order;
+        order.reserve(K);
+        if (!repair_first)
+        {
+            for (uint32_t id = 0u; id < systematic_count; ++id) {
+                order.push_back(id);
+            }
+        }
+        for (uint32_t repair = 0u; repair < K - systematic_count;
+             ++repair)
+        {
+            order.push_back(K + repair);
+        }
+        if (repair_first)
+        {
+            for (uint32_t id = 0u; id < systematic_count; ++id) {
+                order.push_back(id);
+            }
+        }
+
+        wirehair_v2::SetDecoderIncrementalResumeEnabledForTesting(false);
+        WirehairResult order_result = Wirehair_NeedMore;
+        bool feed_ok = true;
+        for (size_t index = 0u; index < order.size(); ++index)
+        {
+            if (!EncodePacket(
+                    reverse_encoder, block_bytes, order[index], packet))
+            {
+                feed_ok = false;
+                break;
+            }
+            order_result = order_decoder.DecodeResult(
+                packet.Id, packet.Data.data(), packet.Bytes);
+            const WirehairResult expected = index + 1u == order.size() ?
+                Wirehair_Success : Wirehair_NeedMore;
+            if (order_result != expected)
+            {
+                feed_ok = false;
+                break;
+            }
+        }
+        wirehair_v2::SetDecoderIncrementalResumeEnabledForTesting(true);
+        const bool retained =
+            order_decoder.ColdReceiveCapacityBytesForTesting() != 0u;
+        if (!Check(feed_ok && order_result == Wirehair_Success &&
+                retained == expect_reuse,
+                "cold reuse systematic-count order gate mismatch"))
+        {
+            return false;
+        }
+
+        recovered.assign(message.size(), 0u);
+        wirehair_v2::ResetDecoderReceivePathCountersForTesting();
+        order_result = order_decoder.RecoverResult(
+            recovered.data(), recovered.size());
+        const wirehair_v2::DecoderReceivePathCounters order_counters =
+            wirehair_v2::DecoderReceivePathCountersForTesting();
+        const uint64_t expected_copies =
+            expect_reuse ? systematic_count : 0u;
+        if (!Check(order_result == Wirehair_Success &&
+                recovered == message &&
+                order_counters.RecoveryPacketEvaluations ==
+                    K - expected_copies &&
+                order_counters.RecoveryColdPacketCopies ==
+                    expected_copies &&
+                order_counters.RecoveryColdPacketCopyBytes ==
+                    expected_copies * block_bytes &&
+                order_counters.RecoveryColdStorageReleases ==
+                    (expect_reuse ? 1u : 0u) &&
+                order_decoder.ColdReceiveCapacityBytesForTesting() == 0u,
+                "cold reuse systematic-count order recovery mismatch"))
+        {
+            return false;
+        }
+        return true;
+    };
+    if (!run_order_case(1u, false, false) ||
+        !run_order_case(1u, true, false) ||
+        !run_order_case(systematic_threshold, false, true) ||
+        !run_order_case(systematic_threshold, true, true))
+    {
+        return false;
+    }
+
     // A forced-cold repair-only stream has no reusable systematic payloads.
-    // The O(1) eligibility gate must preserve the original immediate-release
+    // The systematic-count gate must preserve the original immediate-release
     // path, and recovery must evaluate all K source packets.
     wirehair_v2::MessagePrecodeDecoder repair_decoder;
     if (!Check(repair_decoder.InitializeResult(

@@ -110,6 +110,11 @@ bool IncrementalResumeEnabled() { return true; }
 bool ColdSystematicReuseEnabled() { return true; }
 #endif
 
+uint32_t MinimumColdSystematicReuseCount(uint32_t block_count)
+{
+    return std::max<uint32_t>(2u, (block_count + 7u) / 8u);
+}
+
 bool MessageBlockCount(
     uint64_t message_bytes,
     uint32_t block_bytes,
@@ -801,6 +806,7 @@ WirehairResult MessagePrecodeDecoder::AttemptSolve()
 #endif
         std::vector<SolvePacket> packets;
         packets.reserve(ReceivedBlockIds.size());
+        uint32_t received_systematic_count = 0u;
         for (size_t i = 0; i < ReceivedBlockIds.size(); ++i)
         {
             SolvePacket packet;
@@ -808,6 +814,9 @@ WirehairResult MessagePrecodeDecoder::AttemptSolve()
             packet.Data = ReceivedBlockStorage.data() +
                 i * BlockBytesValue;
             packets.push_back(packet);
+            if (packet.BlockId < K) {
+                ++received_systematic_count;
+            }
         }
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
         DecoderReceiveCounters.ColdSolvePacketAssemblies += packets.size();
@@ -856,23 +865,20 @@ WirehairResult MessagePrecodeDecoder::AttemptSolve()
             IntermediateBlockStorage.swap(intermediate);
             Decoded = true;
             ReceivedCountValue = (uint32_t)ReceivedBlockIds.size();
-            // With no separately allocated systematic cache, a source-headed
-            // stream retains its already-owned cold receive
-            // slots until the first successful recovery.  RecoverResult can
-            // copy received source packets from these slots and then releases
-            // them.  Requiring the first accepted packet to be systematic is
-            // an O(1) eligibility gate: repair-only streams preserve their
-            // original immediate-release path, while arbitrary schedules that
-            // start with repair data safely fall back to packet evaluation.
-            // This adds no receive-time payload copy or allocation and does
-            // not increase the solve peak: the cold buffers already coexist
-            // with `intermediate` here.
-            // Compute eligibility on both test arms so the same-binary OFF
-            // control differs only in the retention decision, not in whether
-            // it loads and classifies the first accepted packet.
+            // With no separately allocated systematic cache, retain cold
+            // receive slots only when enough of them can replace evaluator
+            // work during the first successful recovery.  Count systematics
+            // while assembling the already-required SolvePacket vector: this
+            // is independent of arrival order and needs no receive-hot-path
+            // state or second id pass.  The one-eighth floor was positive in
+            // bounded B=64 threshold-edge screens; two is required at tiny K
+            // to reject the one-anchor repair pattern.
+            // Both test arms perform the identical count so forced OFF differs
+            // only in the retention decision.
             const bool cold_systematic_eligible =
-                !SystematicPacketCache && !ReceivedBlockIds.empty() &&
-                ReceivedBlockIds.front() < K;
+                !SystematicPacketCache &&
+                received_systematic_count >=
+                    MinimumColdSystematicReuseCount(K);
             const bool retain_cold_systematic =
                 cold_systematic_eligible && ColdSystematicReuseEnabled();
             if (!retain_cold_systematic)
