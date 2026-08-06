@@ -219,7 +219,7 @@ private:
     // Cold receive payloads are stored in fixed-width slots.  Mapping packet
     // id directly to its slot keeps duplicate validation O(1); after checkpoint
     // adoption the keys remain as the bounded received-id set while the slot
-    // values are no longer dereferenced.  A successful source-headed cold
+    // values are no longer dereferenced.  A successful systematic-rich cold
     // solve may instead retain the complete table through the first successful
     // RecoverResult call.
     mutable PacketSlotTable ReceivedSlots;
