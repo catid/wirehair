@@ -944,7 +944,10 @@ if(BUILD_TESTS)
     set_tests_properties(wh2_run_native_short_screen_test PROPERTIES
         WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
         ENVIRONMENT "PYTHONWARNINGS=error"
-        TIMEOUT 120
+        # The fault-injection/cleanup matrix is validated separately on Python
+        # 3.8 and current interpreters and takes roughly five to six minutes
+        # per configured interpreter on one core under full-system load.
+        TIMEOUT 600
         LABELS "wh2;benchmark;contract;native;runner;affinity")
 endif()
 
