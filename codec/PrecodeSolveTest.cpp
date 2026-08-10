@@ -1520,9 +1520,11 @@ bool CheckTinyDenseOracle()
         system.Params.HeavyRows;
     // The equation-preserving dense basis peels the eleven two-column deltas
     // directly, reducing the legacy tiny residual completion work from 528.
-    // The direct singleton path additionally skips all H muladds for each
-    // inactive column and one staging XOR for each peeled column at every
-    // block width.
+    // The direct singleton path skips all H muladds for each inactive column
+    // and one staging XOR for each peeled column at every block width.  The
+    // reverse-peel RHS path additionally substitutes the exact K data-bearing
+    // packet rows and skips H muladds for every data-free selected precode
+    // row.  This frozen systematic fixture selects both packet rows.
     static const uint64_t kLegacyExecutedMulAdds = 492u;
     static const uint32_t kBlockBytes[] = { 1u, block_bytes, 1280u };
     static const uint64_t kExpectedDirectXors[] = { 43u, 43u, 30u };
@@ -1568,8 +1570,11 @@ bool CheckTinyDenseOracle()
         if (expected_inactivated == UINT32_MAX) {
             expected_inactivated = stats.InactivatedColumns;
         }
+        const uint64_t data_free_peeled =
+            L - expected_inactivated - K;
         const uint64_t expected_muladds = kLegacyExecutedMulAdds -
-            (uint64_t)expected_inactivated * system.Params.HeavyRows;
+            (uint64_t)(expected_inactivated + data_free_peeled) *
+                system.Params.HeavyRows;
         if (stats.InactivatedColumns != expected_inactivated ||
             stats.BlockMulAdds != expected_muladds ||
             stats.BlockMulAdds >= empty_residue_muladds ||
@@ -1596,8 +1601,10 @@ bool CheckTinyDenseOracle()
         }
         direct_muladds = stats.BlockMulAdds;
     }
+    const uint64_t data_free_peeled = L - expected_inactivated - K;
     if (direct_muladds +
-            (uint64_t)expected_inactivated * system.Params.HeavyRows !=
+            (uint64_t)(expected_inactivated + data_free_peeled) *
+                system.Params.HeavyRows !=
         kLegacyExecutedMulAdds)
     {
         std::fprintf(stderr,
@@ -1610,11 +1617,13 @@ bool CheckTinyDenseOracle()
     }
     std::printf(
         "tiny heavy residues: L=%u period=%u skipped=%llu "
-        "removed_xors=%u muladds=%llu/%llu: PASS\n",
+        "removed_xors=%u data_free_peeled=%llu "
+        "muladds=%llu/%llu: PASS\n",
         L,
         coefficient_period,
         (unsigned long long)empty_residue_muladds,
         L - expected_inactivated,
+        (unsigned long long)data_free_peeled,
         (unsigned long long)direct_muladds,
         (unsigned long long)kLegacyExecutedMulAdds);
 
@@ -4041,9 +4050,8 @@ bool CheckHeavyProjectionCase(const HeavyProjectionCase& test_case)
     return true;
 }
 
-bool CheckHeavyProjectionResumeOracle()
+bool CheckHeavyProjectionResumeOracleCase(uint32_t K)
 {
-    const uint32_t K = 320u;
     const uint32_t block_bytes = 17u;
     wirehair_v2::PrecodeParams params = wirehair_v2::MakeCertifiedParams(
         K, UINT64_C(0x4850524f4a52534d));
@@ -4090,6 +4098,8 @@ bool CheckHeavyProjectionResumeOracle()
         wirehair_v2::HeavyProjectionOracleComparisonsForTesting();
     const uint64_t fallbacks_before =
         wirehair_v2::HeavyProjectionLegacyFallbacksForTesting();
+    const uint64_t tiny_uses_before =
+        wirehair_v2::TinyPeriodicHeavyUsesForTesting();
     WirehairResult result = Wirehair_Error;
     {
         HeavyProjectionOracleScope oracle_scope;
@@ -4102,18 +4112,29 @@ bool CheckHeavyProjectionResumeOracle()
     const uint64_t fallback_delta =
         wirehair_v2::HeavyProjectionLegacyFallbacksForTesting() -
         fallbacks_before;
+    const uint64_t tiny_use_delta =
+        wirehair_v2::TinyPeriodicHeavyUsesForTesting() - tiny_uses_before;
+    const uint32_t L = K + system.Params.Staircase +
+        system.Params.DenseRows + system.Params.HeavyRows;
+    const uint64_t expected_tiny_uses = L < 244u ? 1u : 0u;
     if (result != Wirehair_NeedMore || !resume.Active ||
         resume.Rank >= resume.InactiveCount || output != sentinel ||
-        comparison_delta != 1u || fallback_delta != 0u)
+        comparison_delta != 1u || fallback_delta != 0u ||
+        tiny_use_delta != expected_tiny_uses)
     {
         std::fprintf(stderr,
-            "solve: heavy projection resume checkpoint failed result=%d "
-            "rank=%u/%u comparisons=%llu fallbacks=%llu\n",
+            "solve: heavy projection resume checkpoint failed K=%u "
+            "result=%d rank=%u/%u comparisons=%llu fallbacks=%llu "
+            "tiny=%llu/%llu L=%u\n",
+            K,
             (int)result,
             resume.Rank,
             resume.InactiveCount,
             (unsigned long long)comparison_delta,
-            (unsigned long long)fallback_delta);
+            (unsigned long long)fallback_delta,
+            (unsigned long long)tiny_use_delta,
+            (unsigned long long)expected_tiny_uses,
+            L);
         return false;
     }
 
@@ -4140,10 +4161,21 @@ bool CheckHeavyProjectionResumeOracle()
         return false;
     }
     std::printf(
-        "heavy projection deficient resume K=%u comparisons=%llu: PASS\n",
+        "heavy projection deficient resume K=%u comparisons=%llu "
+        "tiny=%llu: PASS\n",
         K,
-        (unsigned long long)comparison_delta);
+        (unsigned long long)comparison_delta,
+        (unsigned long long)tiny_use_delta);
     return true;
+}
+
+bool CheckHeavyProjectionResumeOracle()
+{
+    // K=8 exercises the tiny reverse-peel RHS path with a non-systematic
+    // duplicate packet set and then resumes it to success.  K=320 retains the
+    // cached-periodic deficient/resume boundary control.
+    return CheckHeavyProjectionResumeOracleCase(8u) &&
+        CheckHeavyProjectionResumeOracleCase(320u);
 }
 
 bool CheckHeavyProjectionPropagationOracle()

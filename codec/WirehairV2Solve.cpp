@@ -1330,7 +1330,9 @@ void ProjectCachedPeriodicHeavyByPeel(
 // ownership or per-column mode checks to that already-large routine measurably
 // perturbs disabled tiny/wide solves.  The caller selects this helper only for
 // PeriodicCauchy, H=12, and L<244, so HeavyCoefficient() is the exact equation
-// dispatch and each packed column also supplies the matching RHS residue.
+// dispatch and the packed coefficient lanes can travel through the selected
+// peel equations without multiplying every peeled block value into the heavy
+// RHS.
 #if defined(_MSC_VER)
 #define WH2_TINY_PERIODIC_NOINLINE __declspec(noinline)
 #elif defined(__GNUC__) && defined(__ELF__)
@@ -1342,7 +1344,8 @@ void ProjectCachedPeriodicHeavyByPeel(
 #define WH2_TINY_PERIODIC_NOINLINE
 #endif
 
-static WH2_TINY_PERIODIC_NOINLINE void PrepareTinyPeriodicHeavy(
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+static void PrepareTinyPeriodicHeavyLegacyForTesting(
     const std::vector<uint32_t>& inactive_index,
     const std::vector<uint64_t>& projection,
     const std::vector<uint8_t>& values,
@@ -1370,10 +1373,6 @@ static WH2_TINY_PERIODIC_NOINLINE void PrepareTinyPeriodicHeavy(
         heavy_rhs.size() ==
             (size_t)kCachedPeriodicHeavyRows * block_bytes);
 
-#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-    test::TriggerSolveAllocationFailureForTesting(
-        test::SolveAllocationFailurePoint::TinyPeriodicHeavyStorage);
-#endif
     std::vector<uint64_t> packed_heavy(
         (size_t)L * kCachedPeriodicWords, uint64_t{0});
     for (uint32_t column = 0u; column < L; ++column)
@@ -1453,6 +1452,124 @@ static WH2_TINY_PERIODIC_NOINLINE void PrepareTinyPeriodicHeavy(
             values.data() + (size_t)column * block_bytes,
             block_bytes,
             stats);
+    }
+}
+#endif
+
+// Substitute selected peel equations into all twelve production heavy rows
+// in reverse peel order.  A selected row has
+//
+//     x[column] + XOR(x[dependency]) = data,
+//
+// so substituting coefficient a adds a*data to the heavy RHS and XORs a into
+// each dependency coefficient.  This is algebraically identical to forming
+// every peeled value first and multiplying all of them into the heavy RHS,
+// but only data-bearing selected rows issue full-block GF(256) operations.
+static WH2_TINY_PERIODIC_NOINLINE void PrepareTinyPeriodicHeavyByPeel(
+    const BinaryEquationArena& rows,
+    const PeelResult& peel,
+    uint32_t column_count,
+    uint32_t block_bytes,
+    std::vector<uint64_t>& projected_heavy,
+    std::vector<uint8_t>& heavy_rhs,
+    PrecodeSolveStats& stats)
+{
+    static_assert(
+        kCachedPeriodicWords == 2u,
+        "the tiny production H=12 path requires two packed words");
+    const uint32_t R = (uint32_t)peel.InactiveOrder.size();
+    CAT_DEBUG_ASSERT(column_count < kCachedPeriodicWindow);
+    CAT_DEBUG_ASSERT(
+        peel.PeelOrder.size() + peel.InactiveOrder.size() == column_count);
+    CAT_DEBUG_ASSERT(
+        projected_heavy.size() == (size_t)R * kCachedPeriodicWords);
+    CAT_DEBUG_ASSERT(
+        heavy_rhs.size() ==
+            (size_t)kCachedPeriodicHeavyRows * block_bytes);
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    test::TriggerSolveAllocationFailureForTesting(
+        test::SolveAllocationFailurePoint::TinyPeriodicHeavyStorage);
+#endif
+    std::vector<uint64_t> propagated(
+        (size_t)column_count * kCachedPeriodicWords, uint64_t{0});
+    for (uint32_t column = 0u; column < column_count; ++column)
+    {
+        uint64_t* const packed = propagated.data() +
+            (size_t)column * kCachedPeriodicWords;
+        for (uint32_t heavy = 0u;
+             heavy < kCachedPeriodicHeavyRows;
+             ++heavy)
+        {
+            packed[heavy >> 3] |=
+                (uint64_t)HeavyCoefficient(
+                    heavy, column, kCachedPeriodicHeavyRows) <<
+                ((heavy & 7u) * 8u);
+        }
+    }
+
+    void* heavy_destinations[kCachedPeriodicHeavyRows];
+    uint8_t heavy_scales[kCachedPeriodicHeavyRows];
+    for (uint32_t heavy = 0u;
+         heavy < kCachedPeriodicHeavyRows;
+         ++heavy)
+    {
+        heavy_destinations[heavy] =
+            heavy_rhs.data() + (size_t)heavy * block_bytes;
+    }
+
+    for (size_t peel_i = peel.PeelOrder.size(); peel_i-- > 0u;)
+    {
+        const uint32_t column = peel.PeelOrder[peel_i];
+        CAT_DEBUG_ASSERT(column < column_count);
+        const uint32_t solve_row = peel.SolveRow[column];
+        CAT_DEBUG_ASSERT(solve_row != UINT32_MAX);
+        const BinaryEquationView equation =
+            rows.SolveDependencies(solve_row);
+        const uint64_t* const packed = propagated.data() +
+            (size_t)column * kCachedPeriodicWords;
+        // Snapshot before updating dependencies.  A defensive duplicate
+        // dependency would then cancel exactly as in binary row algebra.
+        const uint64_t low = packed[0];
+        const uint64_t high = packed[1];
+        if (equation.Data)
+        {
+            for (uint32_t heavy = 0u;
+                 heavy < kCachedPeriodicHeavyRows;
+                 ++heavy)
+            {
+                heavy_scales[heavy] = (uint8_t)(
+                    (heavy < 8u ? low : high) >>
+                    ((heavy & 7u) * 8u));
+            }
+            AddScaledBlocks(
+                heavy_destinations,
+                heavy_scales,
+                kCachedPeriodicHeavyRows,
+                equation.Data,
+                block_bytes,
+                stats);
+        }
+        for (uint32_t dependency : equation.Columns)
+        {
+            CAT_DEBUG_ASSERT(dependency < column_count);
+            uint64_t* const destination = propagated.data() +
+                (size_t)dependency * kCachedPeriodicWords;
+            destination[0] ^= low;
+            destination[1] ^= high;
+        }
+    }
+
+    for (uint32_t inactive = 0u; inactive < R; ++inactive)
+    {
+        const uint32_t column = peel.InactiveOrder[inactive];
+        CAT_DEBUG_ASSERT(column < column_count);
+        const uint64_t* const source = propagated.data() +
+            (size_t)column * kCachedPeriodicWords;
+        uint64_t* const destination = projected_heavy.data() +
+            (size_t)inactive * kCachedPeriodicWords;
+        destination[0] = source[0];
+        destination[1] = source[1];
     }
 }
 
@@ -3608,11 +3725,11 @@ static WirehairResult SolvePrecodeSystemImpl(
             }
         }
 
-        // Heavy RHS values are bucketed by the coefficient period, avoiding
-        // H*L full-block multiplications.  Heavy coefficient vectors are
-        // packed eight rows per word; production H=12 projects them through
-        // the sparse peel schedule while other geometries retain the exact
-        // projection-bit scan.
+        // Tiny production H=12 rows are reverse-substituted through the peel
+        // schedule; larger periodic systems bucket RHS values by coefficient
+        // period.  Both avoid H*L full-block multiplications.  Heavy
+        // coefficient vectors are packed eight rows per word, while other
+        // geometries retain the exact projection-bit scan.
         st.BinaryResidualRank = rank;
         const uint32_t window = 256u - H;
         const uint32_t heavy_words = (H + 7u) / 8u;
@@ -3751,10 +3868,11 @@ static WirehairResult SolvePrecodeSystemImpl(
         }
         if (tiny_periodic_direct)
         {
-            PrepareTinyPeriodicHeavy(
-                inactive_index,
-                projection,
-                values,
+            PrepareTinyPeriodicHeavyByPeel(
+                rows,
+                peel,
+                L,
+                block_bytes,
                 projected_heavy,
                 heavy_rhs,
                 st);
@@ -3764,10 +3882,21 @@ static WirehairResult SolvePrecodeSystemImpl(
             if (HeavyProjectionOracleUsers.load(
                     std::memory_order_relaxed) != 0u)
             {
-                std::vector<uint64_t> legacy(
+                std::vector<uint64_t> legacy_projected(
                     (size_t)R * heavy_words, uint64_t{0});
-                project_heavy_legacy(legacy);
-                if (legacy != projected_heavy) {
+                std::vector<uint8_t> legacy_rhs(
+                    (size_t)H * block_bytes, uint8_t{0});
+                PrecodeSolveStats legacy_stats;
+                PrepareTinyPeriodicHeavyLegacyForTesting(
+                    inactive_index,
+                    projection,
+                    values,
+                    legacy_projected,
+                    legacy_rhs,
+                    legacy_stats);
+                if (legacy_projected != projected_heavy ||
+                    legacy_rhs != heavy_rhs)
+                {
                     return terminal_error();
                 }
                 HeavyProjectionOracleComparisons.fetch_add(
