@@ -1495,6 +1495,11 @@ static WH2_TINY_PERIODIC_NOINLINE void PrepareTinyPeriodicHeavyByPeel(
         (size_t)column_count * kCachedPeriodicWords, uint64_t{0});
     for (uint32_t column = 0u; column < column_count; ++column)
     {
+        // The caller proves H=12 and L<244, so the periodic Cauchy X value is
+        // exactly 12+column with no wrap.  Use the inline inverse-table lookup
+        // directly instead of paying one out-of-line HeavyCoefficient call
+        // and modulus for every packed lane.
+        const uint32_t x = kCachedPeriodicHeavyRows + column;
         uint64_t* const packed = propagated.data() +
             (size_t)column * kCachedPeriodicWords;
         for (uint32_t heavy = 0u;
@@ -1502,8 +1507,7 @@ static WH2_TINY_PERIODIC_NOINLINE void PrepareTinyPeriodicHeavyByPeel(
              ++heavy)
         {
             packed[heavy >> 3] |=
-                (uint64_t)HeavyCoefficient(
-                    heavy, column, kCachedPeriodicHeavyRows) <<
+                (uint64_t)gf256_inv((uint8_t)(x ^ heavy)) <<
                 ((heavy & 7u) * 8u);
         }
     }

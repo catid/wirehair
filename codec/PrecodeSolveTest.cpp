@@ -4178,6 +4178,33 @@ bool CheckHeavyProjectionResumeOracle()
         CheckHeavyProjectionResumeOracleCase(320u);
 }
 
+bool CheckTinyPeriodicCoefficientFormula()
+{
+    for (uint32_t column = 0u; column < 244u; ++column)
+    {
+        const uint32_t x = 12u + column;
+        for (uint32_t heavy = 0u; heavy < 12u; ++heavy)
+        {
+            const uint8_t direct = gf256_inv((uint8_t)(x ^ heavy));
+            const uint8_t reference =
+                wirehair_v2::HeavyCoefficient(heavy, column, 12u);
+            if (direct != reference)
+            {
+                std::fprintf(stderr,
+                    "solve: tiny periodic coefficient mismatch "
+                    "column=%u heavy=%u direct=%u reference=%u\n",
+                    column,
+                    heavy,
+                    (unsigned)direct,
+                    (unsigned)reference);
+                return false;
+            }
+        }
+    }
+    std::printf("tiny periodic coefficient formula: PASS\n");
+    return true;
+}
+
 bool CheckHeavyProjectionPropagationOracle()
 {
     static const HeavyProjectionCase kCases[] = {
@@ -4206,6 +4233,9 @@ bool CheckHeavyProjectionPropagationOracle()
         { "fallback-h128", 320u, 128u,
           wirehair_v2::DenseAnchorLayout::Disabled }
     };
+    if (!CheckTinyPeriodicCoefficientFormula()) {
+        return false;
+    }
     wirehair_v2::ResetHeavyProjectionOracleCountersForTesting();
     for (const HeavyProjectionCase& test_case : kCases) {
         if (!CheckHeavyProjectionCase(test_case)) {
