@@ -188,6 +188,21 @@ uint64_t ProjectionAVX2BatchesForTesting();
 uint64_t ProjectionFallbackBatchesForTesting();
 
 /**
+    Select the one-word affine-projection implementation in this thread.
+
+    -1 forces the general packed-word reference, zero restores production
+    dispatch, and +1 requests the specialization when R fits one word.  A
+    forced request never applies when R needs two or more words.
+*/
+bool SetSingleWordProjectionModeForTesting(int mode);
+int SingleWordProjectionModeForTesting();
+
+/** Reset/read solve selections of the specialized or general projection. */
+void ResetSingleWordProjectionCountersForTesting();
+uint64_t SingleWordProjectionUsesForTesting();
+uint64_t GeneralProjectionUsesForTesting();
+
+/**
     Select the binary-residual representation in the calling thread.
 
     -1 forces the byte-expanded reference, zero restores production dispatch,

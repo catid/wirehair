@@ -848,6 +848,9 @@ if(BUILD_TESTS)
                 NAME wirehair_wh2_timing_policy_symbol_audit
                 COMMAND ${CMAKE_COMMAND}
                     "-DNM=${CMAKE_NM}"
+                    "-DOBJDUMP=${CMAKE_OBJDUMP}"
+                    "-DSYSTEM_NAME=${CMAKE_SYSTEM_NAME}"
+                    "-DLTO_MODE=${WH_LTO}"
                     "-DTIMING_POLICY=$<TARGET_FILE:wirehair_v2_timing_policy>"
                     "-DCONTRACT_WORKER=$<TARGET_FILE:wirehair_wh2_contract_worker>"
                     "-DPHASE_TIMING=$<TARGET_FILE:wirehair_wh2_phase_attribution_test>"

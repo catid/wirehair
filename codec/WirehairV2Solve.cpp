@@ -39,6 +39,9 @@ thread_local uint64_t PackedBinaryResidualUseCount = 0u;
 thread_local int ProjectionAVX2TestMode = 0;
 thread_local uint64_t ProjectionAVX2BatchUseCount = 0u;
 thread_local uint64_t ProjectionFallbackBatchUseCount = 0u;
+thread_local int SingleWordProjectionTestMode = 0;
+thread_local uint64_t SingleWordProjectionUseCount = 0u;
+thread_local uint64_t GeneralProjectionUseCount = 0u;
 #endif
 
 #if defined(GF256_TRY_TARGET_AVX2) && !defined(__AVX2__)
@@ -952,6 +955,133 @@ private:
     const uint64_t* Sources[kBatchSize];
     uint32_t Count = 0u;
 };
+
+#if defined(_MSC_VER)
+#define WH2_SINGLE_WORD_NOINLINE __declspec(noinline)
+#elif defined(__GNUC__) && !defined(__clang__) && defined(__ELF__)
+#define WH2_SINGLE_WORD_NOINLINE \
+    __attribute__((noinline, noclone, section(".text.wh2_single_word")))
+#elif defined(__clang__) && defined(__ELF__)
+#define WH2_SINGLE_WORD_NOINLINE \
+    __attribute__((noinline, section(".text.wh2_single_word")))
+#elif defined(__GNUC__) || defined(__clang__)
+#define WH2_SINGLE_WORD_NOINLINE __attribute__((noinline))
+#else
+#define WH2_SINGLE_WORD_NOINLINE
+#endif
+
+// Keep the one-word per-row accumulators out of SolvePrecodeSystemImpl.  The
+// generic two-word boundary is performance-sensitive too, and inlining these
+// loops measurably perturbs its instruction layout even when they are never
+// selected.  GCC's noclone also prevents IPA constant-propagation clones from
+// escaping the isolated text section in ordinary non-LTO objects.
+template<class XorAccumulator>
+static GF256_FORCE_INLINE uint32_t
+AccumulateSingleWordProjectionConstantImpl(
+    uint32_t column,
+    const BinaryEquationView& equation,
+    const std::vector<uint32_t>& inactive_index,
+    const std::vector<uint64_t>& projection,
+    const std::vector<uint8_t>& values,
+    uint32_t block_bytes,
+    uint64_t& accumulator,
+    XorAccumulator& constant_xor,
+    PrecodeSolveStats& stats)
+{
+    uint64_t accumulated = 0u;
+    uint32_t solve_column_offset = UINT32_MAX;
+    for (const uint32_t* current = equation.Columns.begin();
+         current != equation.Columns.end();
+         ++current)
+    {
+        const uint32_t other = *current;
+        if (other == column) {
+            solve_column_offset = (uint32_t)(
+                current - equation.Columns.begin());
+            continue;
+        }
+        const uint32_t index = inactive_index[other];
+        if (index != UINT32_MAX) {
+            accumulated ^= UINT64_C(1) << (index & 63u);
+        }
+        else
+        {
+            accumulated ^= projection[other];
+            // Inactive value slots are still the zero constant at this
+            // stage.  Only peeled columns can contribute to the affine RHS.
+            constant_xor.Add(
+                values.data() + (size_t)other * block_bytes);
+            ++stats.BlockXors;
+        }
+    }
+    accumulator = accumulated;
+    return solve_column_offset;
+}
+
+static WH2_SINGLE_WORD_NOINLINE uint32_t
+AccumulateSingleWordProjectionConstant(
+    uint32_t column,
+    const BinaryEquationView& equation,
+    const std::vector<uint32_t>& inactive_index,
+    const std::vector<uint64_t>& projection,
+    const std::vector<uint8_t>& values,
+    uint32_t block_bytes,
+    uint64_t& accumulator,
+    BatchedBlockXorInitializer& constant_xor,
+    PrecodeSolveStats& stats)
+{
+    return AccumulateSingleWordProjectionConstantImpl(
+        column, equation, inactive_index, projection, values, block_bytes,
+        accumulator, constant_xor, stats);
+}
+
+static WH2_SINGLE_WORD_NOINLINE uint32_t
+AccumulateSingleWordProjectionConstant(
+    uint32_t column,
+    const BinaryEquationView& equation,
+    const std::vector<uint32_t>& inactive_index,
+    const std::vector<uint64_t>& projection,
+    const std::vector<uint8_t>& values,
+    uint32_t block_bytes,
+    uint64_t& accumulator,
+    BatchedBlockXorAccumulator& constant_xor,
+    PrecodeSolveStats& stats)
+{
+    return AccumulateSingleWordProjectionConstantImpl(
+        column, equation, inactive_index, projection, values, block_bytes,
+        accumulator, constant_xor, stats);
+}
+
+static WH2_SINGLE_WORD_NOINLINE void
+AccumulateSingleWordResidualProjection(
+    const BinaryEquationView& equation,
+    const std::vector<uint32_t>& inactive_index,
+    const std::vector<uint64_t>& projection,
+    const std::vector<uint8_t>& values,
+    uint32_t block_bytes,
+    uint64_t& accumulator,
+    BatchedBlockXorAccumulator& rhs_xor,
+    PrecodeSolveStats& stats)
+{
+    uint64_t accumulated = 0u;
+    for (uint32_t column : equation.Columns)
+    {
+        const uint32_t index = inactive_index[column];
+        if (index != UINT32_MAX) {
+            accumulated ^= UINT64_C(1) << (index & 63u);
+        }
+        else
+        {
+            accumulated ^= projection[column];
+            rhs_xor.Add(
+                values.data() + (size_t)column * block_bytes);
+            ++stats.BlockXors;
+        }
+    }
+    accumulator = accumulated;
+}
+
+#undef WH2_SINGLE_WORD_NOINLINE
 
 template<class XorAccumulator>
 static GF256_FORCE_INLINE uint32_t AccumulatePeeledProjectionConstant(
@@ -1939,6 +2069,36 @@ uint64_t ProjectionAVX2BatchesForTesting()
 uint64_t ProjectionFallbackBatchesForTesting()
 {
     return ProjectionFallbackBatchUseCount;
+}
+
+bool SetSingleWordProjectionModeForTesting(int mode)
+{
+    if (mode < -1 || mode > 1) {
+        return false;
+    }
+    SingleWordProjectionTestMode = mode;
+    return true;
+}
+
+int SingleWordProjectionModeForTesting()
+{
+    return SingleWordProjectionTestMode;
+}
+
+void ResetSingleWordProjectionCountersForTesting()
+{
+    SingleWordProjectionUseCount = 0u;
+    GeneralProjectionUseCount = 0u;
+}
+
+uint64_t SingleWordProjectionUsesForTesting()
+{
+    return SingleWordProjectionUseCount;
+}
+
+uint64_t GeneralProjectionUsesForTesting()
+{
+    return GeneralProjectionUseCount;
 }
 
 bool SetPackedBinaryResidualModeForTesting(int mode)
@@ -3104,53 +3264,125 @@ static WirehairResult SolvePrecodeSystemImpl(
         const bool enable_fused_block_initialization =
             K >= kFusedBlockXorInitMinBlockCount &&
             block_bytes >= kFusedBlockXorInitMinBlockBytes;
+        bool single_word_projection = words == 1u;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        if (SingleWordProjectionTestMode < 0) {
+            single_word_projection = false;
+        }
+        if (words != 0u)
+        {
+            if (single_word_projection) {
+                ++SingleWordProjectionUseCount;
+            }
+            else {
+                ++GeneralProjectionUseCount;
+            }
+        }
+#endif
 
         // Affine projection of peeled columns onto inactive variables.  The
         // block stored in values[column] is the constant term.
-        for (uint32_t column : peel.PeelOrder)
+        if (!single_word_projection)
         {
-            std::fill(accumulator.begin(), accumulator.end(), uint64_t{0});
-            uint8_t* constant =
-                values.data() + (size_t)column * block_bytes;
-            const uint32_t solve_row = peel.SolveRow[column];
-            const BinaryEquationView equation =
-                rows[solve_row];
-            if (equation.Columns.size() == 0u) {
-                return terminal_error();
-            }
-            const size_t initialization_sources =
-                equation.Columns.size() - 1u +
-                (equation.Data ? 1u : 0u);
-            uint32_t solve_column_offset = UINT32_MAX;
-            if (enable_fused_block_initialization &&
-                initialization_sources <= 16u)
+            for (uint32_t column : peel.PeelOrder)
             {
-                BatchedBlockXorInitializer constant_xor(
-                    constant, block_bytes, equation.Data, true);
-                solve_column_offset = AccumulatePeeledProjectionConstant(
-                    column, equation, inactive_index, words, projection,
-                    values, block_bytes, accumulator, constant_xor, st);
-                constant_xor.Flush();
-            }
-            else
-            {
-                if (equation.Data) {
-                    std::memcpy(constant, equation.Data, block_bytes);
+                std::fill(
+                    accumulator.begin(), accumulator.end(), uint64_t{0});
+                uint8_t* constant =
+                    values.data() + (size_t)column * block_bytes;
+                const uint32_t solve_row = peel.SolveRow[column];
+                const BinaryEquationView equation = rows[solve_row];
+                if (equation.Columns.size() == 0u) {
+                    return terminal_error();
                 }
-                BatchedBlockXorAccumulator constant_xor(
-                    constant, block_bytes);
-                solve_column_offset = AccumulatePeeledProjectionConstant(
-                    column, equation, inactive_index, words, projection,
-                    values, block_bytes, accumulator, constant_xor, st);
-                constant_xor.Flush();
+                const size_t initialization_sources =
+                    equation.Columns.size() - 1u +
+                    (equation.Data ? 1u : 0u);
+                uint32_t solve_column_offset = UINT32_MAX;
+                if (enable_fused_block_initialization &&
+                    initialization_sources <= 16u)
+                {
+                    BatchedBlockXorInitializer constant_xor(
+                        constant, block_bytes, equation.Data, true);
+                    solve_column_offset =
+                        AccumulatePeeledProjectionConstant(
+                            column, equation, inactive_index, words,
+                            projection, values, block_bytes, accumulator,
+                            constant_xor, st);
+                    constant_xor.Flush();
+                }
+                else
+                {
+                    if (equation.Data) {
+                        std::memcpy(constant, equation.Data, block_bytes);
+                    }
+                    BatchedBlockXorAccumulator constant_xor(
+                        constant, block_bytes);
+                    solve_column_offset =
+                        AccumulatePeeledProjectionConstant(
+                            column, equation, inactive_index, words,
+                            projection, values, block_bytes, accumulator,
+                            constant_xor, st);
+                    constant_xor.Flush();
+                }
+                CAT_DEBUG_ASSERT(solve_column_offset != UINT32_MAX);
+                if (solve_column_offset == UINT32_MAX) {
+                    return terminal_error();
+                }
+                rows.MoveSolveColumnToEnd(solve_row, solve_column_offset);
+                for (uint32_t w = 0; w < words; ++w) {
+                    projection[(size_t)column * words + w] = accumulator[w];
+                }
             }
-            CAT_DEBUG_ASSERT(solve_column_offset != UINT32_MAX);
-            if (solve_column_offset == UINT32_MAX) {
-                return terminal_error();
-            }
-            rows.MoveSolveColumnToEnd(solve_row, solve_column_offset);
-            for (uint32_t w = 0; w < words; ++w) {
-                projection[(size_t)column * words + w] = accumulator[w];
+        }
+        else
+        {
+            for (uint32_t column : peel.PeelOrder)
+            {
+                uint64_t accumulated_word = 0u;
+                uint8_t* constant =
+                    values.data() + (size_t)column * block_bytes;
+                const uint32_t solve_row = peel.SolveRow[column];
+                const BinaryEquationView equation = rows[solve_row];
+                if (equation.Columns.size() == 0u) {
+                    return terminal_error();
+                }
+                const size_t initialization_sources =
+                    equation.Columns.size() - 1u +
+                    (equation.Data ? 1u : 0u);
+                uint32_t solve_column_offset = UINT32_MAX;
+                if (enable_fused_block_initialization &&
+                    initialization_sources <= 16u)
+                {
+                    BatchedBlockXorInitializer constant_xor(
+                        constant, block_bytes, equation.Data, true);
+                    solve_column_offset =
+                        AccumulateSingleWordProjectionConstant(
+                            column, equation, inactive_index, projection,
+                            values, block_bytes, accumulated_word,
+                            constant_xor, st);
+                    constant_xor.Flush();
+                }
+                else
+                {
+                    if (equation.Data) {
+                        std::memcpy(constant, equation.Data, block_bytes);
+                    }
+                    BatchedBlockXorAccumulator constant_xor(
+                        constant, block_bytes);
+                    solve_column_offset =
+                        AccumulateSingleWordProjectionConstant(
+                            column, equation, inactive_index, projection,
+                            values, block_bytes, accumulated_word,
+                            constant_xor, st);
+                    constant_xor.Flush();
+                }
+                CAT_DEBUG_ASSERT(solve_column_offset != UINT32_MAX);
+                if (solve_column_offset == UINT32_MAX) {
+                    return terminal_error();
+                }
+                rows.MoveSolveColumnToEnd(solve_row, solve_column_offset);
+                projection[column] = accumulated_word;
             }
         }
         phase_end = SolveClock::now();
@@ -3303,31 +3535,40 @@ static WirehairResult SolvePrecodeSystemImpl(
                 continue;
             }
             ++st.ResidualRows;
-            std::fill(
-                accumulator.begin(), accumulator.end(), uint64_t{0});
             std::fill(rhs.begin(), rhs.end(), uint8_t{0});
             if (rows[r].Data) {
                 std::memcpy(rhs.data(), rows[r].Data, block_bytes);
             }
             BatchedBlockXorAccumulator rhs_xor(rhs.data(), block_bytes);
-            BatchedProjectionXorAccumulator projection_xor(
-                accumulator.data(), projection.data(), words);
-            for (uint32_t column : rows[r].Columns)
+            if (single_word_projection)
             {
-                const uint32_t index = inactive_index[column];
-                if (index != UINT32_MAX) {
-                    accumulator[index >> 6] ^=
-                        UINT64_C(1) << (index & 63u);
-                }
-                else
-                {
-                    projection_xor.Add(column);
-                    rhs_xor.Add(
-                        values.data() + (size_t)column * block_bytes);
-                    ++st.BlockXors;
-                }
+                AccumulateSingleWordResidualProjection(
+                    rows[r], inactive_index, projection, values,
+                    block_bytes, accumulator[0], rhs_xor, st);
             }
-            projection_xor.Flush();
+            else
+            {
+                std::fill(
+                    accumulator.begin(), accumulator.end(), uint64_t{0});
+                BatchedProjectionXorAccumulator projection_xor(
+                    accumulator.data(), projection.data(), words);
+                for (uint32_t column : rows[r].Columns)
+                {
+                    const uint32_t index = inactive_index[column];
+                    if (index != UINT32_MAX) {
+                        accumulator[index >> 6] ^=
+                            UINT64_C(1) << (index & 63u);
+                    }
+                    else
+                    {
+                        projection_xor.Add(column);
+                        rhs_xor.Add(
+                            values.data() + (size_t)column * block_bytes);
+                        ++st.BlockXors;
+                    }
+                }
+                projection_xor.Flush();
+            }
             rhs_xor.Flush();
             ResidualInsertResult insertion;
             if (use_packed_binary_residual)

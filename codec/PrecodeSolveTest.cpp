@@ -92,6 +92,27 @@ private:
     bool Valid;
 };
 
+class SingleWordProjectionModeScope
+{
+public:
+    explicit SingleWordProjectionModeScope(int mode)
+        : Previous(wirehair_v2::SingleWordProjectionModeForTesting())
+        , Valid(wirehair_v2::SetSingleWordProjectionModeForTesting(mode))
+    {
+    }
+
+    ~SingleWordProjectionModeScope()
+    {
+        (void)wirehair_v2::SetSingleWordProjectionModeForTesting(Previous);
+    }
+
+    bool IsValid() const { return Valid; }
+
+private:
+    int Previous;
+    bool Valid;
+};
+
 class SolveAllocationFailureScope
 {
 public:
@@ -4166,6 +4187,701 @@ bool CheckHeavyProjectionPropagationOracle()
     return true;
 }
 
+bool CheckSingleWordProjectionDifferential()
+{
+    if (!wirehair_v2::SetSingleWordProjectionModeForTesting(0) ||
+        wirehair_v2::SetSingleWordProjectionModeForTesting(-2) ||
+        wirehair_v2::SetSingleWordProjectionModeForTesting(2) ||
+        wirehair_v2::SingleWordProjectionModeForTesting() != 0)
+    {
+        std::fprintf(stderr,
+            "solve: single-word projection mode validation failed\n");
+        return false;
+    }
+    wirehair_v2::ResetSingleWordProjectionCountersForTesting();
+    if (wirehair_v2::SingleWordProjectionUsesForTesting() != 0u ||
+        wirehair_v2::GeneralProjectionUsesForTesting() != 0u)
+    {
+        std::fprintf(stderr,
+            "solve: single-word projection counters did not reset\n");
+        return false;
+    }
+
+    struct Fixture
+    {
+        const char* Name;
+        uint32_t K;
+        uint64_t MatrixSeed;
+        uint32_t PeelSeed;
+        uint32_t DenseRows;
+        uint32_t HeavyRows;
+        uint32_t MixCount;
+        uint32_t ExpectedR;
+    };
+    static const Fixture kFixtures[] = {
+        { "R1", 2u, UINT64_C(0x9dcbbdc612409ae4),
+          UINT32_C(0x3f9a5cd1), 1u, 1u, 1u, 1u },
+        { "R63", 331u, UINT64_C(0x80f34115d308b6b6),
+          UINT32_C(0xa7fa6970), 12u, 12u,
+          wirehair_v2::kCertifiedPacketMixCount, 63u },
+        { "R64", 337u, UINT64_C(0x7635c1633056a71e),
+          UINT32_C(0x52339a9e), 12u, 12u,
+          wirehair_v2::kCertifiedPacketMixCount, 64u },
+        { "R65", 338u, UINT64_C(0x1113622e0343a0fb),
+          UINT32_C(0xfbe2d6a0), 12u, 12u,
+          wirehair_v2::kCertifiedPacketMixCount, 65u }
+    };
+    static const uint32_t kBlockBytes[] = { 1u, 17u, 1280u };
+
+    struct Outcome
+    {
+        WirehairResult Result;
+        std::vector<uint8_t> Output;
+        wirehair_v2::PrecodeSolveStats Stats;
+        uint64_t SingleUses;
+        uint64_t GeneralUses;
+    };
+
+    for (const Fixture& fixture : kFixtures)
+    {
+        wirehair_v2::PrecodeParams params =
+            wirehair_v2::MakeCertifiedParams(
+                fixture.K, fixture.MatrixSeed);
+        params.DenseRows = fixture.DenseRows;
+        params.HeavyRows = fixture.HeavyRows;
+        params.HeavyFamily =
+            wirehair_v2::HeavyCoefficientFamily::PeriodicCauchy;
+        params.DenseAnchors = wirehair_v2::DenseAnchorLayout::Disabled;
+        wirehair_v2::PrecodeSystem system;
+        if (!wirehair_v2::BuildPrecodeSystem(params, system))
+        {
+            std::fprintf(stderr,
+                "solve: single-word fixture build failed case=%s\n",
+                fixture.Name);
+            return false;
+        }
+        wirehair_v2::PacketRowConfig config;
+        config.PeelSeed = fixture.PeelSeed;
+        config.MixCount = fixture.MixCount;
+
+        for (uint32_t block_bytes : kBlockBytes)
+        {
+            std::vector<uint8_t> message((size_t)fixture.K * block_bytes);
+            for (size_t i = 0u; i < message.size(); ++i) {
+                message[i] = (uint8_t)(
+                    i * 157u + (i >> 6) + fixture.ExpectedR * 11u +
+                    block_bytes * 3u);
+            }
+            std::vector<wirehair_v2::SolvePacket> packets(fixture.K);
+            for (uint32_t id = 0u; id < fixture.K; ++id)
+            {
+                packets[id].BlockId = id;
+                packets[id].Data =
+                    message.data() + (size_t)id * block_bytes;
+            }
+
+            const auto run = [&](int mode) -> Outcome {
+                Outcome outcome;
+                outcome.Result = Wirehair_Error;
+                wirehair_v2::ResetSingleWordProjectionCountersForTesting();
+                {
+                    SingleWordProjectionModeScope scope(mode);
+                    if (!scope.IsValid()) {
+                        return outcome;
+                    }
+                    outcome.Result = wirehair_v2::SolvePrecodeSystem(
+                        system, config, packets, block_bytes,
+                        outcome.Output, &outcome.Stats);
+                }
+                outcome.SingleUses =
+                    wirehair_v2::SingleWordProjectionUsesForTesting();
+                outcome.GeneralUses =
+                    wirehair_v2::GeneralProjectionUsesForTesting();
+                return outcome;
+            };
+
+            const Outcome general = run(-1);
+            const Outcome automatic = run(0);
+            const Outcome forced = run(1);
+            const bool eligible = fixture.ExpectedR <= 64u;
+            if (general.Result != Wirehair_Success ||
+                automatic.Result != Wirehair_Success ||
+                forced.Result != Wirehair_Success ||
+                general.Stats.InactivatedColumns != fixture.ExpectedR ||
+                automatic.Stats.InactivatedColumns != fixture.ExpectedR ||
+                forced.Stats.InactivatedColumns != fixture.ExpectedR ||
+                (fixture.ExpectedR >= 63u &&
+                 (general.Stats.PeeledColumns == 0u ||
+                  general.Stats.BinaryResidualRank == 0u)) ||
+                general.Output != automatic.Output ||
+                general.Output != forced.Output ||
+                !SameSolveStatsIgnoringTiming(
+                    general.Stats, automatic.Stats) ||
+                !SameSolveStatsIgnoringTiming(general.Stats, forced.Stats) ||
+                general.SingleUses != 0u || general.GeneralUses != 1u ||
+                automatic.SingleUses != (eligible ? 1u : 0u) ||
+                automatic.GeneralUses != (eligible ? 0u : 1u) ||
+                forced.SingleUses != (eligible ? 1u : 0u) ||
+                forced.GeneralUses != (eligible ? 0u : 1u) ||
+                !wirehair_v2::VerifyPrecodeSolution(
+                    system, config, packets,
+                    forced.Output.data(), block_bytes))
+            {
+                std::fprintf(stderr,
+                    "solve: single-word projection mismatch case=%s bb=%u "
+                    "results=%d/%d/%d R=%u/%u/%u/%u "
+                    "uses=%llu/%llu,%llu/%llu,%llu/%llu\n",
+                    fixture.Name,
+                    block_bytes,
+                    (int)general.Result,
+                    (int)automatic.Result,
+                    (int)forced.Result,
+                    general.Stats.InactivatedColumns,
+                    automatic.Stats.InactivatedColumns,
+                    forced.Stats.InactivatedColumns,
+                    fixture.ExpectedR,
+                    (unsigned long long)general.SingleUses,
+                    (unsigned long long)general.GeneralUses,
+                    (unsigned long long)automatic.SingleUses,
+                    (unsigned long long)automatic.GeneralUses,
+                    (unsigned long long)forced.SingleUses,
+                    (unsigned long long)forced.GeneralUses);
+                return false;
+            }
+
+            // Pin the serialized checkpoint seam as well as the completed
+            // solve.  Replacing packet zero with a duplicate of packet one
+            // leaves these fixtures exactly one rank short: R=64 exercises
+            // the one-word representation, while R=65 proves a forced
+            // specialization request still falls back to two words.  Repeat
+            // under both residual implementations because either one may
+            // produce the checkpoint that ResumePrecodeSystem consumes.
+            if (block_bytes == 17u && fixture.ExpectedR >= 63u)
+            {
+                std::vector<wirehair_v2::SolvePacket> deficient = packets;
+                deficient[0] = packets[1];
+                const std::vector<uint8_t> sentinel(
+                    9u, uint8_t{0xa5});
+
+                struct CheckpointOutcome
+                {
+                    WirehairResult Result;
+                    std::vector<uint8_t> Output;
+                    wirehair_v2::PrecodeSolveStats Stats;
+                    wirehair_v2::PrecodeSolveResumeState Resume;
+                    uint64_t SingleUses;
+                    uint64_t GeneralUses;
+                };
+
+                const auto checkpoint = [&] (
+                    const std::vector<wirehair_v2::SolvePacket>&
+                        input_packets,
+                    int projection_mode,
+                    int residual_mode) -> CheckpointOutcome
+                {
+                    CheckpointOutcome outcome;
+                    outcome.Result = Wirehair_Error;
+                    outcome.Output = sentinel;
+                    outcome.SingleUses = 0u;
+                    outcome.GeneralUses = 0u;
+                    wirehair_v2::ResetSingleWordProjectionCountersForTesting();
+                    {
+                        SingleWordProjectionModeScope projection_scope(
+                            projection_mode);
+                        PackedBinaryResidualModeScope residual_scope(
+                            residual_mode);
+                        if (!projection_scope.IsValid() ||
+                            !residual_scope.IsValid())
+                        {
+                            return outcome;
+                        }
+                        outcome.Result = wirehair_v2::SolvePrecodeSystem(
+                            system, config, input_packets, block_bytes,
+                            outcome.Output, &outcome.Stats, &outcome.Resume);
+                    }
+                    outcome.SingleUses =
+                        wirehair_v2::SingleWordProjectionUsesForTesting();
+                    outcome.GeneralUses =
+                        wirehair_v2::GeneralProjectionUsesForTesting();
+                    return outcome;
+                };
+
+                for (int residual_mode : { -1, 1 })
+                {
+                    CheckpointOutcome reference =
+                        checkpoint(deficient, -1, residual_mode);
+                    CheckpointOutcome candidate =
+                        checkpoint(deficient, 0, residual_mode);
+                    const bool checkpoint_eligible =
+                        fixture.ExpectedR <= 64u;
+                    const uint32_t expected_projection_words =
+                        (fixture.ExpectedR + 63u) / 64u;
+                    const uint32_t tail_bits = fixture.ExpectedR & 63u;
+                    const auto projection_tail_clear = [&] (
+                        const wirehair_v2::PrecodeSolveResumeState& state) {
+                        if (tail_bits == 0u) {
+                            return true;
+                        }
+                        if (expected_projection_words == 0u ||
+                            state.Projection.size() %
+                                expected_projection_words != 0u)
+                        {
+                            return false;
+                        }
+                        const uint64_t invalid_bits =
+                            ~((UINT64_C(1) << tail_bits) - 1u);
+                        for (size_t offset = expected_projection_words - 1u;
+                             offset < state.Projection.size();
+                             offset += expected_projection_words)
+                        {
+                            if ((state.Projection[offset] & invalid_bits) !=
+                                0u)
+                            {
+                                return false;
+                            }
+                        }
+                        return true;
+                    };
+                    const bool reference_tail_clear =
+                        projection_tail_clear(reference.Resume);
+                    const bool candidate_tail_clear =
+                        projection_tail_clear(candidate.Resume);
+                    if (reference.Result != Wirehair_NeedMore ||
+                        candidate.Result != Wirehair_NeedMore ||
+                        reference.Output != sentinel ||
+                        candidate.Output != sentinel ||
+                        !reference.Resume.Active ||
+                        !candidate.Resume.Active ||
+                        reference.Resume.InactiveCount != fixture.ExpectedR ||
+                        candidate.Resume.InactiveCount != fixture.ExpectedR ||
+                        reference.Resume.ProjectionWords !=
+                            (fixture.ExpectedR + 63u) / 64u ||
+                        candidate.Resume.ProjectionWords !=
+                            (fixture.ExpectedR + 63u) / 64u ||
+                        reference.Resume.Rank + 1u != fixture.ExpectedR ||
+                        candidate.Resume.Rank + 1u != fixture.ExpectedR ||
+                        reference.Stats.InactivatedColumns !=
+                            fixture.ExpectedR ||
+                        candidate.Stats.InactivatedColumns !=
+                            fixture.ExpectedR ||
+                        reference.Stats.BinaryResidualRank == 0u ||
+                        candidate.Stats.BinaryResidualRank == 0u ||
+                        !reference_tail_clear || !candidate_tail_clear ||
+                        !SameResumeStateIgnoringTiming(
+                            reference.Resume, candidate.Resume) ||
+                        !SameSolveStatsIgnoringTiming(
+                            reference.Stats, candidate.Stats) ||
+                        reference.SingleUses != 0u ||
+                        reference.GeneralUses != 1u ||
+                        candidate.SingleUses !=
+                            (checkpoint_eligible ? 1u : 0u) ||
+                        candidate.GeneralUses !=
+                            (checkpoint_eligible ? 0u : 1u))
+                    {
+                        std::fprintf(stderr,
+                            "solve: single-word checkpoint mismatch "
+                            "case=%s residual_mode=%d results=%d/%d "
+                            "R=%u/%u/%u rank=%u/%u uses=%llu/%llu,%llu/%llu\n",
+                            fixture.Name,
+                            residual_mode,
+                            (int)reference.Result,
+                            (int)candidate.Result,
+                            reference.Resume.InactiveCount,
+                            candidate.Resume.InactiveCount,
+                            fixture.ExpectedR,
+                            reference.Resume.Rank,
+                            candidate.Resume.Rank,
+                            (unsigned long long)reference.SingleUses,
+                            (unsigned long long)reference.GeneralUses,
+                            (unsigned long long)candidate.SingleUses,
+                            (unsigned long long)candidate.GeneralUses);
+                        return false;
+                    }
+
+                    wirehair_v2::PrecodeSolveStats reference_resume_stats;
+                    wirehair_v2::PrecodeSolveStats candidate_resume_stats;
+                    const WirehairResult reference_resume_result =
+                        wirehair_v2::ResumePrecodeSystem(
+                            system, config, 0u, message.data(), block_bytes,
+                            reference.Resume, reference.Output,
+                            &reference_resume_stats, true);
+                    const WirehairResult candidate_resume_result =
+                        wirehair_v2::ResumePrecodeSystem(
+                            system, config, 0u, message.data(), block_bytes,
+                            candidate.Resume, candidate.Output,
+                            &candidate_resume_stats, true);
+                    if (reference_resume_result != Wirehair_Success ||
+                        candidate_resume_result != Wirehair_Success ||
+                        reference.Resume.Active || candidate.Resume.Active ||
+                        reference.Output != general.Output ||
+                        candidate.Output != general.Output ||
+                        reference.Output != candidate.Output ||
+                        !SameSolveStatsIgnoringTiming(
+                            reference_resume_stats,
+                            candidate_resume_stats) ||
+                        !wirehair_v2::VerifyPrecodeSolution(
+                            system, config, packets,
+                            candidate.Output.data(), block_bytes))
+                    {
+                        std::fprintf(stderr,
+                            "solve: single-word checkpoint resume mismatch "
+                            "case=%s residual_mode=%d results=%d/%d "
+                            "active=%d/%d\n",
+                            fixture.Name,
+                            residual_mode,
+                            (int)reference_resume_result,
+                            (int)candidate_resume_result,
+                            reference.Resume.Active ? 1 : 0,
+                            candidate.Resume.Active ? 1 : 0);
+                        return false;
+                    }
+                }
+
+                // The packed checkpoint materialization happens after both
+                // affine-projection sites have executed.  Inject each
+                // allocation exception there and require the public wrapper
+                // to preserve every caller-owned object under both the
+                // general and one-word implementations.
+                if (fixture.ExpectedR == 63u)
+                {
+                    using wirehair_v2::test::
+                        SolveAllocationFailureException;
+                    using wirehair_v2::test::SolveAllocationFailurePoint;
+                    const SolveAllocationFailureException exceptions[] = {
+                        SolveAllocationFailureException::BadAlloc,
+                        SolveAllocationFailureException::LengthError
+                    };
+                    for (int projection_mode : { -1, 1 })
+                    {
+                        for (SolveAllocationFailureException exception :
+                             exceptions)
+                        {
+                            std::vector<uint8_t> output = sentinel;
+                            const std::vector<uint8_t> output_before = output;
+                            wirehair_v2::PrecodeSolveStats stats;
+                            stats.PacketRows = UINT32_C(0x50607080);
+                            stats.BlockXors =
+                                UINT64_C(0x1020304050607080);
+                            const wirehair_v2::PrecodeSolveStats stats_before =
+                                stats;
+                            wirehair_v2::PrecodeSolveResumeState resume =
+                                MakeStatsAliasSentinel(
+                                    UINT32_C(0x563) +
+                                    (uint32_t)(projection_mode + 1) * 16u +
+                                    (uint32_t)exception);
+                            const wirehair_v2::PrecodeSolveResumeState
+                                resume_before = resume;
+                            const ResumeStorageIdentity storage_before =
+                                CaptureResumeStorageIdentity(resume);
+                            WirehairResult result = Wirehair_Error;
+                            uint32_t failure_hits = 0u;
+                            {
+                                SingleWordProjectionModeScope
+                                    projection_scope(projection_mode);
+                                PackedBinaryResidualModeScope residual_scope(1);
+                                SolveAllocationFailureScope failure_scope(
+                                    SolveAllocationFailurePoint::
+                                        PackedResumePivotMaterialization,
+                                    exception);
+                                if (!projection_scope.IsValid() ||
+                                    !residual_scope.IsValid())
+                                {
+                                    return false;
+                                }
+                                result = wirehair_v2::SolvePrecodeSystem(
+                                    system, config, deficient, block_bytes,
+                                    output, &stats, &resume);
+                                failure_hits = wirehair_v2::test::
+                                    SolveAllocationFailureHitsForTesting();
+                            }
+                            if (result != Wirehair_OOM ||
+                                failure_hits != 1u ||
+                                output != output_before ||
+                                !SameSolveStats(stats, stats_before) ||
+                                !SameResumeState(resume, resume_before) ||
+                                !SameResumeStorageIdentity(
+                                    resume, storage_before))
+                            {
+                                std::fprintf(stderr,
+                                    "solve: single-word OOM transaction "
+                                    "mismatch mode=%d exception=%u "
+                                    "result=%d hits=%u\n",
+                                    projection_mode,
+                                    (unsigned)exception,
+                                    (int)result,
+                                    failure_hits);
+                                return false;
+                            }
+                        }
+                    }
+                }
+
+                if (fixture.ExpectedR == 64u)
+                {
+                    std::vector<uint8_t> conflicting_data(
+                        packets[1].Data,
+                        packets[1].Data + block_bytes);
+                    conflicting_data[0] ^= uint8_t{1};
+                    std::vector<wirehair_v2::SolvePacket> conflicting =
+                        packets;
+                    conflicting[0].BlockId = packets[1].BlockId;
+                    conflicting[0].Data = conflicting_data.data();
+                    for (int residual_mode : { -1, 1 })
+                    {
+                        const CheckpointOutcome reference =
+                            checkpoint(conflicting, -1, residual_mode);
+                        const CheckpointOutcome candidate =
+                            checkpoint(conflicting, 0, residual_mode);
+                        if (reference.Result != Wirehair_Error ||
+                            candidate.Result != Wirehair_Error ||
+                            reference.Output != sentinel ||
+                            candidate.Output != sentinel ||
+                            reference.Resume.Active ||
+                            candidate.Resume.Active ||
+                            !SameResumeStateIgnoringTiming(
+                                reference.Resume, candidate.Resume) ||
+                            !SameSolveStatsIgnoringTiming(
+                                reference.Stats, candidate.Stats) ||
+                            reference.SingleUses != 0u ||
+                            reference.GeneralUses != 1u ||
+                            candidate.SingleUses != 1u ||
+                            candidate.GeneralUses != 0u)
+                        {
+                            std::fprintf(stderr,
+                                "solve: single-word conflicting duplicate "
+                                "mismatch residual_mode=%d results=%d/%d "
+                                "active=%d/%d uses=%llu/%llu,%llu/%llu\n",
+                                residual_mode,
+                                (int)reference.Result,
+                                (int)candidate.Result,
+                                reference.Resume.Active ? 1 : 0,
+                                candidate.Resume.Active ? 1 : 0,
+                                (unsigned long long)reference.SingleUses,
+                                (unsigned long long)reference.GeneralUses,
+                                (unsigned long long)candidate.SingleUses,
+                                (unsigned long long)candidate.GeneralUses);
+                            return false;
+                        }
+                    }
+
+                    const uint32_t P = system.Params.Staircase +
+                        system.Params.DenseRows + system.Params.HeavyRows;
+                    wirehair_v2::PacketRowRuntime runtime;
+                    if (!runtime.Initialize(
+                            fixture.K, P, config.MixCount))
+                    {
+                        return false;
+                    }
+                    for (int projection_mode : { -1, 1 })
+                    {
+                        SingleWordProjectionModeScope projection_scope(
+                            projection_mode);
+                        if (!projection_scope.IsValid() ||
+                            !ExpectColdSolveStatsAliasRejected(
+                                "single-word projection",
+                                ColdSolveEntryPoint::Public,
+                                system, config, runtime, packets,
+                                block_bytes,
+                                UINT32_C(0x564) +
+                                    (uint32_t)(projection_mode + 1)))
+                        {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Exercise the fused payload initializer through the complete one-word
+    // solve, rather than a kernel-only seam.  This valid sparse precode keeps
+    // R below 64 at the production K/block-width thresholds.  More packet
+    // rows have at most 16 initialization sources than there are unused
+    // binary rows, proving that at least one such packet row was selected as
+    // a peel solve row and entered BatchedBlockXorInitializer.
+    {
+        static const uint32_t K = 10000u;
+        static const uint32_t block_bytes = 1280u;
+        wirehair_v2::PrecodeParams params = {};
+        params.BlockCount = K;
+        params.Staircase = 2u;
+        params.DenseRows = 0u;
+        params.HeavyRows = 0u;
+        params.SourceHits = 1u;
+        params.Seed = 0u;
+        wirehair_v2::PrecodeSystem system;
+        if (!wirehair_v2::BuildPrecodeSystem(params, system) ||
+            !wirehair_v2::ValidatePrecodeSystem(system))
+        {
+            std::fprintf(stderr,
+                "solve: single-word fused fixture build failed\n");
+            return false;
+        }
+
+        wirehair_v2::PacketRowConfig config;
+        config.PeelSeed = UINT32_C(0xf3780b59);
+        config.MixCount = 1u;
+        const uint32_t P = params.Staircase + params.DenseRows +
+            params.HeavyRows;
+        wirehair_v2::PacketRowRuntime runtime;
+        if (!runtime.Initialize(K, P, config.MixCount))
+        {
+            std::fprintf(stderr,
+                "solve: single-word fused runtime initialization failed\n");
+            return false;
+        }
+
+        std::vector<uint8_t> source((size_t)K * block_bytes);
+        for (size_t i = 0u; i < source.size(); ++i) {
+            source[i] = (uint8_t)(
+                1u + (i * 173u + (i >> 7) + 91u) % 255u);
+        }
+        std::vector<uint8_t> parity((size_t)P * block_bytes);
+        if (!wirehair_v2::ComputePrecodeValues(
+                system, source.data(), block_bytes, parity.data()))
+        {
+            std::fprintf(stderr,
+                "solve: single-word fused parity generation failed\n");
+            return false;
+        }
+        std::vector<uint8_t> intermediate(
+            (size_t)(K + P) * block_bytes);
+        std::memcpy(intermediate.data(), source.data(), source.size());
+        std::memcpy(
+            intermediate.data() + source.size(),
+            parity.data(), parity.size());
+
+        std::vector<uint8_t> payload((size_t)K * block_bytes);
+        std::vector<wirehair_v2::SolvePacket> packets(K);
+        uint32_t low_degree_packet_rows = 0u;
+        for (uint32_t id = 0u; id < K; ++id)
+        {
+            const std::vector<uint32_t> row =
+                wirehair_v2::GeneratePacketMatrixRowWithRuntime(
+                    K, P, id, config, runtime);
+            if (row.empty())
+            {
+                std::fprintf(stderr,
+                    "solve: single-word fused packet row failed id=%u\n",
+                    id);
+                return false;
+            }
+            if (row.size() <= 16u) {
+                ++low_degree_packet_rows;
+            }
+            uint8_t* block =
+                payload.data() + (size_t)id * block_bytes;
+            if (!wirehair_v2::
+                    EvaluatePacketBlockForValidatedSystemWithRuntime(
+                        system, config, runtime, intermediate.data(),
+                        block_bytes, id, block))
+            {
+                std::fprintf(stderr,
+                    "solve: single-word fused packet evaluation failed "
+                    "id=%u\n",
+                    id);
+                return false;
+            }
+            packets[id].BlockId = id;
+            packets[id].Data = block;
+        }
+
+        struct FusedOutcome
+        {
+            WirehairResult Result = Wirehair_Error;
+            std::vector<uint8_t> Output;
+            wirehair_v2::PrecodeSolveStats Stats;
+            wirehair_v2::PrecodeSolveResumeState Resume;
+            uint64_t SingleUses = 0u;
+            uint64_t GeneralUses = 0u;
+        };
+        const std::vector<uint8_t> sentinel(11u, uint8_t{0x6d});
+        const auto run_fused = [&](int mode) {
+            FusedOutcome outcome;
+            outcome.Output = sentinel;
+            wirehair_v2::ResetSingleWordProjectionCountersForTesting();
+            {
+                SingleWordProjectionModeScope scope(mode);
+                if (!scope.IsValid()) {
+                    return outcome;
+                }
+                outcome.Result = wirehair_v2::
+                    SolvePrecodeSystemForValidatedSystemWithRuntime(
+                        system, config, runtime, packets, block_bytes,
+                        outcome.Output, &outcome.Stats, &outcome.Resume);
+            }
+            outcome.SingleUses =
+                wirehair_v2::SingleWordProjectionUsesForTesting();
+            outcome.GeneralUses =
+                wirehair_v2::GeneralProjectionUsesForTesting();
+            return outcome;
+        };
+
+        FusedOutcome reference = run_fused(-1);
+        FusedOutcome candidate = run_fused(1);
+        const uint32_t unused_binary_rows =
+            K + params.Staircase + params.DenseRows -
+            reference.Stats.PeeledColumns;
+        const bool reference_values_nonzero = std::any_of(
+            reference.Resume.Values.begin(), reference.Resume.Values.end(),
+            [](uint8_t value) { return value != 0u; });
+        const bool candidate_values_nonzero = std::any_of(
+            candidate.Resume.Values.begin(), candidate.Resume.Values.end(),
+            [](uint8_t value) { return value != 0u; });
+        if (reference.Result != Wirehair_NeedMore ||
+            candidate.Result != Wirehair_NeedMore ||
+            reference.Output != sentinel || candidate.Output != sentinel ||
+            !reference.Resume.Active || !candidate.Resume.Active ||
+            reference.Stats.InactivatedColumns != 58u ||
+            candidate.Stats.InactivatedColumns != 58u ||
+            reference.Stats.PeeledColumns != 9944u ||
+            candidate.Stats.PeeledColumns != 9944u ||
+            reference.Stats.BinaryResidualRank != 22u ||
+            candidate.Stats.BinaryResidualRank != 22u ||
+            reference.Resume.ProjectionWords != 1u ||
+            candidate.Resume.ProjectionWords != 1u ||
+            low_degree_packet_rows != 9328u ||
+            low_degree_packet_rows <= unused_binary_rows ||
+            !reference_values_nonzero || !candidate_values_nonzero ||
+            !SameSolveStatsIgnoringTiming(
+                reference.Stats, candidate.Stats) ||
+            !SameResumeStateIgnoringTiming(
+                reference.Resume, candidate.Resume) ||
+            reference.SingleUses != 0u || reference.GeneralUses != 1u ||
+            candidate.SingleUses != 1u || candidate.GeneralUses != 0u)
+        {
+            std::fprintf(stderr,
+                "solve: single-word fused initializer mismatch "
+                "results=%d/%d R=%u/%u peeled=%u/%u rank=%u/%u "
+                "low/unused=%u/%u uses=%llu/%llu,%llu/%llu\n",
+                (int)reference.Result,
+                (int)candidate.Result,
+                reference.Stats.InactivatedColumns,
+                candidate.Stats.InactivatedColumns,
+                reference.Stats.PeeledColumns,
+                candidate.Stats.PeeledColumns,
+                reference.Stats.BinaryResidualRank,
+                candidate.Stats.BinaryResidualRank,
+                low_degree_packet_rows,
+                unused_binary_rows,
+                (unsigned long long)reference.SingleUses,
+                (unsigned long long)reference.GeneralUses,
+                (unsigned long long)candidate.SingleUses,
+                (unsigned long long)candidate.GeneralUses);
+            return false;
+        }
+    }
+    if (wirehair_v2::SingleWordProjectionModeForTesting() != 0)
+    {
+        std::fprintf(stderr,
+            "solve: single-word projection mode was not restored\n");
+        return false;
+    }
+    std::printf(
+        "single-word projection R=1/63/64, R=65 fallback, and resume: PASS\n");
+    return true;
+}
+
 bool CheckProjectionAVX2Differential()
 {
 #if !defined(GF256_TRY_TARGET_AVX2) && !defined(__AVX2__)
@@ -6161,6 +6877,7 @@ int main(int argc, char** argv)
     ok = CheckIncrementalResume() && ok;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     ok = CheckHeavyProjectionPropagationOracle() && ok;
+    ok = CheckSingleWordProjectionDifferential() && ok;
     ok = CheckProjectionAVX2Differential() && ok;
     ok = CheckSolveAllocationExceptionContainment() && ok;
 #endif
