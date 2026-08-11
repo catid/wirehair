@@ -113,6 +113,30 @@ private:
     bool Valid;
 };
 
+class TinyPeriodicHeavyTransposeModeScope
+{
+public:
+    explicit TinyPeriodicHeavyTransposeModeScope(int mode)
+        : Previous(
+            wirehair_v2::TinyPeriodicHeavyTransposeModeForTesting())
+        , Valid(
+            wirehair_v2::SetTinyPeriodicHeavyTransposeModeForTesting(mode))
+    {
+    }
+
+    ~TinyPeriodicHeavyTransposeModeScope()
+    {
+        (void)wirehair_v2::SetTinyPeriodicHeavyTransposeModeForTesting(
+            Previous);
+    }
+
+    bool IsValid() const { return Valid; }
+
+private:
+    int Previous;
+    bool Valid;
+};
+
 class SolveAllocationFailureScope
 {
 public:
@@ -3939,6 +3963,10 @@ bool CheckHeavyProjectionCase(const HeavyProjectionCase& test_case)
     std::vector<uint8_t> checked;
     wirehair_v2::PrecodeSolveStats control_stats;
     wirehair_v2::PrecodeSolveStats checked_stats;
+    const uint64_t auto_transpose_before =
+        wirehair_v2::TinyPeriodicHeavyTransposeUsesForTesting();
+    const uint64_t auto_legacy_before =
+        wirehair_v2::TinyPeriodicHeavyLegacyUsesForTesting();
     if (wirehair_v2::SolvePrecodeSystem(
             system, config, packets, block_bytes, control,
             &control_stats) != Wirehair_Success)
@@ -3948,6 +3976,12 @@ bool CheckHeavyProjectionCase(const HeavyProjectionCase& test_case)
             test_case.Name);
         return false;
     }
+    const uint64_t auto_transpose_delta =
+        wirehair_v2::TinyPeriodicHeavyTransposeUsesForTesting() -
+        auto_transpose_before;
+    const uint64_t auto_legacy_delta =
+        wirehair_v2::TinyPeriodicHeavyLegacyUsesForTesting() -
+        auto_legacy_before;
 
     const uint64_t comparisons_before =
         wirehair_v2::HeavyProjectionOracleComparisonsForTesting();
@@ -3991,19 +4025,31 @@ bool CheckHeavyProjectionCase(const HeavyProjectionCase& test_case)
             wirehair_v2::HeavyCoefficientFamily::PeriodicCauchy &&
         system.Params.HeavyRows == 12u && L < 244u &&
         control_stats.InactivatedColumns != 0u;
+    gf256_x86_cpu_features active_features = {};
+    gf256_get_active_x86_cpu_features(&active_features);
+    const bool expected_auto_transpose =
+        tiny_direct && block_bytes >= 64u && (block_bytes & 63u) == 0u &&
+        active_features.GFNI != 0;
+    const uint64_t expected_auto_transpose_uses =
+        expected_auto_transpose ? 1u : 0u;
+    const uint64_t expected_auto_legacy_uses =
+        tiny_direct && !expected_auto_transpose ? 1u : 0u;
     const uint64_t expected_tiny_uses = tiny_direct ? 1u : 0u;
     if (checked_result != Wirehair_Success || checked != control ||
         !SameSolveStatsIgnoringTiming(control_stats, checked_stats) ||
         comparison_delta != expected_comparisons ||
         fallback_delta != expected_fallbacks ||
         tiny_use_delta != expected_tiny_uses ||
+        auto_transpose_delta != expected_auto_transpose_uses ||
+        auto_legacy_delta != expected_auto_legacy_uses ||
         !wirehair_v2::VerifyPrecodeSolution(
             system, config, packets, checked.data(), block_bytes))
     {
         std::fprintf(stderr,
             "solve: heavy projection oracle mismatch case=%s result=%d "
             "comparisons=%llu/%llu fallbacks=%llu/%llu "
-            "tiny=%llu/%llu R=%u L=%u\n",
+            "tiny=%llu/%llu auto_transpose=%llu/%llu "
+            "auto_legacy=%llu/%llu R=%u L=%u\n",
             test_case.Name,
             (int)checked_result,
             (unsigned long long)comparison_delta,
@@ -4012,9 +4058,69 @@ bool CheckHeavyProjectionCase(const HeavyProjectionCase& test_case)
             (unsigned long long)expected_fallbacks,
             (unsigned long long)tiny_use_delta,
             (unsigned long long)expected_tiny_uses,
+            (unsigned long long)auto_transpose_delta,
+            (unsigned long long)expected_auto_transpose_uses,
+            (unsigned long long)auto_legacy_delta,
+            (unsigned long long)expected_auto_legacy_uses,
             control_stats.InactivatedColumns,
             L);
         return false;
+    }
+
+    if (tiny_direct)
+    {
+        std::vector<uint8_t> legacy;
+        std::vector<uint8_t> transposed;
+        wirehair_v2::PrecodeSolveStats legacy_stats;
+        wirehair_v2::PrecodeSolveStats transposed_stats;
+        const uint64_t transpose_before =
+            wirehair_v2::TinyPeriodicHeavyTransposeUsesForTesting();
+        const uint64_t legacy_before =
+            wirehair_v2::TinyPeriodicHeavyLegacyUsesForTesting();
+        WirehairResult legacy_result = Wirehair_Error;
+        {
+            TinyPeriodicHeavyTransposeModeScope mode(-1);
+            HeavyProjectionOracleScope oracle_scope;
+            if (!mode.IsValid()) {
+                return false;
+            }
+            legacy_result = wirehair_v2::SolvePrecodeSystem(
+                system, config, packets, block_bytes, legacy,
+                &legacy_stats);
+        }
+        WirehairResult transposed_result = Wirehair_Error;
+        {
+            TinyPeriodicHeavyTransposeModeScope mode(1);
+            HeavyProjectionOracleScope oracle_scope;
+            if (!mode.IsValid()) {
+                return false;
+            }
+            transposed_result = wirehair_v2::SolvePrecodeSystem(
+                system, config, packets, block_bytes, transposed,
+                &transposed_stats);
+        }
+        const uint64_t transpose_delta =
+            wirehair_v2::TinyPeriodicHeavyTransposeUsesForTesting() -
+            transpose_before;
+        const uint64_t legacy_delta =
+            wirehair_v2::TinyPeriodicHeavyLegacyUsesForTesting() -
+            legacy_before;
+        if (legacy_result != Wirehair_Success ||
+            transposed_result != Wirehair_Success ||
+            legacy != transposed || transposed != control ||
+            !SameSolveStatsIgnoringTiming(legacy_stats, transposed_stats) ||
+            transpose_delta != 1u || legacy_delta != 1u)
+        {
+            std::fprintf(stderr,
+                "solve: tiny transpose differential mismatch case=%s "
+                "legacy=%d transposed=%d uses=%llu/%llu\n",
+                test_case.Name,
+                (int)legacy_result,
+                (int)transposed_result,
+                (unsigned long long)legacy_delta,
+                (unsigned long long)transpose_delta);
+            return false;
+        }
     }
 
     static const uint32_t kSampleNumerators[] = { 0u, 1u, 2u };
@@ -4102,7 +4208,11 @@ bool CheckHeavyProjectionResumeOracleCase(uint32_t K)
         wirehair_v2::TinyPeriodicHeavyUsesForTesting();
     WirehairResult result = Wirehair_Error;
     {
+        TinyPeriodicHeavyTransposeModeScope mode(1);
         HeavyProjectionOracleScope oracle_scope;
+        if (!mode.IsValid()) {
+            return false;
+        }
         result = wirehair_v2::SolvePrecodeSystem(
             system, config, deficient, block_bytes, output, &stats, &resume);
     }
@@ -4207,12 +4317,56 @@ bool CheckTinyPeriodicCoefficientFormula()
 
 bool CheckHeavyProjectionPropagationOracle()
 {
+    if (!wirehair_v2::SetTinyPeriodicHeavyTransposeModeForTesting(0) ||
+        wirehair_v2::SetTinyPeriodicHeavyTransposeModeForTesting(-2) ||
+        wirehair_v2::SetTinyPeriodicHeavyTransposeModeForTesting(2) ||
+        wirehair_v2::TinyPeriodicHeavyTransposeModeForTesting() != 0)
+    {
+        std::fprintf(stderr,
+            "solve: tiny transpose mode validation failed\n");
+        return false;
+    }
+    wirehair_v2::ResetTinyPeriodicHeavyTransposeCountersForTesting();
+    if (wirehair_v2::TinyPeriodicHeavyTransposeUsesForTesting() != 0u ||
+        wirehair_v2::TinyPeriodicHeavyLegacyUsesForTesting() != 0u ||
+        wirehair_v2::TinyPeriodicHeavyTimedCallsForTesting() != 0u ||
+        wirehair_v2::TinyPeriodicHeavyTimedNanosecondsForTesting() != 0u ||
+        wirehair_v2::TinyPeriodicHeavyTimedDataRowsForTesting() != 0u)
+    {
+        std::fprintf(stderr,
+            "solve: tiny transpose counter reset failed\n");
+        return false;
+    }
     static const HeavyProjectionCase kCases[] = {
         { "tiny-h12", 8u, 12u,
           wirehair_v2::DenseAnchorLayout::Disabled },
+        { "tiny-h12-tail17", 8u, 12u,
+          wirehair_v2::DenseAnchorLayout::Disabled, 0u, 17u },
+        { "tiny-h12-tail63", 8u, 12u,
+          wirehair_v2::DenseAnchorLayout::Disabled, 0u, 63u },
+        { "tiny-h12-width64", 8u, 12u,
+          wirehair_v2::DenseAnchorLayout::Disabled, 0u, 64u },
+        { "tiny-h12-tail65", 8u, 12u,
+          wirehair_v2::DenseAnchorLayout::Disabled, 0u, 65u },
+        { "tiny-h12-tail127", 8u, 12u,
+          wirehair_v2::DenseAnchorLayout::Disabled, 0u, 127u },
+        { "tiny-h12-width128", 8u, 12u,
+          wirehair_v2::DenseAnchorLayout::Disabled, 0u, 128u },
+        { "tiny-h12-tail129", 8u, 12u,
+          wirehair_v2::DenseAnchorLayout::Disabled, 0u, 129u },
+        { "tiny-h12-tail1279", 8u, 12u,
+          wirehair_v2::DenseAnchorLayout::Disabled, 0u, 1279u },
         { "tiny-h12-wide", 8u, 12u,
           wirehair_v2::DenseAnchorLayout::Disabled, 0u, 1280u },
+        { "tiny-h12-tail1281", 8u, 12u,
+          wirehair_v2::DenseAnchorLayout::Disabled, 0u, 1281u },
+        { "tiny-h12-k32-width64", 32u, 12u,
+          wirehair_v2::DenseAnchorLayout::Disabled, 0u, 64u },
         { "tiny-h12-wide-k32", 32u, 12u,
+          wirehair_v2::DenseAnchorLayout::Disabled, 0u, 1280u },
+        { "tiny-h12-k100-width64", 100u, 12u,
+          wirehair_v2::DenseAnchorLayout::Disabled, 0u, 64u },
+        { "tiny-h12-wide-k100", 100u, 12u,
           wirehair_v2::DenseAnchorLayout::Disabled, 0u, 1280u },
         { "tiny-periodic-L243", 189u, 12u,
           wirehair_v2::DenseAnchorLayout::Disabled, 243u },
@@ -6279,6 +6433,10 @@ bool CheckSolveAllocationExceptionContainment()
                 CaptureResumeStorageIdentity(resume);
             const size_t resume_bytes_before = resume.PersistentBytes();
 
+            TinyPeriodicHeavyTransposeModeScope transpose_mode(1);
+            if (!transpose_mode.IsValid()) {
+                return false;
+            }
             SolveAllocationFailureScope failure(
                 SolveAllocationFailurePoint::TinyPeriodicHeavyStorage,
                 exception);

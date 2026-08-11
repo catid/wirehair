@@ -50,6 +50,13 @@ set(_forbidden_symbols
     "SingleWordProjectionTestMode"
     "SingleWordProjectionUseCount"
     "GeneralProjectionUseCount"
+    "TinyPeriodicHeavyTransposeTestMode"
+    "TinyPeriodicHeavyTransposeUseCount"
+    "TinyPeriodicHeavyLegacyUseCount"
+    "TinyPeriodicHeavyTimingEnabled"
+    "TinyPeriodicHeavyTimedCalls"
+    "TinyPeriodicHeavyTimedNanoseconds"
+    "TinyPeriodicHeavyTimedDataRows"
     "PackedBinaryResidualTestMode"
     "PackedBinaryResidualUseCount"
     "ResumeSystemFingerprintChecks")
@@ -129,6 +136,31 @@ if(DEFINED SYSTEM_NAME AND SYSTEM_NAME STREQUAL "Linux")
                    "\\.(constprop|isra|part)(\\.|\\]|\\))")
                 message(FATAL_ERROR
                     "LTO cloned a single-word accumulator: ${_symbol}")
+            endif()
+        endforeach()
+
+        string(REGEX MATCHALL
+            "[^\n]*[ \t]F[ \t]+[^\n]*PrepareTinyPeriodicHeavy(Transposed|Legacy|Selected)ByPeel[^\n]*"
+            _tiny_periodic_symbols "${_object_symbols}")
+        list(LENGTH _tiny_periodic_symbols _tiny_periodic_symbol_count)
+        if(NOT _tiny_periodic_symbol_count EQUAL 3)
+            message(FATAL_ERROR
+                "${_artifact_var} expected three tiny-periodic dispatch/helper "
+                "function symbols, found ${_tiny_periodic_symbol_count}")
+        endif()
+        foreach(_symbol IN LISTS _tiny_periodic_symbols)
+            if(_require_input_section)
+                string(FIND "${_symbol}" ".text.wh2_tiny_periodic"
+                    _tiny_periodic_section_offset)
+                if(_tiny_periodic_section_offset EQUAL -1)
+                    message(FATAL_ERROR
+                        "tiny-periodic helper escaped isolated text: "
+                        "${_symbol}")
+                endif()
+            elseif(_symbol MATCHES
+                   "\\.(constprop|isra|part)(\\.|\\]|\\))")
+                message(FATAL_ERROR
+                    "LTO cloned a tiny-periodic helper: ${_symbol}")
             endif()
         endforeach()
     endforeach()

@@ -169,6 +169,26 @@ uint64_t HeavyProjectionLegacyFallbacksForTesting();
 uint64_t TinyPeriodicHeavyUsesForTesting();
 
 /**
+    Select the tiny PeriodicCauchy H=12 RHS implementation in this thread.
+
+    -1 forces the legacy source-major helper, zero restores production runtime
+    dispatch, and +1 forces the transposed destination-major helper.  The
+    forced transposed mode is test-only and may exercise the portable kernel;
+    production selects it only for the measured block-size and GFNI boundary.
+*/
+bool SetTinyPeriodicHeavyTransposeModeForTesting(int mode);
+int TinyPeriodicHeavyTransposeModeForTesting();
+
+/** Reset/read primary-helper observations and optional isolated timing. */
+void ResetTinyPeriodicHeavyTransposeCountersForTesting();
+uint64_t TinyPeriodicHeavyTransposeUsesForTesting();
+uint64_t TinyPeriodicHeavyLegacyUsesForTesting();
+void SetTinyPeriodicHeavyTimingForTesting(bool enabled);
+uint64_t TinyPeriodicHeavyTimedCallsForTesting();
+uint64_t TinyPeriodicHeavyTimedNanosecondsForTesting();
+uint64_t TinyPeriodicHeavyTimedDataRowsForTesting();
+
+/**
     Select the portable x86 projection-XOR implementation in this thread.
 
     -1 forces the SSE2/scalar fallback, zero restores production runtime

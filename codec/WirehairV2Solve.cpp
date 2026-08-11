@@ -42,6 +42,13 @@ thread_local uint64_t ProjectionFallbackBatchUseCount = 0u;
 thread_local int SingleWordProjectionTestMode = 0;
 thread_local uint64_t SingleWordProjectionUseCount = 0u;
 thread_local uint64_t GeneralProjectionUseCount = 0u;
+thread_local int TinyPeriodicHeavyTransposeTestMode = 0;
+thread_local uint64_t TinyPeriodicHeavyTransposeUseCount = 0u;
+thread_local uint64_t TinyPeriodicHeavyLegacyUseCount = 0u;
+thread_local bool TinyPeriodicHeavyTimingEnabled = false;
+thread_local uint64_t TinyPeriodicHeavyTimedCalls = 0u;
+thread_local uint64_t TinyPeriodicHeavyTimedNanoseconds = 0u;
+thread_local uint64_t TinyPeriodicHeavyTimedDataRows = 0u;
 #endif
 
 #if defined(GF256_TRY_TARGET_AVX2) && !defined(__AVX2__)
@@ -1335,7 +1342,10 @@ void ProjectCachedPeriodicHeavyByPeel(
 // RHS.
 #if defined(_MSC_VER)
 #define WH2_TINY_PERIODIC_NOINLINE __declspec(noinline)
-#elif defined(__GNUC__) && defined(__ELF__)
+#elif defined(__GNUC__) && !defined(__clang__) && defined(__ELF__)
+#define WH2_TINY_PERIODIC_NOINLINE \
+    __attribute__((noinline, noclone, section(".text.wh2_tiny_periodic")))
+#elif defined(__clang__) && defined(__ELF__)
 #define WH2_TINY_PERIODIC_NOINLINE \
     __attribute__((noinline, section(".text.wh2_tiny_periodic")))
 #elif defined(__GNUC__) || defined(__clang__)
@@ -1465,7 +1475,8 @@ static void PrepareTinyPeriodicHeavyLegacyForTesting(
 // each dependency coefficient.  This is algebraically identical to forming
 // every peeled value first and multiplying all of them into the heavy RHS,
 // but only data-bearing selected rows issue full-block GF(256) operations.
-static WH2_TINY_PERIODIC_NOINLINE void PrepareTinyPeriodicHeavyByPeel(
+template <bool Transposed>
+static GF256_FORCE_INLINE uint32_t PrepareTinyPeriodicHeavyByPeelImpl(
     const BinaryEquationArena& rows,
     const PeelResult& peel,
     uint32_t column_count,
@@ -1514,6 +1525,10 @@ static WH2_TINY_PERIODIC_NOINLINE void PrepareTinyPeriodicHeavyByPeel(
 
     void* heavy_destinations[kCachedPeriodicHeavyRows];
     uint8_t heavy_scales[kCachedPeriodicHeavyRows];
+    const void* data_sources[kCachedPeriodicWindow - 1u];
+    uint8_t data_scales[kCachedPeriodicHeavyRows]
+        [kCachedPeriodicWindow - 1u];
+    uint32_t data_source_count = 0u;
     for (uint32_t heavy = 0u;
          heavy < kCachedPeriodicHeavyRows;
          ++heavy)
@@ -1538,6 +1553,9 @@ static WH2_TINY_PERIODIC_NOINLINE void PrepareTinyPeriodicHeavyByPeel(
         const uint64_t high = packed[1];
         if (equation.Data)
         {
+            CAT_DEBUG_ASSERT(
+                data_source_count < kCachedPeriodicWindow - 1u);
+            const uint32_t data_source = data_source_count++;
             for (uint32_t heavy = 0u;
                  heavy < kCachedPeriodicHeavyRows;
                  ++heavy)
@@ -1545,14 +1563,32 @@ static WH2_TINY_PERIODIC_NOINLINE void PrepareTinyPeriodicHeavyByPeel(
                 heavy_scales[heavy] = (uint8_t)(
                     (heavy < 8u ? low : high) >>
                     ((heavy & 7u) * 8u));
+                if (Transposed)
+                {
+                    data_scales[heavy][data_source] =
+                        heavy_scales[heavy];
+                    if (heavy_scales[heavy] == 1u) {
+                        ++stats.BlockXors;
+                    }
+                    else if (heavy_scales[heavy] > 1u) {
+                        ++stats.BlockMulAdds;
+                    }
+                }
             }
-            AddScaledBlocks(
-                heavy_destinations,
-                heavy_scales,
-                kCachedPeriodicHeavyRows,
-                equation.Data,
-                block_bytes,
-                stats);
+            if (Transposed)
+            {
+                data_sources[data_source] = equation.Data;
+            }
+            else
+            {
+                AddScaledBlocks(
+                    heavy_destinations,
+                    heavy_scales,
+                    kCachedPeriodicHeavyRows,
+                    equation.Data,
+                    block_bytes,
+                    stats);
+            }
         }
         for (uint32_t dependency : equation.Columns)
         {
@@ -1561,6 +1597,21 @@ static WH2_TINY_PERIODIC_NOINLINE void PrepareTinyPeriodicHeavyByPeel(
                 (size_t)dependency * kCachedPeriodicWords;
             destination[0] ^= low;
             destination[1] ^= high;
+        }
+    }
+
+    if (Transposed && data_source_count != 0u)
+    {
+        for (uint32_t heavy = 0u;
+             heavy < kCachedPeriodicHeavyRows;
+             ++heavy)
+        {
+            gf256_mulset_multi_mem(
+                heavy_destinations[heavy],
+                data_sources,
+                data_scales[heavy],
+                (int)data_source_count,
+                (int)block_bytes);
         }
     }
 
@@ -1575,6 +1626,96 @@ static WH2_TINY_PERIODIC_NOINLINE void PrepareTinyPeriodicHeavyByPeel(
         destination[0] = source[0];
         destination[1] = source[1];
     }
+    return data_source_count;
+}
+
+static WH2_TINY_PERIODIC_NOINLINE uint32_t
+PrepareTinyPeriodicHeavyLegacyByPeel(
+    const BinaryEquationArena& rows,
+    const PeelResult& peel,
+    uint32_t column_count,
+    uint32_t block_bytes,
+    std::vector<uint64_t>& projected_heavy,
+    std::vector<uint8_t>& heavy_rhs,
+    PrecodeSolveStats& stats)
+{
+    return PrepareTinyPeriodicHeavyByPeelImpl<false>(
+        rows, peel, column_count, block_bytes, projected_heavy, heavy_rhs,
+        stats);
+}
+
+static WH2_TINY_PERIODIC_NOINLINE uint32_t
+PrepareTinyPeriodicHeavyTransposedByPeel(
+    const BinaryEquationArena& rows,
+    const PeelResult& peel,
+    uint32_t column_count,
+    uint32_t block_bytes,
+    std::vector<uint64_t>& projected_heavy,
+    std::vector<uint8_t>& heavy_rhs,
+    PrecodeSolveStats& stats)
+{
+    return PrepareTinyPeriodicHeavyByPeelImpl<true>(
+        rows, peel, column_count, block_bytes, projected_heavy, heavy_rhs,
+        stats);
+}
+
+static GF256_FORCE_INLINE bool ShouldTransposeTinyPeriodicHeavy(
+    uint32_t block_bytes)
+{
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    if (TinyPeriodicHeavyTransposeTestMode < 0) {
+        return false;
+    }
+    if (TinyPeriodicHeavyTransposeTestMode > 0) {
+        return true;
+    }
+#endif
+    // Same-binary ordinary-solve screens found gains at every tested
+    // 64-byte-aligned width from 64 through 1280 and again at 2048, 4096, and
+    // 16384 bytes for K=8/32/100.  Widths ending one byte before an alignment
+    // boundary could regress sharply in the scalar remainder.  The
+    // destination-major traffic advantage grows with block width, so keep the
+    // GFNI gate uncapped but retain the legacy helper for unaligned widths.
+    if (block_bytes < 64u || (block_bytes & 63u) != 0u) {
+        return false;
+    }
+    // GF256's active dispatch is immutable after its one-time initialization.
+    // Cache the query so a non-GFNI legacy fallback does not repeatedly enter
+    // gf256_init() merely to rediscover the same capability result.
+    static const bool active_gfni = []() {
+        gf256_x86_cpu_features features = {};
+        gf256_get_active_x86_cpu_features(&features);
+        return features.GFNI != 0;
+    }();
+    return active_gfni;
+}
+
+static WH2_TINY_PERIODIC_NOINLINE uint32_t
+PrepareTinyPeriodicHeavySelectedByPeel(
+    const BinaryEquationArena& rows,
+    const PeelResult& peel,
+    uint32_t column_count,
+    uint32_t block_bytes,
+    std::vector<uint64_t>& projected_heavy,
+    std::vector<uint8_t>& heavy_rhs,
+    PrecodeSolveStats& stats
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    , bool& transposed
+#endif
+    )
+{
+    const bool use_transposed =
+        ShouldTransposeTinyPeriodicHeavy(block_bytes);
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    transposed = use_transposed;
+#endif
+    return use_transposed ?
+        PrepareTinyPeriodicHeavyTransposedByPeel(
+            rows, peel, column_count, block_bytes, projected_heavy,
+            heavy_rhs, stats) :
+        PrepareTinyPeriodicHeavyLegacyByPeel(
+            rows, peel, column_count, block_bytes, projected_heavy,
+            heavy_rhs, stats);
 }
 
 #undef WH2_TINY_PERIODIC_NOINLINE
@@ -2146,6 +2287,59 @@ uint64_t HeavyProjectionLegacyFallbacksForTesting()
 uint64_t TinyPeriodicHeavyUsesForTesting()
 {
     return TinyPeriodicHeavyUses.load(std::memory_order_relaxed);
+}
+
+bool SetTinyPeriodicHeavyTransposeModeForTesting(int mode)
+{
+    if (mode < -1 || mode > 1) {
+        return false;
+    }
+    TinyPeriodicHeavyTransposeTestMode = mode;
+    return true;
+}
+
+int TinyPeriodicHeavyTransposeModeForTesting()
+{
+    return TinyPeriodicHeavyTransposeTestMode;
+}
+
+void ResetTinyPeriodicHeavyTransposeCountersForTesting()
+{
+    TinyPeriodicHeavyTransposeUseCount = 0u;
+    TinyPeriodicHeavyLegacyUseCount = 0u;
+    TinyPeriodicHeavyTimedCalls = 0u;
+    TinyPeriodicHeavyTimedNanoseconds = 0u;
+    TinyPeriodicHeavyTimedDataRows = 0u;
+}
+
+uint64_t TinyPeriodicHeavyTransposeUsesForTesting()
+{
+    return TinyPeriodicHeavyTransposeUseCount;
+}
+
+uint64_t TinyPeriodicHeavyLegacyUsesForTesting()
+{
+    return TinyPeriodicHeavyLegacyUseCount;
+}
+
+void SetTinyPeriodicHeavyTimingForTesting(bool enabled)
+{
+    TinyPeriodicHeavyTimingEnabled = enabled;
+}
+
+uint64_t TinyPeriodicHeavyTimedCallsForTesting()
+{
+    return TinyPeriodicHeavyTimedCalls;
+}
+
+uint64_t TinyPeriodicHeavyTimedNanosecondsForTesting()
+{
+    return TinyPeriodicHeavyTimedNanoseconds;
+}
+
+uint64_t TinyPeriodicHeavyTimedDataRowsForTesting()
+{
+    return TinyPeriodicHeavyTimedDataRows;
 }
 
 bool SetProjectionAVX2ModeForTesting(int mode)
@@ -3872,15 +4066,35 @@ static WirehairResult SolvePrecodeSystemImpl(
         }
         if (tiny_periodic_direct)
         {
-            PrepareTinyPeriodicHeavyByPeel(
-                rows,
-                peel,
-                L,
-                block_bytes,
-                projected_heavy,
-                heavy_rhs,
-                st);
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            bool transpose = false;
+            const uint64_t block_xors_before = st.BlockXors;
+            const uint64_t block_muladds_before = st.BlockMulAdds;
+            const std::chrono::steady_clock::time_point helper_start =
+                TinyPeriodicHeavyTimingEnabled ?
+                    std::chrono::steady_clock::now() :
+                    std::chrono::steady_clock::time_point();
+            const uint32_t data_rows =
+                PrepareTinyPeriodicHeavySelectedByPeel(
+                    rows, peel, L, block_bytes, projected_heavy, heavy_rhs,
+                    st, transpose);
+            if (transpose) {
+                ++TinyPeriodicHeavyTransposeUseCount;
+            }
+            else {
+                ++TinyPeriodicHeavyLegacyUseCount;
+            }
+            if (TinyPeriodicHeavyTimingEnabled)
+            {
+                const std::chrono::steady_clock::time_point helper_end =
+                    std::chrono::steady_clock::now();
+                ++TinyPeriodicHeavyTimedCalls;
+                TinyPeriodicHeavyTimedNanoseconds +=
+                    (uint64_t)std::chrono::duration_cast<
+                        std::chrono::nanoseconds>(
+                            helper_end - helper_start).count();
+                TinyPeriodicHeavyTimedDataRows += data_rows;
+            }
             TinyPeriodicHeavyUses.fetch_add(
                 1u, std::memory_order_relaxed);
             if (HeavyProjectionOracleUsers.load(
@@ -3891,21 +4105,56 @@ static WirehairResult SolvePrecodeSystemImpl(
                 std::vector<uint8_t> legacy_rhs(
                     (size_t)H * block_bytes, uint8_t{0});
                 PrecodeSolveStats legacy_stats;
+                const uint32_t legacy_data_rows = transpose ?
+                    PrepareTinyPeriodicHeavyLegacyByPeel(
+                        rows,
+                        peel,
+                        L,
+                        block_bytes,
+                        legacy_projected,
+                        legacy_rhs,
+                        legacy_stats) :
+                    PrepareTinyPeriodicHeavyTransposedByPeel(
+                            rows,
+                            peel,
+                            L,
+                            block_bytes,
+                            legacy_projected,
+                            legacy_rhs,
+                            legacy_stats);
+                if (legacy_projected != projected_heavy ||
+                    legacy_rhs != heavy_rhs ||
+                    legacy_data_rows != data_rows ||
+                    legacy_stats.BlockXors !=
+                        st.BlockXors - block_xors_before ||
+                    legacy_stats.BlockMulAdds !=
+                        st.BlockMulAdds - block_muladds_before)
+                {
+                    return terminal_error();
+                }
+                std::vector<uint64_t> reference_projected(
+                    (size_t)R * heavy_words, uint64_t{0});
+                std::vector<uint8_t> reference_rhs(
+                    (size_t)H * block_bytes, uint8_t{0});
+                PrecodeSolveStats reference_stats;
                 PrepareTinyPeriodicHeavyLegacyForTesting(
                     inactive_index,
                     projection,
                     values,
-                    legacy_projected,
-                    legacy_rhs,
-                    legacy_stats);
-                if (legacy_projected != projected_heavy ||
-                    legacy_rhs != heavy_rhs)
+                    reference_projected,
+                    reference_rhs,
+                    reference_stats);
+                if (reference_projected != projected_heavy ||
+                    reference_rhs != heavy_rhs)
                 {
                     return terminal_error();
                 }
                 HeavyProjectionOracleComparisons.fetch_add(
                     1u, std::memory_order_relaxed);
             }
+#else
+            (void)PrepareTinyPeriodicHeavySelectedByPeel(
+                rows, peel, L, block_bytes, projected_heavy, heavy_rhs, st);
 #endif
         }
         else if (system.Params.HeavyFamily ==
