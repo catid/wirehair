@@ -63,6 +63,16 @@ MAX_THERMAL_GAP_S = 2.25
 MAX_THERMAL_MARGIN_S = 2.25
 MAX_CPU_TEMP_C = 85.0
 MAX_DIMM_TEMP_C = 84.0
+MAX_UID = (1 << 32) - 2
+THERMAL_SAMPLER_THRESHOLDS = {
+    "dimm_safety_c_inclusive": 90.0,
+    "hot_confirm_samples": 3,
+    "max_dimm_jump_c": 12.0,
+    "max_dimm_rate_c_per_s": 6.0,
+    "max_plausible_dimm_c_exclusive": 130.0,
+    "min_plausible_dimm_c_exclusive": 0.0,
+    "telemetry_fault_abort_samples": 8,
+}
 PRIVILEGED_HELPER_TIMEOUT_S = 5.0
 BOOTSTRAP_REPETITIONS = 20000
 MALLOC_MMAP_THRESHOLD = "1073741824"
@@ -1231,7 +1241,11 @@ def run_privileged_bounded(
         cleanup_timeout_s = PRIVILEGED_HELPER_TIMEOUT_S
         cleanup_command = (
             str(sudo_path), "-n", str(timeout_path), "--signal=KILL",
-            "%.3fs" % cleanup_timeout_s, sys.executable, "-c",
+            "%.3fs" % cleanup_timeout_s, "/usr/bin/env", "-i",
+            "HOME=" + environment["HOME"],
+            "PATH=" + environment["PATH"], "LC_ALL=C", "LANG=C", "TZ=UTC",
+            "/usr/bin/python3.12",
+            "-I", "-S", "-B", "-c",
             SESSION_KILL_PROGRAM, str(session_id), _current_boot_id(),
             str(leader_start_tick), "3.0",
         )
@@ -1421,7 +1435,9 @@ def sole_i2c_readers(
     return tuple(sorted(readers))
 
 
-def _parse_thermal_csv(raw: bytes) -> Tuple[Dict[str, str], ...]:
+def _parse_thermal_csv(
+    raw: bytes, *, allow_raw_dimm_faults: bool = False,
+) -> Tuple[Dict[str, str], ...]:
     if not raw.endswith(b"\n") or b"\0" in raw:
         raise TimingError("thermal CSV is not canonical complete text")
     try:
@@ -1464,17 +1480,160 @@ def _parse_thermal_csv(raw: bytes) -> Tuple[Dict[str, str], ...]:
             if field == "cpu_avg_mhz" and not 100.0 <= value <= 10000.0:
                 raise TimingError("thermal CPU frequency implausible")
         for field in ("cpu_tctl_c", *DIMM_FIELDS):
+            if field != "cpu_tctl_c" and not row[field] and \
+                    allow_raw_dimm_faults:
+                continue
             try:
                 temperature = float(row[field])
             except ValueError as exc:
                 raise TimingError("thermal temperature missing") from exc
-            plausible = (0.0 < temperature < 130.0 if field == "cpu_tctl_c"
-                         else -40.0 < temperature < 130.0)
+            plausible = (
+                0.0 < temperature < 130.0 if field == "cpu_tctl_c" else
+                -256.0 <= temperature <= 255.75
+                    if allow_raw_dimm_faults else
+                -40.0 < temperature < 130.0)
             if not math.isfinite(temperature) or not plausible:
                 raise TimingError("thermal temperature implausible")
         for field in ("dimm_read_errors", "edac_ce", "edac_ue"):
             parse_uint(row[field], "thermal " + field)
     return rows
+
+
+def _load_canonical_json_line(raw: bytes, name: str) -> Dict[str, object]:
+    try:
+        value = json.loads(raw.decode("ascii"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TimingError(name + " is not canonical ASCII JSON") from exc
+    if not isinstance(value, dict) or canonical_json(value) != raw:
+        raise TimingError(name + " is not a canonical JSON object")
+    return value
+
+
+def _parse_thermal_validation(
+    raw: bytes, rows: Sequence[Mapping[str, str]],
+    expected_source_sha256: str, expected_output_owner_uid: int,
+) -> Tuple[Dict[str, object], ...]:
+    if not raw.endswith(b"\n") or b"\0" in raw:
+        raise TimingError("thermal validation stream is incomplete")
+    lines = raw.splitlines(keepends=True)
+    if not lines:
+        raise TimingError("thermal validation stream is empty")
+    header = _load_canonical_json_line(lines[0], "thermal validation header")
+    expected_header = {
+        "expected_output_owner_uid": expected_output_owner_uid,
+        "raw_columns": list(THERMAL_FIELDS),
+        "sampler_source_expected_sha256": expected_source_sha256,
+        "sampling": {
+            "dimm_attempts": 5,
+            "dimm_retry_delay_s": 0.01,
+            "interval_s": 1.0,
+        },
+        "schema": "wirehair.wh2.thermal_validation_stream.v1",
+        "thresholds": THERMAL_SAMPLER_THRESHOLDS,
+    }
+    if header != expected_header:
+        raise TimingError("thermal validation header contract changed")
+    samples = tuple(
+        _load_canonical_json_line(line, "thermal validation sample")
+        for line in lines[1:])
+    if len(samples) != len(rows):
+        raise TimingError("thermal raw/validation sample counts differ")
+    sample_fields = {
+        "consecutive_fault_rows", "decision", "edac_ce_delta",
+        "edac_ue_delta", "fault_count", "hot_sensors", "monotonic_s",
+        "read_error_count", "sample_index", "schema", "sensors",
+    }
+    sensor_fields = {
+        "attempt_errors", "hot", "hot_streak", "jump_c",
+        "rate_c_per_s", "raw_c", "reason", "valid",
+    }
+    expected_consecutive_fault_rows = 0
+    for index, (sample, row) in enumerate(zip(samples, rows)):
+        if set(sample) != sample_fields or \
+                sample.get("schema") != \
+                    "wirehair.wh2.thermal_validation_sample.v1" or \
+                type(sample.get("sample_index")) is not int or \
+                sample["sample_index"] != index or \
+                type(sample.get("monotonic_s")) not in (int, float) or \
+                not math.isfinite(float(sample["monotonic_s"])) or \
+                f"{float(sample['monotonic_s']):.6f}" != row["monotonic_s"] or \
+                sample.get("decision") not in {
+                    "continue", "edac_abort", "telemetry_abort",
+                    "thermal_abort"} or \
+                type(sample.get("fault_count")) is not int or \
+                type(sample.get("read_error_count")) is not int or \
+                type(sample.get("consecutive_fault_rows")) is not int or \
+                type(sample.get("edac_ce_delta")) is not int or \
+                type(sample.get("edac_ue_delta")) is not int or \
+                any(sample[key] < 0 for key in (
+                    "fault_count", "read_error_count",
+                    "consecutive_fault_rows", "edac_ce_delta",
+                    "edac_ue_delta")) or \
+                not isinstance(sample.get("hot_sensors"), list) or \
+                not isinstance(sample.get("sensors"), dict) or \
+                set(sample["sensors"]) != set(DIMM_FIELDS):
+            raise TimingError("thermal validation sample contract changed")
+        fault_count = 0
+        read_error_count = 0
+        hot_sensors = []
+        for field in DIMM_FIELDS:
+            sensor = sample["sensors"][field]
+            if not isinstance(sensor, dict) or set(sensor) != sensor_fields or \
+                    type(sensor.get("attempt_errors")) is not int or \
+                    sensor["attempt_errors"] < 0 or \
+                    type(sensor.get("hot")) is not bool or \
+                    type(sensor.get("hot_streak")) is not int or \
+                    sensor["hot_streak"] < 0 or \
+                    type(sensor.get("valid")) is not bool or \
+                    sensor.get("reason") not in {
+                        "absolute_range", "jump", "jump+rate", "ok",
+                        "rate", "read_error"} or \
+                    any(value is not None and (
+                        type(value) not in (int, float) or
+                        not math.isfinite(float(value)) or float(value) < 0.0)
+                        for value in (
+                            sensor.get("jump_c"),
+                            sensor.get("rate_c_per_s"))):
+                raise TimingError("thermal validation sensor contract changed")
+            raw_c = sensor.get("raw_c")
+            if row[field] == "":
+                if raw_c is not None or sensor["reason"] != "read_error" or \
+                        sensor["valid"] or sensor["hot"] or \
+                        sensor["hot_streak"] != 0:
+                    raise TimingError("thermal missing sample validation changed")
+                read_error_count += 1
+            elif type(raw_c) not in (int, float) or \
+                    not math.isfinite(float(raw_c)) or \
+                    float(raw_c) != float(row[field]) or \
+                    sensor["hot"] != (float(raw_c) >= 90.0) or \
+                    sensor["hot_streak"] < (1 if sensor["hot"] else 0) or \
+                    (not sensor["hot"] and sensor["hot_streak"] != 0) or \
+                    sensor["valid"] != (sensor["reason"] == "ok"):
+                raise TimingError("thermal raw value and validation differ")
+            if not sensor["valid"]:
+                fault_count += 1
+            if sensor["hot"] and sensor["hot_streak"] >= \
+                    THERMAL_SAMPLER_THRESHOLDS["hot_confirm_samples"]:
+                hot_sensors.append(field)
+        expected_consecutive_fault_rows = (
+            expected_consecutive_fault_rows + 1 if fault_count else 0)
+        expected_decision = (
+            "thermal_abort" if hot_sensors else
+            "edac_abort" if sample["edac_ce_delta"] or
+                sample["edac_ue_delta"] else
+            "telemetry_abort" if expected_consecutive_fault_rows >=
+                THERMAL_SAMPLER_THRESHOLDS[
+                    "telemetry_fault_abort_samples"] else
+            "continue")
+        if fault_count != sample["fault_count"] or \
+                read_error_count != sample["read_error_count"] or \
+                int(row["dimm_read_errors"]) != read_error_count or \
+                expected_consecutive_fault_rows != \
+                    sample["consecutive_fault_rows"] or \
+                sorted(hot_sensors) != sorted(sample["hot_sensors"]) or \
+                sample["decision"] != expected_decision:
+            raise TimingError("thermal validation aggregate counts changed")
+    return samples
 
 
 def _bootstrap_thermal_csv_state(raw: bytes) -> str:
@@ -1527,10 +1686,48 @@ def stable_thermal_rows(path: Path, attempts: int = 5) -> Tuple[Dict[str, str], 
         from last_error
 
 
+def stable_validated_thermal_rows(
+    csv_path: Path, validation_path: Path, expected_source_sha256: str,
+    expected_output_owner_uid: int,
+    attempts: int = 5,
+) -> Tuple[Tuple[Dict[str, str], ...], Tuple[Dict[str, object], ...]]:
+    last_error: Optional[BaseException] = None
+    for attempt in range(attempts):
+        try:
+            rows = _parse_thermal_csv(
+                stable_file_bytes(csv_path), allow_raw_dimm_faults=True)
+            samples = _parse_thermal_validation(
+                stable_file_bytes(validation_path), rows,
+                expected_source_sha256, expected_output_owner_uid)
+            return rows, samples
+        except (OSError, TimingError, ValueError) as exc:
+            last_error = exc
+            if attempt + 1 < attempts:
+                time.sleep(0.02)
+    raise TimingError(
+        "thermal raw/validation streams remained inconsistent: %s" %
+        last_error) from last_error
+
+
 def enforce_live_thermal_safety(
     path: Path, *, now_s: Optional[float] = None,
+    validation_path: Optional[Path] = None,
+    expected_source_sha256: Optional[str] = None,
+    expected_output_owner_uid: Optional[int] = None,
 ) -> Dict[str, object]:
-    rows = stable_thermal_rows(path)
+    if validation_path is None and expected_source_sha256 is None and \
+            expected_output_owner_uid is None:
+        rows = stable_thermal_rows(path)
+        samples = None
+    elif validation_path is None or not isinstance(expected_source_sha256, str) or \
+            SHA256_RE.fullmatch(expected_source_sha256) is None or \
+            type(expected_output_owner_uid) is not int or \
+            not 0 <= expected_output_owner_uid <= MAX_UID:
+        raise TimingError("live thermal validation binding is incomplete")
+    else:
+        rows, samples = stable_validated_thermal_rows(
+            path, validation_path, expected_source_sha256,
+            expected_output_owner_uid)
     times = [float(row["monotonic_s"]) for row in rows]
     now = time.monotonic() if now_s is None else now_s
     gaps = [right - left for left, right in zip(times, times[1:])]
@@ -1539,15 +1736,27 @@ def enforce_live_thermal_safety(
         raise TimingError("live thermal sample is stale")
     if gaps and max(gaps) > MAX_THERMAL_GAP_S:
         raise TimingError("live thermal cadence gap exceeds gate")
-    if any(int(row["dimm_read_errors"]) != 0 for row in rows):
-        raise TimingError("DIMM read error during timing")
-    ce = [int(row["edac_ce"]) for row in rows]
-    ue = [int(row["edac_ue"]) for row in rows]
-    if any(value != ce[0] for value in ce) or \
-            any(value != ue[0] for value in ue):
-        raise TimingError("EDAC counters changed during timing")
     cpu_max = max(float(row["cpu_tctl_c"]) for row in rows)
-    dimm_max = max(float(row[field]) for row in rows for field in DIMM_FIELDS)
+    if samples is None:
+        if any(int(row["dimm_read_errors"]) != 0 for row in rows):
+            raise TimingError("DIMM read error during timing")
+        ce = [int(row["edac_ce"]) for row in rows]
+        ue = [int(row["edac_ue"]) for row in rows]
+        if any(value != ce[0] for value in ce) or \
+                any(value != ue[0] for value in ue):
+            raise TimingError("EDAC counters changed during timing")
+        dimm_values = [
+            float(row[field]) for row in rows for field in DIMM_FIELDS]
+    else:
+        if any(sample["decision"] != "continue" for sample in samples):
+            raise TimingError("thermal sampler reached a terminal decision")
+        dimm_values = [
+            float(sample["sensors"][field]["raw_c"])
+            for sample in samples for field in DIMM_FIELDS
+            if sample["sensors"][field]["valid"]]
+        if not dimm_values:
+            raise TimingError("thermal validation has no valid DIMM samples")
+    dimm_max = max(dimm_values)
     if cpu_max >= MAX_CPU_TEMP_C or dimm_max >= MAX_DIMM_TEMP_C:
         raise TimingError("live thermal temperature abort threshold reached")
     return {"last_monotonic_s": times[-1],
@@ -1556,12 +1765,29 @@ def enforce_live_thermal_safety(
             "cpu_max_c": cpu_max, "dimm_max_c": dimm_max}
 
 
-def validate_thermal_interval(raw: bytes, start_s: float,
-                              benchmark_end_s: float) -> Dict[str, object]:
+def validate_thermal_interval(
+    raw: bytes, start_s: float, benchmark_end_s: float, *,
+    validation_raw: Optional[bytes] = None,
+    expected_source_sha256: Optional[str] = None,
+    expected_output_owner_uid: Optional[int] = None,
+) -> Dict[str, object]:
     if not math.isfinite(start_s) or not math.isfinite(benchmark_end_s) or \
             benchmark_end_s <= start_s:
         raise TimingError("thermal benchmark interval malformed")
-    rows = _parse_thermal_csv(raw)
+    if validation_raw is None and expected_source_sha256 is None and \
+            expected_output_owner_uid is None:
+        rows = _parse_thermal_csv(raw)
+        samples = None
+    elif validation_raw is None or not isinstance(expected_source_sha256, str) or \
+            SHA256_RE.fullmatch(expected_source_sha256) is None or \
+            type(expected_output_owner_uid) is not int or \
+            not 0 <= expected_output_owner_uid <= MAX_UID:
+        raise TimingError("terminal thermal validation binding is incomplete")
+    else:
+        rows = _parse_thermal_csv(raw, allow_raw_dimm_faults=True)
+        samples = _parse_thermal_validation(
+            validation_raw, rows, expected_source_sha256,
+            expected_output_owner_uid)
     times = [float(row["monotonic_s"]) for row in rows]
     if times[0] > start_s or times[-1] < benchmark_end_s:
         raise TimingError("thermal samples do not bracket benchmark end")
@@ -1571,16 +1797,37 @@ def validate_thermal_interval(raw: bytes, start_s: float,
     gaps = [right - left for left, right in zip(times, times[1:])]
     if gaps and max(gaps) > MAX_THERMAL_GAP_S:
         raise TimingError("thermal cadence gap exceeds gate")
-    if any(int(row["dimm_read_errors"]) != 0 for row in rows):
-        raise TimingError("DIMM read error during timing")
-    ce = [int(row["edac_ce"]) for row in rows]
-    ue = [int(row["edac_ue"]) for row in rows]
-    if any(value != ce[0] for value in ce) or \
-            any(value != ue[0] for value in ue):
-        raise TimingError("EDAC counters changed during timing")
     cpu_max = max(float(row["cpu_tctl_c"]) for row in rows)
-    dimm_max = {field: max(float(row[field]) for row in rows)
-                for field in DIMM_FIELDS}
+    if samples is None:
+        if any(int(row["dimm_read_errors"]) != 0 for row in rows):
+            raise TimingError("DIMM read error during timing")
+        ce = [int(row["edac_ce"]) for row in rows]
+        ue = [int(row["edac_ue"]) for row in rows]
+        if any(value != ce[0] for value in ce) or \
+                any(value != ue[0] for value in ue):
+            raise TimingError("EDAC counters changed during timing")
+        dimm_max = {field: max(float(row[field]) for row in rows)
+                    for field in DIMM_FIELDS}
+        dimm_read_errors = 0
+        edac_ce_delta = 0
+        edac_ue_delta = 0
+    else:
+        if any(sample["decision"] != "continue" for sample in samples):
+            raise TimingError("terminal thermal sampler decision is not clean")
+        dimm_max = {}
+        for field in DIMM_FIELDS:
+            values = [
+                float(sample["sensors"][field]["raw_c"])
+                for sample in samples
+                if sample["sensors"][field]["valid"]]
+            if not values:
+                raise TimingError(
+                    "terminal thermal sensor lacks a valid sample: " + field)
+            dimm_max[field] = max(values)
+        dimm_read_errors = sum(
+            int(sample["read_error_count"]) for sample in samples)
+        edac_ce_delta = int(samples[-1]["edac_ce_delta"])
+        edac_ue_delta = int(samples[-1]["edac_ue_delta"])
     if cpu_max >= MAX_CPU_TEMP_C or max(dimm_max.values()) >= MAX_DIMM_TEMP_C:
         raise TimingError("thermal temperature gate exceeded")
     return {
@@ -1589,12 +1836,17 @@ def validate_thermal_interval(raw: bytes, start_s: float,
             times[-1] - benchmark_end_s,
         "start_margin_s": start_s - times[0],
         "max_gap_s": max(gaps) if gaps else 0.0, "cpu_max_c": cpu_max,
-        "dimm_max_c": dimm_max, "dimm_read_errors": 0,
-        "edac_ce_delta": 0, "edac_ue_delta": 0,
+        "dimm_max_c": dimm_max, "dimm_read_errors": dimm_read_errors,
+        "edac_ce_delta": edac_ce_delta, "edac_ue_delta": edac_ue_delta,
     }
 
 
-def verify_terminal_thermal(path: Path, receipt: Mapping[str, object]) -> bytes:
+def verify_terminal_thermal(
+    path: Path, receipt: Mapping[str, object], *,
+    validation_raw: Optional[bytes] = None,
+    expected_source_sha256: Optional[str] = None,
+    expected_output_owner_uid: Optional[int] = None,
+) -> bytes:
     if path.is_symlink() or not path.is_file():
         raise TimingError("terminal thermal CSV is missing or unsafe")
     raw = stable_file_bytes(path)
@@ -1614,10 +1866,226 @@ def verify_terminal_thermal(path: Path, receipt: Mapping[str, object]) -> bytes:
             raise TimingError("terminal thermal receipt mismatch: " + key)
     summary = validate_thermal_interval(
         raw, float(receipt["timing_start_monotonic_s"]),
-        float(receipt["benchmark_end_monotonic_s"]))
+        float(receipt["benchmark_end_monotonic_s"]),
+        validation_raw=validation_raw,
+        expected_source_sha256=expected_source_sha256,
+        expected_output_owner_uid=expected_output_owner_uid)
     if canonical_json(receipt.get("thermal_summary")) != canonical_json(summary):
         raise TimingError("terminal thermal summary does not replay")
     return raw
+
+
+def _root_sampler_file_record(
+    path: Path, description: str,
+) -> Tuple[Dict[str, object], bytes]:
+    raw = stable_file_bytes(path)
+    info = _root_readonly_single_link_stat(path, description)
+    return ({
+        "device": info.st_dev,
+        "gid": info.st_gid,
+        "inode": info.st_ino,
+        "mode": stat.S_IMODE(info.st_mode),
+        "name": path.name,
+        "nlink": info.st_nlink,
+        "sha256": sha256_bytes(raw),
+        "size": len(raw),
+        "uid": info.st_uid,
+    }, raw)
+
+
+def _record_as_sampler_binding(record: Mapping[str, object]) -> Dict[str, object]:
+    return {key: record[key] for key in (
+        "device", "gid", "inode", "mode", "nlink", "sha256", "size",
+        "uid")}
+
+
+def _validate_sampler_destination(
+    value: object, path: Path, expected_owner_uid: int,
+) -> None:
+    if not isinstance(value, dict) or set(value) != {
+            "basename", "expected_owner_uid", "parent", "path"} or \
+            value.get("basename") != path.name or \
+            value.get("path") != str(path) or \
+            value.get("expected_owner_uid") != expected_owner_uid:
+        raise TimingError("thermal sampler destination contract changed")
+    parent = value.get("parent")
+    binding_fields = {"device", "gid", "inode", "mode", "nlink", "uid"}
+    try:
+        parent_info = path.parent.lstat()
+    except OSError as exc:
+        raise TimingError("thermal sampler parent became unavailable") from exc
+    if not stat.S_ISDIR(parent_info.st_mode):
+        raise TimingError("thermal sampler parent is not a directory")
+    actual_parent_binding = {
+        "device": parent_info.st_dev,
+        "gid": parent_info.st_gid,
+        "inode": parent_info.st_ino,
+        "mode": stat.S_IMODE(parent_info.st_mode),
+        "nlink": parent_info.st_nlink,
+        "uid": parent_info.st_uid,
+    }
+    if not isinstance(parent, dict) or set(parent) != {"binding", "path"} or \
+            parent.get("path") != str(path.parent) or \
+            not isinstance(parent.get("binding"), dict) or \
+            set(parent["binding"]) != binding_fields or \
+            any(type(parent["binding"].get(key)) is not int
+                for key in binding_fields) or \
+            parent["binding"]["uid"] != expected_owner_uid or \
+            parent["binding"]["nlink"] < 1 or \
+            parent["binding"]["mode"] & 0o022 or \
+            parent["binding"] != actual_parent_binding:
+        raise TimingError("thermal sampler parent binding changed")
+
+
+def validate_sampler_terminal_evidence(
+    root: Path, design: Mapping[str, object], segment: int, *, final: bool,
+) -> Tuple[Dict[str, object], bytes]:
+    paths = _sampler_evidence_paths(root, segment, final=final)
+    expected_source_sha256 = design.get("immutable_files", {}).get(
+        "frozen/wirehair_expo_thermal_sampler.py")
+    if not isinstance(expected_source_sha256, str) or \
+            SHA256_RE.fullmatch(expected_source_sha256) is None:
+        raise TimingError("thermal sampler expected source binding is malformed")
+    expected_output_owner_uid = design.get("controller_uid")
+    if type(expected_output_owner_uid) is not int or \
+            not 0 <= expected_output_owner_uid <= MAX_UID:
+        raise TimingError("thermal sampler output-owner UID is malformed")
+    csv_record, csv_raw = _root_sampler_file_record(
+        paths["csv"], "terminal thermal CSV")
+    validation_record, validation_raw = _root_sampler_file_record(
+        paths["validation"], "terminal thermal validation JSONL")
+    receipt_record, _receipt_raw = _root_sampler_file_record(
+        paths["receipt"], "terminal thermal sampler receipt")
+    sampler_receipt = verify_sealed(
+        load_canonical(paths["receipt"], "thermal sampler receipt"),
+        "wirehair.wh2.thermal_sampler.v2", "thermal sampler receipt")
+    fields = {
+        "argv", "cpu_tctl_max_c", "edac_ce_paths", "edac_ue_paths",
+        "errors", "exit_code", "finished_monotonic_ns", "finished_utc",
+        "expected_output_owner_uid", "outcome", "pid", "pid_file", "raw_csv",
+        "raw_samples_preserved", "receipt_file", "sampler_source",
+        "sampling", "schema", "self_sha256_excluding_field", "signal",
+        "started_monotonic_ns", "started_utc", "summary", "thresholds",
+        "validation_jsonl",
+    }
+    transient_paths = _sampler_evidence_paths(root, segment, final=False)
+    expected_argv = _sampler_cmdline(root, design, segment, public=False)[5:]
+    if set(sampler_receipt) != fields or \
+            sampler_receipt.get("argv") != expected_argv or \
+            sampler_receipt.get("outcome") != "stopped" or \
+            sampler_receipt.get("exit_code") != 0 or \
+            sampler_receipt.get("errors") != [] or \
+            sampler_receipt.get("expected_output_owner_uid") != \
+                expected_output_owner_uid or \
+            sampler_receipt.get("signal") != "SIGTERM" or \
+            sampler_receipt.get("raw_samples_preserved") is not True or \
+            sampler_receipt.get("thresholds") != THERMAL_SAMPLER_THRESHOLDS or \
+            sampler_receipt.get("sampling") != {
+                "dimm_attempts": 5,
+                "dimm_retry_delay_s": 0.01,
+                "interval_s": 1.0,
+            }:
+        raise TimingError("thermal sampler terminal contract changed")
+    raw_receipt = sampler_receipt.get("raw_csv")
+    validation_receipt = sampler_receipt.get("validation_jsonl")
+    pid_receipt = sampler_receipt.get("pid_file")
+    source_receipt = sampler_receipt.get("sampler_source")
+    receipt_file = sampler_receipt.get("receipt_file")
+    if not all(isinstance(value, dict) for value in (
+            raw_receipt, validation_receipt, pid_receipt, source_receipt,
+            receipt_file)) or \
+            raw_receipt.get("path") != str(transient_paths["csv"]) or \
+            raw_receipt.get("binding") != \
+                _record_as_sampler_binding(csv_record) or \
+            validation_receipt.get("path") != \
+                str(transient_paths["validation"]) or \
+            validation_receipt.get("binding") != \
+                _record_as_sampler_binding(validation_record) or \
+            pid_receipt.get("path") != str(transient_paths["pid"]) or \
+            pid_receipt.get("removed") is not True or \
+            not isinstance(pid_receipt.get("binding"), dict) or \
+            type(sampler_receipt.get("pid")) is not int or \
+            sampler_receipt["pid"] <= 1 or \
+            pid_receipt["binding"].get("uid") != csv_record["uid"] or \
+            pid_receipt["binding"].get("mode") != 0o444 or \
+            pid_receipt["binding"].get("nlink") != 1 or \
+            pid_receipt["binding"].get("sha256") != sha256_bytes(
+                (str(sampler_receipt["pid"]) + "\n").encode("ascii")) or \
+            source_receipt.get("expected_sha256") != \
+                expected_source_sha256 or \
+            source_receipt.get("path") != str(
+                root / "frozen/wirehair_expo_thermal_sampler.py") or \
+            source_receipt.get("sha256") != expected_source_sha256 or \
+            source_receipt.get("binding") != \
+                source_receipt.get("binding_finished") or \
+            not isinstance(source_receipt.get("binding"), dict) or \
+            source_receipt["binding"].get("sha256") != \
+                expected_source_sha256 or \
+            source_receipt["binding"].get("nlink") != 1 or \
+            source_receipt["binding"].get("mode", 0) & 0o222 or \
+            receipt_file.get("path") != str(transient_paths["receipt"]):
+        raise TimingError("thermal sampler artifact binding changed")
+    for receipt_value, path in (
+            (raw_receipt.get("destination"), transient_paths["csv"]),
+            (validation_receipt.get("destination"),
+             transient_paths["validation"]),
+            (pid_receipt.get("destination"), transient_paths["pid"]),
+            (receipt_file.get("destination"), transient_paths["receipt"])):
+        _validate_sampler_destination(
+            receipt_value, path, expected_output_owner_uid)
+    reservation = receipt_file.get("reservation_binding")
+    if not isinstance(reservation, dict) or \
+            any(reservation.get(key) != receipt_record[key]
+                for key in (
+                    "device", "gid", "inode", "mode", "nlink", "uid")) or \
+            reservation.get("size") != 0 or \
+            reservation.get("sha256") != sha256_bytes(b""):
+        raise TimingError("thermal sampler receipt reservation changed")
+    rows = _parse_thermal_csv(csv_raw, allow_raw_dimm_faults=True)
+    samples = _parse_thermal_validation(
+        validation_raw, rows, expected_source_sha256,
+        expected_output_owner_uid)
+    summary = sampler_receipt.get("summary")
+    invalid_samples = sum(
+        1 for sample in samples for sensor in sample["sensors"].values()
+        if not sensor["valid"] and sensor["reason"] != "read_error")
+    read_error_samples = sum(
+        int(sample["read_error_count"]) for sample in samples)
+    attempt_errors = sum(
+        int(sensor["attempt_errors"])
+        for sample in samples for sensor in sample["sensors"].values())
+    if not isinstance(summary, dict) or \
+            summary.get("sample_count") != len(rows) or \
+            summary.get("decision") != "continue" or \
+            any(type(summary.get(key)) is not int or summary[key] < 0
+                for key in (
+                    "edac_ce_baseline", "edac_ce_delta", "edac_ce_last",
+                    "edac_ue_baseline", "edac_ue_delta", "edac_ue_last")) or \
+            summary.get("dimm_invalid_samples_total") != invalid_samples or \
+            summary.get("dimm_read_error_samples_total") != \
+                read_error_samples or \
+            summary.get("dimm_attempt_errors_total") != attempt_errors or \
+            summary.get("edac_ce_delta") != samples[-1]["edac_ce_delta"] or \
+            summary.get("edac_ue_delta") != samples[-1]["edac_ue_delta"]:
+        raise TimingError("thermal sampler summary does not replay")
+    for row, sample in zip(rows, samples):
+        if sample["edac_ce_delta"] != \
+                int(row["edac_ce"]) - summary["edac_ce_baseline"] or \
+                sample["edac_ue_delta"] != \
+                int(row["edac_ue"]) - summary["edac_ue_baseline"]:
+            raise TimingError("thermal sampler EDAC deltas do not replay")
+    if sampler_receipt.get("cpu_tctl_max_c") != max(
+            float(row["cpu_tctl_c"]) for row in rows):
+        raise TimingError("thermal sampler CPU maximum does not replay")
+    evidence = {
+        "expected_output_owner_uid": expected_output_owner_uid,
+        "expected_source_sha256": expected_source_sha256,
+        "sampler_summary": summary,
+        "terminal_receipt": receipt_record,
+        "thresholds": THERMAL_SAMPLER_THRESHOLDS,
+        "validation_jsonl": validation_record,
+    }
+    return evidence, validation_raw
 
 
 def recover_interrupted_transactions(root: Path) -> List[Dict[str, object]]:
@@ -2091,6 +2559,7 @@ def prepare_campaign(args: argparse.Namespace) -> None:
         for directory in ("frozen", "provenance", "external", "ledger",
                           ".transactions", "interrupted", "segments"):
             (staging / directory).mkdir()
+        os.chmod(staging / "segments", 0o700)
         write_new(staging / "frozen/wh2_p32_dispatch_timing.py",
                   source_blobs[harness_source][1], 0o555)
         write_new(staging / "frozen/wirehair_expo_thermal_sampler.py",
@@ -2162,6 +2631,7 @@ def prepare_campaign(args: argparse.Namespace) -> None:
                     "MALLOC_TRIM_THRESHOLD_": MALLOC_TRIM_THRESHOLD,
                 },
                 "core": args.core, "controller_core": args.controller_core,
+                "controller_uid": os.geteuid(),
                 "thermal_core": args.thermal_core, "numa_node": args.numa_node,
                 "evict_bytes": args.evict_bytes,
                 "timing_topology": timing_topology,
@@ -2287,6 +2757,9 @@ def load_design(root: Path) -> Dict[str, object]:
             type(design.get("evict_bytes")) is not int or \
             design["evict_bytes"] < 4096:
         raise TimingError("frozen NUMA/eviction policy malformed")
+    if type(design.get("controller_uid")) is not int or \
+            not 0 <= design["controller_uid"] <= MAX_UID:
+        raise TimingError("frozen controller UID is malformed")
     required_tools = {"git", "cmake", "taskset", "numactl", "sudo", "fuser",
                       "timeout", "python3", "env", "true"}
     tool_names = set(design.get("tools", {}))
@@ -2748,16 +3221,55 @@ def _public_sampler_identity(identity: Mapping[str, object]) -> Dict[str, object
     return result
 
 
+def _sampler_evidence_paths(
+    root: Path, segment: int, *, final: bool,
+) -> Dict[str, Path]:
+    if type(segment) is not int or not 0 <= segment < 10000:
+        raise TimingError("thermal segment is outside its four-digit domain")
+    prefix = "segment%04d" % segment
+    if final:
+        return {
+            "csv": root / "segments" / (prefix + ".thermal.csv"),
+            "receipt": root / "segments" /
+                (prefix + ".thermal.sampler-receipt.json"),
+            "validation": root / "segments" /
+                (prefix + ".thermal.validation.jsonl"),
+        }
+    return {
+        "csv": root / "segments" / ("." + prefix + ".thermal.csv.part"),
+        "pid": root / "segments" / ("." + prefix + ".bootstrap.pid"),
+        "receipt": root / "segments" /
+            ("." + prefix + ".thermal.sampler-receipt.json.part"),
+        "validation": root / "segments" /
+            ("." + prefix + ".thermal.validation.jsonl.part"),
+    }
+
+
 def _sampler_cmdline(root: Path, design: Mapping[str, object], segment: int,
                      *, public: bool) -> List[str]:
     tools = design["tools"]
-    pid_file = root / "segments" / (".segment%04d.bootstrap.pid" % segment)
+    immutable = design.get("immutable_files")
+    expected_source_sha256 = immutable.get(
+        "frozen/wirehair_expo_thermal_sampler.py") \
+        if isinstance(immutable, dict) else None
+    if not isinstance(expected_source_sha256, str) or \
+            SHA256_RE.fullmatch(expected_source_sha256) is None:
+        raise TimingError("frozen thermal sampler SHA256 is unavailable")
+    expected_output_owner_uid = design.get("controller_uid")
+    if type(expected_output_owner_uid) is not int or \
+            not 0 <= expected_output_owner_uid <= MAX_UID:
+        raise TimingError("thermal output-owner UID is unavailable")
+    paths = _sampler_evidence_paths(root, segment, final=False)
     return [
-        str(tools["python3"]["path"]),
+        str(tools["python3"]["path"]), "-I", "-S", "-B",
         str(root / "frozen/wirehair_expo_thermal_sampler.py"),
-        "--csv", str(root / "segments" /
-            (".segment%04d.thermal.csv.part" % segment)),
-        "--pid-file", "<ephemeral-bootstrap-only>" if public else str(pid_file),
+        "--csv", str(paths["csv"]),
+        "--pid-file", "<ephemeral-bootstrap-only>" if public else
+            str(paths["pid"]),
+        "--validation-jsonl", str(paths["validation"]),
+        "--receipt", str(paths["receipt"]),
+        "--expected-source-sha256", expected_source_sha256,
+        "--expected-output-owner-uid", str(expected_output_owner_uid),
         "--interval", "1.0", "--dimm-attempts", "5",
         "--dimm-retry-delay", "0.01",
     ]
@@ -2782,10 +3294,30 @@ class SamplerStop:
     forced_reason: Optional[str]
 
 
+def _cleanup_failed_sampler_bootstrap(
+    root: Path, design: Mapping[str, object], process: subprocess.Popen[bytes],
+    csv_part: Path, pid_file: Path, segment: int,
+    sampler_argv: Sequence[str], *, launcher_start_tick: int,
+    boot_id: str,
+) -> None:
+    """Close every created launcher session, even after its leader exits."""
+    if getattr(process, "_child_created", False) and \
+            type(getattr(process, "pid", None)) is int and process.pid > 1:
+        _cleanup_timed_out_sampler(
+            root, design, process, csv_part, pid_file, segment,
+            sampler_argv, launcher_start_tick=launcher_start_tick,
+            boot_id=boot_id)
+        return
+    _close_bounded_process_pipes(process)
+
+
 def _thermal_archive_artifact_name(name: str) -> bool:
     return name in {
         "intent.json", "thermal.csv.part", "bootstrap.pid",
-        "thermal.csv.unbound-final", "terminal.json.part",
+        "thermal.csv.unbound-final", "thermal.validation.jsonl.part",
+        "thermal.validation.jsonl.unbound-final",
+        "thermal.sampler-receipt.json.part",
+        "thermal.sampler-receipt.json.unbound-final", "terminal.json.part",
     } or THERMAL_ATOMIC_REMNANT_RE.fullmatch(name) is not None
 
 
@@ -2955,8 +3487,20 @@ def _complete_thermal_archive(
          staging / "thermal.csv.part"),
         (root / "segments" / (".segment%04d.bootstrap.pid" % segment),
          staging / "bootstrap.pid"),
+        (root / "segments" /
+         (".segment%04d.thermal.validation.jsonl.part" % segment),
+         staging / "thermal.validation.jsonl.part"),
+        (root / "segments" /
+         (".segment%04d.thermal.sampler-receipt.json.part" % segment),
+         staging / "thermal.sampler-receipt.json.part"),
         (root / "segments" / ("segment%04d.thermal.csv" % segment),
          staging / "thermal.csv.unbound-final"),
+        (root / "segments" /
+         ("segment%04d.thermal.validation.jsonl" % segment),
+         staging / "thermal.validation.jsonl.unbound-final"),
+        (root / "segments" /
+         ("segment%04d.thermal.sampler-receipt.json" % segment),
+         staging / "thermal.sampler-receipt.json.unbound-final"),
         (root / "segments" / ("segment%04d.terminal.json.part" % segment),
          staging / "terminal.json.part"),
     )
@@ -3009,10 +3553,21 @@ def archive_invalid_thermal_segment(
         raise TimingError("thermal archive reason is outside its domain")
     csv_part = root / "segments" / (".segment%04d.thermal.csv.part" % segment)
     pid_file = root / "segments" / (".segment%04d.bootstrap.pid" % segment)
+    validation_part = root / "segments" / (
+        ".segment%04d.thermal.validation.jsonl.part" % segment)
+    receipt_part = root / "segments" / (
+        ".segment%04d.thermal.sampler-receipt.json.part" % segment)
     thermal_final = root / "segments" / ("segment%04d.thermal.csv" % segment)
+    validation_final = root / "segments" / (
+        "segment%04d.thermal.validation.jsonl" % segment)
+    receipt_final = root / "segments" / (
+        "segment%04d.thermal.sampler-receipt.json" % segment)
     terminal_part = root / "segments" / ("segment%04d.terminal.json.part" % segment)
     if not any(path.exists() or path.is_symlink()
-               for path in (csv_part, pid_file, thermal_final, terminal_part)):
+               for path in (
+                   csv_part, pid_file, validation_part, receipt_part,
+                   thermal_final, validation_final, receipt_final,
+                   terminal_part)):
         return None
     token = time.monotonic_ns()
     staging = root / "interrupted" / (
@@ -3070,8 +3625,12 @@ def recover_orphaned_thermal_segments(
     orphan_segments: set[int] = set()
     for path in tuple((root / "segments").iterdir()):
         match = re.fullmatch(
-            r"(?:\.segment([0-9]{4})\.(?:thermal\.csv\.part|bootstrap\.pid)|"
-            r"segment([0-9]{4})\.(?:thermal\.csv|terminal\.json\.part))",
+            r"(?:\.segment([0-9]{4})\.(?:thermal\.csv\.part|bootstrap\.pid|"
+            r"thermal\.validation\.jsonl\.part|"
+            r"thermal\.sampler-receipt\.json\.part)|"
+            r"segment([0-9]{4})\.(?:thermal\.csv|"
+            r"thermal\.validation\.jsonl|thermal\.sampler-receipt\.json|"
+            r"terminal\.json\.part))",
             path.name)
         if match is not None:
             segment = int(match.group(1) or match.group(2))
@@ -3096,11 +3655,18 @@ def start_sampler(root: Path, design: Mapping[str, object], segment: int) -> Sam
     sudo_path = Path(str(tools["sudo"]["path"]))
     fuser_path = Path(str(tools["fuser"]["path"]))
     timeout_path = Path(str(tools["timeout"]["path"]))
+    segments_info = (root / "segments").stat()
+    if os.geteuid() != design.get("controller_uid") or \
+            segments_info.st_uid != design.get("controller_uid") or \
+            stat.S_IMODE(segments_info.st_mode) & 0o022:
+        raise TimingError(
+            "thermal output parent does not match the sealed controller UID")
     if sole_i2c_readers(fuser_path, sudo_path, timeout_path):
         raise TimingError("refusing to signal or coexist with an existing I2C reader")
-    csv_part = root / "segments" / (".segment%04d.thermal.csv.part" % segment)
-    pid_file = root / "segments" / (".segment%04d.bootstrap.pid" % segment)
-    for path in (csv_part, pid_file):
+    sampler_paths = _sampler_evidence_paths(root, segment, final=False)
+    csv_part = sampler_paths["csv"]
+    pid_file = sampler_paths["pid"]
+    for path in sampler_paths.values():
         if path.exists() or path.is_symlink():
             raise TimingError("stale sampler bootstrap artifact exists")
     environment = sanitized_environment(root / "runtime-home", allocator=False)
@@ -3171,9 +3737,22 @@ def start_sampler(root: Path, design: Mapping[str, object], segment: int) -> Sam
                 last_error = TimingError("sampler CSV has no complete sample")
                 time.sleep(0.05)
                 continue
-            # Any failure in a complete, newline-terminated row is permanent
-            # evidence corruption rather than an append-in-progress state.
-            _parse_thermal_csv(raw)
+            # Preserve first-row decoded spikes and read failures, then require
+            # the paired canonical validation stream to explain them exactly.
+            _parse_thermal_csv(raw, allow_raw_dimm_faults=True)
+            try:
+                stable_validated_thermal_rows(
+                    csv_part, sampler_paths["validation"],
+                    design["immutable_files"][
+                        "frozen/wirehair_expo_thermal_sampler.py"],
+                    design["controller_uid"],
+                    attempts=3)
+            except (OSError, TimingError, ValueError) as exc:
+                # The raw row is deliberately flushed before its validation
+                # line.  A short mismatch is an append-in-progress state.
+                last_error = exc
+                time.sleep(0.05)
+                continue
             return SamplerOwner(
                 process, pid, launcher_start_tick, identity,
                 csv_part, pid_file, segment)
@@ -3181,21 +3760,13 @@ def start_sampler(root: Path, design: Mapping[str, object], segment: int) -> Sam
     except BaseException as primary:
         cleanup_error: Optional[BaseException] = None
         archive_error: Optional[BaseException] = None
-        if getattr(process, "_child_created", False) and \
-                type(getattr(process, "pid", None)) is int and process.pid > 1 and \
-                getattr(process, "returncode", None) is None:
-            try:
-                _cleanup_timed_out_sampler(
-                    root, design, process, csv_part, pid_file, segment,
-                    sampler_argv, launcher_start_tick=launcher_start_tick,
-                    boot_id=boot_id)
-            except BaseException as exc:
-                cleanup_error = exc
-        else:
-            try:
-                _close_bounded_process_pipes(process)
-            except BaseException as exc:
-                cleanup_error = exc
+        try:
+            _cleanup_failed_sampler_bootstrap(
+                root, design, process, csv_part, pid_file, segment,
+                sampler_argv, launcher_start_tick=launcher_start_tick,
+                boot_id=boot_id)
+        except BaseException as exc:
+            cleanup_error = exc
         if cleanup_error is None:
             try:
                 archive_invalid_thermal_segment(
@@ -3239,7 +3810,8 @@ def _kill_owned_process_session(
         str(tools["env"]["path"]), "-i",
         "HOME=" + environment["HOME"], "PATH=" + environment["PATH"],
         "LC_ALL=C", "LANG=C", "TZ=UTC", "PYTHONDONTWRITEBYTECODE=1",
-        str(tools["python3"]["path"]), "-c", SESSION_KILL_PROGRAM,
+        str(tools["python3"]["path"]), "-I", "-S", "-B", "-c",
+        SESSION_KILL_PROGRAM,
         str(session_id), boot_id, str(launcher_start_tick), "3.0",
     )
     rc, helper_stdout, helper_stderr = run_privileged_bounded(
@@ -3336,7 +3908,8 @@ def _stop_owned_sampler(
         str(tools["env"]["path"]), "-i",
         "HOME=" + environment["HOME"], "PATH=" + environment["PATH"],
         "LC_ALL=C", "LANG=C", "TZ=UTC", "PYTHONDONTWRITEBYTECODE=1",
-        str(tools["python3"]["path"]), "-c", PIDFD_STOP_PROGRAM,
+        str(tools["python3"]["path"]), "-I", "-S", "-B", "-c",
+        PIDFD_STOP_PROGRAM,
         str(owner.pid), str(owner.identity["start_tick"]),
         str(owner.identity["cmdline_sha256"]),
     )
@@ -3505,30 +4078,43 @@ def stop_sampler(owner: SamplerOwner, root: Path, design: Mapping[str, object],
         raise coverage_error
 
     raw = stable_file_bytes(owner.csv_part)
-    summary = validate_thermal_interval(raw, timing_start_s, benchmark_end_s)
     thermal_stat = _root_sealed_thermal_stat(owner.csv_part)
     if (thermal_stat.st_dev, thermal_stat.st_ino) != (
             owner.identity.get("csv_device"),
             owner.identity.get("csv_inode")):
         raise TimingError("terminal thermal CSV inode changed before commit")
-    final = root / "segments" / ("segment%04d.thermal.csv" % owner.segment)
-    if final.exists() or final.is_symlink():
-        raise TimingError("terminal thermal CSV already exists")
-    os.replace(owner.csv_part, final)
-    fsync_directory(final.parent)
+    transient_paths = _sampler_evidence_paths(
+        root, owner.segment, final=False)
+    final_paths = _sampler_evidence_paths(root, owner.segment, final=True)
+    if any(path.exists() or path.is_symlink()
+           for path in final_paths.values()):
+        raise TimingError("terminal thermal evidence already exists")
+    for label in ("csv", "validation", "receipt"):
+        os.replace(transient_paths[label], final_paths[label])
+    fsync_directory(final_paths["csv"].parent)
+    sampler_evidence, validation_raw = validate_sampler_terminal_evidence(
+        root, design, owner.segment, final=True)
+    summary = validate_thermal_interval(
+        raw, timing_start_s, benchmark_end_s,
+        validation_raw=validation_raw,
+        expected_source_sha256=sampler_evidence[
+            "expected_source_sha256"],
+        expected_output_owner_uid=sampler_evidence[
+            "expected_output_owner_uid"])
     return {
         "sampler_identity_start": _public_sampler_identity(owner.identity),
         "sampler_identity_end": _public_sampler_identity(stop.identity_end),
         "graceful_stop": stop.graceful,
         "graceful_stop_mechanism": stop.mechanism,
         "post_end_sample": True,
-        "thermal_csv_name": final.name,
+        "thermal_csv_name": final_paths["csv"].name,
         "thermal_csv_sha256": sha256_bytes(raw), "thermal_csv_size": len(raw),
         "thermal_csv_device": thermal_stat.st_dev,
         "thermal_csv_inode": thermal_stat.st_ino,
         "thermal_csv_uid": thermal_stat.st_uid,
         "thermal_csv_mode": stat.S_IMODE(thermal_stat.st_mode),
         "thermal_csv_nlink": thermal_stat.st_nlink,
+        "thermal_sampler_evidence": sampler_evidence,
         "thermal_summary": summary,
     }
 
@@ -3539,7 +4125,10 @@ def _next_segment(root: Path) -> int:
         if path.name != "segment%04d.terminal.json" % index:
             raise TimingError("segment terminal sequence has a gap")
     unknown = [path for path in (root / "segments").iterdir()
-               if not re.fullmatch(r"segment[0-9]{4}\.(?:terminal\.json|thermal\.csv)",
+               if not re.fullmatch(
+                   r"segment[0-9]{4}\.(?:terminal\.json|thermal\.csv|"
+                   r"thermal\.validation\.jsonl|"
+                   r"thermal\.sampler-receipt\.json)",
                                    path.name)]
     if unknown:
         raise TimingError("segments directory contains stale/unknown entry: %s" %
@@ -3728,7 +4317,14 @@ def _run_campaign_locked(args: argparse.Namespace, root: Path,
         poll_time = time.monotonic()
         if not force and poll_time - last_live_check_s < 0.75:
             return
-        enforce_live_thermal_safety(owner.csv_part)
+        sampler_paths = _sampler_evidence_paths(
+            root, owner.segment, final=False)
+        enforce_live_thermal_safety(
+            owner.csv_part,
+            validation_path=sampler_paths["validation"],
+            expected_source_sha256=design["immutable_files"][
+                "frozen/wirehair_expo_thermal_sampler.py"],
+            expected_output_owner_uid=design["controller_uid"])
         last_live_check_s = time.monotonic()
 
     try:
@@ -3940,7 +4536,8 @@ def verify_segments(root: Path, design: Mapping[str, object],
             "graceful_stop_mechanism", "post_end_sample", "thermal_csv_name",
             "thermal_csv_sha256", "thermal_csv_size", "thermal_csv_device",
             "thermal_csv_inode", "thermal_csv_uid", "thermal_csv_mode",
-            "thermal_csv_nlink", "thermal_summary",
+            "thermal_csv_nlink", "thermal_sampler_evidence",
+            "thermal_summary",
         }
         if set(terminal) != terminal_fields:
             raise TimingError("segment terminal field set changed")
@@ -4020,7 +4617,17 @@ def verify_segments(root: Path, design: Mapping[str, object],
         thermal_name = terminal.get("thermal_csv_name")
         if thermal_name != "segment%04d.thermal.csv" % index:
             raise TimingError("terminal thermal file identity changed")
-        verify_terminal_thermal(root / "segments" / str(thermal_name), terminal)
+        sampler_evidence, validation_raw = validate_sampler_terminal_evidence(
+            root, design, index, final=True)
+        if terminal.get("thermal_sampler_evidence") != sampler_evidence:
+            raise TimingError("terminal sampler evidence receipt changed")
+        verify_terminal_thermal(
+            root / "segments" / str(thermal_name), terminal,
+            validation_raw=validation_raw,
+            expected_source_sha256=sampler_evidence[
+                "expected_source_sha256"],
+            expected_output_owner_uid=sampler_evidence[
+                "expected_output_owner_uid"])
         completed = terminal.get("completed_tasks")
         resumed = terminal.get("resumed_jobs_before")
         if not isinstance(completed, list) or not isinstance(resumed, list) or \
@@ -4073,7 +4680,11 @@ def verify_segments(root: Path, design: Mapping[str, object],
     segment_files = sorted(path.name for path in (root / "segments").iterdir())
     expected_files = sorted(
         ["segment%04d.terminal.json" % i for i in range(len(terminals))] +
-        ["segment%04d.thermal.csv" % i for i in range(len(terminals))])
+        ["segment%04d.thermal.csv" % i for i in range(len(terminals))] +
+        ["segment%04d.thermal.validation.jsonl" % i
+         for i in range(len(terminals))] +
+        ["segment%04d.thermal.sampler-receipt.json" % i
+         for i in range(len(terminals))])
     if segment_files != expected_files:
         raise TimingError("segments directory contains ephemeral or unknown files")
     actual_archives = {path.name for path in (root / "interrupted").iterdir()}

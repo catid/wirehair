@@ -42,6 +42,51 @@ def thermal_bytes(times=(99.5, 100.5, 101.5)):
     return stream.getvalue().encode("ascii")
 
 
+def validated_thermal_bytes(
+        values, times, expected_source_sha256="a" * 64,
+        expected_output_owner_uid=1000):
+    parsed = list(csv.DictReader(io.StringIO(
+        thermal_bytes(times).decode("ascii"))))
+    monitor = thermal_sampler.DimmPlausibilityMonitor(0, 0)
+    samples = []
+    target_sensor = thermal_sampler.DIMMS[0]
+    target_field = thermal_sampler.dimm_name(target_sensor)
+    for row, value, monotonic in zip(parsed, values, times):
+        temperatures = {
+            sensor: 45.0 for sensor in thermal_sampler.DIMMS}
+        attempts = {sensor: 0 for sensor in thermal_sampler.DIMMS}
+        if value is None:
+            temperatures.pop(target_sensor)
+            attempts[target_sensor] = 5
+            row[target_field] = ""
+            row["dimm_read_errors"] = "1"
+        else:
+            temperatures[target_sensor] = float(value)
+            row[target_field] = str(float(value))
+        samples.append(monitor.observe(
+            float(monotonic), temperatures, attempts, 0, 0))
+    stream = io.StringIO(newline="")
+    writer = csv.DictWriter(
+        stream, fieldnames=timing.THERMAL_FIELDS, lineterminator="\n")
+    writer.writeheader()
+    writer.writerows(parsed)
+    header = {
+        "expected_output_owner_uid": expected_output_owner_uid,
+        "raw_columns": list(timing.THERMAL_FIELDS),
+        "sampler_source_expected_sha256": expected_source_sha256,
+        "sampling": {
+            "dimm_attempts": 5,
+            "dimm_retry_delay_s": 0.01,
+            "interval_s": 1.0,
+        },
+        "schema": "wirehair.wh2.thermal_validation_stream.v1",
+        "thresholds": thermal_sampler.threshold_metadata(),
+    }
+    validation = thermal_sampler.canonical_json_bytes(header) + b"".join(
+        thermal_sampler.canonical_json_bytes(sample) for sample in samples)
+    return stream.getvalue().encode("ascii"), validation
+
+
 def root_owned_sealed_stat(path):
     actual = path.lstat()
     return mock.Mock(
@@ -868,17 +913,25 @@ class BoundedChildTests(unittest.TestCase):
 
 class ThermalSamplerTests(unittest.TestCase):
     def test_evidence_open_preserves_primary_failure_when_close_also_fails(self):
-        with mock.patch.object(thermal_sampler.os, "open", return_value=77), \
-                mock.patch.object(thermal_sampler.os, "fchmod"), \
-                mock.patch.object(
-                    thermal_sampler.os, "fdopen",
-                    side_effect=RuntimeError("fdopen-primary")), \
-                mock.patch.object(
-                    thermal_sampler.os, "close",
-                    side_effect=OSError("close-secondary")) as close:
-            with self.assertRaisesRegex(RuntimeError, "fdopen-primary"):
-                thermal_sampler.open_exclusive_evidence("evidence")
-        close.assert_called_once_with(77)
+        with tempfile.TemporaryDirectory() as temporary:
+            path = str(Path(temporary) / "evidence")
+            destination = thermal_sampler.prepare_evidence_destination(path)
+            try:
+                with mock.patch.object(
+                        thermal_sampler.os, "open", return_value=77), \
+                        mock.patch.object(thermal_sampler.os, "fchmod"), \
+                        mock.patch.object(
+                            thermal_sampler.os, "fdopen",
+                            side_effect=RuntimeError("fdopen-primary")), \
+                        mock.patch.object(
+                            thermal_sampler.os, "close",
+                            side_effect=OSError("close-secondary")) as close:
+                    with self.assertRaisesRegex(RuntimeError, "fdopen-primary"):
+                        thermal_sampler.open_exclusive_evidence(
+                            path, destination=destination)
+                close.assert_called_once_with(77)
+            finally:
+                thermal_sampler.close_evidence_destination(destination)
 
     def test_evidence_files_are_readonly_even_under_umask_zero(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -971,13 +1024,26 @@ class ThermalSamplerTests(unittest.TestCase):
         with self.assertRaises(timing.TimingError):
             timing._parse_thermal_csv(complete_bad_row)
 
+        for value in (240.75, None):
+            with self.subTest(first_sample=value):
+                raw, validation = validated_thermal_bytes(
+                    (value,), (100.0,))
+                parsed = timing._parse_thermal_csv(
+                    raw, allow_raw_dimm_faults=True)
+                samples = timing._parse_thermal_validation(
+                    validation, parsed, "a" * 64, 1000)
+                self.assertEqual(samples[0]["decision"], "continue")
+                self.assertFalse(
+                    samples[0]["sensors"][timing.DIMM_FIELDS[0]]["valid"])
+
     def test_graceful_sampler_seals_csv_before_controller_receives_it(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "thermal.csv"
-            with path.open("xb") as output:
+            with path.open("xb+") as output:
                 output.write(b"sample\n")
-                thermal_sampler.seal_csv_output(output)
+                binding = thermal_sampler.seal_and_hash_output(output)
                 self.assertEqual(os.fstat(output.fileno()).st_mode & 0o777, 0o444)
+            thermal_sampler.validate_path_binding(str(path), binding)
             self.assertEqual(path.stat().st_mode & 0o777, 0o444)
 
     def test_edac_sum_requires_stable_complete_nonnegative_inventory(self):
@@ -1009,28 +1075,32 @@ class ThermalSamplerTests(unittest.TestCase):
                 self.assertRaisesRegex(RuntimeError, "inventory changed"):
             thermal_sampler.sum_edac("ce_count", (path, path + ".other"))
 
-    def test_implausible_spd_read_is_retried(self):
+    def test_implausible_spd_read_is_preserved_without_retry(self):
         dimm = (1, 0x50)
         with mock.patch.object(thermal_sampler, "DIMMS", [dimm]), \
                 mock.patch.object(
                     thermal_sampler, "read_spd5118_temperature",
                     side_effect=[240.75, 48.25]) as read:
-            temperatures, pending = thermal_sampler.read_dimm_temperatures(
+            temperatures, pending, attempts = \
+                thermal_sampler.read_dimm_temperatures(
                 {1: object()}, attempts=2, retry_delay=0.0)
-        self.assertEqual(temperatures, {dimm: 48.25})
+        self.assertEqual(temperatures, {dimm: 240.75})
         self.assertEqual(pending, [])
-        self.assertEqual(read.call_count, 2)
+        self.assertEqual(attempts, {dimm: 0})
+        self.assertEqual(read.call_count, 1)
 
-    def test_repeated_implausible_spd_reads_are_reported_failed(self):
+    def test_negative_decoded_spd_read_is_preserved_without_retry(self):
         dimm = (1, 0x50)
         with mock.patch.object(thermal_sampler, "DIMMS", [dimm]), \
                 mock.patch.object(
                     thermal_sampler, "read_spd5118_temperature",
                     side_effect=[-40.0, 130.0]):
-            temperatures, pending = thermal_sampler.read_dimm_temperatures(
+            temperatures, pending, attempts = \
+                thermal_sampler.read_dimm_temperatures(
                 {1: object()}, attempts=2, retry_delay=0.0)
-        self.assertEqual(temperatures, {})
-        self.assertEqual(pending, [dimm])
+        self.assertEqual(temperatures, {dimm: -40.0})
+        self.assertEqual(pending, [])
+        self.assertEqual(attempts, {dimm: 0})
 
     def test_plausible_spd_boundary_values_and_oserror_retry(self):
         dimms = [(1, 0x50), (1, 0x51)]
@@ -1038,13 +1108,142 @@ class ThermalSamplerTests(unittest.TestCase):
                 mock.patch.object(
                     thermal_sampler, "read_spd5118_temperature",
                     side_effect=[-39.75, OSError("transient"), 129.75]):
-            temperatures, pending = thermal_sampler.read_dimm_temperatures(
+            temperatures, pending, attempts = \
+                thermal_sampler.read_dimm_temperatures(
                 {1: object()}, attempts=2, retry_delay=0.0)
         self.assertEqual(temperatures, {
             (1, 0x50): -39.75,
             (1, 0x51): 129.75,
         })
         self.assertEqual(pending, [])
+        self.assertEqual(attempts, {(1, 0x50): 0, (1, 0x51): 1})
+
+    def test_campaign_command_and_terminal_evidence_round_trip(self):
+        real_os_open = os.open
+        handlers = {}
+        cpu_total = 1000
+
+        def synthetic_open(path, flags, mode=0o777, *, dir_fd=None):
+            if str(path).startswith("/dev/i2c-"):
+                return real_os_open("/dev/null", os.O_RDWR)
+            return real_os_open(path, flags, mode, dir_fd=dir_fd)
+
+        def install_signal(signum, handler):
+            handlers[signum] = handler
+
+        def synthetic_cpu_stat():
+            nonlocal cpu_total
+            cpu_total += 100
+            return cpu_total, cpu_total // 10
+
+        def synthetic_dimms(_fds, _attempts, _retry_delay):
+            handlers[signal.SIGTERM](signal.SIGTERM, None)
+            values = {
+                sensor: 45.0 for sensor in thermal_sampler.DIMMS}
+            return values, [], {
+                sensor: 0 for sensor in thermal_sampler.DIMMS}
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "segments").mkdir()
+            (root / "segments").chmod(0o700)
+            (root / "frozen").mkdir()
+            frozen = root / "frozen/wirehair_expo_thermal_sampler.py"
+            source = Path(thermal_sampler.__file__).read_bytes()
+            frozen.write_bytes(source)
+            frozen.chmod(0o444)
+            (root / "frozen").chmod(0o555)
+            source_sha = timing.sha256_bytes(source)
+            design = {
+                "controller_uid": os.geteuid(),
+                "immutable_files": {
+                    "frozen/wirehair_expo_thermal_sampler.py": source_sha,
+                },
+                "tools": {"python3": {"path": sys.executable}},
+            }
+            command = timing._sampler_cmdline(
+                root, design, 0, public=False)
+            self.assertEqual(command[:4], [sys.executable, "-I", "-S", "-B"])
+            owner_flag = command.index("--expected-output-owner-uid")
+            self.assertEqual(command[owner_flag + 1], str(os.geteuid()))
+            args = thermal_sampler.parse_arguments(command[5:])
+            with mock.patch.object(thermal_sampler, "__file__", str(frozen)), \
+                    mock.patch.object(
+                        thermal_sampler.os, "open", side_effect=synthetic_open), \
+                    mock.patch.object(
+                        thermal_sampler.signal, "signal",
+                        side_effect=install_signal), \
+                    mock.patch.object(
+                        thermal_sampler, "find_tctl_path",
+                        return_value="/fake/tctl"), \
+                    mock.patch.object(
+                        thermal_sampler, "read_text", return_value="50000"), \
+                    mock.patch.object(
+                        thermal_sampler, "discover_edac_paths",
+                        side_effect=lambda counter:
+                            (f"/fake/mc0/{counter}",)), \
+                    mock.patch.object(
+                        thermal_sampler, "sum_edac", return_value=0), \
+                    mock.patch.object(
+                        thermal_sampler, "read_cpu_stat",
+                        side_effect=synthetic_cpu_stat), \
+                    mock.patch.object(
+                        thermal_sampler, "average_cpu_mhz",
+                        return_value=4000.0), \
+                    mock.patch.object(
+                        thermal_sampler, "read_dimm_temperatures",
+                        side_effect=synthetic_dimms):
+                return_code = thermal_sampler.run_sampler(args)
+            self.assertEqual(
+                return_code, 0,
+                Path(args.receipt).read_text(encoding="ascii"))
+            sampler_receipt = json.loads(
+                Path(args.receipt).read_text(encoding="ascii"))
+            self.assertEqual(
+                sampler_receipt["expected_output_owner_uid"], os.geteuid())
+            for key in ("raw_csv", "pid_file", "validation_jsonl"):
+                self.assertEqual(
+                    sampler_receipt[key]["destination"]
+                    ["expected_owner_uid"], os.geteuid())
+            validation_header = json.loads(
+                Path(args.validation_jsonl).read_text(
+                    encoding="ascii").splitlines()[0])
+            self.assertEqual(
+                validation_header["expected_output_owner_uid"], os.geteuid())
+            transient = timing._sampler_evidence_paths(
+                root, 0, final=False)
+            final = timing._sampler_evidence_paths(root, 0, final=True)
+            for label in ("csv", "validation", "receipt"):
+                os.replace(transient[label], final[label])
+            with mock.patch.object(
+                    timing, "_root_readonly_single_link_stat",
+                    side_effect=lambda path, _description: path.stat()):
+                evidence, validation = \
+                    timing.validate_sampler_terminal_evidence(
+                        root, design, 0, final=True)
+            self.assertEqual(evidence["expected_source_sha256"], source_sha)
+            self.assertEqual(
+                evidence["expected_output_owner_uid"], os.geteuid())
+            self.assertEqual(evidence["sampler_summary"]["sample_count"], 1)
+            self.assertTrue(validation.endswith(b"\n"))
+            self.assertFalse(transient["pid"].exists())
+
+    def test_sampler_launch_requires_sealed_controller_owned_parent(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "segments").mkdir(mode=0o700)
+            wrong_uid = 1 if os.geteuid() == 0 else 0
+            design = {
+                "controller_uid": wrong_uid,
+                "tools": {
+                    "fuser": {"path": "/fuser"},
+                    "sudo": {"path": "/sudo"},
+                    "timeout": {"path": "/timeout"},
+                },
+            }
+            with self.assertRaisesRegex(
+                    timing.TimingError, "sealed controller UID"):
+                timing.start_sampler(root, design, 0)
 
 
 class PostTaskBindingTests(unittest.TestCase):
@@ -1497,6 +1696,12 @@ class ThermalSealingTests(unittest.TestCase):
             part = root / "segments/.segment0000.thermal.csv.part"
             part.write_bytes(thermal_bytes())
             part.chmod(0o444)
+            for name in (
+                    ".segment0000.thermal.validation.jsonl.part",
+                    ".segment0000.thermal.sampler-receipt.json.part"):
+                sidecar = root / "segments" / name
+                sidecar.write_bytes(b"fixture\n")
+                sidecar.chmod(0o444)
             real_stat = part.stat()
             sealed_stat = mock.Mock(
                 st_mode=(real_stat.st_mode & ~0o777) | 0o444,
@@ -1520,6 +1725,15 @@ class ThermalSealingTests(unittest.TestCase):
                     mock.patch.object(
                         timing, "_root_sealed_thermal_stat",
                         return_value=sealed_stat), \
+                    mock.patch.object(
+                        timing, "validate_sampler_terminal_evidence",
+                        return_value=({
+                            "expected_output_owner_uid": 1000,
+                            "expected_source_sha256": "a" * 64,
+                        }, b"fixture\n")), \
+                    mock.patch.object(
+                        timing, "validate_thermal_interval",
+                        return_value={"sample_count": 3}), \
                     mock.patch.object(
                         timing.os, "chmod",
                         side_effect=PermissionError("not owner")) as chmod:
@@ -1591,6 +1805,78 @@ class ThermalSealingTests(unittest.TestCase):
                             timing.TimingError, "temperature gate exceeded"):
                         timing.validate_thermal_interval(
                             path.read_bytes(), recent[0] + 0.1, recent[-1] - 0.05)
+
+    def test_validated_wave94_spike_is_preserved_but_not_treated_as_heat(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            csv_path = Path(temporary) / "thermal.csv"
+            validation_path = Path(temporary) / "thermal.validation.jsonl"
+            now = time.monotonic()
+            times = (now - 1.9, now - 0.9, now - 0.1)
+            raw, validation = validated_thermal_bytes(
+                (40.75, 121.0, 40.75), times)
+            csv_path.write_bytes(raw)
+            validation_path.write_bytes(validation)
+            live = timing.enforce_live_thermal_safety(
+                csv_path, now_s=now, validation_path=validation_path,
+                expected_source_sha256="a" * 64,
+                expected_output_owner_uid=1000)
+            self.assertEqual(live["dimm_max_c"], 45.0)
+            summary = timing.validate_thermal_interval(
+                raw, times[0] + 0.1, times[-1] - 0.05,
+                validation_raw=validation,
+                expected_source_sha256="a" * 64,
+                expected_output_owner_uid=1000)
+            self.assertEqual(summary["dimm_read_errors"], 0)
+            self.assertEqual(
+                summary["dimm_max_c"][timing.DIMM_FIELDS[0]], 40.75)
+
+    def test_validation_stream_binds_output_owner_uid(self):
+        raw, validation = validated_thermal_bytes((40.0,), (100.0,))
+        rows = timing._parse_thermal_csv(raw, allow_raw_dimm_faults=True)
+        timing._parse_thermal_validation(validation, rows, "a" * 64, 1000)
+        with self.assertRaisesRegex(
+                timing.TimingError, "header contract changed"):
+            timing._parse_thermal_validation(
+                validation, rows, "a" * 64, 1001)
+
+    def test_validated_sustained_hot_sequence_is_terminal(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            csv_path = Path(temporary) / "thermal.csv"
+            validation_path = Path(temporary) / "thermal.validation.jsonl"
+            now = time.monotonic()
+            times = (now - 3.1, now - 2.1, now - 1.1, now - 0.1)
+            raw, validation = validated_thermal_bytes(
+                (40.0, 95.0, 95.0, 95.0), times)
+            csv_path.write_bytes(raw)
+            validation_path.write_bytes(validation)
+            with self.assertRaisesRegex(
+                    timing.TimingError, "terminal decision"):
+                timing.enforce_live_thermal_safety(
+                    csv_path, now_s=now, validation_path=validation_path,
+                    expected_source_sha256="a" * 64,
+                    expected_output_owner_uid=1000)
+
+    def test_one_validated_read_failure_is_counted_without_data_loss(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            csv_path = Path(temporary) / "thermal.csv"
+            validation_path = Path(temporary) / "thermal.validation.jsonl"
+            now = time.monotonic()
+            times = (now - 1.9, now - 0.9, now - 0.1)
+            raw, validation = validated_thermal_bytes(
+                (40.0, None, 40.25), times)
+            csv_path.write_bytes(raw)
+            validation_path.write_bytes(validation)
+            timing.enforce_live_thermal_safety(
+                csv_path, now_s=now, validation_path=validation_path,
+                expected_source_sha256="a" * 64,
+                expected_output_owner_uid=1000)
+            summary = timing.validate_thermal_interval(
+                raw, times[0] + 0.1, times[-1] - 0.05,
+                validation_raw=validation,
+                expected_source_sha256="a" * 64,
+                expected_output_owner_uid=1000)
+            self.assertEqual(summary["dimm_read_errors"], 1)
+            self.assertIn(b",,", raw)
 
     def test_live_thermal_safety_rejects_stale_and_gapped_streams(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1762,6 +2048,12 @@ class ThermalSealingTests(unittest.TestCase):
                         timing.stop_sampler(
                             owner, root, design, 100.0, 101.0)
                 stop.assert_called_once()
+                helper_command = stop.call_args.args[2]
+                python_index = helper_command.index("/frozen/python3")
+                self.assertEqual(
+                    helper_command[python_index:python_index + 5],
+                    ("/frozen/python3", "-I", "-S", "-B", "-c"))
+                self.assertEqual(helper_command[:2], ("/frozen/env", "-i"))
                 process.communicate.assert_called_once_with(timeout=15)
 
     def test_bootstrap_timeout_prefers_identity_then_falls_back_to_session(self):
@@ -1824,6 +2116,28 @@ class ThermalSealingTests(unittest.TestCase):
                         root, design, process, csv_path, pid_file, 9, argv,
                         launcher_start_tick=4242, boot_id=boot_id)
                 kill.assert_called_once()
+
+    def test_exited_bootstrap_launcher_still_uses_exact_session_cleanup(self):
+        process = mock.Mock(pid=999, returncode=7)
+        process._child_created = True
+        root = Path("/synthetic/root")
+        csv_path = root / "thermal.csv.part"
+        pid_path = root / "bootstrap.pid"
+        design = {"test": True}
+        argv = ["/frozen/python3", "-I", "-S", "-B",
+                "/frozen/sampler.py"]
+        boot_id = "01234567-89ab-cdef-0123-456789abcdef"
+        with mock.patch.object(
+                timing, "_cleanup_timed_out_sampler") as cleanup, \
+                mock.patch.object(
+                    timing, "_close_bounded_process_pipes") as close:
+            timing._cleanup_failed_sampler_bootstrap(
+                root, design, process, csv_path, pid_path, 4, argv,
+                launcher_start_tick=0, boot_id=boot_id)
+        cleanup.assert_called_once_with(
+            root, design, process, csv_path, pid_path, 4, argv,
+            launcher_start_tick=0, boot_id=boot_id)
+        close.assert_not_called()
 
     def test_hung_sampler_uses_forced_session_cleanup_and_is_not_promotional(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1973,6 +2287,20 @@ class SegmentReceiptTests(unittest.TestCase):
             side_effect=root_owned_sealed_stat)
         patcher.start()
         self.addCleanup(patcher.stop)
+        self.sampler_evidence = {
+            "expected_output_owner_uid": 1000,
+            "expected_source_sha256": "a" * 64,
+            "fixture": True,
+        }
+        evidence_patcher = mock.patch.object(
+            timing, "validate_sampler_terminal_evidence",
+            return_value=(self.sampler_evidence, b"fixture\n"))
+        evidence_patcher.start()
+        self.addCleanup(evidence_patcher.stop)
+        thermal_patcher = mock.patch.object(
+            timing, "verify_terminal_thermal", return_value=thermal_bytes())
+        thermal_patcher.start()
+        self.addCleanup(thermal_patcher.stop)
 
     def make_fixture(self, root: Path):
         (root / "segments").mkdir()
@@ -1981,12 +2309,20 @@ class SegmentReceiptTests(unittest.TestCase):
                      "prelaunch_receipt.json", "tasks_manifest.jsonl"):
             (root / name).write_bytes((name + "\n").encode("ascii"))
         design = {
-            "controller_core": 126, "thermal_core": 127, "task_count": 1,
+            "controller_core": 126, "controller_uid": 1000,
+            "thermal_core": 127, "task_count": 1,
             "tools": {"python3": {"path": "/usr/bin/python3"}},
+            "immutable_files": {
+                "frozen/wirehair_expo_thermal_sampler.py": "a" * 64,
+            },
         }
         raw = thermal_bytes()
         thermal = root / "segments/segment0000.thermal.csv"
         thermal.write_bytes(raw)
+        (root / "segments/segment0000.thermal.validation.jsonl").write_bytes(
+            b"fixture\n")
+        (root / "segments/segment0000.thermal.sampler-receipt.json").write_bytes(
+            b"fixture\n")
         stat = thermal.stat()
         identity = {
             "pid": 1234, "start_tick": 5678,
@@ -2032,6 +2368,7 @@ class SegmentReceiptTests(unittest.TestCase):
                 "thermal_csv_inode": stat.st_ino,
                 "thermal_csv_uid": 0, "thermal_csv_mode": 0o444,
                 "thermal_csv_nlink": 1,
+                "thermal_sampler_evidence": self.sampler_evidence,
                 "thermal_summary": timing.validate_thermal_interval(
                     raw, 100.0, 101.0),
             })

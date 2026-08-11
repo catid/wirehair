@@ -768,6 +768,27 @@ if(BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
                 TIMEOUT 120)
         if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
             add_test(
+                NAME wirehair_expo_thermal_sampler_test
+                COMMAND ${CMAKE_COMMAND} -E env
+                    PYTHON=${Python3_EXECUTABLE}
+                    bash
+                    ${PROJECT_SOURCE_DIR}/bench/test_wirehair_expo_thermal_sampler.sh)
+            set_tests_properties(wirehair_expo_thermal_sampler_test
+                PROPERTIES
+                    LABELS "v2;research;thermal;plausibility;transactional"
+                    TIMEOUT 30)
+            add_test(
+                NAME wh2_thermal_sampler_transition_test
+                COMMAND ${Python3_EXECUTABLE}
+                    ${PROJECT_SOURCE_DIR}/bench/wh2_thermal_sampler_transition_test.py
+                    -v)
+            set_tests_properties(wh2_thermal_sampler_transition_test
+                PROPERTIES
+                    ENVIRONMENT
+                        "PYTHONPATH=${PROJECT_SOURCE_DIR}/bench;PYTHONWARNINGS=error"
+                    LABELS "v2;research;thermal;transition;transactional"
+                    TIMEOUT 60)
+            add_test(
                 NAME wh2_p32_dispatch_timing_test
                 COMMAND ${Python3_EXECUTABLE}
                     ${PROJECT_SOURCE_DIR}/bench/wh2_p32_dispatch_timing_test.py

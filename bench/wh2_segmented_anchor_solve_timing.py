@@ -51,20 +51,23 @@ SAMPLER_NAME = "wirehair_expo_thermal_sampler.py"
 RECOVERY_RESULT_NAME = "wh2_segmented_anchor_allk_recovery_result.json"
 
 P32_HELPER_SOURCE_PROVENANCE = {
+    # The commit/tree identify the imported timing-helper lineage.  The file
+    # ledger below binds the reviewed fail-closed thermal hardening overlay
+    # byte-for-byte at campaign preparation.
     "source_commit": "97a3a0b941f3efe34a6e18609b7681d3a1110982",
     "source_tree": "ab84c084b212fecc6672a7efda5a4df6203c866c",
     "files": {
         "bench/wh2_p32_dispatch_timing.py": {
-            "git_blob_sha1": "c1605efe36168f96bb45864e22a50f0e2fcbfbf8",
-            "sha256": "1efbeffd05e7b4dbd9950b9eafc64016e7564f36c410a552c4e231362f6c4ba8",
+            "git_blob_sha1": "4315472c307a89c1213a3fa84c65fde1bf281876",
+            "sha256": "414806a687d184fc2ec2973fcd0ea4b8ab232d13d8e707404e926d394fefb821",
         },
         "bench/wh2_p32_dispatch_timing_test.py": {
-            "git_blob_sha1": "21a6c01bc196971c643809ae23fd329116447c31",
-            "sha256": "22656b311658e3ed73fc5771c4ff8c12cb07e0b2f9e7c8b751e04291a5bf0fa5",
+            "git_blob_sha1": "cf361041ae4ad1c8bf33045e38b44e86b3387651",
+            "sha256": "c803b23210ab695716fcfac6397aa383525ec25ca28b5040814d3b88e821102c",
         },
         "bench/wirehair_expo_thermal_sampler.py": {
-            "git_blob_sha1": "77d58141f3ecc6cf769e62eba474ffd4e4571b5e",
-            "sha256": "047b6e7e70fc54631c94808bfa2aeb24470423ba3a71f376bcab9f78ab63bd56",
+            "git_blob_sha1": "02956335780b7e4c35b878c89ca41a6c47cb708a",
+            "sha256": "3c291790b6169c07e53dc0924d383455a81addd6da858d8d4d231b9f1263f6a2",
         },
     },
 }
@@ -95,6 +98,7 @@ MAX_STDERR_BYTES = 64 * 1024
 MAX_INTERRUPTED_ARCHIVE_BYTES = 64 * 1024 * 1024
 MAX_CPU_TEMP_C = 85.0
 MAX_DIMM_TEMP_C = 84.0
+MAX_UID = (1 << 32) - 2
 MAX_THERMAL_GAP_S = 2.25
 MAX_THERMAL_MARGIN_S = 2.25
 QUIET_SAMPLE_SECONDS = 1.0
@@ -1326,6 +1330,7 @@ def prepare_campaign(args: argparse.Namespace) -> None:
         for directory in ("frozen", "provenance", "external", "ledger",
                           ".transactions", "interrupted", "segments"):
             (staging / directory).mkdir()
+        os.chmod(staging / "segments", 0o700)
         smoke_home = staging / ".smoke-home"
         smoke_home.mkdir()
         atomic_write(staging / "controller.lock", b"", 0o644)
@@ -1409,6 +1414,7 @@ def prepare_campaign(args: argparse.Namespace) -> None:
                 "MALLOC_TRIM_THRESHOLD_": MALLOC_TRIM_THRESHOLD,
             },
             "core": args.core, "controller_core": args.controller_core,
+            "controller_uid": os.geteuid(),
             "thermal_core": args.thermal_core, "numa_node": args.numa_node,
             "evict_bytes": args.evict_bytes,
             "timing_quiet_cpus": timing_quiet_cpus,
@@ -1551,7 +1557,7 @@ def load_design(root: Path) -> Dict[str, object]:
     }
     dynamic_fields = {
         "schema", "self_sha256_excluding_field", "root", "head", "tree",
-        "core", "controller_core", "thermal_core", "numa_node",
+        "core", "controller_core", "controller_uid", "thermal_core", "numa_node",
         "evict_bytes", "timing_quiet_cpus", "timing_topology", "controller_topology",
         "thermal_topology", "tasks_manifest_sha256",
         "prelaunch_receipt_sha256", "recovery_receipt_sha256",
@@ -1567,6 +1573,9 @@ def load_design(root: Path) -> Dict[str, object]:
                 "evict_bytes"):
         if type(design.get(key)) is not int or int(design[key]) < 0:
             raise TimingError("frozen integer is malformed: " + key)
+    if type(design.get("controller_uid")) is not int or \
+            not 0 <= design["controller_uid"] <= MAX_UID:
+        raise TimingError("frozen controller UID is malformed")
     if int(design["evict_bytes"]) < 268435456:
         raise TimingError("frozen eviction allocation is too small")
     for key in ("head", "tree"):
@@ -2507,6 +2516,10 @@ def _next_segment(root: Path) -> int:
     allowed = {
         *("segment%04d.terminal.json" % index for index in range(len(terminals))),
         *("segment%04d.thermal.csv" % index for index in range(len(terminals))),
+        *("segment%04d.thermal.validation.jsonl" % index
+          for index in range(len(terminals))),
+        *("segment%04d.thermal.sampler-receipt.json" % index
+          for index in range(len(terminals))),
     }
     unknown = [path.name for path in (root / "segments").iterdir()
                if path.name not in allowed]
@@ -2607,7 +2620,7 @@ def verify_segments(root: Path, design: Mapping[str, object],
         "graceful_stop_mechanism", "post_end_sample", "thermal_csv_name",
         "thermal_csv_sha256", "thermal_csv_size", "thermal_csv_device",
         "thermal_csv_inode", "thermal_csv_uid", "thermal_csv_mode",
-        "thermal_csv_nlink", "thermal_summary",
+        "thermal_csv_nlink", "thermal_sampler_evidence", "thermal_summary",
     }
     for index, path in enumerate(terminals):
         if saw_complete:
@@ -2688,8 +2701,18 @@ def verify_segments(root: Path, design: Mapping[str, object],
                 terminal.get("thermal_csv_name") != \
                     "segment%04d.thermal.csv" % index:
             raise TimingError("sampler lifecycle was not terminal and graceful")
+        sampler_evidence, validation_raw = \
+            isolation.validate_sampler_terminal_evidence(
+                root, design, index, final=True)
+        if terminal.get("thermal_sampler_evidence") != sampler_evidence:
+            raise TimingError("terminal sampler evidence receipt changed")
         isolation.verify_terminal_thermal(
-            root / "segments" / str(terminal["thermal_csv_name"]), terminal)
+            root / "segments" / str(terminal["thermal_csv_name"]), terminal,
+            validation_raw=validation_raw,
+            expected_source_sha256=sampler_evidence[
+                "expected_source_sha256"],
+            expected_output_owner_uid=sampler_evidence[
+                "expected_output_owner_uid"])
         resumed = terminal.get("resumed_jobs_before")
         completed = terminal.get("completed_tasks")
         if resumed != sorted(completed_jobs) or not isinstance(completed, list):
@@ -2744,7 +2767,11 @@ def verify_segments(root: Path, design: Mapping[str, object],
         records.append(terminal)
     expected_segment_files = sorted(
         ["segment%04d.terminal.json" % index for index in range(len(terminals))] +
-        ["segment%04d.thermal.csv" % index for index in range(len(terminals))])
+        ["segment%04d.thermal.csv" % index for index in range(len(terminals))] +
+        ["segment%04d.thermal.validation.jsonl" % index
+         for index in range(len(terminals))] +
+        ["segment%04d.thermal.sampler-receipt.json" % index
+         for index in range(len(terminals))])
     if sorted(path.name for path in (root / "segments").iterdir()) != \
             expected_segment_files:
         raise TimingError("segments directory contains ephemeral or unknown files")
@@ -2934,7 +2961,14 @@ def _run_campaign_locked(args: argparse.Namespace, root: Path,
         poll_time = time.monotonic()
         if not force and poll_time - last_live_check_s < 0.75:
             return
-        receipt = isolation.enforce_live_thermal_safety(owner.csv_part)
+        sampler_paths = isolation._sampler_evidence_paths(
+            root, owner.segment, final=False)
+        receipt = isolation.enforce_live_thermal_safety(
+            owner.csv_part,
+            validation_path=sampler_paths["validation"],
+            expected_source_sha256=design["immutable_files"][
+                "frozen/wirehair_expo_thermal_sampler.py"],
+            expected_output_owner_uid=design["controller_uid"])
         if not initial_thermal_gate:
             initial_thermal_gate = dict(receipt)
         last_live_check_s = time.monotonic()
