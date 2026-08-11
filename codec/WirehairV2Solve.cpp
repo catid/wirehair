@@ -4074,10 +4074,28 @@ static WirehairResult SolvePrecodeSystemImpl(
                 TinyPeriodicHeavyTimingEnabled ?
                     std::chrono::steady_clock::now() :
                     std::chrono::steady_clock::time_point();
-            const uint32_t data_rows =
-                PrepareTinyPeriodicHeavySelectedByPeel(
+            uint32_t data_rows;
+            // The profile fuzzer's tiny-oracle arm uses byte-sized blocks,
+            // for which production dispatch can never select the transposed
+            // GFNI path.
+            // Keep the forced-positive test seam intact, but avoid entering a
+            // second noinline dispatch frame for the normal and forced-legacy
+            // cases.  This branch is compiled only into the hook-enabled
+            // policy archive; the ordinary production solve remains byte-for-
+            // byte unchanged.
+            if (block_bytes < 64u &&
+                TinyPeriodicHeavyTransposeTestMode <= 0)
+            {
+                data_rows = PrepareTinyPeriodicHeavyLegacyByPeel(
+                    rows, peel, L, block_bytes, projected_heavy, heavy_rhs,
+                    st);
+            }
+            else
+            {
+                data_rows = PrepareTinyPeriodicHeavySelectedByPeel(
                     rows, peel, L, block_bytes, projected_heavy, heavy_rhs,
                     st, transpose);
+            }
             if (transpose) {
                 ++TinyPeriodicHeavyTransposeUseCount;
             }
