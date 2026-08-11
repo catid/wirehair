@@ -5,11 +5,94 @@
 
 #include <wirehair/wirehair.h>
 
+#include <memory>
+#include <new>
 #include <stddef.h>
 #include <stdint.h>
+#include <utility>
 #include <vector>
 
 namespace wirehair_v2 {
+
+/**
+    Allocator used only by the owned solve-value arena.
+
+    std::vector value-initializes newly resized byte elements, which writes the
+    complete L * block_bytes arena before the solver immediately overwrites its
+    live blocks.  This allocator instead default-initializes new scalar
+    elements, starting their lifetime without writing their value.  Callers
+    must establish every byte before reading it.  Stateful codec paths adopt
+    this storage directly; compatibility std::vector overloads publish a
+    transactional copy only after a solve has succeeded.
+*/
+template<class T>
+class SolveNoInitAllocator
+{
+public:
+    typedef T value_type;
+    typedef T* pointer;
+    typedef const T* const_pointer;
+    typedef T& reference;
+    typedef const T& const_reference;
+    typedef size_t size_type;
+    typedef ptrdiff_t difference_type;
+
+    template<class U>
+    struct rebind { typedef SolveNoInitAllocator<U> other; };
+
+    SolveNoInitAllocator() noexcept {}
+
+    template<class U>
+    SolveNoInitAllocator(const SolveNoInitAllocator<U>&) noexcept {}
+
+    pointer allocate(size_type count)
+    {
+        return std::allocator<T>().allocate(count);
+    }
+
+    void deallocate(pointer data, size_type count) noexcept
+    {
+        std::allocator<T>().deallocate(data, count);
+    }
+
+    template<class U>
+    void construct(U* destination)
+    {
+        ::new (static_cast<void*>(destination)) U;
+    }
+
+    template<class U, class Arg, class... Args>
+    void construct(U* destination, Arg&& arg, Args&&... args)
+    {
+        ::new (static_cast<void*>(destination)) U(
+            std::forward<Arg>(arg), std::forward<Args>(args)...);
+    }
+
+    template<class U>
+    void destroy(U* object) noexcept
+    {
+        object->~U();
+    }
+};
+
+template<class T, class U>
+inline bool operator==(
+    const SolveNoInitAllocator<T>&,
+    const SolveNoInitAllocator<U>&) noexcept
+{
+    return true;
+}
+
+template<class T, class U>
+inline bool operator!=(
+    const SolveNoInitAllocator<T>&,
+    const SolveNoInitAllocator<U>&) noexcept
+{
+    return false;
+}
+
+typedef std::vector<uint8_t, SolveNoInitAllocator<uint8_t> >
+    SolveValueStorage;
 
 // Message packets use a distinct final contract number so they cannot be
 // confused with the separately versioned experimental recovery-row helper.
@@ -123,6 +206,13 @@ struct PrecodeSolveStats
     uint64_t ResidualNanoseconds = 0;
     uint64_t BackSubNanoseconds = 0;
     uint32_t PacketSeedAttempt = 0;
+    // Keep these diagnostics layout-unconditional.  Hook-enabled internal
+    // targets can link the production library too, so conditional members
+    // would give shared codec classes incompatible layouts across translation
+    // units.  Hot-path writes remain test-hook-only in WirehairV2Solve.cpp.
+    uint64_t SolveValueArenaBytes = 0;
+    uint64_t SolveValueArenaEagerZeroBytes = 0;
+    uint64_t SolveValueArenaCommitCopyBytes = 0;
 };
 
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
@@ -239,6 +329,12 @@ uint64_t PackedBinaryResidualUsesForTesting();
 /** Exact byte/packed insertion oracle, including partial-word tail poison. */
 bool PackedBinaryResidualInsertionOracleForTesting();
 
+/** Poison no-init solve bytes so exact oracles expose read-before-write. */
+void SetSolveValueArenaPoisonForTesting(bool enabled);
+
+/** Force the fused block initializer below its production crossover. */
+void SetFusedBlockInitializationForTesting(bool enabled);
+
 namespace test {
 
 /** Allocation-capable scopes exercised by the solve exception tests. */
@@ -254,7 +350,9 @@ enum class SolveAllocationFailurePoint : uint8_t
     TinyDenseOracleValidation,
     TinyPeriodicHeavyStorage,
     PackedResumePivotMaterialization,
-    PackedResumeScratchMaterialization
+    PackedResumeScratchMaterialization,
+    SolveValueArenaAllocation,
+    SolveOwnedResumeOutputAllocation
 };
 
 enum class SolveAllocationFailureException : uint8_t
@@ -464,6 +562,16 @@ WirehairResult SolvePrecodeSystem(
     PrecodeSolveStats* stats = nullptr,
     PrecodeSolveResumeState* resume_state = nullptr);
 
+/** Owned no-init solve arena used by stateful codec paths. */
+WirehairResult SolvePrecodeSystem(
+    const PrecodeSystem& system,
+    const PacketRowConfig& config,
+    const std::vector<SolvePacket>& packets,
+    uint32_t block_bytes,
+    SolveValueStorage& intermediate_blocks_out,
+    PrecodeSolveStats* stats = nullptr,
+    PrecodeSolveResumeState* resume_state = nullptr);
+
 /** Internal cold solve using cached packet primes; still validates system. */
 WirehairResult SolvePrecodeSystemWithRuntime(
     const PrecodeSystem& system,
@@ -472,6 +580,16 @@ WirehairResult SolvePrecodeSystemWithRuntime(
     const std::vector<SolvePacket>& packets,
     uint32_t block_bytes,
     std::vector<uint8_t>& intermediate_blocks_out,
+    PrecodeSolveStats* stats = nullptr,
+    PrecodeSolveResumeState* resume_state = nullptr);
+
+WirehairResult SolvePrecodeSystemWithRuntime(
+    const PrecodeSystem& system,
+    const PacketRowConfig& config,
+    const PacketRowRuntime& runtime,
+    const std::vector<SolvePacket>& packets,
+    uint32_t block_bytes,
+    SolveValueStorage& intermediate_blocks_out,
     PrecodeSolveStats* stats = nullptr,
     PrecodeSolveResumeState* resume_state = nullptr);
 
@@ -492,6 +610,19 @@ WirehairResult SolvePrecodeSystemForValidatedSystemWithRuntime(
     const std::vector<SolvePacket>& packets,
     uint32_t block_bytes,
     std::vector<uint8_t>& intermediate_blocks_out,
+    PrecodeSolveStats* stats = nullptr,
+    PrecodeSolveResumeState* resume_state = nullptr,
+    size_t resume_persistent_byte_limit = (size_t)-1,
+    PackedBinaryResidualPolicy packed_residual_policy =
+        PackedBinaryResidualPolicy::GenericCheckpoint);
+
+WirehairResult SolvePrecodeSystemForValidatedSystemWithRuntime(
+    const PrecodeSystem& system,
+    const PacketRowConfig& config,
+    const PacketRowRuntime& runtime,
+    const std::vector<SolvePacket>& packets,
+    uint32_t block_bytes,
+    SolveValueStorage& intermediate_blocks_out,
     PrecodeSolveStats* stats = nullptr,
     PrecodeSolveResumeState* resume_state = nullptr,
     size_t resume_persistent_byte_limit = (size_t)-1,
@@ -531,6 +662,17 @@ WirehairResult ResumePrecodeSystem(
     PrecodeSolveStats* stats = nullptr,
     bool allow_insert = true);
 
+WirehairResult ResumePrecodeSystem(
+    const PrecodeSystem& system,
+    const PacketRowConfig& config,
+    uint32_t block_id,
+    const uint8_t* block_data,
+    uint32_t block_bytes,
+    PrecodeSolveResumeState& resume_state,
+    SolveValueStorage& intermediate_blocks_out,
+    PrecodeSolveStats* stats = nullptr,
+    bool allow_insert = true);
+
 /**
     Internal resume path for a decoder-owned, validated immutable system.
 
@@ -548,6 +690,17 @@ WirehairResult ResumePrecodeSystemForValidatedSystem(
     uint32_t block_bytes,
     PrecodeSolveResumeState& resume_state,
     std::vector<uint8_t>& intermediate_blocks_out,
+    PrecodeSolveStats* stats = nullptr,
+    bool allow_insert = true);
+
+WirehairResult ResumePrecodeSystemForValidatedSystem(
+    const PrecodeSystem& system,
+    const PacketRowConfig& config,
+    uint32_t block_id,
+    const uint8_t* block_data,
+    uint32_t block_bytes,
+    PrecodeSolveResumeState& resume_state,
+    SolveValueStorage& intermediate_blocks_out,
     PrecodeSolveStats* stats = nullptr,
     bool allow_insert = true);
 

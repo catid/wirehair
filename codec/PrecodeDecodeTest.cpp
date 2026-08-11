@@ -243,7 +243,12 @@ bool SameStats(
         a.ProjectNanoseconds == b.ProjectNanoseconds &&
         a.ResidualNanoseconds == b.ResidualNanoseconds &&
         a.BackSubNanoseconds == b.BackSubNanoseconds &&
-        a.PacketSeedAttempt == b.PacketSeedAttempt;
+        a.PacketSeedAttempt == b.PacketSeedAttempt &&
+        a.SolveValueArenaBytes == b.SolveValueArenaBytes &&
+        a.SolveValueArenaEagerZeroBytes ==
+            b.SolveValueArenaEagerZeroBytes &&
+        a.SolveValueArenaCommitCopyBytes ==
+            b.SolveValueArenaCommitCopyBytes;
 }
 
 std::vector<uint8_t> MakeMessage(size_t bytes)

@@ -39,6 +39,8 @@ set(_forbidden_symbols
     "PacketRowSeedMultiplier"
     "PacketRowSeedAvalanche"
     "ActiveSolveAllocationFailure"
+    "PoisonSolveValueArena"
+    "ForceFusedBlockInitialization"
     "BinaryPeelOracleUsers"
     "BinaryPeelOracleComparisons"
     "HeavyProjectionOracleUsers"

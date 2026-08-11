@@ -982,11 +982,18 @@ void CheckIsolatedSolveFixture()
     for (uint32_t run = 0u; run < 2u; ++run)
     {
         const IsolatedSolveResult result = fixture.Run();
+        const uint64_t expected_arena_bytes =
+            ((uint64_t)result.Stats.PeeledColumns +
+                result.Stats.InactivatedColumns) * block_bytes;
         Check(result.Result == Wirehair_Success &&
                   result.BytesVerified &&
                   result.ElapsedNanoseconds > 0u &&
-                  result.Stats.PacketRows == K + 4u,
-            "isolated solve invocation was not timed and byte-verified");
+                  result.Stats.PacketRows == K + 4u &&
+                  result.Stats.SolveValueArenaBytes ==
+                      expected_arena_bytes &&
+                  result.Stats.SolveValueArenaEagerZeroBytes == 0u &&
+                  result.Stats.SolveValueArenaCommitCopyBytes == 0u,
+            "isolated solve did not use the owned no-init arena exactly");
     }
 
     // A solve fixture consumes only the frozen K+4 prefix of the shared K+64

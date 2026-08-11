@@ -120,7 +120,12 @@ bool SameNonTimingStats(
             y.BinaryAdjacencyStorageAllocations &&
         x.BlockXors == y.BlockXors &&
         x.BlockMulAdds == y.BlockMulAdds &&
-        x.PacketSeedAttempt == y.PacketSeedAttempt;
+        x.PacketSeedAttempt == y.PacketSeedAttempt &&
+        x.SolveValueArenaBytes == y.SolveValueArenaBytes &&
+        x.SolveValueArenaEagerZeroBytes ==
+            y.SolveValueArenaEagerZeroBytes &&
+        x.SolveValueArenaCommitCopyBytes ==
+            y.SolveValueArenaCommitCopyBytes;
 }
 
 bool AddInt63(uint64_t value, uint64_t& total)

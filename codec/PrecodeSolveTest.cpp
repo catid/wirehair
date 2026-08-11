@@ -137,6 +137,34 @@ private:
     bool Valid;
 };
 
+class SolveValueArenaPoisonScope
+{
+public:
+    SolveValueArenaPoisonScope()
+    {
+        wirehair_v2::SetSolveValueArenaPoisonForTesting(true);
+    }
+
+    ~SolveValueArenaPoisonScope()
+    {
+        wirehair_v2::SetSolveValueArenaPoisonForTesting(false);
+    }
+};
+
+class FusedBlockInitializationScope
+{
+public:
+    FusedBlockInitializationScope()
+    {
+        wirehair_v2::SetFusedBlockInitializationForTesting(true);
+    }
+
+    ~FusedBlockInitializationScope()
+    {
+        wirehair_v2::SetFusedBlockInitializationForTesting(false);
+    }
+};
+
 class SolveAllocationFailureScope
 {
 public:
@@ -185,7 +213,12 @@ bool SameSolveStats(
         a.ProjectNanoseconds == b.ProjectNanoseconds &&
         a.ResidualNanoseconds == b.ResidualNanoseconds &&
         a.BackSubNanoseconds == b.BackSubNanoseconds &&
-        a.PacketSeedAttempt == b.PacketSeedAttempt;
+        a.PacketSeedAttempt == b.PacketSeedAttempt &&
+        a.SolveValueArenaBytes == b.SolveValueArenaBytes &&
+        a.SolveValueArenaEagerZeroBytes ==
+            b.SolveValueArenaEagerZeroBytes &&
+        a.SolveValueArenaCommitCopyBytes ==
+            b.SolveValueArenaCommitCopyBytes;
 }
 
 void ClearSolveTiming(wirehair_v2::PrecodeSolveStats& stats)
@@ -204,6 +237,38 @@ bool SameSolveStatsIgnoringTiming(
     ClearSolveTiming(a);
     ClearSolveTiming(b);
     return SameSolveStats(a, b);
+}
+
+bool SameDeterministicSolveStats(
+    const wirehair_v2::PrecodeSolveStats& a,
+    const wirehair_v2::PrecodeSolveStats& b)
+{
+    return a.PacketRows == b.PacketRows &&
+        a.PeeledColumns == b.PeeledColumns &&
+        a.InactivatedColumns == b.InactivatedColumns &&
+        a.ResidualRows == b.ResidualRows &&
+        a.ResidualRank == b.ResidualRank &&
+        a.BinaryResidualRank == b.BinaryResidualRank &&
+        a.BinaryRowReferences == b.BinaryRowReferences &&
+        a.BinaryRowStorageBytes == b.BinaryRowStorageBytes &&
+        a.BinaryAdjacencyStorageBytes == b.BinaryAdjacencyStorageBytes &&
+        a.BinaryRowStorageAllocations == b.BinaryRowStorageAllocations &&
+        a.BinaryAdjacencyStorageAllocations ==
+            b.BinaryAdjacencyStorageAllocations &&
+        a.BlockXors == b.BlockXors &&
+        a.BlockMulAdds == b.BlockMulAdds &&
+        a.PacketSeedAttempt == b.PacketSeedAttempt &&
+        a.SolveValueArenaBytes == b.SolveValueArenaBytes &&
+        a.SolveValueArenaEagerZeroBytes ==
+            b.SolveValueArenaEagerZeroBytes;
+}
+
+bool SameSolveValueBytes(
+    const wirehair_v2::SolveValueStorage& owned,
+    const std::vector<uint8_t>& compatible)
+{
+    return owned.size() == compatible.size() &&
+        std::equal(owned.begin(), owned.end(), compatible.begin());
 }
 
 bool SameResumeState(
@@ -3576,6 +3641,454 @@ bool CheckResumeSystemBinding(
     return true;
 }
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+bool CheckSolveValueArenaCase(uint32_t block_bytes)
+{
+    const uint32_t K = 64u;
+    wirehair_v2::PrecodeParams params = wirehair_v2::MakeCertifiedParams(
+        K, UINT64_C(0x4e4f494e49545631));
+    wirehair_v2::PacketRowConfig base_config;
+    base_config.PeelSeed = UINT32_C(0x6e6f696e);
+    base_config.MixCount = wirehair_v2::kCertifiedPacketMixCount;
+    wirehair_v2::PrecodeSystem system;
+    wirehair_v2::PacketRowConfig config;
+    if (wirehair_v2::SelectSystematicConfiguration(
+            params, base_config, system, config) != Wirehair_Success)
+    {
+        std::fprintf(stderr,
+            "solve: no-init configuration failed bb=%u\n", block_bytes);
+        return false;
+    }
+
+    const uint32_t P = system.Params.Staircase + system.Params.DenseRows +
+        system.Params.HeavyRows;
+    const uint32_t L = K + P;
+    const uint64_t arena_bytes = (uint64_t)L * block_bytes;
+    wirehair_v2::PacketRowRuntime runtime;
+    if (!runtime.Initialize(K, P, config.MixCount)) {
+        return false;
+    }
+    std::vector<uint8_t> message((size_t)K * block_bytes);
+    for (size_t i = 0u; i < message.size(); ++i) {
+        message[i] = (uint8_t)(i * 197u + (i >> 3) + 41u);
+    }
+    std::vector<wirehair_v2::SolvePacket> systematic(K);
+    for (uint32_t id = 0u; id < K; ++id)
+    {
+        systematic[id].BlockId = id;
+        systematic[id].Data =
+            message.data() + (size_t)id * block_bytes;
+    }
+
+    std::vector<uint8_t> compatible(9u, 0x31u);
+    wirehair_v2::PrecodeSolveStats compatible_stats;
+    WirehairResult compatible_result = Wirehair_Error;
+    {
+        SolveValueArenaPoisonScope poison;
+        compatible_result = wirehair_v2::SolvePrecodeSystem(
+            system, config, systematic, block_bytes,
+            compatible, &compatible_stats);
+    }
+    if (compatible_result != Wirehair_Success ||
+        compatible_stats.SolveValueArenaBytes != arena_bytes ||
+        compatible_stats.SolveValueArenaEagerZeroBytes != 0u ||
+        compatible_stats.SolveValueArenaCommitCopyBytes != arena_bytes ||
+        !wirehair_v2::VerifyPrecodeSolution(
+            system, config, systematic, compatible.data(), block_bytes))
+    {
+        std::fprintf(stderr,
+            "solve: compatibility no-init publication failed bb=%u\n",
+            block_bytes);
+        return false;
+    }
+
+    wirehair_v2::SolveValueStorage owned_nonfused(7u, 0x52u);
+    wirehair_v2::PrecodeSolveStats nonfused_stats;
+    WirehairResult nonfused_result = Wirehair_Error;
+    {
+        SolveValueArenaPoisonScope poison;
+        nonfused_result = wirehair_v2::SolvePrecodeSystem(
+            system, config, systematic, block_bytes,
+            owned_nonfused, &nonfused_stats);
+    }
+    wirehair_v2::SolveValueStorage owned_fused(11u, 0x73u);
+    wirehair_v2::PrecodeSolveStats fused_stats;
+    WirehairResult fused_result = Wirehair_Error;
+    {
+        SolveValueArenaPoisonScope poison;
+        FusedBlockInitializationScope fused;
+        fused_result = wirehair_v2::SolvePrecodeSystem(
+            system, config, systematic, block_bytes,
+            owned_fused, &fused_stats);
+    }
+    if (nonfused_result != Wirehair_Success ||
+        fused_result != Wirehair_Success ||
+        !SameSolveValueBytes(owned_nonfused, compatible) ||
+        !SameSolveValueBytes(owned_fused, compatible) ||
+        !SameDeterministicSolveStats(nonfused_stats, compatible_stats) ||
+        !SameDeterministicSolveStats(fused_stats, compatible_stats) ||
+        nonfused_stats.SolveValueArenaCommitCopyBytes != 0u ||
+        fused_stats.SolveValueArenaCommitCopyBytes != 0u)
+    {
+        std::fprintf(stderr,
+            "solve: owned poisoned initialization mismatch bb=%u\n",
+            block_bytes);
+        return false;
+    }
+
+    if (compatible_stats.InactivatedColumns == 0u ||
+        compatible_stats.InactivatedColumns > 64u)
+    {
+        std::fprintf(stderr,
+            "solve: no-init projection fixture is not one-word bb=%u R=%u\n",
+            block_bytes, compatible_stats.InactivatedColumns);
+        return false;
+    }
+    wirehair_v2::SolveValueStorage forced_general;
+    wirehair_v2::SolveValueStorage forced_single;
+    wirehair_v2::PrecodeSolveStats general_stats;
+    wirehair_v2::PrecodeSolveStats single_stats;
+    WirehairResult general_result = Wirehair_Error;
+    WirehairResult single_result = Wirehair_Error;
+    {
+        SolveValueArenaPoisonScope poison;
+        FusedBlockInitializationScope fused;
+        SingleWordProjectionModeScope general(-1);
+        if (!general.IsValid()) {
+            return false;
+        }
+        general_result = wirehair_v2::SolvePrecodeSystem(
+            system, config, systematic, block_bytes,
+            forced_general, &general_stats);
+    }
+    {
+        SolveValueArenaPoisonScope poison;
+        FusedBlockInitializationScope fused;
+        SingleWordProjectionModeScope single(1);
+        if (!single.IsValid()) {
+            return false;
+        }
+        single_result = wirehair_v2::SolvePrecodeSystem(
+            system, config, systematic, block_bytes,
+            forced_single, &single_stats);
+    }
+    if (general_result != Wirehair_Success ||
+        single_result != Wirehair_Success ||
+        !SameSolveValueBytes(forced_general, compatible) ||
+        !SameSolveValueBytes(forced_single, compatible) ||
+        !SameDeterministicSolveStats(general_stats, single_stats) ||
+        general_stats.SolveValueArenaCommitCopyBytes != 0u ||
+        single_stats.SolveValueArenaCommitCopyBytes != 0u)
+    {
+        std::fprintf(stderr,
+            "solve: poisoned general/single-word mismatch bb=%u\n",
+            block_bytes);
+        return false;
+    }
+
+    // Current compatibility ABI must reject zero width before allocation and
+    // leave both output and diagnostics untouched.
+    std::vector<uint8_t> zero_output(5u, 0x84u);
+    const std::vector<uint8_t> zero_before = zero_output;
+    wirehair_v2::PrecodeSolveStats zero_stats;
+    zero_stats.PacketRows = UINT32_C(0x13579bdf);
+    const wirehair_v2::PrecodeSolveStats zero_stats_before = zero_stats;
+    if (wirehair_v2::SolvePrecodeSystem(
+            system, config, systematic, 0u,
+            zero_output, &zero_stats) != Wirehair_InvalidInput ||
+        zero_output != zero_before ||
+        !SameSolveStats(zero_stats, zero_stats_before))
+    {
+        std::fprintf(stderr,
+            "solve: zero-width compatibility contract changed bb=%u\n",
+            block_bytes);
+        return false;
+    }
+
+    std::vector<wirehair_v2::SolvePacket> null_packet = systematic;
+    null_packet[K / 2u].Data = nullptr;
+    wirehair_v2::SolveValueStorage null_output(5u, 0x95u);
+    const std::vector<uint8_t> null_before(
+        null_output.begin(), null_output.end());
+    if (wirehair_v2::SolvePrecodeSystem(
+            system, config, null_packet, block_bytes, null_output) !=
+            Wirehair_InvalidInput ||
+        !SameSolveValueBytes(null_output, null_before))
+    {
+        std::fprintf(stderr,
+            "solve: owned null-packet contract changed bb=%u\n",
+            block_bytes);
+        return false;
+    }
+
+    using wirehair_v2::test::SolveAllocationFailureException;
+    using wirehair_v2::test::SolveAllocationFailurePoint;
+    const SolveAllocationFailureException failure_exceptions[] = {
+        SolveAllocationFailureException::BadAlloc,
+        SolveAllocationFailureException::LengthError
+    };
+    for (SolveAllocationFailureException exception : failure_exceptions)
+    {
+        wirehair_v2::SolveValueStorage oom_output(5u, 0xa6u);
+        const std::vector<uint8_t> oom_before(
+            oom_output.begin(), oom_output.end());
+        wirehair_v2::PrecodeSolveResumeState oom_resume;
+        oom_resume.Active = true;
+        oom_resume.SourceCount = UINT32_C(0x2468ace0);
+        const wirehair_v2::PrecodeSolveResumeState oom_resume_before =
+            oom_resume;
+        wirehair_v2::PrecodeSolveStats oom_stats;
+        oom_stats.PacketRows = UINT32_C(0x89abcdef);
+        const wirehair_v2::PrecodeSolveStats oom_stats_before = oom_stats;
+        WirehairResult result = Wirehair_Error;
+        {
+            SolveAllocationFailureScope failure(
+                SolveAllocationFailurePoint::SolveValueArenaAllocation,
+                exception);
+            result = wirehair_v2::SolvePrecodeSystem(
+                system, config, systematic, block_bytes,
+                oom_output, &oom_stats, &oom_resume);
+            if (wirehair_v2::test::
+                    SolveAllocationFailureHitsForTesting() != 1u)
+            {
+                return false;
+            }
+        }
+        if (result != Wirehair_OOM ||
+            !SameSolveValueBytes(oom_output, oom_before) ||
+            !SameResumeState(oom_resume, oom_resume_before) ||
+            !SameSolveStats(oom_stats, oom_stats_before))
+        {
+            std::fprintf(stderr,
+                "solve: owned arena OOM changed state bb=%u exception=%u\n",
+                block_bytes, (unsigned)exception);
+            return false;
+        }
+    }
+
+    std::vector<wirehair_v2::SolvePacket> deficient(K);
+    for (wirehair_v2::SolvePacket& packet : deficient)
+    {
+        packet.BlockId = 0u;
+        packet.Data = message.data();
+    }
+    wirehair_v2::SolveValueStorage owned_output(13u, 0xb7u);
+    const std::vector<uint8_t> owned_sentinel(
+        owned_output.begin(), owned_output.end());
+    wirehair_v2::PrecodeSolveResumeState resume;
+    wirehair_v2::PrecodeSolveStats resume_stats;
+    WirehairResult deficient_result = Wirehair_Error;
+    {
+        SolveValueArenaPoisonScope poison;
+        FusedBlockInitializationScope fused;
+        deficient_result = wirehair_v2::SolvePrecodeSystem(
+            system, config, deficient, block_bytes,
+            owned_output, &resume_stats, &resume);
+    }
+    if (deficient_result != Wirehair_NeedMore || !resume.Active ||
+        !SameSolveValueBytes(owned_output, owned_sentinel) ||
+        resume.Rank >= resume.InactiveCount ||
+        resume_stats.SolveValueArenaBytes != arena_bytes ||
+        resume_stats.SolveValueArenaEagerZeroBytes != 0u ||
+        resume_stats.SolveValueArenaCommitCopyBytes != 0u)
+    {
+        std::fprintf(stderr,
+            "solve: owned poisoned checkpoint failed bb=%u\n", block_bytes);
+        return false;
+    }
+    for (uint32_t column : resume.InactiveColumns)
+    {
+        const uint8_t* value = resume.Values.data() +
+            (size_t)column * block_bytes;
+        if (!std::all_of(
+                value, value + block_bytes,
+                [](uint8_t byte) { return byte == 0u; }))
+        {
+            std::fprintf(stderr,
+                "solve: checkpoint inactive zero missing bb=%u column=%u\n",
+                block_bytes, column);
+            return false;
+        }
+    }
+    const wirehair_v2::PrecodeSolveResumeState resume_copy = resume;
+    if (!SameResumeState(resume_copy, resume)) {
+        return false;
+    }
+
+    // A checkpoint that cannot fit must preserve the caller's state and avoid
+    // paying the allocator-crossing value copy.
+    wirehair_v2::PrecodeSolveResumeState rejected_resume;
+    rejected_resume.Active = true;
+    rejected_resume.SourceCount = UINT32_C(0x10293847);
+    const wirehair_v2::PrecodeSolveResumeState rejected_before =
+        rejected_resume;
+    wirehair_v2::SolveValueStorage rejected_output(3u, 0xc8u);
+    const std::vector<uint8_t> rejected_output_before(
+        rejected_output.begin(), rejected_output.end());
+    WirehairResult rejected_result = Wirehair_Error;
+    {
+        SolveValueArenaPoisonScope poison;
+        rejected_result =
+            wirehair_v2::SolvePrecodeSystemForValidatedSystemWithRuntime(
+                system, config, runtime, deficient, block_bytes,
+                rejected_output, nullptr, &rejected_resume, 0u,
+                wirehair_v2::PackedBinaryResidualPolicy::DecoderReceive);
+    }
+    if (rejected_result != Wirehair_NeedMore ||
+        !SameResumeState(rejected_resume, rejected_before) ||
+        !SameSolveValueBytes(rejected_output, rejected_output_before))
+    {
+        std::fprintf(stderr,
+            "solve: budget-rejected checkpoint changed state bb=%u\n",
+            block_bytes);
+        return false;
+    }
+
+    // Re-poison inactive checkpoint constants.  Duplicate/corruption checks
+    // and eventual completion must treat them as structural zeroes.
+    for (uint32_t column : resume.InactiveColumns) {
+        std::memset(
+            resume.Values.data() + (size_t)column * block_bytes,
+            0xa5,
+            block_bytes);
+    }
+    wirehair_v2::SolveValueStorage ignored_output(4u, 0xd9u);
+    const std::vector<uint8_t> ignored_before(
+        ignored_output.begin(), ignored_output.end());
+    wirehair_v2::PrecodeSolveResumeState state_before = resume;
+    if (wirehair_v2::ResumePrecodeSystem(
+            system, config, 0u, message.data(), block_bytes,
+            resume, ignored_output, nullptr, false) != Wirehair_NeedMore ||
+        !SameResumeState(resume, state_before) ||
+        !SameSolveValueBytes(ignored_output, ignored_before))
+    {
+        std::fprintf(stderr,
+            "solve: poisoned inactive duplicate read bb=%u\n", block_bytes);
+        return false;
+    }
+    std::vector<uint8_t> corrupt(
+        message.begin(), message.begin() + block_bytes);
+    corrupt[0] ^= 1u;
+    state_before = resume;
+    if (wirehair_v2::ResumePrecodeSystem(
+            system, config, 0u, corrupt.data(), block_bytes,
+            resume, ignored_output, nullptr, false) != Wirehair_Error ||
+        !SameResumeState(resume, state_before) ||
+        !SameSolveValueBytes(ignored_output, ignored_before))
+    {
+        std::fprintf(stderr,
+            "solve: poisoned inactive corruption read bb=%u\n", block_bytes);
+        return false;
+    }
+
+    WirehairResult resume_result = Wirehair_NeedMore;
+    bool checked_resume_oom = false;
+    for (uint32_t id = 1u; id < K; ++id)
+    {
+        if (!checked_resume_oom &&
+            resume.Rank + 1u == resume.InactiveCount)
+        {
+            for (SolveAllocationFailureException exception :
+                    failure_exceptions)
+            {
+                const wirehair_v2::PrecodeSolveResumeState before = resume;
+                const std::vector<uint8_t> output_before(
+                    owned_output.begin(), owned_output.end());
+                wirehair_v2::PrecodeSolveStats oom_stats;
+                WirehairResult oom_result = Wirehair_Error;
+                {
+                    SolveAllocationFailureScope failure(
+                        SolveAllocationFailurePoint::
+                            SolveOwnedResumeOutputAllocation,
+                        exception);
+                    oom_result = wirehair_v2::ResumePrecodeSystem(
+                        system, config, id,
+                        message.data() + (size_t)id * block_bytes,
+                        block_bytes, resume, owned_output,
+                        &oom_stats, true);
+                    if (wirehair_v2::test::
+                            SolveAllocationFailureHitsForTesting() != 1u)
+                    {
+                        return false;
+                    }
+                }
+                if (oom_result != Wirehair_OOM ||
+                    !SameResumeState(resume, before) ||
+                    !SameSolveValueBytes(owned_output, output_before) ||
+                    !SameSolveStats(oom_stats, before.Stats))
+                {
+                    std::fprintf(stderr,
+                        "solve: owned resume OOM changed state bb=%u "
+                        "exception=%u\n",
+                        block_bytes, (unsigned)exception);
+                    return false;
+                }
+            }
+            checked_resume_oom = true;
+        }
+        resume_result = wirehair_v2::ResumePrecodeSystem(
+            system, config, id,
+            message.data() + (size_t)id * block_bytes,
+            block_bytes, resume, owned_output, &resume_stats, true);
+        if (id + 1u < K && resume_result != Wirehair_NeedMore) {
+            return false;
+        }
+    }
+    if (resume_result != Wirehair_Success || resume.Active ||
+        !checked_resume_oom ||
+        !SameSolveValueBytes(owned_output, compatible) ||
+        resume_stats.SolveValueArenaCommitCopyBytes != arena_bytes)
+    {
+        std::fprintf(stderr,
+            "solve: owned poisoned resume failed bb=%u result=%d\n",
+            block_bytes, (int)resume_result);
+        return false;
+    }
+
+    // The established public std::vector resume ABI retains its zero-copy
+    // checkpoint transfer even though owned resume must cross allocators.
+    std::vector<uint8_t> vector_output(7u, 0xeau);
+    const std::vector<uint8_t> vector_sentinel = vector_output;
+    wirehair_v2::PrecodeSolveResumeState vector_resume;
+    wirehair_v2::PrecodeSolveStats vector_stats;
+    if (wirehair_v2::SolvePrecodeSystem(
+            system, config, deficient, block_bytes,
+            vector_output, &vector_stats, &vector_resume) !=
+            Wirehair_NeedMore ||
+        vector_output != vector_sentinel || !vector_resume.Active)
+    {
+        return false;
+    }
+    WirehairResult vector_result = Wirehair_NeedMore;
+    for (uint32_t id = 1u; id < K; ++id) {
+        vector_result = wirehair_v2::ResumePrecodeSystem(
+            system, config, id,
+            message.data() + (size_t)id * block_bytes,
+            block_bytes, vector_resume, vector_output,
+            &vector_stats, true);
+    }
+    if (vector_result != Wirehair_Success || vector_resume.Active ||
+        vector_output != compatible ||
+        vector_stats.SolveValueArenaCommitCopyBytes != 0u)
+    {
+        std::fprintf(stderr,
+            "solve: compatibility resume transfer changed bb=%u\n",
+            block_bytes);
+        return false;
+    }
+
+    std::printf("solve value no-init arena bb=%u: PASS\n", block_bytes);
+    return true;
+}
+
+bool CheckSolveValueArena()
+{
+    return CheckSolveValueArenaCase(17u) &&
+        CheckSolveValueArenaCase(
+            wirehair_v2::kGenericPackedBinaryResidualMinBlockBytes);
+}
+#endif
+
 bool CheckIncrementalResumeCase(uint32_t block_bytes)
 {
     const uint32_t K = 64u;
@@ -6888,6 +7401,14 @@ int main(int argc, char** argv)
     static_assert(
         wirehair_v2::kPacketRowContractVersion == 4u,
         "shipping packet-row contract must be version 4");
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    if (argc == 2 &&
+        std::strcmp(argv[1], "--solve-arena-oracle") == 0)
+    {
+        return CheckSolveValueArena() &&
+            CheckIncrementalResumeCase(17u) ? 0 : 1;
+    }
+#endif
     if (argc == 3)
     {
         const uint32_t K = (uint32_t)std::strtoul(argv[1], nullptr, 10);
@@ -7092,6 +7613,7 @@ int main(int argc, char** argv)
     ok = CheckBinaryQuotientBoundary() && ok;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     ok = CheckPackedBinaryResidualDifferential() && ok;
+    ok = CheckSolveValueArena() && ok;
 #endif
     ok = CheckConcurrentCoefficientCaches() && ok;
     ok = CheckIncrementalResume() && ok;

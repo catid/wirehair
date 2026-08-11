@@ -230,7 +230,7 @@ bool VerifyWh2DecodedBytes(
     const wirehair_v2::PacketRowRuntime& runtime,
     uint32_t block_bytes,
     const std::vector<uint8_t>& expected_source,
-    const std::vector<uint8_t>& intermediate)
+    const wirehair_v2::SolveValueStorage& intermediate)
 {
     const uint32_t K = system.Params.BlockCount;
     size_t source_bytes = 0u;
@@ -326,7 +326,7 @@ struct NativeArm::Impl
     wirehair_v2::PrecodeSystem System = {};
     wirehair_v2::PacketRowConfig PacketConfig = {};
     wirehair_v2::PacketRowRuntime PacketRuntime = {};
-    std::vector<uint8_t> Intermediate;
+    wirehair_v2::SolveValueStorage Intermediate;
     bool Initialized = false;
 };
 
@@ -587,7 +587,7 @@ WirehairResult NativeArm::InitializeOwnedSourceAfterGlobalInit(
         }
 
         wirehair_v2::PrecodeSolveStats stats;
-        std::vector<uint8_t> intermediate;
+        wirehair_v2::SolveValueStorage intermediate;
         const WirehairResult solve_result =
             wirehair_v2::SolvePrecodeSystemForValidatedSystemWithRuntime(
                 system,
@@ -854,7 +854,7 @@ RecoveryCellResult NativeRecoveryFixture::RunNested() const
                         (size_t)packet_index * arm.BlockBytes;
                     packets.push_back(packet);
                 }
-                std::vector<uint8_t> intermediate;
+                wirehair_v2::SolveValueStorage intermediate;
                 const WirehairResult solve_result =
                     wirehair_v2::
                         SolvePrecodeSystemForValidatedSystemWithRuntime(
@@ -1010,7 +1010,7 @@ WirehairResult NativeTimingControlProbe::Initialize(
             systematic[block_id].BlockId = block_id;
             systematic[block_id].Data = &zero;
         }
-        std::vector<uint8_t> intermediate;
+        wirehair_v2::SolveValueStorage intermediate;
         const WirehairResult construction_result =
             wirehair_v2::SolvePrecodeSystemForValidatedSystemWithRuntime(
                 next->HeadSystem,
@@ -1087,7 +1087,7 @@ NativeTimingControlQualificationResult NativeTimingControlProbe::Run(
             solve_packets[i].BlockId = packet_ids[i];
             solve_packets[i].Data = &zero;
         }
-        std::vector<uint8_t> intermediate;
+        wirehair_v2::SolveValueStorage intermediate;
         result.Wirehair2HeadResult =
             wirehair_v2::SolvePrecodeSystemForValidatedSystemWithRuntime(
                 ImplValue->HeadSystem,
@@ -1678,7 +1678,7 @@ IsolatedSolveResult NativeSolveFixture::Run() const
     try
     {
         const NativeArm::Impl& arm = *ImplValue->ArmState;
-        std::vector<uint8_t> intermediate;
+        wirehair_v2::SolveValueStorage intermediate;
         wirehair_v2::PrecodeSolveStats stats;
         const std::chrono::steady_clock::time_point start =
             std::chrono::steady_clock::now();

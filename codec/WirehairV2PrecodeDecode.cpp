@@ -810,7 +810,7 @@ WirehairResult MessagePrecodeDecoder::AttemptSolve()
             {
                 return LastSolveResult;
             }
-            std::vector<uint8_t> intermediate;
+            SolveValueStorage intermediate;
             // Seed from the last committed attempt as a defense for every
             // early-return path.  ResumePrecodeSystem also republishes the
             // checkpoint counters on allocation failure, so a retryable OOM
@@ -873,7 +873,7 @@ WirehairResult MessagePrecodeDecoder::AttemptSolve()
         DecoderReceiveCounters.ColdSolvePayloadBytes +=
             ReceivedBlockStorage.size();
 #endif
-        std::vector<uint8_t> intermediate;
+        SolveValueStorage intermediate;
         // A cold solve has the same transactional stats contract: preserve
         // the last committed counters if the solver cannot allocate.
         PrecodeSolveStats solve_stats = SolveStatsValue;
@@ -1052,7 +1052,7 @@ MessagePrecodeDecoder::MaterializeDirectSystematic()
             ReceivedBlockStorage.size();
 #endif
 
-        std::vector<uint8_t> intermediate;
+        SolveValueStorage intermediate;
         PrecodeSolveStats solve_stats = SolveStatsValue;
         ++SolveAttemptCountValue;
         // Keep the direct representation live until the complete ordinary
