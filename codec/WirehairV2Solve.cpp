@@ -2202,6 +2202,25 @@ bool RowIsZero(const uint8_t* data, uint32_t bytes)
 
 } // namespace
 
+namespace internal {
+
+PacketRowEquationIdentity PacketRowEquationIdentitySnapshot() noexcept
+{
+    return CurrentPacketRowEquationIdentity();
+}
+
+void PrecodeSystemFingerprint(
+    const PrecodeSystem& system,
+    uint64_t& first,
+    uint64_t& second) noexcept
+{
+    const auto fingerprint = FingerprintPrecodeSystem(system);
+    first = fingerprint.First;
+    second = fingerprint.Second;
+}
+
+} // namespace internal
+
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 bool SetPacketRowSeedMultiplierForTesting(uint32_t multiplier)
 {

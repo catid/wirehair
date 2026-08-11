@@ -6,6 +6,8 @@
 #include "WirehairV2Plan.h"
 
 #include <algorithm>
+#include <array>
+#include <chrono>
 #include <cstring>
 #include <iterator>
 #include <limits>
@@ -922,6 +924,51 @@ WirehairResult PrecodeEncoder::InitializeSolvedSystem(
     }
 }
 
+WirehairResult PrecodeEncoder::InitializeSolvedGeneratorPlan(
+    const PrecodeParams& params,
+    const PacketRowConfig& packet_config,
+    const PacketRowRuntime& packet_runtime,
+    std::vector<uint8_t>& intermediate_blocks,
+    uint32_t block_bytes)
+{
+    const uint64_t precode_count_wide =
+        (uint64_t)params.Staircase + params.DenseRows + params.HeavyRows;
+    const uint64_t column_count_wide =
+        (uint64_t)params.BlockCount + precode_count_wide;
+    if (params.BlockCount < 2u || params.BlockCount > 8u ||
+        block_bytes < 1024u || block_bytes > 2048u ||
+        (block_bytes & 63u) != 0u || precode_count_wide > UINT32_MAX ||
+        !IsPacketRowDomainValid(
+            params.BlockCount,
+            (uint32_t)precode_count_wide,
+            packet_config.MixCount) ||
+        !packet_runtime.IsValidFor(
+            params.BlockCount,
+            (uint32_t)precode_count_wide,
+            packet_config.MixCount) ||
+        column_count_wide >
+            (uint64_t)std::numeric_limits<size_t>::max() / block_bytes ||
+        intermediate_blocks.size() !=
+            (size_t)column_count_wide * block_bytes)
+    {
+        return Wirehair_InvalidInput;
+    }
+
+    PrecodeEncoder next;
+    next.SystemValue.Params = params;
+    next.RowSeed = packet_config.PeelSeed;
+    next.MixCount = packet_config.MixCount;
+    next.BlockBytesValue = block_bytes;
+    next.PacketConfigValue = packet_config;
+    next.PacketRuntimeValue = packet_runtime;
+    next.SolvedIntermediateStorage.swap(intermediate_blocks);
+    next.SourceBlocks = next.SolvedIntermediateStorage.data();
+    next.UsesPacketContract = true;
+    next.Initialized = true;
+    Swap(next);
+    return Wirehair_Success;
+}
+
 bool PrecodeEncoder::Initialize(
     const PrecodeSystem& system,
     const PeelingCodec& codec,
@@ -1341,6 +1388,374 @@ void BindMessagePrecodeProfile(
     profile.V2RecoveryRowSeedSalt = options.RecoveryRowSeedSalt;
 }
 
+namespace {
+
+bool IsSystematicGeneratorPlanDomain(uint32_t K, uint32_t block_bytes)
+{
+    return K >= 2u && K <= 8u && block_bytes >= 1024u &&
+        block_bytes <= 2048u && (block_bytes & 63u) == 0u;
+}
+
+bool HasActiveGFNI()
+{
+    // The selected GF256 backend is immutable after initialization.  Plan
+    // replay is deliberately tiny, so avoid paying the gf256_init/call_once
+    // feature-query guard for every encoder that reuses the same plan.
+    static const bool active = []() {
+        gf256_x86_cpu_features features = {};
+        gf256_get_active_x86_cpu_features(&features);
+        return features.GFNI != 0;
+    }();
+    return active;
+}
+
+bool SamePrecodeParamsForGeneratorPlan(
+    const PrecodeParams& a,
+    const PrecodeParams& b)
+{
+    return a.BlockCount == b.BlockCount &&
+        a.Staircase == b.Staircase &&
+        a.DenseRows == b.DenseRows &&
+        a.HeavyRows == b.HeavyRows &&
+        a.SourceHits == b.SourceHits &&
+        a.DenseIdentityCorner == b.DenseIdentityCorner &&
+        a.HeavyFamily == b.HeavyFamily &&
+        a.DenseAnchors == b.DenseAnchors &&
+        a.Seed == b.Seed;
+}
+
+bool SamePacketConfigForGeneratorPlan(
+    const PacketRowConfig& a,
+    const PacketRowConfig& b)
+{
+    return a.PeelSeed == b.PeelSeed && a.MixCount == b.MixCount;
+}
+
+bool SamePacketEquationForGeneratorPlan(
+    const PacketRowEquationIdentity& a,
+    const PacketRowEquationIdentity& b)
+{
+    return a.BlockIdMultiplier == b.BlockIdMultiplier &&
+        a.BlockIdAvalanche == b.BlockIdAvalanche &&
+        a.OddPeelSeedXor == b.OddPeelSeedXor;
+}
+
+bool SameSystematicGeneratorPlanKey(
+    const SystematicGeneratorPlanKey& a,
+    const SystematicGeneratorPlanKey& b)
+{
+    return a.PrecodeContract == b.PrecodeContract &&
+        a.PacketRowContract == b.PacketRowContract &&
+        a.SourceBlockCount == b.SourceBlockCount &&
+        a.BlockBytes == b.BlockBytes &&
+        a.PacketSeedAttempt == b.PacketSeedAttempt &&
+        a.RecoveryMixCount == b.RecoveryMixCount &&
+        a.DenseIdentityCorner == b.DenseIdentityCorner &&
+        a.PrecodeSeedSalt == b.PrecodeSeedSalt &&
+        a.RecoveryRowSeedSalt == b.RecoveryRowSeedSalt;
+}
+
+SystematicGeneratorPlanKey MakeSystematicGeneratorPlanKey(
+    const SeedProfile& profile,
+    const MessagePrecodeEncoderOptions& options,
+    uint32_t block_bytes)
+{
+    SystematicGeneratorPlanKey key;
+    key.PrecodeContract = PrecodeContractVersion();
+    key.PacketRowContract = kPacketRowContractVersion;
+    key.SourceBlockCount = profile.BlockCount;
+    key.BlockBytes = block_bytes;
+    key.PacketSeedAttempt = profile.V2SeedAttempt;
+    key.RecoveryMixCount = options.RecoveryMixCount;
+    key.DenseIdentityCorner = options.DenseIdentityCorner ? 1u : 0u;
+    key.PrecodeSeedSalt = options.PrecodeSeedSalt;
+    key.RecoveryRowSeedSalt = options.RecoveryRowSeedSalt;
+    return key;
+}
+
+} // namespace
+
+WirehairResult SystematicGeneratorPlan::Build(
+    const SeedProfile& selected_profile,
+    const MessagePrecodeEncoderOptions* requested_options,
+    std::shared_ptr<const SystematicGeneratorPlan>& plan_out)
+{
+    if (!selected_profile.V2SeedSelected ||
+        selected_profile.V2SeedAttempt >= kMaxPacketSeedAttempts ||
+        selected_profile.BlockBytes == 0u ||
+        !IsSystematicGeneratorPlanDomain(
+            selected_profile.BlockCount, selected_profile.BlockBytes))
+    {
+        return Wirehair_InvalidInput;
+    }
+    if (gf256_init() != 0) {
+        return Wirehair_UnsupportedPlatform;
+    }
+    if (!HasActiveGFNI()) {
+        return Wirehair_UnsupportedPlatform;
+    }
+
+    MessagePrecodeEncoderOptions options;
+    PrecodeParams params;
+    PacketRowConfig packet_config;
+    if (!ResolveMessagePrecodeOptions(
+            selected_profile, requested_options, options) ||
+        !ResolveMessagePrecodeConfiguration(
+            selected_profile, options, params, packet_config) ||
+        params.BlockCount != selected_profile.BlockCount)
+    {
+        return Wirehair_InvalidInput;
+    }
+
+    try
+    {
+        typedef std::chrono::steady_clock PlanClock;
+        const PlanClock::time_point build_start = PlanClock::now();
+
+        GuardedAllocation();
+        PrecodeSystem system;
+        if (!BuildPrecodeSystem(params, system)) {
+            return Wirehair_InvalidInput;
+        }
+        const uint64_t precode_count_wide =
+            (uint64_t)params.Staircase + params.DenseRows + params.HeavyRows;
+        const uint64_t column_count_wide =
+            (uint64_t)params.BlockCount + precode_count_wide;
+        if (precode_count_wide > UINT32_MAX ||
+            column_count_wide > UINT32_MAX)
+        {
+            return Wirehair_InvalidInput;
+        }
+        const uint32_t K = params.BlockCount;
+        const uint32_t L = (uint32_t)column_count_wide;
+        PacketRowRuntime runtime;
+        if (!runtime.Initialize(
+                K, (uint32_t)precode_count_wide, packet_config.MixCount))
+        {
+            return Wirehair_InvalidInput;
+        }
+
+        std::array<uint8_t, 8u * 8u> identity = {};
+        GuardedAllocation();
+        std::vector<SolvePacket> packets(K);
+        for (uint32_t block_id = 0u; block_id < K; ++block_id)
+        {
+            identity[(size_t)block_id * K + block_id] = 1u;
+            packets[block_id].BlockId = block_id;
+            packets[block_id].Data = identity.data() + (size_t)block_id * K;
+        }
+
+        GuardedAllocation();
+        std::vector<uint8_t> generator;
+        PrecodeSolveStats solve_stats;
+        const WirehairResult solve_result =
+            SolvePrecodeSystemForValidatedSystemWithRuntime(
+                system,
+                packet_config,
+                runtime,
+                packets,
+                K,
+                generator,
+                &solve_stats);
+        if (solve_result == Wirehair_NeedMore ||
+            solve_result == Wirehair_Error)
+        {
+            return ClassifyExactSystematicConstructionFailure(
+                system, packet_config, runtime, solve_result);
+        }
+        if (solve_result != Wirehair_Success) {
+            return solve_result;
+        }
+        if (generator.size() != (size_t)L * K) {
+            return Wirehair_Error;
+        }
+        solve_stats.PacketSeedAttempt = selected_profile.V2SeedAttempt;
+
+        uint64_t fingerprint0 = 0u;
+        uint64_t fingerprint1 = 0u;
+        internal::PrecodeSystemFingerprint(
+            system, fingerprint0, fingerprint1);
+        const PacketRowEquationIdentity packet_equation =
+            internal::PacketRowEquationIdentitySnapshot();
+
+        GuardedAllocation();
+        std::shared_ptr<SystematicGeneratorPlan> next(
+            new SystematicGeneratorPlan());
+        next->KeyValue = MakeSystematicGeneratorPlanKey(
+            selected_profile, options, selected_profile.BlockBytes);
+        next->ParamsValue = params;
+        next->PacketConfigValue = packet_config;
+        next->RuntimeValue = runtime;
+        next->PacketEquationValue = packet_equation;
+        next->GraphFingerprint0Value = fingerprint0;
+        next->GraphFingerprint1Value = fingerprint1;
+        next->ColumnBlockCountValue = L;
+        next->Generator.swap(generator);
+        next->BuildStatsValue.Solve = solve_stats;
+        next->BuildStatsValue.GeneratorBytes = next->Generator.size();
+        next->BuildStatsValue.BuildNanoseconds = (uint64_t)
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                PlanClock::now() - build_start).count();
+        plan_out = std::move(next);
+        return Wirehair_Success;
+    }
+    catch (const std::bad_alloc&) {
+        return Wirehair_OOM;
+    }
+    catch (const std::length_error&) {
+        return Wirehair_OOM;
+    }
+}
+
+bool SystematicGeneratorPlan::Matches(
+    const SeedProfile& selected_profile,
+    const MessagePrecodeEncoderOptions& options,
+    uint32_t block_bytes) const noexcept
+{
+    if (!selected_profile.V2SeedSelected ||
+        selected_profile.BlockCount != KeyValue.SourceBlockCount ||
+        selected_profile.BlockBytes != block_bytes ||
+        !IsSystematicGeneratorPlanDomain(
+            selected_profile.BlockCount, block_bytes))
+    {
+        return false;
+    }
+
+    PrecodeParams params;
+    PacketRowConfig packet_config;
+    if (!ResolveMessagePrecodeConfiguration(
+            selected_profile, options, params, packet_config))
+    {
+        return false;
+    }
+    const SystematicGeneratorPlanKey key =
+        MakeSystematicGeneratorPlanKey(
+            selected_profile, options, block_bytes);
+    return SameSystematicGeneratorPlanKey(key, KeyValue) &&
+        SamePrecodeParamsForGeneratorPlan(params, ParamsValue) &&
+        SamePacketConfigForGeneratorPlan(
+            packet_config, PacketConfigValue) &&
+        SamePacketEquationForGeneratorPlan(
+            internal::PacketRowEquationIdentitySnapshot(),
+            PacketEquationValue);
+}
+
+bool SystematicGeneratorPlan::IsInternallyValid() const noexcept
+{
+    const uint64_t precode_count_wide =
+        (uint64_t)ParamsValue.Staircase +
+        ParamsValue.DenseRows + ParamsValue.HeavyRows;
+    const uint64_t column_count_wide =
+        (uint64_t)ParamsValue.BlockCount + precode_count_wide;
+    return KeyValue.PrecodeContract == PrecodeContractVersion() &&
+        KeyValue.PacketRowContract == kPacketRowContractVersion &&
+        IsSystematicGeneratorPlanDomain(
+            KeyValue.SourceBlockCount, KeyValue.BlockBytes) &&
+        KeyValue.SourceBlockCount == ParamsValue.BlockCount &&
+        KeyValue.RecoveryMixCount == PacketConfigValue.MixCount &&
+        KeyValue.DenseIdentityCorner ==
+            (ParamsValue.DenseIdentityCorner ? 1u : 0u) &&
+        precode_count_wide <= UINT32_MAX &&
+        column_count_wide <= UINT32_MAX &&
+        ColumnBlockCountValue == (uint32_t)column_count_wide &&
+        RuntimeValue.IsValidFor(
+            ParamsValue.BlockCount,
+            (uint32_t)precode_count_wide,
+            PacketConfigValue.MixCount) &&
+        Generator.size() ==
+            (size_t)ColumnBlockCountValue * ParamsValue.BlockCount &&
+        BuildStatsValue.GeneratorBytes == Generator.size() &&
+        BuildStatsValue.Solve.PacketSeedAttempt ==
+            KeyValue.PacketSeedAttempt;
+}
+
+WirehairResult SystematicGeneratorPlan::Replay(
+    const void* message,
+    uint64_t message_bytes,
+    std::vector<uint8_t>& intermediate_out,
+    SystematicGeneratorPlanReplayStats& stats_out) const
+{
+    uint32_t block_count = 0u;
+    if (!message ||
+        !MessageBlockCount(message_bytes, KeyValue.BlockBytes, block_count) ||
+        block_count != KeyValue.SourceBlockCount ||
+        !IsSystematicGeneratorPlanDomain(block_count, KeyValue.BlockBytes))
+    {
+        return Wirehair_InvalidInput;
+    }
+    if (!IsInternallyValid()) {
+        return Wirehair_Error;
+    }
+    const uint64_t output_bytes_wide =
+        (uint64_t)ColumnBlockCountValue * KeyValue.BlockBytes;
+    if (output_bytes_wide > (uint64_t)std::numeric_limits<size_t>::max()) {
+        return Wirehair_InvalidInput;
+    }
+
+    try
+    {
+        const uint8_t* const message_data =
+            static_cast<const uint8_t*>(message);
+        std::array<const void*, 8u> sources;
+        alignas(64) std::array<uint8_t, 2048u> padded_final;
+        const uint32_t final_bytes =
+            (uint32_t)(message_bytes % KeyValue.BlockBytes);
+        if (final_bytes != 0u)
+        {
+            std::memset(
+                padded_final.data(), 0, KeyValue.BlockBytes);
+            std::memcpy(
+                padded_final.data(),
+                message_data +
+                    (size_t)(block_count - 1u) * KeyValue.BlockBytes,
+                final_bytes);
+        }
+        for (uint32_t source = 0u; source < block_count; ++source)
+        {
+            sources[source] = final_bytes != 0u &&
+                    source + 1u == block_count ?
+                padded_final.data() :
+                message_data + (size_t)source * KeyValue.BlockBytes;
+        }
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        test::TriggerEncodeAllocationFailureForTesting(
+            test::EncodeAllocationFailurePoint::
+                GeneratorPlanReplayIntermediate);
+#endif
+        GuardedAllocation();
+        std::vector<uint8_t> next((size_t)output_bytes_wide);
+        for (uint32_t column = 0u;
+             column < ColumnBlockCountValue;
+             ++column)
+        {
+            gf256_mulset_multi_mem(
+                next.data() + (size_t)column * KeyValue.BlockBytes,
+                sources.data(),
+                Generator.data() + (size_t)column * block_count,
+                (int)block_count,
+                (int)KeyValue.BlockBytes);
+        }
+
+        SystematicGeneratorPlanReplayStats stats;
+        stats.SourceBlockCount = block_count;
+        stats.ColumnBlockCount = ColumnBlockCountValue;
+        stats.BlockBytes = KeyValue.BlockBytes;
+        stats.OutputBytes = output_bytes_wide;
+        stats.LinearCombinations = ColumnBlockCountValue;
+        stats.SourceTerms = (uint64_t)ColumnBlockCountValue * block_count;
+        intermediate_out.swap(next);
+        stats_out = stats;
+        return Wirehair_Success;
+    }
+    catch (const std::bad_alloc&) {
+        return Wirehair_OOM;
+    }
+    catch (const std::length_error&) {
+        return Wirehair_OOM;
+    }
+}
+
 bool MessagePrecodeEncoder::Initialize(
     const void* message,
     uint64_t message_bytes,
@@ -1538,6 +1953,158 @@ WirehairResult MessagePrecodeEncoder::InitializeResult(
         return Wirehair_OOM;
     }
 }
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+WirehairResult
+MessagePrecodeEncoder::InitializeResultWithSystematicGeneratorPlanForTesting(
+    const SystematicGeneratorPlan* plan,
+    const void* message,
+    uint64_t message_bytes,
+    uint32_t block_bytes,
+    const SeedProfile* seed_override,
+    const MessagePrecodeEncoderOptions* options,
+    bool* used_plan_out,
+    SystematicGeneratorPlanReplayStats* replay_stats_out)
+{
+    uint32_t block_count = 0u;
+    if (!message ||
+        !MessageBlockCount(message_bytes, block_bytes, block_count))
+    {
+        return Wirehair_InvalidInput;
+    }
+    const SeedProfile profile = seed_override ? *seed_override :
+        SelectSeedProfile(block_count, block_bytes);
+    if (profile.BlockCount != block_count ||
+        profile.BlockBytes != block_bytes)
+    {
+        return Wirehair_InvalidInput;
+    }
+    MessagePrecodeEncoderOptions opts;
+    if (!ResolveMessagePrecodeOptions(profile, options, opts)) {
+        return Wirehair_InvalidInput;
+    }
+    const uint64_t padded_source_bytes =
+        (uint64_t)block_count * block_bytes;
+    if (padded_source_bytes > (uint64_t)std::numeric_limits<size_t>::max()) {
+        return Wirehair_InvalidInput;
+    }
+
+    const auto initialize_legacy = [&]() -> WirehairResult {
+        const WirehairResult result = InitializeResult(
+            message,
+            message_bytes,
+            block_bytes,
+            seed_override,
+            options);
+        if (result == Wirehair_Success)
+        {
+            if (used_plan_out) {
+                *used_plan_out = false;
+            }
+            if (replay_stats_out) {
+                *replay_stats_out = SystematicGeneratorPlanReplayStats();
+            }
+        }
+        return result;
+    };
+
+    // Applicability, ISA, and key rejection are advisory by contract.  None
+    // of these checks allocate, so an ineligible request reaches the exact
+    // legacy initializer before plan-owned storage is touched.
+    if (!plan ||
+        !IsSystematicGeneratorPlanDomain(block_count, block_bytes) ||
+        !HasActiveGFNI())
+    {
+        return initialize_legacy();
+    }
+    if (!plan->IsInternallyValid()) {
+        return Wirehair_Error;
+    }
+    if (!plan->Matches(profile, opts, block_bytes)) {
+        return initialize_legacy();
+    }
+
+    std::vector<uint8_t> intermediate_blocks;
+    SystematicGeneratorPlanReplayStats replay_stats;
+    const WirehairResult replay_result = plan->Replay(
+        message, message_bytes, intermediate_blocks, replay_stats);
+    if (replay_result == Wirehair_OOM ||
+        replay_result == Wirehair_UnsupportedPlatform)
+    {
+        return initialize_legacy();
+    }
+    if (replay_result != Wirehair_Success) {
+        return replay_result;
+    }
+    const auto release_plan_intermediate = [&]() {
+        std::vector<uint8_t> empty;
+        intermediate_blocks.swap(empty);
+    };
+
+    try
+    {
+        std::vector<uint8_t> systematic_source_cache;
+        if (opts.CacheSystematicSource)
+        {
+            test::TriggerEncodeAllocationFailureForTesting(
+                test::EncodeAllocationFailurePoint::
+                    GeneratorPlanSystematicCache);
+            GuardedAllocation();
+            const uint8_t* const message_data =
+                static_cast<const uint8_t*>(message);
+            systematic_source_cache.assign(
+                message_data, message_data + (size_t)message_bytes);
+        }
+
+        PrecodeEncoder next_encoder;
+        const WirehairResult encoder_result =
+            next_encoder.InitializeSolvedGeneratorPlan(
+                plan->ParamsValue,
+                plan->PacketConfigValue,
+                plan->RuntimeValue,
+                intermediate_blocks,
+                block_bytes);
+        if (encoder_result == Wirehair_OOM) {
+            release_plan_intermediate();
+            return initialize_legacy();
+        }
+        if (encoder_result != Wirehair_Success) {
+            return encoder_result;
+        }
+
+        EncoderValue.Swap(next_encoder);
+        ProfileValue = profile;
+        OptionsValue = opts;
+        // No per-message solve ran on this path.  Do not present the
+        // one-time identity-RHS plan build as this encoder's solve work:
+        // callers retain that accounting in plan->BuildStats(), while the
+        // committed replay work is returned separately to this test-only
+        // entry point.  The selected packet attempt remains part of the
+        // observable message contract.
+        SolveStatsValue = PrecodeSolveStats();
+        SolveStatsValue.PacketSeedAttempt = profile.V2SeedAttempt;
+        MessageBytesValue = message_bytes;
+        BlockBytesValue = block_bytes;
+        SystematicSourceCache.swap(systematic_source_cache);
+        Initialized = true;
+        if (used_plan_out) {
+            *used_plan_out = true;
+        }
+        if (replay_stats_out) {
+            *replay_stats_out = replay_stats;
+        }
+        return Wirehair_Success;
+    }
+    catch (const std::bad_alloc&) {
+        release_plan_intermediate();
+        return initialize_legacy();
+    }
+    catch (const std::length_error&) {
+        release_plan_intermediate();
+        return initialize_legacy();
+    }
+}
+#endif
 
 bool MessagePrecodeEncoder::Encode(
     uint32_t block_id,

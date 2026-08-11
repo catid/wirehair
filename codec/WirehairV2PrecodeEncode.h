@@ -9,6 +9,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <memory>
 #include <vector>
 
 /*
@@ -71,7 +72,9 @@ enum class EncodeAllocationFailurePoint : uint8_t
     RecoveryBlockValidation,
     EncodedBlockValidation,
     EncodedBlockRow,
-    InitializeSolvedValidation
+    InitializeSolvedValidation,
+    GeneratorPlanReplayIntermediate,
+    GeneratorPlanSystematicCache
 };
 
 enum class EncodeAllocationFailureException : uint8_t
@@ -281,6 +284,12 @@ private:
         const PacketRowConfig& packet_config,
         std::vector<uint8_t>& intermediate_blocks,
         uint32_t block_bytes);
+    WirehairResult InitializeSolvedGeneratorPlan(
+        const PrecodeParams& params,
+        const PacketRowConfig& packet_config,
+        const PacketRowRuntime& packet_runtime,
+        std::vector<uint8_t>& intermediate_blocks,
+        uint32_t block_bytes);
 
     PrecodeSystem SystemValue = {};
     PeelingCodec CodecValue = {};
@@ -345,6 +354,99 @@ void BindMessagePrecodeProfile(
     uint32_t packet_seed_attempt);
 
 /**
+    Canonical, equation-only identity for one reusable systematic generator.
+
+    This deliberately does not retain SeedProfile: tuning diagnostics and
+    local policy fields do not participate in the emitted equation system.
+    Exact params, packet config, and process-local packet identity are retained
+    and compared on reuse.  The graph digest is immutable build provenance;
+    params determine that graph, so reuse does not rebuild and rehash it.
+*/
+struct SystematicGeneratorPlanKey
+{
+    uint32_t PrecodeContract = 0u;
+    uint32_t PacketRowContract = 0u;
+    uint32_t SourceBlockCount = 0u;
+    uint32_t BlockBytes = 0u;
+    uint32_t PacketSeedAttempt = 0u;
+    uint32_t RecoveryMixCount = 0u;
+    uint32_t DenseIdentityCorner = 0u;
+    uint64_t PrecodeSeedSalt = 0u;
+    uint64_t RecoveryRowSeedSalt = 0u;
+};
+
+struct SystematicGeneratorPlanBuildStats
+{
+    PrecodeSolveStats Solve = {};
+    uint64_t GeneratorBytes = 0u;
+    uint64_t BuildNanoseconds = 0u;
+};
+
+struct SystematicGeneratorPlanReplayStats
+{
+    uint32_t SourceBlockCount = 0u;
+    uint32_t ColumnBlockCount = 0u;
+    uint32_t BlockBytes = 0u;
+    uint64_t OutputBytes = 0u;
+    uint64_t LinearCombinations = 0u;
+    uint64_t SourceTerms = 0u;
+};
+
+/**
+    Immutable caller-owned L-by-K systematic generator for the measured tiny
+    GFNI domain.  Build accepts only an already selected exact packet attempt;
+    it never performs seed selection or changes the caller's wire contract.
+*/
+class SystematicGeneratorPlan
+{
+public:
+    static WirehairResult Build(
+        const SeedProfile& selected_profile,
+        const MessagePrecodeEncoderOptions* options,
+        std::shared_ptr<const SystematicGeneratorPlan>& plan_out);
+
+    const SystematicGeneratorPlanKey& Key() const { return KeyValue; }
+    const PrecodeParams& SystemParams() const { return ParamsValue; }
+    const PacketRowConfig& PacketConfig() const { return PacketConfigValue; }
+    const PacketRowRuntime& PacketRuntime() const { return RuntimeValue; }
+    const PacketRowEquationIdentity& PacketEquationIdentity() const {
+        return PacketEquationValue;
+    }
+    uint64_t GraphFingerprint0() const { return GraphFingerprint0Value; }
+    uint64_t GraphFingerprint1() const { return GraphFingerprint1Value; }
+    uint32_t ColumnBlockCount() const { return ColumnBlockCountValue; }
+    const SystematicGeneratorPlanBuildStats& BuildStats() const {
+        return BuildStatsValue;
+    }
+
+private:
+    friend class MessagePrecodeEncoder;
+    SystematicGeneratorPlan() = default;
+
+    bool IsInternallyValid() const noexcept;
+    bool Matches(
+        const SeedProfile& selected_profile,
+        const MessagePrecodeEncoderOptions& options,
+        uint32_t block_bytes) const noexcept;
+    WirehairResult Replay(
+        const void* message,
+        uint64_t message_bytes,
+        std::vector<uint8_t>& intermediate_out,
+        SystematicGeneratorPlanReplayStats& stats_out) const;
+
+    SystematicGeneratorPlanKey KeyValue = {};
+    PrecodeParams ParamsValue = {};
+    PacketRowConfig PacketConfigValue = {};
+    PacketRowRuntime RuntimeValue = {};
+    PacketRowEquationIdentity PacketEquationValue = {};
+    uint64_t GraphFingerprint0Value = 0u;
+    uint64_t GraphFingerprint1Value = 0u;
+    uint32_t ColumnBlockCountValue = 0u;
+    std::vector<uint8_t> Generator;
+    SystematicGeneratorPlanBuildStats BuildStatsValue = {};
+};
+
+/**
     Message-level adapter for the V2 precode encoder.
 
     This borrows complete caller-owned message blocks only for the duration of
@@ -391,6 +493,28 @@ public:
         uint32_t block_bytes,
         const SeedProfile* seed_override = nullptr,
         const MessagePrecodeEncoderOptions* options = nullptr);
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    /**
+        Internal first-stage advisory path for focused production tests.
+
+        The immutable plan is borrowed only during this call.  A null,
+        ineligible, ISA-incompatible, or equation-mismatched plan and any
+        plan-path OOM use the unchanged legacy initializer.  Once an exact
+        plan has begun replay, non-allocation errors are surfaced rather than
+        hidden by fallback.  Diagnostic outputs are committed only when the
+        encoder initialization succeeds.
+    */
+    WirehairResult InitializeResultWithSystematicGeneratorPlanForTesting(
+        const SystematicGeneratorPlan* plan,
+        const void* message,
+        uint64_t message_bytes,
+        uint32_t block_bytes,
+        const SeedProfile* seed_override,
+        const MessagePrecodeEncoderOptions* options,
+        bool* used_plan_out,
+        SystematicGeneratorPlanReplayStats* replay_stats_out);
+#endif
 
     bool Encode(
         uint32_t block_id,

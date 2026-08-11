@@ -66,6 +66,22 @@ static_assert(
     sizeof(PacketRowEquationIdentity) == 3u * sizeof(uint32_t),
     "packet-row equation identity must remain three fixed-width words");
 
+namespace internal {
+
+/** Snapshot every process-local control that participates in packet rows. */
+PacketRowEquationIdentity PacketRowEquationIdentitySnapshot() noexcept;
+
+/**
+    Compute the stable 128-bit content identity used to bind immutable
+    algebraic artifacts to one exact precode row graph.
+*/
+void PrecodeSystemFingerprint(
+    const PrecodeSystem& system,
+    uint64_t& first,
+    uint64_t& second) noexcept;
+
+} // namespace internal
+
 /**
     Validated process-local invariants for one packet-row domain.
 
