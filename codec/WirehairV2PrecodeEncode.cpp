@@ -152,7 +152,7 @@ uint32_t MaskRank(std::vector<uint64_t>& masks, uint32_t width)
 
 /// Dense-column bit mask of one dense row (bits over [K + S, K + S + D2))
 bool DenseColumnMask(
-    const std::vector<uint32_t>& row_columns,
+    const PrecodeRowView& row_columns,
     uint32_t dense_base,
     uint32_t dense_rows,
     uint64_t& mask_out)
@@ -244,7 +244,7 @@ bool DenseCornerInvertible(const PrecodeSystem& system)
         std::vector<uint64_t> masks(D2);
         for (uint32_t r = 0; r < D2; ++r) {
             if (!DenseColumnMask(
-                    system.DenseBasisRowColumns[r], dense_base, D2, masks[r]))
+                    system.DenseBasisRow(r), dense_base, D2, masks[r]))
             {
                 return false;
             }
@@ -325,7 +325,7 @@ static bool ComputePrecodeValuesImpl(
         BlockAccumulator acc(
             parity_blocks + (size_t)j * block_bytes,
             block_bytes, st.StaircaseBlockOps);
-        for (const uint32_t col : system.StaircaseRows[j])
+        for (const uint32_t col : system.StaircaseRow(j))
         {
             if (col == own) {
                 continue;
@@ -349,12 +349,9 @@ static bool ComputePrecodeValuesImpl(
     {
         std::vector<uint8_t> rhs((size_t)D2 * block_bytes);
         std::vector<uint64_t> masks(D2);
-        const std::vector<std::vector<uint32_t>>& dense_basis_rows =
-            system.DenseBasisRowColumns;
-
         for (uint32_t r = 0; r < D2; ++r)
         {
-            const std::vector<uint32_t>& row = dense_basis_rows[r];
+            const PrecodeRowView row = system.DenseBasisRow(r);
             uint64_t mask = 0; // dense bits of this basis row only
 
             BlockAccumulator acc(
@@ -837,9 +834,8 @@ void PrecodeEncoder::Swap(PrecodeEncoder& other) noexcept
 {
     using std::swap;
     swap(SystemValue.Params, other.SystemValue.Params);
-    SystemValue.StaircaseRows.swap(other.SystemValue.StaircaseRows);
-    SystemValue.DenseBasisRowColumns.swap(
-        other.SystemValue.DenseBasisRowColumns);
+    SystemValue.BinaryRowOffsets.swap(other.SystemValue.BinaryRowOffsets);
+    SystemValue.BinaryRowColumns.swap(other.SystemValue.BinaryRowColumns);
     swap(CodecValue, other.CodecValue);
     swap(RowSeed, other.RowSeed);
     swap(MixCount, other.MixCount);
@@ -893,8 +889,8 @@ WirehairResult PrecodeEncoder::InitializeSolvedSystem(
         PrecodeEncoder next;
         // The complete graph was required by the solve and validated above,
         // but packet evaluation consumes only its immutable dimensions/seed
-        // params.  Retaining thousands of nested row allocations here would
-        // duplicate a graph that can never be consulted by this encoder mode.
+        // params.  Retaining the flat binary-row graph here would duplicate
+        // storage that can never be consulted by this encoder mode.
         next.SystemValue.Params = system.Params;
         next.RowSeed = packet_config.PeelSeed;
         next.MixCount = packet_config.MixCount;

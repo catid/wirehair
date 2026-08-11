@@ -39,8 +39,8 @@ bool SameSystem(
     const wirehair_v2::PrecodeSystem& b)
 {
     return SameParams(a.Params, b.Params) &&
-        a.StaircaseRows == b.StaircaseRows &&
-        a.DenseBasisRowColumns == b.DenseBasisRowColumns;
+        a.BinaryRowOffsets == b.BinaryRowOffsets &&
+        a.BinaryRowColumns == b.BinaryRowColumns;
 }
 
 bool Fail(std::string& failure, const char* message)
@@ -110,8 +110,8 @@ bool FuzzParams(wirehair_v2::fuzz::Input& input, std::string& failure)
     wirehair_v2::PrecodeSystem sentinel;
     sentinel.Params.BlockCount = 7u;
     sentinel.Params.Staircase = 3u;
-    sentinel.StaircaseRows.push_back(std::vector<uint32_t>{1u, 2u});
-    sentinel.DenseBasisRowColumns.push_back(std::vector<uint32_t>{4u});
+    sentinel.BinaryRowOffsets = { 0u, 2u, 3u };
+    sentinel.BinaryRowColumns = { 1u, 2u, 4u };
     wirehair_v2::PrecodeSystem output = sentinel;
     const bool built = wirehair_v2::BuildPrecodeSystem(params, output);
     if (built != expected_valid) {
@@ -147,18 +147,35 @@ bool FuzzSystem(wirehair_v2::fuzz::Input& input, std::string& failure)
     {
     case 0: break;
     case 1: ++system.Params.BlockCount; break;
-    case 2: system.StaircaseRows.pop_back(); break;
+    case 2:
+        wirehair_v2::test::ErasePrecodeRowForTesting(
+            system, system.Params.Staircase - 1u);
+        break;
     case 3:
-        system.StaircaseRows[0].push_back(UINT32_MAX);
+    {
+        std::vector<uint32_t> row =
+            wirehair_v2::test::CopyPrecodeRowForTesting(
+                system.StaircaseRow(0u));
+        row.push_back(UINT32_MAX);
+        wirehair_v2::test::ReplacePrecodeRowForTesting(system, 0u, row);
         break;
+    }
     case 4:
-        system.StaircaseRows[0].push_back(system.StaircaseRows[0].back());
+    {
+        std::vector<uint32_t> row =
+            wirehair_v2::test::CopyPrecodeRowForTesting(
+                system.StaircaseRow(0u));
+        row.push_back(row.back());
+        wirehair_v2::test::ReplacePrecodeRowForTesting(system, 0u, row);
         break;
+    }
     case 5:
-        std::reverse(
-            system.DenseBasisRowColumns[0].begin(),
-            system.DenseBasisRowColumns[0].end());
+    {
+        wirehair_v2::MutablePrecodeRowView row =
+            system.MutableDenseBasisRow(0u);
+        std::reverse(row.begin(), row.end());
         break;
+    }
     case 6: ++system.Params.DenseRows; break;
     case 7: system.Params.HeavyRows = 129u; break;
     default: system.Params.SourceHits = 0u; break;

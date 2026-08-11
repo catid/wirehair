@@ -4,9 +4,21 @@
 #include "../gf256.h"
 
 #include <algorithm>
+#include <new>
+#include <stdexcept>
 
 namespace wirehair_v2 {
 namespace {
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+thread_local test::PrecodeBuildAllocationFailurePoint
+    ActivePrecodeBuildAllocationFailurePoint =
+        test::PrecodeBuildAllocationFailurePoint::None;
+thread_local test::PrecodeBuildAllocationFailureException
+    ActivePrecodeBuildAllocationFailureException =
+        test::PrecodeBuildAllocationFailureException::BadAlloc;
+thread_local uint32_t ActivePrecodeBuildAllocationFailureHits = 0u;
+#endif
 
 uint32_t CertifiedSourceHits(uint32_t block_count)
 {
@@ -57,7 +69,7 @@ void UnbiasedShuffleDeck(
 }
 
 bool IsStrictlyIncreasingBelow(
-    const std::vector<uint32_t>& row,
+    const PrecodeRowView& row,
     uint64_t limit)
 {
     uint32_t previous = 0;
@@ -139,6 +151,42 @@ bool ValidatePrecodeParams(const PrecodeParams& params)
 
 } // namespace
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+namespace test {
+
+void SetPrecodeBuildAllocationFailurePointForTesting(
+    PrecodeBuildAllocationFailurePoint point,
+    PrecodeBuildAllocationFailureException exception)
+{
+    ActivePrecodeBuildAllocationFailurePoint = point;
+    ActivePrecodeBuildAllocationFailureException = exception;
+    ActivePrecodeBuildAllocationFailureHits = 0u;
+}
+
+uint32_t PrecodeBuildAllocationFailureHitsForTesting()
+{
+    return ActivePrecodeBuildAllocationFailureHits;
+}
+
+void TriggerPrecodeBuildAllocationFailureForTesting(
+    PrecodeBuildAllocationFailurePoint point)
+{
+    if (ActivePrecodeBuildAllocationFailurePoint != point) {
+        return;
+    }
+    ++ActivePrecodeBuildAllocationFailureHits;
+    if (ActivePrecodeBuildAllocationFailureException ==
+        PrecodeBuildAllocationFailureException::LengthError)
+    {
+        throw std::length_error(
+            "injected WH2 precode-build allocation failure");
+    }
+    throw std::bad_alloc();
+}
+
+} // namespace test
+#endif
+
 PrecodeParams MakeCertifiedParams(uint32_t block_count, uint64_t seed)
 {
     PrecodeParams params;
@@ -157,9 +205,27 @@ PrecodeParams MakeCertifiedParams(uint32_t block_count, uint64_t seed)
 
 bool HasValidPrecodeSystemShape(const PrecodeSystem& system)
 {
-    return ValidatePrecodeParams(system.Params) &&
-        system.StaircaseRows.size() == system.Params.Staircase &&
-        system.DenseBasisRowColumns.size() == system.Params.DenseRows;
+    if (!ValidatePrecodeParams(system.Params)) {
+        return false;
+    }
+    const uint64_t row_count = (uint64_t)system.Params.Staircase +
+        system.Params.DenseRows;
+    if (row_count + 1u != system.BinaryRowOffsets.size() ||
+        system.BinaryRowOffsets.empty() ||
+        system.BinaryRowOffsets[0] != 0u ||
+        system.BinaryRowColumns.size() > UINT32_MAX)
+    {
+        return false;
+    }
+    uint32_t previous = 0u;
+    for (uint32_t offset : system.BinaryRowOffsets)
+    {
+        if (offset < previous || offset > system.BinaryRowColumns.size()) {
+            return false;
+        }
+        previous = offset;
+    }
+    return previous == system.BinaryRowColumns.size();
 }
 
 bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
@@ -176,41 +242,28 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
     const uint64_t span_wide = (uint64_t)K + S + D2;
     const uint32_t span = (uint32_t)span_wide;
 
-    out.Params = params;
-    out.StaircaseRows.assign(S, std::vector<uint32_t>());
-    out.DenseBasisRowColumns.assign(D2, std::vector<uint32_t>());
+    // Construct transactionally.  Status-bearing callers translate allocation
+    // failures to Wirehair_OOM, and a direct caller that observes an exception
+    // must not receive a partially converted CSR graph.
+    PrecodeSystem candidate;
+    candidate.Params = params;
+    const uint32_t row_count = S + D2;
+    candidate.BinaryRowOffsets.assign((size_t)row_count + 1u, 0u);
 
     wirehair::PCGRandom prng;
     prng.Seed(params.Seed, K);
 
     // --- Staircase rows ---
-    // Reserve beyond the mean source load so rows in the ordinary upper tail
-    // do not reallocate while the random placements are appended.  Two
-    // standard deviations keeps the retained-capacity cost modest; the
-    // trailing three entries cover parity/link columns and integer rounding.
-    {
-        const uint32_t hits = std::min(N1, S);
-        const uint32_t mean = (K * hits) / S;
-        // When integer division rounds the mean to zero, almost every row has
-        // only parity/link entries.  Preserve the prior three-entry request;
-        // letting the O(K) hit rows grow is cheaper than adding slack to tens
-        // of thousands of otherwise empty exotic rows.
-        uint32_t slack = mean == 0u ? 0u : 2u;
-        while (slack * slack < 4u * mean) {
-            ++slack;
-        }
-        const uint32_t expected = mean + slack + 3u;
-        for (uint32_t j = 0; j < S; ++j) {
-            out.StaircaseRows[j].reserve(expected);
-        }
-    }
-
     // Each source column hits min(N1, S) distinct parities.  Distinctness
     // by retry: the tiny-K dense-count table goes as low as S=2 (K=2), but
-    // hits <= S always leaves a free residue, so the loop terminates.
+    // hits <= S always leaves a free residue, so the loop terminates.  Save
+    // only the selected row indices: source columns are implicit in the flat
+    // position and are scattered in ascending order after prefixing counts.
+    const uint32_t hits = N1 < S ? N1 : S;
+    const size_t hit_assignment_count = (size_t)K * hits;
+    std::vector<uint16_t> hit_rows(hit_assignment_count);
     {
         uint32_t picks[8];
-        const uint32_t hits = N1 < S ? N1 : S;
         for (uint32_t c = 0; c < K; ++c)
         {
             for (uint32_t hit = 0; hit < hits; ++hit)
@@ -228,20 +281,70 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
                     }
                 } while (collide);
                 picks[hit] = p;
-                out.StaircaseRows[p].push_back(c);
+                hit_rows[(size_t)c * hits + hit] = (uint16_t)p;
+                ++candidate.BinaryRowOffsets[p + 1u];
             }
         }
     }
 
-    // Own parity column and staircase link.  Source entries were appended
-    // in ascending c, so appending K+j-1 then K+j keeps rows sorted, and
-    // no column can appear twice (per-source hits are distinct parities).
+    // Account for own parity and staircase-link columns.  Source entries will
+    // be scattered in ascending c, so writing K+j-1 then K+j keeps each row
+    // sorted and unique.
     for (uint32_t j = 0; j < S; ++j)
     {
-        if (j > 0u) {
-            out.StaircaseRows[j].push_back(K + j - 1u);
+        candidate.BinaryRowOffsets[j + 1u] += j == 0u ? 1u : 2u;
+    }
+
+    // Dense row lengths are known before their contents.  Reserve their exact
+    // slices in the same CSR allocation as the staircase rows.
+    const uint32_t deck_span = params.DenseIdentityCorner ? (K + S) : span;
+    const uint32_t set_count = D2 == 0u ? 0u : (deck_span + 1u) >> 1;
+    for (uint32_t row = 0; row < D2; ++row)
+    {
+        const bool is_anchor = row == 0u ||
+            IsAdditionalDenseAnchor(params.DenseAnchors, row);
+        const uint32_t length = is_anchor ?
+            set_count + (params.DenseIdentityCorner ? 1u : 0u) :
+            (params.DenseIdentityCorner ? 4u : 2u);
+        candidate.BinaryRowOffsets[S + row + 1u] = length;
+    }
+
+    uint64_t reference_count = 0u;
+    for (uint32_t row = 0; row < row_count; ++row)
+    {
+        reference_count += candidate.BinaryRowOffsets[row + 1u];
+        if (reference_count > UINT32_MAX) {
+            return false;
         }
-        out.StaircaseRows[j].push_back(K + j);
+        candidate.BinaryRowOffsets[row + 1u] = (uint32_t)reference_count;
+    }
+    candidate.BinaryRowColumns.resize((size_t)reference_count);
+
+    // Temporarily use each staircase start offset as its fill cursor.  Once all
+    // sources are scattered, reconstruct the starts while appending the fixed
+    // link/own suffixes.  This avoids a fourth heap allocation for cursors.
+    for (uint32_t c = 0; c < K; ++c)
+    {
+        for (uint32_t hit = 0; hit < hits; ++hit)
+        {
+            const uint32_t row = hit_rows[(size_t)c * hits + hit];
+            candidate.BinaryRowColumns[
+                candidate.BinaryRowOffsets[row]++] = c;
+        }
+    }
+    uint32_t next_start = 0u;
+    for (uint32_t row = 0; row < S; ++row)
+    {
+        uint32_t write = candidate.BinaryRowOffsets[row];
+        candidate.BinaryRowOffsets[row] = next_start;
+        if (row > 0u) {
+            candidate.BinaryRowColumns[write++] = K + row - 1u;
+        }
+        candidate.BinaryRowColumns[write++] = K + row;
+        next_start = write;
+    }
+    if (candidate.BinaryRowOffsets[S] != next_start) {
+        return false;
     }
 
     // --- Shuffle-2 dense rows ---
@@ -259,12 +362,6 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
     // materialization is skipped.
     if (D2 > 0u)
     {
-        // Certified construction decks over all binary columns; the
-        // identity-corner variant excludes the D2 dense columns and gives
-        // each row its own dense column instead (see the header)
-        const uint32_t deck_span =
-            params.DenseIdentityCorner ? (K + S) : span;
-        const uint32_t set_count = (deck_span + 1u) >> 1;
         // Keep the small-K shuffle scratch inline.  Both arrays are fully
         // initialized below, so the large-K vectors remain simple fallbacks
         // and their initialization cannot affect the generated equations.
@@ -287,6 +384,7 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
         // ascending column scan.  Four0369 is the largest accepted layout.
         uint32_t anchor_rows[4] = {};
         uint8_t anchor_bits[4] = {};
+        uint32_t anchor_write[4] = {};
         uint32_t anchor_count = 0u;
         uint32_t row_i = 0;
         const auto mark_anchor = [&]() {
@@ -299,22 +397,30 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
             }
             anchor_rows[anchor_count] = row_i;
             anchor_bits[anchor_count] = anchor_bit;
-            out.DenseBasisRowColumns[row_i].reserve(set_count + 1u);
+            anchor_write[anchor_count] =
+                candidate.BinaryRowOffsets[S + row_i];
             ++anchor_count;
             ++row_i;
         };
         const auto emit_delta = [&](uint32_t first, uint32_t second) {
-            std::vector<uint32_t>& columns =
-                out.DenseBasisRowColumns[row_i];
-            columns.reserve(params.DenseIdentityCorner ? 4u : 2u);
-            columns.push_back(first);
-            columns.push_back(second);
+            uint32_t columns[4];
+            uint32_t count = 0u;
+            columns[count++] = first;
+            columns[count++] = second;
             if (params.DenseIdentityCorner)
             {
-                columns.push_back(K + S + row_i - 1u);
-                columns.push_back(K + S + row_i);
+                columns[count++] = K + S + row_i - 1u;
+                columns[count++] = K + S + row_i;
             }
-            std::sort(columns.begin(), columns.end());
+            std::sort(columns, columns + count);
+            const uint32_t write = candidate.BinaryRowOffsets[S + row_i];
+            std::copy(
+                columns,
+                columns + count,
+                candidate.BinaryRowColumns.begin() + write);
+            CAT_DEBUG_ASSERT(
+                write + count ==
+                candidate.BinaryRowOffsets[S + row_i + 1u]);
             ++row_i;
         };
 
@@ -367,8 +473,7 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
             const uint8_t flags = anchor_flags[col];
             for (uint32_t anchor = 0; anchor < anchor_count; ++anchor) {
                 if ((flags & anchor_bits[anchor]) != 0u) {
-                    out.DenseBasisRowColumns[anchor_rows[anchor]].push_back(
-                        col);
+                    candidate.BinaryRowColumns[anchor_write[anchor]++] = col;
                 }
             }
         }
@@ -379,12 +484,35 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
             // anchor, but retaining the loop keeps the basis rule explicit.
             for (uint32_t anchor = 0; anchor < anchor_count; ++anchor) {
                 const uint32_t row = anchor_rows[anchor];
-                out.DenseBasisRowColumns[row].push_back(K + S + row);
+                candidate.BinaryRowColumns[anchor_write[anchor]++] =
+                    K + S + row;
             }
+        }
+        for (uint32_t anchor = 0; anchor < anchor_count; ++anchor)
+        {
+            if (anchor_write[anchor] !=
+                candidate.BinaryRowOffsets[
+                    S + anchor_rows[anchor] + 1u])
+            {
+                return false;
+            }
+        }
+        if (row_i != D2) {
+            return false;
         }
     }
 
-    return ValidatePrecodeSystem(out);
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    test::TriggerPrecodeBuildAllocationFailureForTesting(
+        test::PrecodeBuildAllocationFailurePoint::FinalValidation);
+#endif
+    if (!ValidatePrecodeSystem(candidate)) {
+        return false;
+    }
+    out.Params = candidate.Params;
+    out.BinaryRowOffsets.swap(candidate.BinaryRowOffsets);
+    out.BinaryRowColumns.swap(candidate.BinaryRowColumns);
+    return true;
 }
 
 bool ValidatePrecodeSystem(const PrecodeSystem& system)
@@ -417,7 +545,7 @@ bool ValidatePrecodeSystem(const PrecodeSystem& system)
     }
     for (uint32_t row_index = 0; row_index < S; ++row_index)
     {
-        const std::vector<uint32_t>& row = system.StaircaseRows[row_index];
+        const PrecodeRowView row = system.StaircaseRow(row_index);
         if (!IsStrictlyIncreasingBelow(row, staircase_end)) {
             return false;
         }
@@ -464,8 +592,7 @@ bool ValidatePrecodeSystem(const PrecodeSystem& system)
         (known_span + 1u) / 2u : ((size_t)binary_span + 1u) / 2u;
     for (uint32_t row_index = 0; row_index < D2; ++row_index)
     {
-        const std::vector<uint32_t>& basis =
-            system.DenseBasisRowColumns[row_index];
+        const PrecodeRowView basis = system.DenseBasisRow(row_index);
         if (!IsStrictlyIncreasingBelow(basis, binary_span))
         {
             return false;

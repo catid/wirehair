@@ -7,6 +7,8 @@
 #include <cstdio>
 #include <cstring>
 #include <iterator>
+#include <new>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -16,6 +18,75 @@
 // end-to-end, by the later solver phases.
 
 namespace {
+
+bool HaveSameBinaryRows(
+    const wirehair_v2::PrecodeSystem& left,
+    const wirehair_v2::PrecodeSystem& right)
+{
+    return left.BinaryRowOffsets == right.BinaryRowOffsets &&
+        left.BinaryRowColumns == right.BinaryRowColumns;
+}
+
+bool HaveSameRowRange(
+    const wirehair_v2::PrecodeSystem& left,
+    const wirehair_v2::PrecodeSystem& right,
+    uint32_t first,
+    uint32_t count)
+{
+    for (uint32_t row = 0u; row < count; ++row) {
+        if (left.BinaryRow(first + row) != right.BinaryRow(first + row)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool HaveSameParams(
+    const wirehair_v2::PrecodeParams& left,
+    const wirehair_v2::PrecodeParams& right)
+{
+    return left.BlockCount == right.BlockCount &&
+        left.Staircase == right.Staircase &&
+        left.DenseRows == right.DenseRows &&
+        left.HeavyRows == right.HeavyRows &&
+        left.SourceHits == right.SourceHits &&
+        left.DenseIdentityCorner == right.DenseIdentityCorner &&
+        left.HeavyFamily == right.HeavyFamily &&
+        left.DenseAnchors == right.DenseAnchors &&
+        left.Seed == right.Seed;
+}
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+class PrecodeBuildAllocationFailureScope
+{
+public:
+    PrecodeBuildAllocationFailureScope(
+        wirehair_v2::test::PrecodeBuildAllocationFailureException exception)
+    {
+        wirehair_v2::test::
+            SetPrecodeBuildAllocationFailurePointForTesting(
+                wirehair_v2::test::
+                    PrecodeBuildAllocationFailurePoint::FinalValidation,
+                exception);
+    }
+
+    ~PrecodeBuildAllocationFailureScope()
+    {
+        wirehair_v2::test::
+            SetPrecodeBuildAllocationFailurePointForTesting(
+                wirehair_v2::test::
+                    PrecodeBuildAllocationFailurePoint::None,
+                wirehair_v2::test::
+                    PrecodeBuildAllocationFailureException::BadAlloc);
+    }
+
+private:
+    PrecodeBuildAllocationFailureScope(
+        const PrecodeBuildAllocationFailureScope&);
+    PrecodeBuildAllocationFailureScope& operator=(
+        const PrecodeBuildAllocationFailureScope&);
+};
+#endif
 
 bool TestParams()
 {
@@ -65,8 +136,8 @@ bool TestParams()
 
     wirehair_v2::PrecodeSystem sentinel;
     sentinel.Params.BlockCount = 7u;
-    sentinel.StaircaseRows.push_back(std::vector<uint32_t>{1u, 2u});
-    sentinel.DenseBasisRowColumns.push_back(std::vector<uint32_t>{4u});
+    sentinel.BinaryRowOffsets = { 0u, 2u, 3u };
+    sentinel.BinaryRowColumns = { 1u, 2u, 4u };
 
     std::vector<wirehair_v2::PrecodeParams> invalid_params;
     wirehair_v2::PrecodeParams invalid =
@@ -125,8 +196,7 @@ bool TestParams()
         wirehair_v2::PrecodeSystem out = sentinel;
         if (wirehair_v2::BuildPrecodeSystem(invalid_params[i], out) ||
             out.Params.BlockCount != sentinel.Params.BlockCount ||
-            out.StaircaseRows != sentinel.StaircaseRows ||
-            out.DenseBasisRowColumns != sentinel.DenseBasisRowColumns)
+            !HaveSameBinaryRows(out, sentinel))
         {
             std::fprintf(stderr,
                 "invalid parameter case %zu must fail before modifying output\n",
@@ -137,6 +207,180 @@ bool TestParams()
     return true;
 }
 
+bool TestMalformedFlatOffsets()
+{
+    wirehair_v2::PrecodeSystem valid;
+    if (!wirehair_v2::BuildPrecodeSystem(
+            wirehair_v2::MakeCertifiedParams(
+                64u, UINT64_C(0x4353524f46465345)),
+            valid) ||
+        !wirehair_v2::HasValidPrecodeSystemShape(valid) ||
+        !wirehair_v2::ValidatePrecodeSystem(valid))
+    {
+        std::fprintf(stderr, "flat-offset fixture did not validate\n");
+        return false;
+    }
+
+    const auto rejected = [](const char* name,
+                             const wirehair_v2::PrecodeSystem& system) {
+        if (wirehair_v2::HasValidPrecodeSystemShape(system) ||
+            wirehair_v2::ValidatePrecodeSystem(system))
+        {
+            std::fprintf(stderr,
+                "flat-offset validator accepted %s\n", name);
+            return false;
+        }
+        return true;
+    };
+
+    wirehair_v2::PrecodeSystem malformed = valid;
+    malformed.BinaryRowOffsets.clear();
+    if (!rejected("empty offsets", malformed)) {
+        return false;
+    }
+    malformed = valid;
+    malformed.BinaryRowOffsets.pop_back();
+    if (!rejected("missing terminal offset", malformed)) {
+        return false;
+    }
+    malformed = valid;
+    malformed.BinaryRowOffsets.push_back(
+        malformed.BinaryRowOffsets.back());
+    if (!rejected("extra terminal offset", malformed)) {
+        return false;
+    }
+    malformed = valid;
+    malformed.BinaryRowOffsets[0] = 1u;
+    if (!rejected("nonzero origin", malformed)) {
+        return false;
+    }
+    malformed = valid;
+    malformed.BinaryRowOffsets[2] =
+        malformed.BinaryRowOffsets[1] - 1u;
+    if (!rejected("decreasing offsets", malformed)) {
+        return false;
+    }
+    malformed = valid;
+    malformed.BinaryRowOffsets[1] =
+        (uint32_t)malformed.BinaryRowColumns.size() + 1u;
+    if (!rejected("out-of-range offset", malformed)) {
+        return false;
+    }
+    malformed = valid;
+    --malformed.BinaryRowOffsets.back();
+    if (!rejected("short terminal offset", malformed)) {
+        return false;
+    }
+    malformed = valid;
+    ++malformed.BinaryRowOffsets.back();
+    if (!rejected("long terminal offset", malformed)) {
+        return false;
+    }
+    return true;
+}
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+bool TestBuildAllocationTransaction()
+{
+    wirehair_v2::PrecodeSystem retained;
+    if (!wirehair_v2::BuildPrecodeSystem(
+            wirehair_v2::MakeCertifiedParams(
+                64u, UINT64_C(0x52455441494e4544)),
+            retained) ||
+        !wirehair_v2::ValidatePrecodeSystem(retained))
+    {
+        std::fprintf(stderr, "precode OOM retained fixture failed\n");
+        return false;
+    }
+    const wirehair_v2::PrecodeSystem retained_before = retained;
+    const uint32_t* const offsets_data = retained.BinaryRowOffsets.data();
+    const uint32_t* const columns_data = retained.BinaryRowColumns.data();
+    const size_t offsets_capacity = retained.BinaryRowOffsets.capacity();
+    const size_t columns_capacity = retained.BinaryRowColumns.capacity();
+    const wirehair_v2::PrecodeParams replacement_params =
+        wirehair_v2::MakeCertifiedParams(
+            2048u, UINT64_C(0x4f4f4d43414e4449));
+
+    using wirehair_v2::test::PrecodeBuildAllocationFailureException;
+    const PrecodeBuildAllocationFailureException exceptions[] = {
+        PrecodeBuildAllocationFailureException::BadAlloc,
+        PrecodeBuildAllocationFailureException::LengthError
+    };
+    for (PrecodeBuildAllocationFailureException exception : exceptions)
+    {
+        bool caught_expected = false;
+        uint32_t hits = 0u;
+        {
+            PrecodeBuildAllocationFailureScope failure(exception);
+            try {
+                (void)wirehair_v2::BuildPrecodeSystem(
+                    replacement_params, retained);
+            }
+            catch (const std::bad_alloc&) {
+                caught_expected = exception ==
+                    PrecodeBuildAllocationFailureException::BadAlloc;
+            }
+            catch (const std::length_error&) {
+                caught_expected = exception ==
+                    PrecodeBuildAllocationFailureException::LengthError;
+            }
+            catch (...) {
+                caught_expected = false;
+            }
+            hits = wirehair_v2::test::
+                PrecodeBuildAllocationFailureHitsForTesting();
+        }
+        if (!caught_expected || hits != 1u ||
+            !HaveSameParams(retained.Params, retained_before.Params) ||
+            !HaveSameBinaryRows(retained, retained_before) ||
+            retained.BinaryRowOffsets.data() != offsets_data ||
+            retained.BinaryRowColumns.data() != columns_data ||
+            retained.BinaryRowOffsets.capacity() != offsets_capacity ||
+            retained.BinaryRowColumns.capacity() != columns_capacity ||
+            !wirehair_v2::ValidatePrecodeSystem(retained))
+        {
+            std::fprintf(stderr,
+                "precode OOM build escaped or modified retained graph\n");
+            return false;
+        }
+    }
+
+    wirehair_v2::PrecodeParams invalid = replacement_params;
+    invalid.BlockCount = 1u;
+    uint32_t invalid_hits = UINT32_MAX;
+    bool invalid_built = true;
+    {
+        PrecodeBuildAllocationFailureScope failure(
+            PrecodeBuildAllocationFailureException::BadAlloc);
+        invalid_built = wirehair_v2::BuildPrecodeSystem(invalid, retained);
+        invalid_hits = wirehair_v2::test::
+            PrecodeBuildAllocationFailureHitsForTesting();
+    }
+    if (invalid_built || invalid_hits != 0u ||
+        !HaveSameParams(retained.Params, retained_before.Params) ||
+        !HaveSameBinaryRows(retained, retained_before) ||
+        retained.BinaryRowOffsets.data() != offsets_data ||
+        retained.BinaryRowColumns.data() != columns_data ||
+        retained.BinaryRowOffsets.capacity() != offsets_capacity ||
+        retained.BinaryRowColumns.capacity() != columns_capacity)
+    {
+        std::fprintf(stderr,
+            "invalid precode build reached hook or modified output\n");
+        return false;
+    }
+
+    if (!wirehair_v2::BuildPrecodeSystem(replacement_params, retained) ||
+        retained.Params.BlockCount != replacement_params.BlockCount ||
+        !wirehair_v2::ValidatePrecodeSystem(retained))
+    {
+        std::fprintf(stderr,
+            "precode build did not recover after allocation injection\n");
+        return false;
+    }
+    return true;
+}
+#endif
+
 bool TestStaircase(const wirehair_v2::PrecodeSystem& system)
 {
     const uint32_t K = system.Params.BlockCount;
@@ -144,7 +388,7 @@ bool TestStaircase(const wirehair_v2::PrecodeSystem& system)
     const uint32_t N1 = system.Params.SourceHits;
     const uint32_t hits = N1 < S ? N1 : S;
 
-    if (system.StaircaseRows.size() != S) {
+    if (system.BinaryRowCount() != (size_t)S + system.Params.DenseRows) {
         std::fprintf(stderr, "K=%u: staircase row count\n", K);
         return false;
     }
@@ -152,7 +396,7 @@ bool TestStaircase(const wirehair_v2::PrecodeSystem& system)
     std::vector<uint32_t> source_hits(K, 0);
     for (uint32_t j = 0; j < S; ++j)
     {
-        const std::vector<uint32_t>& row = system.StaircaseRows[j];
+        const wirehair_v2::PrecodeRowView row = system.StaircaseRow(j);
 
         // Sorted, unique, in-range
         for (size_t i = 0; i < row.size(); ++i)
@@ -228,20 +472,25 @@ bool ReconstructDenseRows(
     std::vector<std::vector<uint32_t>>& rows_out)
 {
     const uint32_t D2 = system.Params.DenseRows;
-    if (system.DenseBasisRowColumns.size() != D2) {
+    if (system.BinaryRowCount() !=
+        (size_t)system.Params.Staircase + D2)
+    {
         return false;
     }
     std::vector<std::vector<uint32_t>> rows(D2);
     for (uint32_t row = 0; row < D2; ++row)
     {
         if (IsAnchorRow(system.Params.DenseAnchors, row)) {
-            rows[row] = system.DenseBasisRowColumns[row];
+            const wirehair_v2::PrecodeRowView basis =
+                system.DenseBasisRow(row);
+            rows[row].assign(basis.begin(), basis.end());
             continue;
         }
+        const wirehair_v2::PrecodeRowView basis =
+            system.DenseBasisRow(row);
         std::set_symmetric_difference(
             rows[row - 1u].begin(), rows[row - 1u].end(),
-            system.DenseBasisRowColumns[row].begin(),
-            system.DenseBasisRowColumns[row].end(),
+            basis.begin(), basis.end(),
             std::back_inserter(rows[row]));
     }
     rows_out.swap(rows);
@@ -343,14 +592,14 @@ bool TestDeterminism(uint32_t K)
         std::fprintf(stderr, "K=%u: determinism build failed\n", K);
         return false;
     }
-    if (a.StaircaseRows != b.StaircaseRows ||
-        a.DenseBasisRowColumns != b.DenseBasisRowColumns)
+    if (!HaveSameBinaryRows(a, b))
     {
         std::fprintf(stderr, "K=%u: same seed produced different systems\n", K);
         return false;
     }
-    if (a.StaircaseRows == c.StaircaseRows ||
-        a.DenseBasisRowColumns == c.DenseBasisRowColumns)
+    if (HaveSameRowRange(a, c, 0u, a.Params.Staircase) ||
+        HaveSameRowRange(
+            a, c, a.Params.Staircase, a.Params.DenseRows))
     {
         std::fprintf(stderr, "K=%u: different seed produced same system\n", K);
         return false;
@@ -386,18 +635,25 @@ void MixGraphFingerprint(
     MixGraphFingerprintU32(hash, (uint32_t)params.DenseAnchors);
     MixGraphFingerprintU32(hash, (uint32_t)params.HeavyFamily);
     MixGraphFingerprintU64(hash, params.Seed);
-    MixGraphFingerprintU32(hash, (uint32_t)system.StaircaseRows.size());
-    for (const std::vector<uint32_t>& row : system.StaircaseRows) {
+    MixGraphFingerprintU32(hash, params.Staircase);
+    for (uint32_t row_index = 0;
+         row_index < params.Staircase;
+         ++row_index)
+    {
+        const wirehair_v2::PrecodeRowView row =
+            system.StaircaseRow(row_index);
         MixGraphFingerprintU32(hash, (uint32_t)row.size());
         for (uint32_t column : row) {
             MixGraphFingerprintU32(hash, column);
         }
     }
-    MixGraphFingerprintU32(
-        hash, (uint32_t)system.DenseBasisRowColumns.size());
-    for (const std::vector<uint32_t>& row :
-        system.DenseBasisRowColumns)
+    MixGraphFingerprintU32(hash, params.DenseRows);
+    for (uint32_t row_index = 0;
+         row_index < params.DenseRows;
+         ++row_index)
     {
+        const wirehair_v2::PrecodeRowView row =
+            system.DenseBasisRow(row_index);
         MixGraphFingerprintU32(hash, (uint32_t)row.size());
         for (uint32_t column : row) {
             MixGraphFingerprintU32(hash, column);
@@ -457,32 +713,20 @@ bool TestExactGraphGolden()
     if (!BuildPrecodeSystem(exotic, exotic_system)) {
         return false;
     }
-    std::vector<uint32_t> three_entry_capacity_probe;
-    three_entry_capacity_probe.reserve(3u);
-    const size_t zero_mean_capacity =
-        three_entry_capacity_probe.capacity();
-    std::vector<uint32_t> growth_capacity_probe;
-    growth_capacity_probe.reserve(3u);
-    growth_capacity_probe.push_back(0u);
-    growth_capacity_probe.push_back(1u);
-    growth_capacity_probe.push_back(2u);
-    growth_capacity_probe.push_back(3u);
-    const size_t one_growth_capacity = growth_capacity_probe.capacity();
-    uint64_t retained_capacity = 0u;
-    for (const std::vector<uint32_t>& row : exotic_system.StaircaseRows)
-    {
-        retained_capacity += row.capacity();
-    }
-    const uint64_t retained_capacity_limit =
-        (uint64_t)zero_mean_capacity * exotic.Staircase +
-        (uint64_t)(one_growth_capacity - zero_mean_capacity) *
-            exotic.BlockCount;
-    if (retained_capacity > retained_capacity_limit)
+    const size_t expected_exotic_references =
+        (size_t)exotic.Staircase * 2u - 1u + exotic.BlockCount;
+    if (exotic_system.BinaryRowOffsets.size() !=
+            (size_t)exotic.Staircase + 1u ||
+        exotic_system.BinaryRowColumns.size() !=
+            expected_exotic_references)
     {
         std::fprintf(stderr,
-            "zero-mean staircase retained %llu entries, want <= %llu\n",
-            (unsigned long long)retained_capacity,
-            (unsigned long long)retained_capacity_limit);
+            "zero-mean staircase flat shape offsets=%zu refs=%zu, "
+            "want %u/%zu\n",
+            exotic_system.BinaryRowOffsets.size(),
+            exotic_system.BinaryRowColumns.size(),
+            exotic.Staircase + 1u,
+            expected_exotic_references);
         return false;
     }
     MixGraphFingerprint(hash, exotic_system);
@@ -536,8 +780,7 @@ bool TestDenseAnchorLayout(
     if (!BuildPrecodeSystem(params, system) ||
         !BuildPrecodeSystem(params, repeat) ||
         !wirehair_v2::ValidatePrecodeSystem(system) ||
-        system.DenseBasisRowColumns != repeat.DenseBasisRowColumns ||
-        system.StaircaseRows != repeat.StaircaseRows)
+        !HaveSameBinaryRows(system, repeat))
     {
         std::fprintf(stderr,
             "K=%u layout=%u: anchor build/validation/determinism failed\n",
@@ -547,10 +790,9 @@ bool TestDenseAnchorLayout(
 
     const uint32_t span = K + params.Staircase + params.DenseRows;
     const size_t anchor_size = (span + 1u) / 2u;
-    const std::vector<std::vector<uint32_t>>& basis =
-        system.DenseBasisRowColumns;
     std::vector<std::vector<uint32_t>> dense_rows;
-    if (basis.size() != params.DenseRows ||
+    if (system.BinaryRowCount() !=
+            (size_t)params.Staircase + params.DenseRows ||
         !ReconstructDenseRows(system, dense_rows))
     {
         std::fprintf(stderr,
@@ -567,19 +809,21 @@ bool TestDenseAnchorLayout(
     {
         const bool anchor = IsAnchorRow(layout, row);
         const size_t expected_size = anchor ? anchor_size : 2u;
-        if (basis[row].size() != expected_size)
+        const wirehair_v2::PrecodeRowView basis =
+            system.DenseBasisRow(row);
+        if (basis.size() != expected_size)
         {
             std::fprintf(stderr,
                 "K=%u layout=%u row=%u: basis refs=%zu want=%zu\n",
                 K, (unsigned)layout, row,
-                basis[row].size(), expected_size);
+                basis.size(), expected_size);
             return false;
         }
         expected_references += expected_size;
-        actual_references += basis[row].size();
+        actual_references += basis.size();
 
         if (anchor) {
-            reconstructed = basis[row];
+            reconstructed.assign(basis.begin(), basis.end());
             segment_columns.clear();
         }
         else
@@ -590,7 +834,7 @@ bool TestDenseAnchorLayout(
                 segment_columns.clear();
             }
             segment_columns.insert(
-                segment_columns.end(), basis[row].begin(), basis[row].end());
+                segment_columns.end(), basis.begin(), basis.end());
             std::sort(segment_columns.begin(), segment_columns.end());
             if (std::adjacent_find(
                     segment_columns.begin(), segment_columns.end()) !=
@@ -604,7 +848,7 @@ bool TestDenseAnchorLayout(
             std::vector<uint32_t> next;
             std::set_symmetric_difference(
                 reconstructed.begin(), reconstructed.end(),
-                basis[row].begin(), basis[row].end(),
+                basis.begin(), basis.end(),
                 std::back_inserter(next));
             reconstructed.swap(next);
         }
@@ -622,7 +866,8 @@ bool TestDenseAnchorLayout(
     if (K == 64u)
     {
         wirehair_v2::PrecodeSystem bad = system;
-        bad.DenseBasisRowColumns[1u].clear();
+        wirehair_v2::test::ReplacePrecodeRowForTesting(
+            bad, (size_t)params.Staircase + 1u, {});
         if (wirehair_v2::ValidatePrecodeSystem(bad)) {
             std::fprintf(stderr,
                 "layout=%u: validator accepted missing direct delta\n",
@@ -630,7 +875,12 @@ bool TestDenseAnchorLayout(
             return false;
         }
         bad = system;
-        bad.DenseBasisRowColumns[0u].pop_back();
+        std::vector<uint32_t> damaged_anchor =
+            wirehair_v2::test::CopyPrecodeRowForTesting(
+                bad.DenseBasisRow(0u));
+        damaged_anchor.pop_back();
+        wirehair_v2::test::ReplacePrecodeRowForTesting(
+            bad, params.Staircase, damaged_anchor);
         if (wirehair_v2::ValidatePrecodeSystem(bad)) {
             std::fprintf(stderr,
                 "layout=%u: validator accepted damaged direct anchor\n",
@@ -839,6 +1089,14 @@ int main()
     if (!TestParams()) {
         return 1;
     }
+    if (!TestMalformedFlatOffsets()) {
+        return 1;
+    }
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    if (!TestBuildAllocationTransaction()) {
+        return 1;
+    }
+#endif
     if (!TestHeavyCoefficients()) {
         return 1;
     }

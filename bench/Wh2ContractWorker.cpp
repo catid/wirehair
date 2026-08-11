@@ -1266,25 +1266,27 @@ bool TimingProxyEquationSha256(
     const std::string configuration =
         TimingProxyConfigurationBytes(block_bytes, resolved);
     bytes.reserve(bytes.size() + configuration.size() +
-        system.StaircaseRows.size() * 16u +
-        system.DenseBasisRowColumns.size() * 16u);
+        ((size_t)system.Params.Staircase + system.Params.DenseRows) * 16u);
     AppendUint32LittleEndian(
         static_cast<uint32_t>(configuration.size()), bytes);
     bytes += configuration;
-    const auto append_rows = [&bytes](
-        const std::vector<std::vector<uint32_t>>& rows)
+    const auto append_rows = [&bytes, &system](
+        uint32_t first_row,
+        uint32_t row_count)
     {
-        AppendUint32LittleEndian(static_cast<uint32_t>(rows.size()), bytes);
-        for (const std::vector<uint32_t>& row : rows)
+        AppendUint32LittleEndian(row_count, bytes);
+        for (uint32_t row_index = 0; row_index < row_count; ++row_index)
         {
+            const wirehair_v2::PrecodeRowView row =
+                system.BinaryRow(first_row + row_index);
             AppendUint32LittleEndian(static_cast<uint32_t>(row.size()), bytes);
             for (uint32_t column : row) {
                 AppendUint32LittleEndian(column, bytes);
             }
         }
     };
-    append_rows(system.StaircaseRows);
-    append_rows(system.DenseBasisRowColumns);
+    append_rows(0u, system.Params.Staircase);
+    append_rows(system.Params.Staircase, system.Params.DenseRows);
     digest = wirehair::wh2_benchmark::Sha256Hex(bytes);
     return IsLowerSha256(digest);
 }
@@ -1373,9 +1375,8 @@ bool EmitTimingProxyWitness(
                 head_resolved.Params, head_system) ||
             !wirehair_v2::BuildPrecodeSystem(
                 proxy_resolved.Params, proxy_system) ||
-            head_system.StaircaseRows != proxy_system.StaircaseRows ||
-            head_system.DenseBasisRowColumns !=
-                proxy_system.DenseBasisRowColumns)
+            head_system.BinaryRowOffsets != proxy_system.BinaryRowOffsets ||
+            head_system.BinaryRowColumns != proxy_system.BinaryRowColumns)
         {
             return false;
         }

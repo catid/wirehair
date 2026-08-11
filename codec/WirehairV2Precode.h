@@ -7,6 +7,10 @@
 
 #include <stdint.h>
 
+#include <algorithm>
+#include <cstddef>
+#include <limits>
+#include <stdexcept>
 #include <vector>
 
 /*
@@ -104,49 +108,268 @@ struct PrecodeParams
 /// N1 = 2 below K=10000 and N1 = 3 from K=10000 upward
 PrecodeParams MakeCertifiedParams(uint32_t block_count, uint64_t seed);
 
+struct PrecodeRowView
+{
+    const uint32_t* Data = nullptr;
+    size_t Count = 0u;
+
+    const uint32_t* begin() const noexcept { return Data; }
+    const uint32_t* end() const noexcept
+    {
+        return Count == 0u ? Data : Data + Count;
+    }
+    size_t size() const noexcept { return Count; }
+    bool empty() const noexcept { return Count == 0u; }
+    const uint32_t& operator[](size_t index) const noexcept
+    {
+        return Data[index];
+    }
+    const uint32_t& front() const noexcept { return Data[0]; }
+    const uint32_t& back() const noexcept { return Data[Count - 1u]; }
+};
+
+struct MutablePrecodeRowView
+{
+    uint32_t* Data = nullptr;
+    size_t Count = 0u;
+
+    uint32_t* begin() const noexcept { return Data; }
+    uint32_t* end() const noexcept
+    {
+        return Count == 0u ? Data : Data + Count;
+    }
+    size_t size() const noexcept { return Count; }
+    bool empty() const noexcept { return Count == 0u; }
+    uint32_t& operator[](size_t index) const noexcept { return Data[index]; }
+    uint32_t& front() const noexcept { return Data[0]; }
+    uint32_t& back() const noexcept { return Data[Count - 1u]; }
+};
+
+inline bool operator==(
+    const PrecodeRowView& left,
+    const PrecodeRowView& right) noexcept
+{
+    return left.size() == right.size() &&
+        (left.empty() ||
+         std::equal(left.begin(), left.end(), right.begin()));
+}
+
+inline bool operator!=(
+    const PrecodeRowView& left,
+    const PrecodeRowView& right) noexcept
+{
+    return !(left == right);
+}
+
 struct PrecodeSystem
 {
     PrecodeParams Params = {};
 
     /**
-        Staircase parity rows.
+        Flat binary-row storage shared by staircase rows followed by dense
+        basis rows.  BinaryRowOffsets always uses uint32_t because the fully
+        validated construction envelope contains far fewer than UINT32_MAX
+        references.  A valid non-empty system has S + D2 + 1 offsets, starts
+        at zero, and ends at BinaryRowColumns.size().
 
-        Row j (j in [0, S)) is a GF(2) constraint over binary columns
-        [0, K + S): the source columns whose N1 hits landed on parity j,
-        plus the own-parity column K + j, plus the staircase link column
-        K + j - 1 for j > 0.  Column lists are sorted and deduplicated
-        (every column appears exactly once; construction cannot produce
-        duplicates because per-source hits are distinct).
+        Keeping these two vectors unconditional is important: V2 sources are
+        compiled into archives with different test-hook macros, so conditional
+        row-storage members would create an ODR/ABI mismatch.
+
+        Staircase row j (j in [0, S)) contains the source columns whose N1
+        hits landed on parity j, the own-parity column K + j, and for j > 0
+        the staircase link K + j - 1.  Each later dense-basis segment starts
+        with a balanced half-dense anchor; subsequent rows store sorted
+        two-column deltas (four with the identity corner).  All slices are
+        sorted and deduplicated.  These elementary row additions preserve the
+        original equation span without retaining duplicate half-dense rows.
+
+        The certified tiny-even-span limitation remains unchanged: a later
+        reconstructed dense row can become zero for rare K=2/K=4 seeds.
+        Message initialization rejects rank-deficient attempts and selects a
+        full-rank packet/precode seed.
     */
-    std::vector<std::vector<uint32_t>> StaircaseRows;
+    std::vector<uint32_t> BinaryRowOffsets;
+    std::vector<uint32_t> BinaryRowColumns;
 
-    /**
-        Equation-preserving Shuffle-2 dense basis.
+    /// Row accessors require HasValidPrecodeSystemShape() to have succeeded.
+    size_t BinaryRowCount() const noexcept
+    {
+        return BinaryRowOffsets.empty() ? 0u :
+            BinaryRowOffsets.size() - 1u;
+    }
 
-        Each segment starts with its balanced half-dense anchor row.  Every
-        later entry is the sorted two-column delta from the preceding
-        equation rather than a stored copy of that half-dense equation.  In
-        the identity-corner variant, a delta additionally contains the old
-        and new owned dense columns, for four entries total.  Applying these
-        elementary row additions preserves the exact original equation span
-        while avoiding duplicate full-row construction and storage.
+    PrecodeRowView BinaryRow(size_t row) const noexcept
+    {
+        const uint32_t first = BinaryRowOffsets[row];
+        const uint32_t last = BinaryRowOffsets[row + 1u];
+        PrecodeRowView view;
+        view.Data = BinaryRowColumns.empty() ? nullptr :
+            BinaryRowColumns.data() + first;
+        view.Count = (size_t)(last - first);
+        return view;
+    }
 
-        Known limitation (inherited from the certified reference
-        construction): at tiny EVEN spans (K=2 and K=4 with the certified
-        table) a reconstructed later row can walk down to exactly zero — a
-        dead constraint — at roughly 1e-4 systems.  Guarding would break the
-        exact-2-difference invariant.  Version-4 message initialization
-        instead rejects rank-deficient attempts and deterministically selects
-        a full-rank joint packet/precode seed; exhaustive tiny-K tests pin the
-        selected attempts.
-    */
-    std::vector<std::vector<uint32_t>> DenseBasisRowColumns;
+    MutablePrecodeRowView MutableBinaryRow(size_t row) noexcept
+    {
+        const uint32_t first = BinaryRowOffsets[row];
+        const uint32_t last = BinaryRowOffsets[row + 1u];
+        MutablePrecodeRowView view;
+        view.Data = BinaryRowColumns.empty() ? nullptr :
+            BinaryRowColumns.data() + first;
+        view.Count = (size_t)(last - first);
+        return view;
+    }
+
+    PrecodeRowView StaircaseRow(size_t row) const noexcept
+    {
+        return BinaryRow(row);
+    }
+
+    MutablePrecodeRowView MutableStaircaseRow(size_t row) noexcept
+    {
+        return MutableBinaryRow(row);
+    }
+
+    PrecodeRowView DenseBasisRow(size_t row) const noexcept
+    {
+        return BinaryRow((size_t)Params.Staircase + row);
+    }
+
+    MutablePrecodeRowView MutableDenseBasisRow(size_t row) noexcept
+    {
+        return MutableBinaryRow((size_t)Params.Staircase + row);
+    }
 };
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+namespace test {
+
+inline std::vector<uint32_t> CopyPrecodeRowForTesting(
+    const PrecodeRowView& row)
+{
+    if (row.empty()) {
+        return {};
+    }
+    return std::vector<uint32_t>(row.begin(), row.end());
+}
+
+inline void ReplacePrecodeRowForTesting(
+    PrecodeSystem& system,
+    size_t row,
+    const std::vector<uint32_t>& replacement)
+{
+    if (system.BinaryRowOffsets.empty() ||
+        row >= system.BinaryRowOffsets.size() - 1u)
+    {
+        throw std::out_of_range("WH2 test precode row is out of range");
+    }
+    const uint32_t first = system.BinaryRowOffsets[row];
+    const uint32_t last = system.BinaryRowOffsets[row + 1u];
+    if (first > last || last > system.BinaryRowColumns.size()) {
+        throw std::out_of_range("WH2 test precode offsets are malformed");
+    }
+    const size_t old_size = (size_t)(last - first);
+    const size_t retained_size = system.BinaryRowColumns.size() - old_size;
+    const size_t max_size = std::numeric_limits<uint32_t>::max();
+    if (retained_size > max_size ||
+        replacement.size() > max_size - retained_size)
+    {
+        throw std::length_error("WH2 test precode row is too large");
+    }
+    system.BinaryRowColumns.erase(
+        system.BinaryRowColumns.begin() + first,
+        system.BinaryRowColumns.begin() + last);
+    system.BinaryRowColumns.insert(
+        system.BinaryRowColumns.begin() + first,
+        replacement.begin(),
+        replacement.end());
+    for (size_t offset = row + 1u;
+         offset < system.BinaryRowOffsets.size();
+         ++offset)
+    {
+        if (replacement.size() >= old_size) {
+            system.BinaryRowOffsets[offset] +=
+                (uint32_t)(replacement.size() - old_size);
+        }
+        else {
+            system.BinaryRowOffsets[offset] -=
+                (uint32_t)(old_size - replacement.size());
+        }
+    }
+}
+
+inline void ErasePrecodeRowForTesting(PrecodeSystem& system, size_t row)
+{
+    if (system.BinaryRowOffsets.empty() ||
+        row >= system.BinaryRowOffsets.size() - 1u)
+    {
+        throw std::out_of_range("WH2 test precode row is out of range");
+    }
+    const uint32_t first = system.BinaryRowOffsets[row];
+    const uint32_t last = system.BinaryRowOffsets[row + 1u];
+    if (first > last || last > system.BinaryRowColumns.size()) {
+        throw std::out_of_range("WH2 test precode offsets are malformed");
+    }
+    const uint32_t removed = last - first;
+    system.BinaryRowColumns.erase(
+        system.BinaryRowColumns.begin() + first,
+        system.BinaryRowColumns.begin() + last);
+    for (size_t offset = row + 1u;
+         offset < system.BinaryRowOffsets.size();
+         ++offset)
+    {
+        system.BinaryRowOffsets[offset] -= removed;
+    }
+    system.BinaryRowOffsets.erase(
+        system.BinaryRowOffsets.begin() + row + 1u);
+}
+
+inline void AppendPrecodeRowForTesting(
+    PrecodeSystem& system,
+    const std::vector<uint32_t>& row)
+{
+    if (system.BinaryRowOffsets.empty()) {
+        system.BinaryRowOffsets.push_back(0u);
+    }
+    const size_t max_size = std::numeric_limits<uint32_t>::max();
+    if (system.BinaryRowColumns.size() > max_size ||
+        row.size() > max_size - system.BinaryRowColumns.size())
+    {
+        throw std::length_error("WH2 test precode graph is too large");
+    }
+    system.BinaryRowColumns.insert(
+        system.BinaryRowColumns.end(), row.begin(), row.end());
+    system.BinaryRowOffsets.push_back(
+        (uint32_t)system.BinaryRowColumns.size());
+}
+
+enum class PrecodeBuildAllocationFailurePoint : uint8_t
+{
+    None,
+    FinalValidation
+};
+
+enum class PrecodeBuildAllocationFailureException : uint8_t
+{
+    BadAlloc,
+    LengthError
+};
+
+void SetPrecodeBuildAllocationFailurePointForTesting(
+    PrecodeBuildAllocationFailurePoint point,
+    PrecodeBuildAllocationFailureException exception);
+uint32_t PrecodeBuildAllocationFailureHitsForTesting();
+void TriggerPrecodeBuildAllocationFailureForTesting(
+    PrecodeBuildAllocationFailurePoint point);
+
+} // namespace test
+#endif
+
 /**
-    Allocation-free validation of Params and the two outer row-vector sizes.
-    This is the exact prefix checked by ValidatePrecodeSystem before it
-    allocates source-hit scratch.
+    Allocation-free validation of Params and the complete flat CSR shape.
+    This is the exact prefix checked by ValidatePrecodeSystem before row views
+    or source-hit scratch are used.
 */
 bool HasValidPrecodeSystemShape(const PrecodeSystem& system);
 

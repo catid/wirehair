@@ -985,11 +985,17 @@ static GeneratedSystem GenerateSystem(
             exit(1);
         }
 
-        for (const std::vector<uint32_t>& columns : codec_sys.StaircaseRows)
+        for (uint32_t row_index = 0;
+             row_index < params.Staircase;
+             ++row_index)
         {
+            const wirehair_v2::PrecodeRowView columns =
+                codec_sys.StaircaseRow(row_index);
             SparseRow row;
             row.IsConstraint = true;
-            row.Columns = columns;
+            if (!columns.empty()) {
+                row.Columns.assign(columns.begin(), columns.end());
+            }
             if (row.Columns.size() > 1u) {
                 sys.PrecodeGenXors += row.Columns.size() - 1u;
             }
@@ -1003,12 +1009,17 @@ static GeneratedSystem GenerateSystem(
         const unsigned deck_span = scheme.IdentCorner ?
             K + scheme.D : K + scheme.D + scheme.Dense2;
         bool first_dense = true;
-        for (const std::vector<uint32_t>& columns :
-                codec_sys.DenseBasisRowColumns)
+        for (uint32_t row_index = 0;
+             row_index < params.DenseRows;
+             ++row_index)
         {
+            const wirehair_v2::PrecodeRowView columns =
+                codec_sys.DenseBasisRow(row_index);
             SparseRow row;
             row.IsConstraint = true;
-            row.Columns = columns;
+            if (!columns.empty()) {
+                row.Columns.assign(columns.begin(), columns.end());
+            }
             sys.PrecodeGenXors +=
                 first_dense ? ((deck_span + 1u) >> 1) : 2u;
             first_dense = false;

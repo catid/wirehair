@@ -1438,7 +1438,8 @@ void CheckValidatedDecoderInitializationTransactionality()
     const uint32_t preserved_attempt = decoder.PacketSeedAttempt();
 
     wirehair_v2::PrecodeSystem malformed(system);
-    malformed.StaircaseRows.pop_back();
+    wirehair_v2::test::ErasePrecodeRowForTesting(
+        malformed, malformed.Params.Staircase - 1u);
     Check(decoder.InitializeForValidatedSystemForTesting(
               source.size(),
               block_bytes,

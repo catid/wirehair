@@ -103,7 +103,7 @@ WirehairResult SolvePrecodeSystemTinyDenseOracle(
         std::vector<uint8_t> matrix(matrix_bytes, 0u);
         std::vector<uint8_t> rhs(rhs_bytes, 0u);
         uint32_t row = 0u;
-        const auto add_binary = [&](const std::vector<uint32_t>& columns,
+        const auto add_binary = [&](const PrecodeRowView& columns,
                                     const uint8_t* data) -> bool {
             if (row >= row_count) {
                 return false;
@@ -125,14 +125,13 @@ WirehairResult SolvePrecodeSystemTinyDenseOracle(
             return true;
         };
 
-        for (const std::vector<uint32_t>& columns : system.StaircaseRows) {
-            if (!add_binary(columns, nullptr)) {
+        for (uint32_t row_index = 0; row_index < S; ++row_index) {
+            if (!add_binary(system.StaircaseRow(row_index), nullptr)) {
                 return Wirehair_InvalidInput;
             }
         }
-        for (const std::vector<uint32_t>& columns :
-                system.DenseBasisRowColumns) {
-            if (!add_binary(columns, nullptr)) {
+        for (uint32_t row_index = 0; row_index < D2; ++row_index) {
+            if (!add_binary(system.DenseBasisRow(row_index), nullptr)) {
                 return Wirehair_InvalidInput;
             }
         }
@@ -150,7 +149,10 @@ WirehairResult SolvePrecodeSystemTinyDenseOracle(
         {
             const std::vector<uint32_t> columns = GeneratePacketMatrixRow(
                 K, P, packet.BlockId, config);
-            if (columns.empty() || !add_binary(columns, packet.Data)) {
+            PrecodeRowView packet_row;
+            packet_row.Data = columns.data();
+            packet_row.Count = columns.size();
+            if (columns.empty() || !add_binary(packet_row, packet.Data)) {
                 return Wirehair_InvalidInput;
             }
         }

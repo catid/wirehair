@@ -30,6 +30,8 @@ set(_forbidden_symbols
     "HeavyBucketStorageLimit"
     "ActiveEncodeAllocationFailure"
     "EncodeAllocationFailureHits"
+    "PrecodeBuildAllocationFailure"
+    "ActivePrecodeBuildAllocationFailure"
     "DecoderAllocationFailureCountdown"
     "DecoderColdSystematicReuseEnabled"
     "ColdReceiveAllocationBytesForTesting"

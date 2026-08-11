@@ -1254,7 +1254,8 @@ bool CheckPacketEvaluationFusion()
             return false;
         }
         wirehair_v2::PrecodeSystem malformed = system;
-        malformed.StaircaseRows[0].clear();
+        wirehair_v2::test::ReplacePrecodeRowForTesting(
+            malformed, 0u, {});
         stats.PacketRows = UINT32_C(0x76543210);
         if (wirehair_v2::SolvePrecodeSystemWithRuntime(
                 malformed, config, runtime, packets, block_bytes,
@@ -3045,16 +3046,16 @@ bool MutateDenseBasisValue(wirehair_v2::PrecodeSystem& system)
         return false;
     }
     const uint32_t span = (uint32_t)span_wide;
-    for (size_t row_i = 1u;
-         row_i < system.DenseBasisRowColumns.size();
+    for (uint32_t row_i = 1u;
+         row_i < system.Params.DenseRows;
          ++row_i)
     {
-        std::vector<uint32_t>& row =
-            system.DenseBasisRowColumns[row_i];
+        wirehair_v2::MutablePrecodeRowView row =
+            system.MutableDenseBasisRow(row_i);
         if (row.size() != 2u) {
             continue;
         }
-        const std::vector<uint32_t> original = row;
+        const uint32_t original[2] = { row[0], row[1] };
         for (uint32_t column = 0u; column < span; ++column)
         {
             if (column == original[0] || column == original[1]) {
@@ -3063,45 +3064,47 @@ bool MutateDenseBasisValue(wirehair_v2::PrecodeSystem& system)
             row[0] = column;
             row[1] = original[1];
             std::sort(row.begin(), row.end());
-            if (row != original &&
+            if ((row[0] != original[0] || row[1] != original[1]) &&
                 wirehair_v2::ValidatePrecodeSystem(system))
             {
                 return true;
             }
         }
-        row = original;
+        row[0] = original[0];
+        row[1] = original[1];
     }
     return false;
 }
 
 bool MutateDenseBasisOrder(wirehair_v2::PrecodeSystem& system)
 {
-    for (size_t first = 1u;
-         first < system.DenseBasisRowColumns.size();
+    for (uint32_t first = 1u;
+         first < system.Params.DenseRows;
          ++first)
     {
-        if (system.DenseBasisRowColumns[first].size() != 2u) {
+        if (system.DenseBasisRow(first).size() != 2u) {
             continue;
         }
-        for (size_t second = first + 1u;
-             second < system.DenseBasisRowColumns.size();
+        for (uint32_t second = first + 1u;
+             second < system.Params.DenseRows;
              ++second)
         {
-            if (system.DenseBasisRowColumns[second].size() != 2u ||
-                system.DenseBasisRowColumns[first] ==
-                    system.DenseBasisRowColumns[second])
+            if (system.DenseBasisRow(second).size() != 2u ||
+                system.DenseBasisRow(first) == system.DenseBasisRow(second))
             {
                 continue;
             }
-            std::swap(
-                system.DenseBasisRowColumns[first],
-                system.DenseBasisRowColumns[second]);
+            wirehair_v2::MutablePrecodeRowView first_row =
+                system.MutableDenseBasisRow(first);
+            wirehair_v2::MutablePrecodeRowView second_row =
+                system.MutableDenseBasisRow(second);
+            std::swap(first_row[0], second_row[0]);
+            std::swap(first_row[1], second_row[1]);
             if (wirehair_v2::ValidatePrecodeSystem(system)) {
                 return true;
             }
-            std::swap(
-                system.DenseBasisRowColumns[first],
-                system.DenseBasisRowColumns[second]);
+            std::swap(first_row[0], second_row[0]);
+            std::swap(first_row[1], second_row[1]);
         }
     }
     return false;
@@ -3113,31 +3116,36 @@ bool MutateStaircaseRowLengths(wirehair_v2::PrecodeSystem& system)
     for (uint32_t column = 0u; column < K; ++column)
     {
         for (size_t remove_i = 0u;
-             remove_i < system.StaircaseRows.size();
+             remove_i < system.Params.Staircase;
              ++remove_i)
         {
-            std::vector<uint32_t>& remove_row =
-                system.StaircaseRows[remove_i];
-            const std::vector<uint32_t>::iterator remove_at =
+            const wirehair_v2::PrecodeRowView remove_view =
+                system.StaircaseRow(remove_i);
+            const uint32_t* const remove_at =
                 std::lower_bound(
-                    remove_row.begin(), remove_row.end(), column);
-            if (remove_at == remove_row.end() || *remove_at != column) {
+                    remove_view.begin(), remove_view.end(), column);
+            if (remove_at == remove_view.end() || *remove_at != column) {
                 continue;
             }
             for (size_t add_i = 0u;
-                 add_i < system.StaircaseRows.size();
+                 add_i < system.Params.Staircase;
                  ++add_i)
             {
                 if (add_i == remove_i) {
                     continue;
                 }
-                std::vector<uint32_t>& add_row =
-                    system.StaircaseRows[add_i];
-                const std::vector<uint32_t>::iterator add_at =
-                    std::lower_bound(add_row.begin(), add_row.end(), column);
-                if (add_at != add_row.end() && *add_at == column) {
+                const wirehair_v2::PrecodeRowView add_view =
+                    system.StaircaseRow(add_i);
+                const uint32_t* const add_at =
+                    std::lower_bound(
+                        add_view.begin(), add_view.end(), column);
+                if (add_at != add_view.end() && *add_at == column) {
                     continue;
                 }
+                std::vector<uint32_t> remove_row(
+                    remove_view.begin(), remove_view.end());
+                std::vector<uint32_t> add_row(
+                    add_view.begin(), add_view.end());
                 const std::vector<uint32_t> remove_original = remove_row;
                 const std::vector<uint32_t> add_original = add_row;
                 remove_row.erase(std::lower_bound(
@@ -3146,11 +3154,17 @@ bool MutateStaircaseRowLengths(wirehair_v2::PrecodeSystem& system)
                     std::lower_bound(
                         add_row.begin(), add_row.end(), column),
                     column);
+                wirehair_v2::test::ReplacePrecodeRowForTesting(
+                    system, remove_i, remove_row);
+                wirehair_v2::test::ReplacePrecodeRowForTesting(
+                    system, add_i, add_row);
                 if (wirehair_v2::ValidatePrecodeSystem(system)) {
                     return true;
                 }
-                remove_row = remove_original;
-                add_row = add_original;
+                wirehair_v2::test::ReplacePrecodeRowForTesting(
+                    system, remove_i, remove_original);
+                wirehair_v2::test::ReplacePrecodeRowForTesting(
+                    system, add_i, add_original);
             }
         }
     }
@@ -3287,6 +3301,15 @@ bool CheckResumeSystemBinding(
     {
         std::fprintf(stderr,
             "solve: value-equivalent resume system was rejected/diverged\n");
+        return false;
+    }
+
+    wirehair_v2::PrecodeSystem malformed_offsets = system;
+    malformed_offsets.BinaryRowOffsets.pop_back();
+    if (!ExpectResumeSystemMismatchRejected(
+            "malformed-offsets", system, malformed_offsets, config,
+            message, block_bytes, initial_state))
+    {
         return false;
     }
 
@@ -3474,9 +3497,10 @@ bool CheckResumeSystemBinding(
             UINT64_C(0x9e3779b97f4a7c15) * attempt;
         if (wirehair_v2::BuildPrecodeSystem(
                 different_seed_params, different_seed_system) &&
-            (different_seed_system.StaircaseRows != system.StaircaseRows ||
-             different_seed_system.DenseBasisRowColumns !=
-                system.DenseBasisRowColumns))
+            (different_seed_system.BinaryRowOffsets !=
+                    system.BinaryRowOffsets ||
+             different_seed_system.BinaryRowColumns !=
+                    system.BinaryRowColumns))
         {
             found_different_seed_graph = true;
             break;
@@ -3527,9 +3551,8 @@ bool CheckResumeSystemBinding(
             wirehair_v2::HeavyCoefficientFamily::HashedNonzero :
             wirehair_v2::HeavyCoefficientFamily::PeriodicCauchy;
     if (!wirehair_v2::ValidatePrecodeSystem(parameter_mutation) ||
-        parameter_mutation.StaircaseRows != system.StaircaseRows ||
-        parameter_mutation.DenseBasisRowColumns !=
-            system.DenseBasisRowColumns ||
+        parameter_mutation.BinaryRowOffsets != system.BinaryRowOffsets ||
+        parameter_mutation.BinaryRowColumns != system.BinaryRowColumns ||
         !ExpectResumeSystemMismatchRejected(
             "equation-param", system, parameter_mutation, config,
             message, block_bytes, initial_state))
@@ -5418,10 +5441,11 @@ bool CheckColdSolveStatsAlias()
     // on stored-graph validation failures.  The trusted overload deliberately
     // skips this validation and is covered only by its alias fast rejection.
     wirehair_v2::PrecodeSystem invalid_system = system;
-    if (invalid_system.StaircaseRows.empty()) {
+    if (invalid_system.Params.Staircase == 0u) {
         return false;
     }
-    invalid_system.StaircaseRows.pop_back();
+    wirehair_v2::test::ErasePrecodeRowForTesting(
+        invalid_system, invalid_system.Params.Staircase - 1u);
     static const ColdSolveEntryPoint validating_entry_points[] = {
         ColdSolveEntryPoint::Public,
         ColdSolveEntryPoint::Runtime
@@ -6547,10 +6571,8 @@ bool CheckSolveAllocationExceptionContainment()
     zero_residual_system.Params.Staircase = 2u;
     zero_residual_system.Params.SourceHits = 1u;
     zero_residual_system.Params.Seed = UINT64_C(0x5230564552494659);
-    zero_residual_system.StaircaseRows = {
-        std::vector<uint32_t>{ 0u },
-        std::vector<uint32_t>{ 1u }
-    };
+    zero_residual_system.BinaryRowOffsets = { 0u, 1u, 2u };
+    zero_residual_system.BinaryRowColumns = { 0u, 1u };
     wirehair_v2::PacketRowConfig zero_residual_config;
     zero_residual_config.MixCount = 1u;
     wirehair_v2::PacketRowRuntime zero_residual_runtime;
@@ -6937,29 +6959,40 @@ int main(int argc, char** argv)
                 diagnostic_params.HeavyRows <= 64u)
         {
             std::vector<uint64_t> masks;
-            const auto add_mask = [&](const std::vector<uint32_t>& row) {
+            const auto add_mask = [&](
+                    const uint32_t* columns, size_t column_count) {
                 uint64_t mask = 0u;
-                for (uint32_t column : row) {
-                    mask ^= UINT64_C(1) << column;
+                for (size_t i = 0u; i < column_count; ++i) {
+                    mask ^= UINT64_C(1) << columns[i];
                 }
                 masks.push_back(mask);
             };
-            for (const std::vector<uint32_t>& row :
-                    diagnostic_system.StaircaseRows) {
-                add_mask(row);
+            for (uint32_t row_i = 0u;
+                 row_i < diagnostic_params.Staircase;
+                 ++row_i)
+            {
+                const wirehair_v2::PrecodeRowView row =
+                    diagnostic_system.StaircaseRow(row_i);
+                add_mask(row.begin(), row.size());
             }
-            for (const std::vector<uint32_t>& row :
-                    diagnostic_system.DenseBasisRowColumns) {
-                add_mask(row);
+            for (uint32_t row_i = 0u;
+                 row_i < diagnostic_params.DenseRows;
+                 ++row_i)
+            {
+                const wirehair_v2::PrecodeRowView row =
+                    diagnostic_system.DenseBasisRow(row_i);
+                add_mask(row.begin(), row.size());
             }
             for (uint32_t id = 0; id < K; ++id) {
-                add_mask(wirehair_v2::GeneratePacketMatrixRow(
+                const std::vector<uint32_t> row =
+                    wirehair_v2::GeneratePacketMatrixRow(
                     K,
                     diagnostic_params.Staircase +
                         diagnostic_params.DenseRows +
                         diagnostic_params.HeavyRows,
                     id,
-                    diagnostic_config));
+                    diagnostic_config);
+                add_mask(row.data(), row.size());
             }
             for (uint32_t column = 0; column < 64u; ++column)
             {

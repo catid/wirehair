@@ -467,9 +467,8 @@ void MessagePrecodeDecoder::Swap(MessagePrecodeDecoder& other) noexcept
     swap(PacketConfigValue, other.PacketConfigValue);
     swap(PacketRuntimeValue, other.PacketRuntimeValue);
     swap(SystemValue.Params, other.SystemValue.Params);
-    SystemValue.StaircaseRows.swap(other.SystemValue.StaircaseRows);
-    SystemValue.DenseBasisRowColumns.swap(
-        other.SystemValue.DenseBasisRowColumns);
+    SystemValue.BinaryRowOffsets.swap(other.SystemValue.BinaryRowOffsets);
+    SystemValue.BinaryRowColumns.swap(other.SystemValue.BinaryRowColumns);
     ReceivedBlockIds.swap(other.ReceivedBlockIds);
     ReceivedBlockStorage.swap(other.ReceivedBlockStorage);
     ReceivedSlots.Swap(other.ReceivedSlots);

@@ -78,8 +78,8 @@ bool CheckPatternInitializedAccessors()
         system.Params.BlockCount != 0u || system.Params.Staircase != 0u ||
         system.Params.DenseRows != 0u || system.Params.HeavyRows != 0u ||
         system.Params.SourceHits != 0u || system.Params.DenseIdentityCorner ||
-        system.Params.Seed != 0u || !system.StaircaseRows.empty() ||
-        !system.DenseBasisRowColumns.empty() ||
+        system.Params.Seed != 0u || !system.BinaryRowOffsets.empty() ||
+        !system.BinaryRowColumns.empty() ||
         stats.StaircaseBlockOps != 0u ||
         stats.DenseKnownBlockOps != 0u || stats.DenseSolveBlockOps != 0u ||
         stats.HeavyBucketXors != 0u || stats.HeavyMulAdds != 0u ||
@@ -145,8 +145,8 @@ bool CheckPatternInitializedAccessors()
         decoder_options.RecoveryRowSeedSalt !=
             wirehair_v2::kMessageRecoveryRowSeedSalt ||
         decoder_system.Params.BlockCount != 0u ||
-        !decoder_system.StaircaseRows.empty() ||
-        !decoder_system.DenseBasisRowColumns.empty() ||
+        !decoder_system.BinaryRowOffsets.empty() ||
+        !decoder_system.BinaryRowColumns.empty() ||
         solve_stats.PacketRows != 0u ||
         solve_stats.InactivatedColumns != 0u ||
         solve_stats.ResidualRank != 0u)

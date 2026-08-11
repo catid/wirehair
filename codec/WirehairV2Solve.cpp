@@ -227,9 +227,12 @@ PrecodeSystemFingerprint FingerprintPrecodeSystem(
     builder.Add(params.Seed);
 
     builder.Add(UINT64_C(0x5354414952434153)); // "STAIRCAS"
-    builder.Add(system.StaircaseRows.size());
-    for (const std::vector<uint32_t>& row : system.StaircaseRows)
+    builder.Add(params.Staircase);
+    for (uint32_t row_index = 0;
+         row_index < params.Staircase;
+         ++row_index)
     {
+        const PrecodeRowView row = system.StaircaseRow(row_index);
         builder.Add(row.size());
         for (uint32_t column : row) {
             builder.Add(column);
@@ -237,10 +240,12 @@ PrecodeSystemFingerprint FingerprintPrecodeSystem(
     }
 
     builder.Add(UINT64_C(0x44454e5345424153)); // "DENSEBAS"
-    builder.Add(system.DenseBasisRowColumns.size());
-    for (const std::vector<uint32_t>& row :
-            system.DenseBasisRowColumns)
+    builder.Add(params.DenseRows);
+    for (uint32_t row_index = 0;
+         row_index < params.DenseRows;
+         ++row_index)
     {
+        const PrecodeRowView row = system.DenseBasisRow(row_index);
         builder.Add(row.size());
         for (uint32_t column : row) {
             builder.Add(column);
@@ -286,13 +291,21 @@ public:
         Columns.push_back(column);
     }
 
-    void AppendRow(
-        const std::vector<uint32_t>& columns,
-        const uint8_t* data)
+    void AppendPrecodeRows(const PrecodeSystem& system)
     {
-        BeginRow(data);
-        Columns.insert(Columns.end(), columns.begin(), columns.end());
-        EndRow();
+        CAT_DEBUG_ASSERT(NextRow == 0u);
+        const size_t row_count = system.BinaryRowCount();
+        CAT_DEBUG_ASSERT(row_count <= RowData.size());
+        Columns.insert(
+            Columns.end(),
+            system.BinaryRowColumns.begin(),
+            system.BinaryRowColumns.end());
+        for (size_t row = 0; row < row_count; ++row)
+        {
+            RowData[NextRow] = nullptr;
+            ++NextRow;
+            RowOffsets[NextRow] = system.BinaryRowOffsets[row + 1u];
+        }
     }
 
     void EndRow()
@@ -3400,9 +3413,7 @@ static WirehairResult SolvePrecodeSystemImpl(
             return Wirehair_OOM;
         }
         const size_t row_count = (size_t)row_count_wide;
-        const std::vector<std::vector<uint32_t>>& dense_basis_rows =
-            system.DenseBasisRowColumns;
-        size_t reference_count = 0u;
+        size_t reference_count = system.BinaryRowColumns.size();
         const auto add_references = [&reference_count](size_t count) {
             if (count > std::numeric_limits<size_t>::max() - reference_count) {
                 return false;
@@ -3410,16 +3421,6 @@ static WirehairResult SolvePrecodeSystemImpl(
             reference_count += count;
             return true;
         };
-        for (const std::vector<uint32_t>& columns : system.StaircaseRows) {
-            if (!add_references(columns.size())) {
-                return Wirehair_OOM;
-            }
-        }
-        for (const std::vector<uint32_t>& columns : dense_basis_rows) {
-            if (!add_references(columns.size())) {
-                return Wirehair_OOM;
-            }
-        }
         // The peel distribution averages fewer than seven source references.
         // Reserve one modestly padded estimate and generate each packet row
         // only once.  The previous exact reserve initialized every packet PRNG
@@ -3439,16 +3440,8 @@ static WirehairResult SolvePrecodeSystemImpl(
 
         BinaryEquationArena rows;
         rows.Initialize(row_count, reserved_reference_count);
-        for (const std::vector<uint32_t>& columns : system.StaircaseRows)
-        {
-            rows.AppendRow(columns, nullptr);
-            st.BinaryRowReferences += columns.size();
-        }
-        for (const std::vector<uint32_t>& columns : dense_basis_rows)
-        {
-            rows.AppendRow(columns, nullptr);
-            st.BinaryRowReferences += columns.size();
-        }
+        rows.AppendPrecodeRows(system);
+        st.BinaryRowReferences += system.BinaryRowColumns.size();
         for (const SolvePacket& packet : packets)
         {
             size_t packet_references = 0u;
@@ -5045,6 +5038,8 @@ static WirehairResult ResumePrecodeSystemImpl(
         state.ColumnCount != K + (uint32_t)P_wide ||
         state.BlockBytes != block_bytes || block_bytes == 0u ||
         !SamePrecodeParams(state.SystemParams, system.Params) ||
+        (verify_system_fingerprint &&
+         !HasValidPrecodeSystemShape(system)) ||
         state.Config.PeelSeed != config.PeelSeed ||
         state.Config.MixCount != config.MixCount ||
         !SamePacketRowEquationIdentity(
@@ -5541,10 +5536,12 @@ static bool VerifyPrecodeSolutionImpl(
 #endif
     std::vector<uint8_t> value(block_bytes, 0u);
 
-    const auto verify_binary = [&](const std::vector<uint32_t>& columns,
+    const auto verify_binary = [&](const uint32_t* columns,
+                                   size_t column_count,
                                    const uint8_t* expected) {
         std::fill(value.begin(), value.end(), uint8_t{0});
-        for (uint32_t column : columns) {
+        for (size_t i = 0; i < column_count; ++i) {
+            const uint32_t column = columns[i];
             gf256_add_mem(
                 value.data(),
                 intermediate_blocks + (size_t)column * block_bytes,
@@ -5555,14 +5552,21 @@ static bool VerifyPrecodeSolutionImpl(
             RowIsZero(value.data(), block_bytes);
     };
 
-    for (const std::vector<uint32_t>& row : system.StaircaseRows) {
-        if (!verify_binary(row, nullptr)) {
+    for (uint32_t row_index = 0;
+         row_index < system.Params.Staircase;
+         ++row_index)
+    {
+        const PrecodeRowView row = system.StaircaseRow(row_index);
+        if (!verify_binary(row.begin(), row.size(), nullptr)) {
             return false;
         }
     }
-    for (const std::vector<uint32_t>& row :
-            system.DenseBasisRowColumns) {
-        if (!verify_binary(row, nullptr)) {
+    for (uint32_t row_index = 0;
+         row_index < system.Params.DenseRows;
+         ++row_index)
+    {
+        const PrecodeRowView row = system.DenseBasisRow(row_index);
+        if (!verify_binary(row.begin(), row.size(), nullptr)) {
             return false;
         }
     }
@@ -5574,7 +5578,8 @@ static bool VerifyPrecodeSolutionImpl(
 #endif
         const std::vector<uint32_t> row =
             GeneratePacketMatrixRow(K, P, packet.BlockId, config);
-        if (row.empty() || !verify_binary(row, packet.Data))
+        if (row.empty() ||
+            !verify_binary(row.data(), row.size(), packet.Data))
         {
             return false;
         }

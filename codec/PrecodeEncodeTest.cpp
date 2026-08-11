@@ -56,6 +56,36 @@ private:
     EncodeAllocationFailureScope& operator=(
         const EncodeAllocationFailureScope&);
 };
+
+class PrecodeBuildAllocationFailureScope
+{
+public:
+    explicit PrecodeBuildAllocationFailureScope(
+        wirehair_v2::test::PrecodeBuildAllocationFailureException exception)
+    {
+        wirehair_v2::test::
+            SetPrecodeBuildAllocationFailurePointForTesting(
+                wirehair_v2::test::
+                    PrecodeBuildAllocationFailurePoint::FinalValidation,
+                exception);
+    }
+
+    ~PrecodeBuildAllocationFailureScope()
+    {
+        wirehair_v2::test::
+            SetPrecodeBuildAllocationFailurePointForTesting(
+                wirehair_v2::test::
+                    PrecodeBuildAllocationFailurePoint::None,
+                wirehair_v2::test::
+                    PrecodeBuildAllocationFailureException::BadAlloc);
+    }
+
+private:
+    PrecodeBuildAllocationFailureScope(
+        const PrecodeBuildAllocationFailureScope&);
+    PrecodeBuildAllocationFailureScope& operator=(
+        const PrecodeBuildAllocationFailureScope&);
+};
 #endif
 
 bool ParsePositiveU32(const char* text, uint32_t& out)
@@ -143,13 +173,13 @@ bool VerifyValues(
     // Binary rows: staircase then dense
     for (uint32_t family = 0; family < 2u; ++family)
     {
-        const std::vector<std::vector<uint32_t>>& rows =
-            family == 0u ?
-                system.StaircaseRows : system.DenseBasisRowColumns;
-        for (size_t r = 0; r < rows.size(); ++r)
+        const uint32_t row_count = family == 0u ? S : D2;
+        for (uint32_t r = 0; r < row_count; ++r)
         {
+            const wirehair_v2::PrecodeRowView row = family == 0u ?
+                system.StaircaseRow(r) : system.DenseBasisRow(r);
             std::memset(acc.data(), 0, block_bytes);
-            for (const uint32_t col : rows[r])
+            for (const uint32_t col : row)
             {
                 gf256_add_mem(acc.data(),
                     ColumnValue(system, source, parity, block_bytes, col),
@@ -158,7 +188,7 @@ bool VerifyValues(
             if (!is_zero())
             {
                 std::fprintf(stderr,
-                    "%s: K=%u bb=%u: %s row %zu does not sum to zero\n",
+                    "%s: K=%u bb=%u: %s row %u does not sum to zero\n",
                     tag, K, block_bytes,
                     family == 0u ? "staircase" : "dense", r);
                 return false;
@@ -211,7 +241,7 @@ uint32_t DenseCornerRank(const wirehair_v2::PrecodeSystem& system)
     std::vector<uint64_t> masks(D2, 0);
     for (uint32_t r = 0; r < D2; ++r)
     {
-        for (const uint32_t col : system.DenseBasisRowColumns[r])
+        for (const uint32_t col : system.DenseBasisRow(r))
         {
             if (col >= dense_base) {
                 masks[r] ^= UINT64_C(1) << (col - dense_base);
@@ -594,21 +624,23 @@ bool TestMalformedDenseCorner()
     system.Params.SourceHits = 1u;
     system.Params.DenseIdentityCorner = false;
     system.Params.Seed = 0u;
-    system.StaircaseRows.push_back(std::vector<uint32_t>{0u, 2u});
+    wirehair_v2::test::AppendPrecodeRowForTesting(
+        system, std::vector<uint32_t>{0u, 2u});
 
     // dense_base is K + S = 3.  Column 67 is dense_base + 64, which used
     // to shift by 64 in DenseCornerInvertible before row validation.  Keep
     // a valid dense column at the tail so the test also catches validators
     // that only scan the sorted dense tail and miss malformed unsorted rows.
-    system.DenseBasisRowColumns.push_back(
-        std::vector<uint32_t>{67u, 0u, 3u});
+    wirehair_v2::test::AppendPrecodeRowForTesting(
+        system, std::vector<uint32_t>{67u, 0u, 3u});
     if (wirehair_v2::DenseCornerInvertible(system)) {
         std::fprintf(stderr,
             "malformed dense corner should not be reported invertible\n");
         return false;
     }
 
-    system.DenseBasisRowColumns[0] = std::vector<uint32_t>{3u, 3u};
+    wirehair_v2::test::ReplacePrecodeRowForTesting(
+        system, 1u, std::vector<uint32_t>{3u, 3u});
     if (wirehair_v2::DenseCornerInvertible(system)) {
         std::fprintf(stderr,
             "duplicate dense columns should cancel in GF(2)\n");
@@ -642,6 +674,10 @@ bool TestStrictSystemValidation()
 
     std::vector<wirehair_v2::PrecodeSystem> invalid;
     wirehair_v2::PrecodeSystem bad;
+    const uint32_t K = valid.Params.BlockCount;
+    const uint32_t S = valid.Params.Staircase;
+    const uint32_t dense_base = K + S;
+    const uint32_t binary_span = dense_base + valid.Params.DenseRows;
 
     bad = valid;
     bad.Params.BlockCount = 0u;
@@ -656,61 +692,74 @@ bool TestStrictSystemValidation()
     bad.Params.HeavyRows = 129u;
     invalid.push_back(bad);
     bad = valid;
-    bad.StaircaseRows.pop_back();
+    wirehair_v2::test::ErasePrecodeRowForTesting(bad, S - 1u);
     invalid.push_back(bad);
     bad = valid;
-    bad.DenseBasisRowColumns.pop_back();
-    invalid.push_back(bad);
-
-    const uint32_t K = valid.Params.BlockCount;
-    const uint32_t S = valid.Params.Staircase;
-    const uint32_t dense_base = K + S;
-    const uint32_t binary_span = dense_base + valid.Params.DenseRows;
-
-    bad = valid;
-    bad.StaircaseRows[0].erase(
-        std::find(bad.StaircaseRows[0].begin(),
-            bad.StaircaseRows[0].end(), K));
-    invalid.push_back(bad);
-    bad = valid;
-    bad.StaircaseRows[1].erase(
-        std::find(bad.StaircaseRows[1].begin(),
-            bad.StaircaseRows[1].end(), K));
-    invalid.push_back(bad);
-    bad = valid;
-    bad.StaircaseRows[1].push_back(K + 2u);
-    std::sort(bad.StaircaseRows[1].begin(), bad.StaircaseRows[1].end());
-    invalid.push_back(bad);
-    bad = valid;
-    bad.StaircaseRows[0].insert(
-        bad.StaircaseRows[0].begin(), bad.StaircaseRows[0][0]);
-    invalid.push_back(bad);
-    bad = valid;
-    std::swap(bad.StaircaseRows[0][0], bad.StaircaseRows[0][1]);
+    wirehair_v2::test::ErasePrecodeRowForTesting(
+        bad, (size_t)S + valid.Params.DenseRows - 1u);
     invalid.push_back(bad);
 
     bad = valid;
-    bad.DenseBasisRowColumns[0].insert(
-        bad.DenseBasisRowColumns[0].begin(),
-        bad.DenseBasisRowColumns[0][0]);
+    std::vector<uint32_t> row =
+        wirehair_v2::test::CopyPrecodeRowForTesting(
+            bad.StaircaseRow(0u));
+    row.erase(std::find(row.begin(), row.end(), K));
+    wirehair_v2::test::ReplacePrecodeRowForTesting(bad, 0u, row);
+    invalid.push_back(bad);
+    bad = valid;
+    row = wirehair_v2::test::CopyPrecodeRowForTesting(
+        bad.StaircaseRow(1u));
+    row.erase(std::find(row.begin(), row.end(), K));
+    wirehair_v2::test::ReplacePrecodeRowForTesting(bad, 1u, row);
+    invalid.push_back(bad);
+    bad = valid;
+    row = wirehair_v2::test::CopyPrecodeRowForTesting(
+        bad.StaircaseRow(1u));
+    row.push_back(K + 2u);
+    std::sort(row.begin(), row.end());
+    wirehair_v2::test::ReplacePrecodeRowForTesting(bad, 1u, row);
+    invalid.push_back(bad);
+    bad = valid;
+    row = wirehair_v2::test::CopyPrecodeRowForTesting(
+        bad.StaircaseRow(0u));
+    row.insert(row.begin(), row[0]);
+    wirehair_v2::test::ReplacePrecodeRowForTesting(bad, 0u, row);
     invalid.push_back(bad);
     bad = valid;
     std::swap(
-        bad.DenseBasisRowColumns[0][0],
-        bad.DenseBasisRowColumns[0][1]);
+        bad.MutableStaircaseRow(0u)[0],
+        bad.MutableStaircaseRow(0u)[1]);
+    invalid.push_back(bad);
+
+    bad = valid;
+    row = wirehair_v2::test::CopyPrecodeRowForTesting(
+        bad.DenseBasisRow(0u));
+    row.insert(row.begin(), row[0]);
+    wirehair_v2::test::ReplacePrecodeRowForTesting(bad, S, row);
     invalid.push_back(bad);
     bad = valid;
-    bad.DenseBasisRowColumns[0].push_back(binary_span);
+    std::swap(
+        bad.MutableDenseBasisRow(0u)[0],
+        bad.MutableDenseBasisRow(0u)[1]);
     invalid.push_back(bad);
     bad = valid;
-    bad.DenseBasisRowColumns[0].back() = dense_base + 1u;
-    std::sort(
-        bad.DenseBasisRowColumns[0].begin(),
-        bad.DenseBasisRowColumns[0].end());
+    row = wirehair_v2::test::CopyPrecodeRowForTesting(
+        bad.DenseBasisRow(0u));
+    row.push_back(binary_span);
+    wirehair_v2::test::ReplacePrecodeRowForTesting(bad, S, row);
     invalid.push_back(bad);
     bad = valid;
-    bad.DenseBasisRowColumns[1].erase(
-        bad.DenseBasisRowColumns[1].begin());
+    row = wirehair_v2::test::CopyPrecodeRowForTesting(
+        bad.DenseBasisRow(0u));
+    row.back() = dense_base + 1u;
+    std::sort(row.begin(), row.end());
+    wirehair_v2::test::ReplacePrecodeRowForTesting(bad, S, row);
+    invalid.push_back(bad);
+    bad = valid;
+    row = wirehair_v2::test::CopyPrecodeRowForTesting(
+        bad.DenseBasisRow(1u));
+    row.erase(row.begin());
+    wirehair_v2::test::ReplacePrecodeRowForTesting(bad, S + 1u, row);
     invalid.push_back(bad);
 
     wirehair::PCGRandom mutation_rng;
@@ -725,24 +774,43 @@ bool TestStrictSystemValidation()
             bad.Params.BlockCount = mutation_rng.Next() & 1u;
             break;
         case 1:
-            bad.StaircaseRows[row].erase(std::find(
-                bad.StaircaseRows[row].begin(),
-                bad.StaircaseRows[row].end(), K + row));
+        {
+            std::vector<uint32_t> columns =
+                wirehair_v2::test::CopyPrecodeRowForTesting(
+                    bad.StaircaseRow(row));
+            columns.erase(std::find(
+                columns.begin(), columns.end(), K + row));
+            wirehair_v2::test::ReplacePrecodeRowForTesting(
+                bad, row, columns);
             break;
+        }
         case 2:
-            bad.StaircaseRows[row].insert(
-                bad.StaircaseRows[row].begin(),
-                bad.StaircaseRows[row][0]);
+        {
+            std::vector<uint32_t> columns =
+                wirehair_v2::test::CopyPrecodeRowForTesting(
+                    bad.StaircaseRow(row));
+            columns.insert(columns.begin(), columns[0]);
+            wirehair_v2::test::ReplacePrecodeRowForTesting(
+                bad, row, columns);
             break;
+        }
         case 3:
-            bad.DenseBasisRowColumns[
-                mutation_rng.Next() % valid.Params.DenseRows]
-                    .push_back(binary_span);
+        {
+            const uint32_t dense_row =
+                mutation_rng.Next() % valid.Params.DenseRows;
+            std::vector<uint32_t> columns =
+                wirehair_v2::test::CopyPrecodeRowForTesting(
+                    bad.DenseBasisRow(dense_row));
+            columns.push_back(binary_span);
+            wirehair_v2::test::ReplacePrecodeRowForTesting(
+                bad, (size_t)S + dense_row, columns);
             break;
+        }
         case 4:
         {
-            std::vector<uint32_t>& dense = bad.DenseBasisRowColumns[
-                mutation_rng.Next() % valid.Params.DenseRows];
+            wirehair_v2::MutablePrecodeRowView dense =
+                bad.MutableDenseBasisRow(
+                    mutation_rng.Next() % valid.Params.DenseRows);
             std::swap(dense[0], dense[1]);
             break;
         }
@@ -750,17 +818,21 @@ bool TestStrictSystemValidation()
         {
             const uint32_t dense_row =
                 mutation_rng.Next() % valid.Params.DenseRows;
-            std::vector<uint32_t>& dense =
-                bad.DenseBasisRowColumns[dense_row];
+            std::vector<uint32_t> dense =
+                wirehair_v2::test::CopyPrecodeRowForTesting(
+                    bad.DenseBasisRow(dense_row));
             dense.erase(std::find(
                 dense.begin(), dense.end(), dense_base + dense_row));
+            wirehair_v2::test::ReplacePrecodeRowForTesting(
+                bad, (size_t)S + dense_row, dense);
             break;
         }
         case 6:
             bad.Params.HeavyRows = 129u + mutation_rng.Next() % 100u;
             break;
         default:
-            bad.DenseBasisRowColumns.pop_back();
+            wirehair_v2::test::ErasePrecodeRowForTesting(
+                bad, (size_t)S + valid.Params.DenseRows - 1u);
             break;
         }
         invalid.push_back(bad);
@@ -981,9 +1053,10 @@ bool TestRecoveryBlockEncoding()
     if (!encoder_state.IsInitialized() ||
         !encoder_state.HasCompleteSystem() ||
         !wirehair_v2::ValidatePrecodeSystem(encoder_state.System()) ||
-        encoder_state.System().StaircaseRows != system.StaircaseRows ||
-        encoder_state.System().DenseBasisRowColumns !=
-            system.DenseBasisRowColumns ||
+        encoder_state.System().BinaryRowOffsets !=
+            system.BinaryRowOffsets ||
+        encoder_state.System().BinaryRowColumns !=
+            system.BinaryRowColumns ||
         encoder_state.SourceBlockCount() != K ||
         encoder_state.ParityBlockCount() != parity_count ||
         encoder_state.BlockBytes() != bb ||
@@ -1307,8 +1380,8 @@ bool TestMessagePrecodeEncoder()
     packet_config.PeelSeed = (uint32_t)blocks.RecoveryRowSeed();
     packet_config.MixCount = blocks.RecoveryMixCount();
     if (!blocks.IntermediateBlocks() || blocks.HasCompleteSystem() ||
-        !encoder_system.StaircaseRows.empty() ||
-        !encoder_system.DenseBasisRowColumns.empty() ||
+        !encoder_system.BinaryRowOffsets.empty() ||
+        !encoder_system.BinaryRowColumns.empty() ||
         encoder_system.Params.BlockCount != K ||
         encoder_system.Params.Staircase != encoder.Profile().V2StaircaseCount ||
         encoder_system.Params.DenseRows != encoder.Profile().V2DenseRowCount ||
@@ -1411,8 +1484,8 @@ bool TestMessagePrecodeEncoder()
         !encoder.IsInitialized() ||
         !encoder.IntermediateBlocks() ||
         encoder.BlockEncoder().HasCompleteSystem() ||
-        !encoder.BlockEncoder().System().StaircaseRows.empty() ||
-        !encoder.BlockEncoder().System().DenseBasisRowColumns.empty() ||
+        !encoder.BlockEncoder().System().BinaryRowOffsets.empty() ||
+        !encoder.BlockEncoder().System().BinaryRowColumns.empty() ||
         encoder.SourceBlockCount() != K ||
         !encoder.BlockEncoder().IsInitialized())
     {
@@ -1834,6 +1907,35 @@ bool TestEncodeAllocationExceptionBoundaries()
         const char* const exception_name = exception_names[exception_i];
 
         {
+            const wirehair_v2::test::
+                PrecodeBuildAllocationFailureException precode_exception =
+                    exception == EncodeAllocationFailureException::BadAlloc ?
+                    wirehair_v2::test::
+                        PrecodeBuildAllocationFailureException::BadAlloc :
+                    wirehair_v2::test::
+                        PrecodeBuildAllocationFailureException::LengthError;
+            PrecodeBuildAllocationFailureScope failure(precode_exception);
+            const WirehairResult result = message_encoder.InitializeResult(
+                source.data(), message_bytes, bb, nullptr, &options);
+            if (result != Wirehair_OOM ||
+                wirehair_v2::test::
+                    PrecodeBuildAllocationFailureHitsForTesting() != 1u ||
+                !message_encoder.IsInitialized() ||
+                message_encoder.IntermediateBlocks() != working_intermediate ||
+                message_encoder.Profile().BlockCount !=
+                    working_profile.BlockCount ||
+                message_encoder.Profile().BlockBytes !=
+                    working_profile.BlockBytes)
+            {
+                std::fprintf(stderr,
+                    "encode allocation boundaries: precode build escaped/"
+                    "committed %s result=%d\n",
+                    exception_name, (int)result);
+                return false;
+            }
+        }
+
+        {
             EncodeAllocationFailureScope failure(
                 EncodeAllocationFailurePoint::DenseCornerValidation,
                 exception);
@@ -1983,7 +2085,8 @@ bool TestEncodeAllocationExceptionBoundaries()
     // Structural and pointer checks that require no allocation retain
     // precedence over the deterministic validation injection points.
     wirehair_v2::PrecodeSystem malformed = system;
-    malformed.StaircaseRows.pop_back();
+    wirehair_v2::test::ErasePrecodeRowForTesting(
+        malformed, malformed.Params.Staircase - 1u);
     const EncodeAllocationFailurePoint validation_points[] = {
         EncodeAllocationFailurePoint::DenseCornerValidation,
         EncodeAllocationFailurePoint::PrecodeValuesValidation,
