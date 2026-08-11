@@ -163,6 +163,25 @@ bool HasValidPrecodeSystemShape(const PrecodeSystem& system);
 bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out);
 
 /**
+    Build a system for an internally resolved encoder configuration.
+
+    This entry still validates every input parameter before modifying `out`,
+    but omits BuildPrecodeSystem()'s final redundant structural walk in
+    Release builds.  It is only for a system generated immediately from a
+    configuration already accepted by the message-encoder resolver; arbitrary
+    callers, decoder ingress, fuzzers, and experiments must use the fully
+    validating BuildPrecodeSystem() entry above.
+*/
+bool BuildGeneratedPrecodeSystemForResolvedEncoder(
+    const PrecodeParams& params,
+    PrecodeSystem& out);
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+/** Force the generated encoder builder to validate (-1) or skip (+1). */
+bool SetGeneratedPrecodeBuildValidationModeForTesting(int mode);
+#endif
+
+/**
     Validate every structural invariant consumed by the encoder.  Validation
     uses widened arithmetic and performs no writes to block data.  Validation
     allocates bounded source-hit scratch and may throw std::bad_alloc or

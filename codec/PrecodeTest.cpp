@@ -17,6 +17,25 @@
 
 namespace {
 
+bool SamePrecodeSystem(
+    const wirehair_v2::PrecodeSystem& a,
+    const wirehair_v2::PrecodeSystem& b)
+{
+    const wirehair_v2::PrecodeParams& ap = a.Params;
+    const wirehair_v2::PrecodeParams& bp = b.Params;
+    return ap.BlockCount == bp.BlockCount &&
+        ap.Staircase == bp.Staircase &&
+        ap.DenseRows == bp.DenseRows &&
+        ap.HeavyRows == bp.HeavyRows &&
+        ap.SourceHits == bp.SourceHits &&
+        ap.DenseIdentityCorner == bp.DenseIdentityCorner &&
+        ap.HeavyFamily == bp.HeavyFamily &&
+        ap.DenseAnchors == bp.DenseAnchors &&
+        ap.Seed == bp.Seed &&
+        a.StaircaseRows == b.StaircaseRows &&
+        a.DenseBasisRowColumns == b.DenseBasisRowColumns;
+}
+
 bool TestParams()
 {
     struct ParamCase
@@ -133,9 +152,154 @@ bool TestParams()
                 i);
             return false;
         }
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        out = sentinel;
+        if (wirehair_v2::
+                BuildGeneratedPrecodeSystemForResolvedEncoder(
+                    invalid_params[i], out) ||
+            !SamePrecodeSystem(out, sentinel))
+        {
+            std::fprintf(stderr,
+                "generated invalid parameter case %zu modified output\n", i);
+            return false;
+        }
+#endif
     }
     return true;
 }
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+bool TestGeneratedEncoderBuildPath()
+{
+    if (wirehair_v2::SetGeneratedPrecodeBuildValidationModeForTesting(-2) ||
+        wirehair_v2::SetGeneratedPrecodeBuildValidationModeForTesting(2))
+    {
+        std::fprintf(stderr,
+            "generated build accepted an invalid validation mode\n");
+        return false;
+    }
+
+    static const uint32_t kBlockCounts[] = {
+        2u, 3u, 4u, 5u, 8u, 32u, 100u, 189u, 190u,
+        511u, 512u, 513u, 1024u, 1025u, 9999u, 10000u, 64000u
+    };
+    static const uint64_t kSeeds[] = {
+        UINT64_C(0), UINT64_C(1), UINT64_C(0xffffffffffffffff)
+    };
+    for (uint32_t K : kBlockCounts)
+    {
+        for (uint64_t seed : kSeeds)
+        {
+            wirehair_v2::PrecodeParams params =
+                wirehair_v2::MakeCertifiedParams(K, seed);
+            wirehair_v2::PrecodeSystem full;
+            wirehair_v2::PrecodeSystem generated;
+            if (!wirehair_v2::
+                    SetGeneratedPrecodeBuildValidationModeForTesting(-1) ||
+                !wirehair_v2::
+                    BuildGeneratedPrecodeSystemForResolvedEncoder(
+                        params, full) ||
+                !wirehair_v2::
+                    SetGeneratedPrecodeBuildValidationModeForTesting(1) ||
+                !wirehair_v2::
+                    BuildGeneratedPrecodeSystemForResolvedEncoder(
+                        params, generated) ||
+                !SamePrecodeSystem(full, generated) ||
+                !wirehair_v2::ValidatePrecodeSystem(generated))
+            {
+                std::fprintf(stderr,
+                    "generated build differs at K=%u seed=%llu\n",
+                    K, (unsigned long long)seed);
+                return false;
+            }
+
+            if (K + params.Staircase >=
+                    2u * (params.DenseRows >> 1))
+            {
+                params.DenseIdentityCorner = true;
+                if (!wirehair_v2::
+                        SetGeneratedPrecodeBuildValidationModeForTesting(-1) ||
+                    !wirehair_v2::
+                        BuildGeneratedPrecodeSystemForResolvedEncoder(
+                            params, full) ||
+                    !wirehair_v2::
+                        SetGeneratedPrecodeBuildValidationModeForTesting(1) ||
+                    !wirehair_v2::
+                        BuildGeneratedPrecodeSystemForResolvedEncoder(
+                            params, generated) ||
+                    !SamePrecodeSystem(full, generated) ||
+                    !wirehair_v2::ValidatePrecodeSystem(generated))
+                {
+                    std::fprintf(stderr,
+                        "generated identity build differs at K=%u\n", K);
+                    return false;
+                }
+            }
+        }
+    }
+
+    static const uint32_t kDenseRows[] = {0u, 1u, 2u, 3u, 12u, 64u};
+    for (uint32_t dense_rows : kDenseRows)
+    {
+        wirehair_v2::PrecodeParams params =
+            wirehair_v2::MakeCertifiedParams(
+                64u, UINT64_C(0x67656e6572617465) ^ dense_rows);
+        params.DenseRows = dense_rows;
+        wirehair_v2::PrecodeSystem full;
+        wirehair_v2::PrecodeSystem generated;
+        if (!wirehair_v2::
+                SetGeneratedPrecodeBuildValidationModeForTesting(-1) ||
+            !wirehair_v2::BuildGeneratedPrecodeSystemForResolvedEncoder(
+                params, full) ||
+            !wirehair_v2::
+                SetGeneratedPrecodeBuildValidationModeForTesting(1) ||
+            !wirehair_v2::BuildGeneratedPrecodeSystemForResolvedEncoder(
+                params, generated) ||
+            !SamePrecodeSystem(full, generated) ||
+            !wirehair_v2::ValidatePrecodeSystem(generated))
+        {
+            std::fprintf(stderr,
+                "generated exotic build differs at D2=%u\n", dense_rows);
+            return false;
+        }
+    }
+
+    static const wirehair_v2::DenseAnchorLayout kLayouts[] = {
+        wirehair_v2::DenseAnchorLayout::Two07,
+        wirehair_v2::DenseAnchorLayout::Four0369
+    };
+    for (wirehair_v2::DenseAnchorLayout layout : kLayouts)
+    {
+        wirehair_v2::PrecodeParams params =
+            wirehair_v2::MakeCertifiedParams(100u, UINT64_C(0x616e63686f72));
+        params.DenseAnchors = layout;
+        wirehair_v2::PrecodeSystem full;
+        wirehair_v2::PrecodeSystem generated;
+        if (!wirehair_v2::
+                SetGeneratedPrecodeBuildValidationModeForTesting(-1) ||
+            !wirehair_v2::BuildGeneratedPrecodeSystemForResolvedEncoder(
+                params, full) ||
+            !wirehair_v2::
+                SetGeneratedPrecodeBuildValidationModeForTesting(1) ||
+            !wirehair_v2::BuildGeneratedPrecodeSystemForResolvedEncoder(
+                params, generated) ||
+            !SamePrecodeSystem(full, generated) ||
+            !wirehair_v2::ValidatePrecodeSystem(generated))
+        {
+            std::fprintf(stderr,
+                "generated anchor build differs at layout=%u\n",
+                (unsigned)layout);
+            return false;
+        }
+    }
+
+    if (!wirehair_v2::SetGeneratedPrecodeBuildValidationModeForTesting(0)) {
+        return false;
+    }
+    std::printf("generated encoder build validation differential: PASS\n");
+    return true;
+}
+#endif
 
 bool TestStaircase(const wirehair_v2::PrecodeSystem& system)
 {
@@ -839,6 +1003,11 @@ int main()
     if (!TestParams()) {
         return 1;
     }
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    if (!TestGeneratedEncoderBuildPath()) {
+        return 1;
+    }
+#endif
     if (!TestHeavyCoefficients()) {
         return 1;
     }

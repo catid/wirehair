@@ -1428,7 +1428,7 @@ WirehairResult MessagePrecodeEncoder::InitializeResult(
 
         GuardedAllocation();
         PrecodeSystem system;
-        if (!BuildPrecodeSystem(params, system)) {
+        if (!BuildGeneratedPrecodeSystemForResolvedEncoder(params, system)) {
             return Wirehair_InvalidInput;
         }
         const uint64_t precode_count_wide = (uint64_t)params.Staircase +

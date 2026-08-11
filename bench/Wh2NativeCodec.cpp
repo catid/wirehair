@@ -561,7 +561,13 @@ WirehairResult NativeArm::InitializeOwnedSourceAfterGlobalInit(
             resolved.PacketConfig;
 
         wirehair_v2::PrecodeSystem system;
-        if (!wirehair_v2::BuildPrecodeSystem(params, system)) {
+        const bool built =
+            spec.Kind == NativeArmKind::Wirehair2Certified
+                ? wirehair_v2::BuildGeneratedPrecodeSystemForResolvedEncoder(
+                      params, system)
+                : wirehair_v2::BuildPrecodeSystem(params, system);
+        if (!built)
+        {
             return Wirehair_BadPeelSeed;
         }
         const uint64_t precode_count_wide = (uint64_t)params.Staircase +

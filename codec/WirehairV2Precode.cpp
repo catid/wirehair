@@ -162,7 +162,22 @@ bool HasValidPrecodeSystemShape(const PrecodeSystem& system)
         system.DenseBasisRowColumns.size() == system.Params.DenseRows;
 }
 
-bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
+namespace {
+
+enum class FinalSystemValidation
+{
+    Full,
+    Skip
+};
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+thread_local int GeneratedPrecodeBuildValidationMode = 0;
+#endif
+
+bool BuildPrecodeSystemImpl(
+    const PrecodeParams& params,
+    PrecodeSystem& out,
+    FinalSystemValidation final_validation)
 {
     const uint32_t K = params.BlockCount;
     const uint32_t S = params.Staircase;
@@ -384,8 +399,50 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
         }
     }
 
+    if (final_validation == FinalSystemValidation::Full) {
+        return ValidatePrecodeSystem(out);
+    }
+
+#if !defined(NDEBUG)
+    // Keep ordinary CMake Debug builds fully validating.  The project's
+    // CAT_DEBUG_ASSERT macro depends on DEBUG/_DEBUG, which CMake does not
+    // define for every supported toolchain.
     return ValidatePrecodeSystem(out);
+#else
+    return true;
+#endif
 }
+
+} // namespace
+
+bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
+{
+    return BuildPrecodeSystemImpl(params, out, FinalSystemValidation::Full);
+}
+
+bool BuildGeneratedPrecodeSystemForResolvedEncoder(
+    const PrecodeParams& params,
+    PrecodeSystem& out)
+{
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    if (GeneratedPrecodeBuildValidationMode < 0) {
+        return BuildPrecodeSystemImpl(
+            params, out, FinalSystemValidation::Full);
+    }
+#endif
+    return BuildPrecodeSystemImpl(params, out, FinalSystemValidation::Skip);
+}
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+bool SetGeneratedPrecodeBuildValidationModeForTesting(int mode)
+{
+    if (mode < -1 || mode > 1) {
+        return false;
+    }
+    GeneratedPrecodeBuildValidationMode = mode;
+    return true;
+}
+#endif
 
 bool ValidatePrecodeSystem(const PrecodeSystem& system)
 {
