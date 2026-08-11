@@ -331,6 +331,37 @@ static bool gf256_self_test()
         }
     }
 
+    // Test gf256_mulset_multi_mem(), including zero/identity/general scales,
+    // one runtime-target GFNI block, and every portable tail size.
+    for (unsigned i = 0; i < kTestBufferBytes; ++i)
+    {
+        m_SelfTestBuffers.A[i] = (uint8_t)(i * 3u + 7u);
+        m_SelfTestBuffers.B[i] = (uint8_t)(i * 5u + 11u);
+        m_SelfTestBuffers.C[i] = (uint8_t)(i * 7u + 13u);
+        m_SelfTestBuffers.D[i] = (uint8_t)(i * 11u + 17u);
+        m_SelfTestBuffers.E[i] = (uint8_t)(i * 13u + 19u);
+    }
+    {
+        const void* sources[] = {
+            m_SelfTestBuffers.B,
+            m_SelfTestBuffers.C,
+            m_SelfTestBuffers.D,
+            m_SelfTestBuffers.E
+        };
+        const uint8_t scales[] = { 0u, 1u, 2u, 0x6cu };
+        gf256_mulset_multi_mem(
+            m_SelfTestBuffers.A, sources, scales, 4, kTestBufferBytes);
+    }
+    for (unsigned i = 0; i < kTestBufferBytes; ++i)
+    {
+        const uint8_t expected =
+            (uint8_t)(i * 7u + 13u) ^
+            gf256_mul((uint8_t)(i * 11u + 17u), 2u) ^
+            gf256_mul((uint8_t)(i * 13u + 19u), 0x6cu);
+        if (m_SelfTestBuffers.A[i] != expected)
+            return false;
+    }
+
     // Test gf256_mul_mem()
     for (unsigned i = 0; i < kTestBufferBytes; ++i)
     {
@@ -395,6 +426,9 @@ static bool CpuHasAVX2 = false;
 #endif
 #if defined(GF256_TRY_TARGET_AVX512)
 static bool CpuHasTargetAVX512 = false;
+#endif
+#if defined(GF256_TRY_TARGET_GFNI)
+static bool CpuHasTargetGFNI = false;
 #endif
 #if defined(GF256_TRY_WIDE_XOR)
 static thread_local bool ThreadWideXor = false;
@@ -552,7 +586,9 @@ extern "C" void gf256_get_active_x86_cpu_features(
 # if defined(GF256_TRY_AVX2) || defined(GF256_TRY_TARGET_AVX2)
     features->AVX2 = CpuHasAVX2;
 # endif
-# if defined(GF256_TRY_GFNI)
+# if defined(GF256_TRY_TARGET_GFNI)
+    features->GFNI = CpuHasTargetGFNI;
+# elif defined(GF256_TRY_GFNI)
     features->GFNI = CpuHasGFNI;
 # endif
 # if defined(GF256_TRY_TARGET_AVX512)
@@ -621,6 +657,10 @@ static void gf256_architecture_init()
 
 #if defined(GF256_TRY_TARGET_AVX512)
     CpuHasTargetAVX512 = features.AVX512 != 0;
+#endif
+
+#if defined(GF256_TRY_TARGET_GFNI)
+    CpuHasTargetGFNI = features.GFNI != 0;
 #endif
 
 #if defined(GF256_TRY_GFNI)
@@ -899,7 +939,7 @@ static void gf256_mul_mem_init()
 //------------------------------------------------------------------------------
 // GFNI affine matrices (Ablation S1)
 
-#ifdef GF256_TRY_GFNI
+#if defined(GF256_TRY_GFNI) || defined(GF256_TRY_TARGET_GFNI)
 // Build the 8x8 GF(2)-affine matrix (packed into a qword) such that, under the
 // vgf2p8affineqb convention [ out_bit j = parity(x & ((M>>(8*j))&0xff)) ], applying
 // M to byte x yields gf256_mul(x, c) in Wirehair's field (poly 0x14D).
@@ -921,12 +961,22 @@ static uint64_t gf256_gfni_matrix(uint8_t c)
     return m;
 }
 
+#ifdef GF256_TRY_TARGET_GFNI
+alignas(64) static uint64_t TargetGFNIMulMatrix[256];
+#endif
+
 static void gf256_gfni_init()
 {
-    for (int c = 0; c < 256; ++c)
+    for (int c = 0; c < 256; ++c) {
+#ifdef GF256_TRY_GFNI
         GF256Ctx.GFNI_MUL_MATRIX[c] = gf256_gfni_matrix((uint8_t)c);
+#endif
+#ifdef GF256_TRY_TARGET_GFNI
+        TargetGFNIMulMatrix[c] = gf256_gfni_matrix((uint8_t)c);
+#endif
+    }
 }
-#endif // GF256_TRY_GFNI
+#endif // GF256_TRY_GFNI || GF256_TRY_TARGET_GFNI
 
 
 //------------------------------------------------------------------------------
@@ -982,7 +1032,7 @@ extern "C" int gf256_init_(int version)
         gf256_inv_init();
         gf256_sqr_init();
         gf256_mul_mem_init();
-#ifdef GF256_TRY_GFNI
+#if defined(GF256_TRY_GFNI) || defined(GF256_TRY_TARGET_GFNI)
         gf256_gfni_init();
 #endif
 
@@ -2511,6 +2561,181 @@ static GF256_AVX2_TARGET int gf256_muladd_multi_mem_avx2_target(
     return vector_end;
 }
 
+#endif // !GF256_TARGET_MOBILE && GF256_TRY_TARGET_AVX2
+
+#if !defined(GF256_TARGET_MOBILE) && \
+    (defined(GF256_TRY_TARGET_AVX2) || defined(GF256_TRY_AVX2))
+
+static GF256_AVX2_TARGET int gf256_mulset_multi_mem_avx2_target(
+    uint8_t* GF256_RESTRICT destination,
+    const void* const* GF256_RESTRICT sources,
+    const uint8_t* GF256_RESTRICT scales,
+    int source_count,
+    int bytes)
+{
+    const __m256i clear_low = _mm256_set1_epi8(0x0f);
+    const __m256i zero = _mm256_setzero_si256();
+    const int vector_bytes = bytes & ~31;
+    int offset = 0;
+
+    for (; vector_bytes - offset >= 256; offset += 256)
+    {
+        __m256i accumulators[8] = {
+            zero, zero, zero, zero, zero, zero, zero, zero
+        };
+        for (int source = 0; source < source_count; ++source)
+        {
+            const uint8_t scale = scales[source];
+            if (scale == 0u) {
+                continue;
+            }
+            const uint8_t* const input =
+                reinterpret_cast<const uint8_t*>(sources[source]) + offset;
+            if (scale == 1u)
+            {
+                for (int lane = 0; lane < 8; ++lane) {
+                    accumulators[lane] = _mm256_xor_si256(
+                        accumulators[lane],
+                        _mm256_loadu_si256(
+                            reinterpret_cast<const __m256i*>(
+                                input + lane * 32)));
+                }
+                continue;
+            }
+
+            const __m256i table_low = _mm256_broadcastsi128_si256(
+                _mm_loadu_si128(GF256Ctx.MM128.TABLE_LO_Y + scale));
+            const __m256i table_high = _mm256_broadcastsi128_si256(
+                _mm_loadu_si128(GF256Ctx.MM128.TABLE_HI_Y + scale));
+            for (int lane = 0; lane < 8; ++lane)
+            {
+                __m256i value = _mm256_loadu_si256(
+                    reinterpret_cast<const __m256i*>(input + lane * 32));
+                __m256i low = _mm256_and_si256(value, clear_low);
+                value = _mm256_srli_epi64(value, 4);
+                const __m256i high = _mm256_and_si256(value, clear_low);
+                low = _mm256_shuffle_epi8(table_low, low);
+                const __m256i product = _mm256_xor_si256(
+                    low, _mm256_shuffle_epi8(table_high, high));
+                accumulators[lane] =
+                    _mm256_xor_si256(accumulators[lane], product);
+            }
+        }
+        for (int lane = 0; lane < 8; ++lane) {
+            _mm256_storeu_si256(
+                reinterpret_cast<__m256i*>(destination + offset + lane * 32),
+                accumulators[lane]);
+        }
+    }
+
+    for (; offset < vector_bytes; offset += 32)
+    {
+        __m256i accumulator = zero;
+        for (int source = 0; source < source_count; ++source)
+        {
+            const uint8_t scale = scales[source];
+            if (scale == 0u) {
+                continue;
+            }
+            const uint8_t* const input =
+                reinterpret_cast<const uint8_t*>(sources[source]) + offset;
+            __m256i value = _mm256_loadu_si256(
+                reinterpret_cast<const __m256i*>(input));
+            if (scale != 1u)
+            {
+                const __m256i table_low = _mm256_broadcastsi128_si256(
+                    _mm_loadu_si128(GF256Ctx.MM128.TABLE_LO_Y + scale));
+                const __m256i table_high = _mm256_broadcastsi128_si256(
+                    _mm_loadu_si128(GF256Ctx.MM128.TABLE_HI_Y + scale));
+                __m256i low = _mm256_and_si256(value, clear_low);
+                value = _mm256_srli_epi64(value, 4);
+                const __m256i high = _mm256_and_si256(value, clear_low);
+                value = _mm256_xor_si256(
+                    _mm256_shuffle_epi8(table_low, low),
+                    _mm256_shuffle_epi8(table_high, high));
+            }
+            accumulator = _mm256_xor_si256(accumulator, value);
+        }
+        _mm256_storeu_si256(
+            reinterpret_cast<__m256i*>(destination + offset), accumulator);
+    }
+    return vector_bytes;
+}
+
+#endif
+
+#if !defined(GF256_TARGET_MOBILE) && defined(GF256_TRY_TARGET_GFNI)
+
+template<unsigned LaneCount>
+static GF256_GFNI_TARGET GF256_FORCE_INLINE void
+gf256_mulset_multi_mem_gfni_chunk(
+    uint8_t* GF256_RESTRICT destination,
+    const void* const* GF256_RESTRICT sources,
+    const uint8_t* GF256_RESTRICT scales,
+    int source_count,
+    int offset)
+{
+    const __m512i zero = _mm512_setzero_si512();
+    __m512i accumulators[LaneCount];
+    for (unsigned lane = 0; lane < LaneCount; ++lane) {
+        accumulators[lane] = zero;
+    }
+    for (int source = 0; source < source_count; ++source)
+    {
+        const uint8_t scale = scales[source];
+        if (scale == 0u) {
+            continue;
+        }
+        const uint8_t* const input =
+            reinterpret_cast<const uint8_t*>(sources[source]) + offset;
+        const __m512i matrix = _mm512_set1_epi64(
+            static_cast<long long>(TargetGFNIMulMatrix[scale]));
+        for (unsigned lane = 0; lane < LaneCount; ++lane)
+        {
+            const __m512i value = _mm512_loadu_si512(
+                reinterpret_cast<const void*>(input + lane * 64u));
+            const __m512i product = scale == 1u ? value :
+                _mm512_gf2p8affine_epi64_epi8(value, matrix, 0);
+            accumulators[lane] =
+                _mm512_xor_si512(accumulators[lane], product);
+        }
+    }
+    for (unsigned lane = 0; lane < LaneCount; ++lane) {
+        _mm512_storeu_si512(
+            reinterpret_cast<void*>(destination + offset + lane * 64u),
+            accumulators[lane]);
+    }
+}
+
+static GF256_GFNI_TARGET int gf256_mulset_multi_mem_gfni_target(
+    uint8_t* GF256_RESTRICT destination,
+    const void* const* GF256_RESTRICT sources,
+    const uint8_t* GF256_RESTRICT scales,
+    int source_count,
+    int bytes)
+{
+    int offset = 0;
+    while (bytes - offset >= 1024)
+    {
+        gf256_mulset_multi_mem_gfni_chunk<16>(
+            destination, sources, scales, source_count, offset);
+        offset += 1024;
+    }
+    while (bytes - offset >= 256)
+    {
+        gf256_mulset_multi_mem_gfni_chunk<4>(
+            destination, sources, scales, source_count, offset);
+        offset += 256;
+    }
+    while (bytes - offset >= 64)
+    {
+        gf256_mulset_multi_mem_gfni_chunk<1>(
+            destination, sources, scales, source_count, offset);
+        offset += 64;
+    }
+    return offset;
+}
+
 #endif
 
 #if !defined(GF256_TARGET_MOBILE) && \
@@ -3320,6 +3545,79 @@ extern "C" void gf256_muladd_multi_mem(
                 }
             }
         }
+    }
+}
+
+extern "C" void gf256_mulset_multi_mem(
+    void * GF256_RESTRICT destination,
+    const void * const * GF256_RESTRICT sources,
+    const uint8_t * GF256_RESTRICT scales,
+    int source_count,
+    int bytes)
+{
+    if (bytes <= 0 || source_count <= 0) {
+        return;
+    }
+
+    bool initialized = false;
+    for (int source = 0; source < source_count; ++source)
+    {
+        const uint8_t scale = scales[source];
+        if (scale == 0u) {
+            continue;
+        }
+        if (!initialized)
+        {
+            if (scale > 1u) {
+                WH_BUMP(3, bytes);
+            }
+            initialized = true;
+        }
+        else if (scale == 1u) {
+            WH_BUMP(0, bytes);
+        }
+        else {
+            WH_BUMP(4, bytes);
+        }
+    }
+
+    uint8_t* const output = reinterpret_cast<uint8_t*>(destination);
+    int offset = 0;
+#if !defined(GF256_TARGET_MOBILE) && defined(GF256_TRY_TARGET_GFNI)
+    if (CpuHasTargetGFNI && bytes >= 64) {
+        offset = gf256_mulset_multi_mem_gfni_target(
+            output, sources, scales, source_count, bytes);
+    }
+#endif
+#if !defined(GF256_TARGET_MOBILE) && \
+    (defined(GF256_TRY_TARGET_AVX2) || defined(GF256_TRY_AVX2))
+    if (offset == 0 && CpuHasAVX2) {
+        offset = gf256_mulset_multi_mem_avx2_target(
+            output, sources, scales, source_count, bytes);
+    }
+#endif
+
+    const uint8_t* tables[16];
+    int base = 0;
+    while (base < source_count)
+    {
+        const int group_count = source_count - base < 16 ?
+            source_count - base : 16;
+        for (int local = 0; local < group_count; ++local) {
+            tables[local] = GF256Ctx.GF256_MUL_TABLE +
+                ((unsigned)scales[base + local] << 8);
+        }
+        for (int byte = offset; byte < bytes; ++byte)
+        {
+            uint8_t value = base == 0 ? 0u : output[byte];
+            for (int local = 0; local < group_count; ++local) {
+                value ^= tables[local][
+                    reinterpret_cast<const uint8_t*>(
+                        sources[base + local])[byte]];
+            }
+            output[byte] = value;
+        }
+        base += group_count;
     }
 }
 

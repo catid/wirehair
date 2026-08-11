@@ -86,6 +86,9 @@
     // substantially slower than the portable runtime-dispatch build.
     #define GF256_TRY_TARGET_AVX512
     #define GF256_AVX512_TARGET __attribute__((target("avx512f")))
+    #define GF256_TRY_TARGET_GFNI
+    #define GF256_GFNI_TARGET \
+        __attribute__((target("avx512f,avx512bw,gfni")))
 # endif
 #else // __AVX2__
     #define GF256_ALIGN_BYTES 16
@@ -99,6 +102,9 @@
     #define GF256_AVX2_TARGET __attribute__((target("avx2")))
     #define GF256_TRY_TARGET_AVX512
     #define GF256_AVX512_TARGET __attribute__((target("avx512f")))
+    #define GF256_TRY_TARGET_GFNI
+    #define GF256_GFNI_TARGET \
+        __attribute__((target("avx512f,avx512bw,gfni")))
     #include <immintrin.h>
 # endif
 #endif // __AVX2__
@@ -109,14 +115,18 @@
 #if !defined(GF256_AVX512_TARGET)
     #define GF256_AVX512_TARGET
 #endif
+#if !defined(GF256_GFNI_TARGET)
+    #define GF256_GFNI_TARGET
+#endif
 
 #if defined(GF256_TRY_TARGET_AVX2) || \
     (defined(GF256_TRY_AVX2) && defined(GF256_TRY_TARGET_AVX512))
     #define GF256_TRY_WIDE_XOR
 #endif
 
-// Ablation S1 (wirehair-cqu): GFNI gf2p8affineqb constant-multiply for poly 0x14D.
-// Enabled when built with -DWH_GFNI=1 on a target that exposes GFNI+AVX512F/BW.
+// Ablation S1 (wirehair-cqu): compile-wide GFNI constant-multiply kernels for
+// poly 0x14D.  This optional native-build experiment is separate from the
+// runtime-targeted GFNI multi-source helper selected above on portable x86.
 #if defined(WH_GFNI) && (WH_GFNI+0) && defined(__GFNI__) && defined(__AVX512F__) && defined(__AVX512BW__)
     #define GF256_TRY_GFNI /* 512-bit single-instruction GF(256) multiply */
     #include <immintrin.h>
@@ -420,6 +430,25 @@ extern void gf256_muladd_multi_mem(
     const uint8_t * GF256_RESTRICT scales,
     int destination_count,
     const void * GF256_RESTRICT source,
+    int bytes);
+
+/**
+    Form one scaled linear combination of independent source blocks:
+    `destination[] = sum(sources[j][] * scales[j])`.
+
+    For positive counts and byte lengths, destination, sources, scales, and
+    every source pointer must be valid, including sources with a zero scale.
+    The destination range must not overlap any source range, the source-pointer
+    array, or the scales array.  Source ranges may overlap or duplicate each
+    other.  An all-zero scale vector overwrites the destination with zero.
+    Non-positive counts and byte lengths are no-ops and do not inspect any
+    pointer.
+*/
+extern void gf256_mulset_multi_mem(
+    void * GF256_RESTRICT destination,
+    const void * const * GF256_RESTRICT sources,
+    const uint8_t * GF256_RESTRICT scales,
+    int source_count,
     int bytes);
 
 /// Performs "x[] /= y" bulk memory operation.  vz == vx is supported.
