@@ -2595,6 +2595,300 @@ bool CheckColdSolveStatsAlias()
     return true;
 }
 
+bool CheckColdSolveWideXorPolicy()
+{
+    const uint32_t K = 64u;
+    const uint32_t block_bytes = 512u;
+    wirehair_v2::PrecodeParams params = wirehair_v2::MakeCertifiedParams(
+        K, UINT64_C(0x57494445584f5231));
+    wirehair_v2::PacketRowConfig base_config;
+    base_config.PeelSeed = UINT32_C(0x57494445);
+    base_config.MixCount = wirehair_v2::kCertifiedPacketMixCount;
+    wirehair_v2::PrecodeSystem system;
+    wirehair_v2::PacketRowConfig config;
+    if (wirehair_v2::SelectSystematicConfiguration(
+            params, base_config, system, config) != Wirehair_Success)
+    {
+        std::fprintf(stderr, "solve: wide-XOR configuration failed\n");
+        return false;
+    }
+    const uint32_t P = system.Params.Staircase +
+        system.Params.DenseRows + system.Params.HeavyRows;
+    wirehair_v2::PacketRowRuntime runtime;
+    if (!runtime.Initialize(K, P, config.MixCount)) {
+        return false;
+    }
+    std::vector<uint8_t> message((size_t)K * block_bytes);
+    for (size_t i = 0u; i < message.size(); ++i) {
+        message[i] = (uint8_t)(i * 149u + (i >> 5) + 0x3du);
+    }
+    std::vector<wirehair_v2::SolvePacket> packets(K);
+    for (uint32_t id = 0u; id < K; ++id) {
+        packets[id].BlockId = id;
+        packets[id].Data = message.data() + (size_t)id * block_bytes;
+    }
+    static const ColdSolveEntryPoint entry_points[] = {
+        ColdSolveEntryPoint::Public,
+        ColdSolveEntryPoint::Runtime,
+        ColdSolveEntryPoint::ValidatedRuntime
+    };
+    std::vector<uint8_t> reference_output;
+    wirehair_v2::PrecodeSolveStats reference_stats = {};
+    for (size_t entry_i = 0u;
+         entry_i < sizeof(entry_points) / sizeof(entry_points[0]);
+         ++entry_i)
+    {
+        std::vector<uint8_t> outputs[2];
+        wirehair_v2::PrecodeSolveStats stats[2] = {};
+        for (int mode_i = 0; mode_i < 2; ++mode_i)
+        {
+            const int mode = mode_i == 0 ? -1 : 1;
+            if (!wirehair_v2::SetColdSolveWideXorModeForTesting(mode)) {
+                return false;
+            }
+            wirehair_v2::ResetColdSolveWideXorObservationsForTesting();
+            const int ambient = mode_i == 0 ? 1 : 0;
+            const int saved = gf256_set_thread_wide_xor(ambient);
+            const int effective_ambient =
+                gf256_set_thread_wide_xor(ambient);
+            const WirehairResult result = CallColdSolve(
+                entry_points[entry_i], system, config, runtime, packets,
+                block_bytes, outputs[mode_i], &stats[mode_i], nullptr);
+            const int restored = gf256_set_thread_wide_xor(saved);
+            if (result != Wirehair_Success ||
+                restored != effective_ambient ||
+                wirehair_v2::ColdSolveWideXorObservationCountForTesting() !=
+                    1u ||
+                wirehair_v2::LastColdSolveWideXorSelectionForTesting() !=
+                    mode_i)
+            {
+                std::fprintf(stderr,
+                    "solve: wide-XOR scope mismatch entry=%s mode=%d "
+                    "result=%d restored=%d observations=%llu last=%d\n",
+                    ColdSolveEntryPointName(entry_points[entry_i]), mode,
+                    (int)result, restored,
+                    (unsigned long long)
+                        wirehair_v2::ColdSolveWideXorObservationCountForTesting(),
+                    wirehair_v2::LastColdSolveWideXorSelectionForTesting());
+                (void)wirehair_v2::SetColdSolveWideXorModeForTesting(0);
+                return false;
+            }
+        }
+        if (outputs[0] != outputs[1] ||
+            !SameSolveStatsIgnoringTiming(stats[0], stats[1]) ||
+            !wirehair_v2::VerifyPrecodeSolution(
+                system, config, packets, outputs[0].data(), block_bytes))
+        {
+            std::fprintf(stderr,
+                "solve: wide-XOR differential failed entry=%s\n",
+                ColdSolveEntryPointName(entry_points[entry_i]));
+            (void)wirehair_v2::SetColdSolveWideXorModeForTesting(0);
+            return false;
+        }
+        if (entry_i == 0u) {
+            reference_output = outputs[0];
+            reference_stats = stats[0];
+        }
+        else if (outputs[0] != reference_output ||
+                 !SameSolveStatsIgnoringTiming(stats[0], reference_stats))
+        {
+            std::fprintf(stderr,
+                "solve: wide-XOR entry-point differential failed\n");
+            (void)wirehair_v2::SetColdSolveWideXorModeForTesting(0);
+            return false;
+        }
+    }
+
+    if (wirehair_v2::SetColdSolveWideXorModeForTesting(2) ||
+        !wirehair_v2::SetColdSolveWideXorModeForTesting(1) ||
+        wirehair_v2::SetColdSolveWideXorModeForTesting(-2))
+    {
+        std::fprintf(stderr, "solve: wide-XOR mode validation failed\n");
+        (void)wirehair_v2::SetColdSolveWideXorModeForTesting(0);
+        return false;
+    }
+    wirehair_v2::ResetColdSolveWideXorObservationsForTesting();
+    std::vector<wirehair_v2::SolvePacket> too_few(
+        packets.begin(), packets.end() - 1u);
+    std::vector<uint8_t> short_output(7u, 0xa5u);
+    wirehair_v2::PrecodeSolveStats short_stats = {};
+    const int saved = gf256_set_thread_wide_xor(0);
+    const WirehairResult short_result = CallColdSolve(
+        ColdSolveEntryPoint::Public, system, config, runtime, too_few,
+        block_bytes, short_output, &short_stats, nullptr);
+    const int restored = gf256_set_thread_wide_xor(saved);
+    if (short_result != Wirehair_NeedMore || restored != 0 ||
+        wirehair_v2::ColdSolveWideXorObservationCountForTesting() != 1u)
+    {
+        std::fprintf(stderr, "solve: wide-XOR early NeedMore leaked TLS\n");
+        (void)wirehair_v2::SetColdSolveWideXorModeForTesting(0);
+        return false;
+    }
+
+    gf256_x86_cpu_features features = {};
+    gf256_get_active_x86_cpu_features(&features);
+    for (uint32_t boundary_bytes = 511u;
+         boundary_bytes <= 512u;
+         ++boundary_bytes)
+    {
+        std::vector<uint8_t> boundary_message((size_t)K * boundary_bytes);
+        for (size_t i = 0u; i < boundary_message.size(); ++i) {
+            boundary_message[i] = (uint8_t)(i * 61u + boundary_bytes);
+        }
+        std::vector<wirehair_v2::SolvePacket> boundary_packets(K);
+        for (uint32_t id = 0u; id < K; ++id) {
+            boundary_packets[id].BlockId = id;
+            boundary_packets[id].Data = boundary_message.data() +
+                (size_t)id * boundary_bytes;
+        }
+        if (!wirehair_v2::SetColdSolveWideXorModeForTesting(0)) {
+            return false;
+        }
+        wirehair_v2::ResetColdSolveWideXorObservationsForTesting();
+        std::vector<uint8_t> output;
+        if (wirehair_v2::SolvePrecodeSystem(
+                system, config, boundary_packets, boundary_bytes, output) !=
+            Wirehair_Success ||
+            wirehair_v2::ColdSolveWideXorObservationCountForTesting() != 1u)
+        {
+            return false;
+        }
+        int expected = 0;
+#if !defined(GF256_TARGET_MOBILE) && defined(GF256_TRY_WIDE_XOR)
+        expected = boundary_bytes == 512u && features.AVX2 ? 1 : 0;
+#else
+        (void)features;
+#endif
+        if (wirehair_v2::LastColdSolveWideXorSelectionForTesting() !=
+            expected)
+        {
+            std::fprintf(stderr,
+                "solve: wide-XOR boundary mismatch bb=%u expected=%d\n",
+                boundary_bytes, expected);
+            return false;
+        }
+    }
+
+    std::vector<wirehair_v2::SolvePacket> deficient(K);
+    for (wirehair_v2::SolvePacket& packet : deficient) {
+        packet.BlockId = 0u;
+        packet.Data = message.data();
+    }
+    wirehair_v2::PrecodeSolveResumeState deficient_states[2];
+    wirehair_v2::PrecodeSolveStats deficient_stats[2] = {};
+    std::vector<uint8_t> deficient_outputs[2];
+    for (int mode_i = 0; mode_i < 2; ++mode_i)
+    {
+        const int mode = mode_i == 0 ? -1 : 1;
+        if (!wirehair_v2::SetColdSolveWideXorModeForTesting(mode)) {
+            return false;
+        }
+        wirehair_v2::ResetColdSolveWideXorObservationsForTesting();
+        if (CallColdSolve(
+                ColdSolveEntryPoint::Public, system, config, runtime,
+                deficient, block_bytes, deficient_outputs[mode_i],
+                &deficient_stats[mode_i], &deficient_states[mode_i]) !=
+                Wirehair_NeedMore ||
+            wirehair_v2::ColdSolveWideXorObservationCountForTesting() != 1u)
+        {
+            std::fprintf(stderr,
+                "solve: wide-XOR deficient checkpoint missing mode=%d\n",
+                mode);
+            return false;
+        }
+    }
+    if (deficient_outputs[0] != deficient_outputs[1] ||
+        !SameSolveStatsIgnoringTiming(
+            deficient_stats[0], deficient_stats[1]) ||
+        !SameResumeStateIgnoringTiming(
+            deficient_states[0], deficient_states[1]))
+    {
+        std::fprintf(stderr,
+            "solve: wide-XOR deficient checkpoint differential failed\n");
+        return false;
+    }
+    wirehair_v2::ResetColdSolveWideXorObservationsForTesting();
+    std::vector<uint8_t> resume_output(5u, 0xc3u);
+    wirehair_v2::PrecodeSolveStats resume_stats = {};
+    if (wirehair_v2::ResumePrecodeSystem(
+            system, config, 1u, message.data() + block_bytes, block_bytes,
+            deficient_states[0], resume_output, &resume_stats, true) !=
+            Wirehair_NeedMore ||
+        wirehair_v2::ColdSolveWideXorObservationCountForTesting() != 0u)
+    {
+        std::fprintf(stderr,
+            "solve: Resume consumed cold-solve wide-XOR policy\n");
+        return false;
+    }
+
+    std::vector<uint8_t> thread_outputs[2];
+    wirehair_v2::PrecodeSolveStats thread_stats[2] = {};
+    bool thread_ok[2] = { false, false };
+    std::atomic<unsigned> ready(0u);
+    std::atomic<bool> start(false);
+    std::vector<std::thread> threads;
+    try
+    {
+        for (unsigned thread = 0u; thread < 2u; ++thread)
+        {
+            threads.push_back(std::thread([&, thread]() {
+                const int mode = thread == 0u ? 1 : -1;
+                const int ambient = thread == 0u ? 0 : 1;
+                if (!wirehair_v2::SetColdSolveWideXorModeForTesting(mode)) {
+                    return;
+                }
+                wirehair_v2::ResetColdSolveWideXorObservationsForTesting();
+                const int saved_ambient =
+                    gf256_set_thread_wide_xor(ambient);
+                const int effective_ambient =
+                    gf256_set_thread_wide_xor(ambient);
+                ready.fetch_add(1u);
+                while (!start.load()) {
+                    std::this_thread::yield();
+                }
+                const WirehairResult result = wirehair_v2::SolvePrecodeSystem(
+                    system, config, packets, block_bytes,
+                    thread_outputs[thread], &thread_stats[thread]);
+                const int restored =
+                    gf256_set_thread_wide_xor(saved_ambient);
+                thread_ok[thread] = result == Wirehair_Success &&
+                    restored == effective_ambient &&
+                    wirehair_v2::ColdSolveWideXorObservationCountForTesting() ==
+                        1u &&
+                    wirehair_v2::LastColdSolveWideXorSelectionForTesting() ==
+                        (thread == 0u ? 1 : 0);
+                (void)wirehair_v2::SetColdSolveWideXorModeForTesting(0);
+            }));
+        }
+    }
+    catch (...)
+    {
+        start.store(true);
+        for (std::thread& thread : threads) {
+            thread.join();
+        }
+        return false;
+    }
+    while (ready.load() != 2u) {
+        std::this_thread::yield();
+    }
+    start.store(true);
+    for (std::thread& thread : threads) {
+        thread.join();
+    }
+    if (!thread_ok[0] || !thread_ok[1] ||
+        thread_outputs[0] != thread_outputs[1] ||
+        !SameSolveStatsIgnoringTiming(thread_stats[0], thread_stats[1]))
+    {
+        std::fprintf(stderr, "solve: wide-XOR thread isolation failed\n");
+        return false;
+    }
+
+    (void)wirehair_v2::SetColdSolveWideXorModeForTesting(0);
+    std::printf("cold-solve wide-XOR policy/differential: PASS\n");
+    return true;
+}
+
 bool CheckBinaryPeelLowDegreeXorOracle()
 {
     const uint32_t K = 64000u;
@@ -3686,6 +3980,7 @@ int main(int argc, char** argv)
     ok = CheckConcurrentCoefficientCaches() && ok;
     ok = CheckIncrementalResume() && ok;
     ok = CheckColdSolveStatsAlias() && ok;
+    ok = CheckColdSolveWideXorPolicy() && ok;
     ok = CheckBinaryPeelLowDegreeXorOracle() && ok;
     ok = CheckMixDomainValidation() && ok;
     ok = CheckPacketRowDomainBoundaries() && ok;

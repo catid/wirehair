@@ -234,6 +234,36 @@ bool ParsePacketSchedule(const char* text, PacketScheduleKind& kind)
     return true;
 }
 
+const char* ColdSolveWideXorModeName(int mode)
+{
+    if (mode < 0) {
+        return "off";
+    }
+    if (mode > 0) {
+        return "on";
+    }
+    return "policy";
+}
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+bool ParseColdSolveWideXorMode(const char* text, int& mode)
+{
+    if (!std::strcmp(text, "off")) {
+        mode = -1;
+    }
+    else if (!std::strcmp(text, "policy")) {
+        mode = 0;
+    }
+    else if (!std::strcmp(text, "on")) {
+        mode = 1;
+    }
+    else {
+        return false;
+    }
+    return true;
+}
+#endif
+
 Rng MakeCompareLossRng(uint64_t seed);
 
 std::vector<uint32_t> BuildPacketSchedule(
@@ -1729,6 +1759,7 @@ int CmdCompare(int argc, char** argv)
     CompareOptions compare_options;
     uint32_t packet_row_seed_multiplier = 1u;
     bool packet_row_seed_avalanche = false;
+    int cold_solve_wide_xor_mode = 0;
 
     for (int i = 0; i < argc; ++i)
     {
@@ -1798,6 +1829,20 @@ int CmdCompare(int argc, char** argv)
                      argv[i], "--packet-row-seed-avalanche"))
         {
             packet_row_seed_avalanche = true;
+        }
+        else if (!std::strcmp(argv[i], "--cold-solve-wide-xor"))
+        {
+            if (!TakeArg(
+                    "compare", "--cold-solve-wide-xor",
+                    argc, argv, i, value) ||
+                !ParseColdSolveWideXorMode(
+                    value, cold_solve_wide_xor_mode))
+            {
+                std::fprintf(stderr,
+                    "compare --cold-solve-wide-xor expects "
+                    "off, policy, or on\n");
+                return 1;
+            }
         }
 #endif
         else if (!std::strcmp(argv[i], "--schedule")) {
@@ -1907,6 +1952,12 @@ int CmdCompare(int argc, char** argv)
     }
     wirehair_v2::SetPacketRowSeedAvalancheForTesting(
         packet_row_seed_avalanche);
+    if (!wirehair_v2::SetColdSolveWideXorModeForTesting(
+            cold_solve_wide_xor_mode))
+    {
+        std::fprintf(stderr, "compare invalid cold-solve wide-XOR mode\n");
+        return 1;
+    }
 #endif
     const uint64_t max_message_bytes = max_message_mib > 0u ?
         (uint64_t)max_message_mib * 1024u * 1024u : 0u;
@@ -1979,6 +2030,7 @@ int CmdCompare(int argc, char** argv)
         "schedule_seed=0x%llx "
         "packet_row_seed_multiplier=0x%x "
         "packet_row_seed_avalanche=%u "
+        "cold_solve_wide_xor=%s "
         "loss_trace=common-id-v2 "
         "precode_profile_handoff=encoder-selected-v1\n",
         nlo,
@@ -2004,7 +2056,8 @@ int CmdCompare(int argc, char** argv)
         PacketScheduleName(schedule_kind),
         (unsigned long long)seed,
         packet_row_seed_multiplier,
-        packet_row_seed_avalanche ? 1u : 0u);
+        packet_row_seed_avalanche ? 1u : 0u,
+        ColdSolveWideXorModeName(cold_solve_wide_xor_mode));
     std::printf(
         "%-15s %-8s %-7s %-7s %-10s %-10s %-8s "
         "%-6s %-6s %-6s %-8s "
@@ -3468,6 +3521,7 @@ int CmdPrecodeFail(int argc, char** argv)
     uint32_t odd_packet_peel_seed_xor = 0u;
     uint32_t packet_row_seed_multiplier = 1u;
     bool packet_row_seed_avalanche = false;
+    int cold_solve_wide_xor_mode = 0;
     uint32_t seed_block_bytes_override = 0u;
     bool paired_overhead_stream = false;
     uint32_t exact_precode_attempt = 0u;
@@ -3653,6 +3707,20 @@ int CmdPrecodeFail(int argc, char** argv)
                      argv[i], "--packet-row-seed-avalanche"))
         {
             packet_row_seed_avalanche = true;
+        }
+        else if (!std::strcmp(argv[i], "--cold-solve-wide-xor"))
+        {
+            if (!TakeArg(
+                    "precodefail", "--cold-solve-wide-xor",
+                    argc, argv, i, value) ||
+                !ParseColdSolveWideXorMode(
+                    value, cold_solve_wide_xor_mode))
+            {
+                std::fprintf(stderr,
+                    "precodefail --cold-solve-wide-xor expects "
+                    "off, policy, or on\n");
+                return 1;
+            }
         }
         else if (!std::strcmp(argv[i], "--paired-overhead-stream")) {
             paired_overhead_stream = true;
@@ -3846,6 +3914,13 @@ int CmdPrecodeFail(int argc, char** argv)
         packet_row_seed_avalanche);
     wirehair_v2::SetOddPacketPeelSeedXorForTesting(
         odd_packet_peel_seed_xor);
+    if (!wirehair_v2::SetColdSolveWideXorModeForTesting(
+            cold_solve_wide_xor_mode))
+    {
+        std::fprintf(stderr,
+            "precodefail invalid cold-solve wide-XOR mode\n");
+        return 1;
+    }
     if (seed_block_bytes_explicit && seed_block_bytes_override == 0u)
     {
         std::fprintf(stderr,
@@ -3893,6 +3968,7 @@ int CmdPrecodeFail(int argc, char** argv)
         "packet_row_seed_multiplier=0x%x "
         "packet_row_seed_avalanche=%u seed_block_bytes_override=%u "
         "overhead_stream=%s full_payload_solve=%u schedule=%s "
+        "cold_solve_wide_xor=%s "
         "exact_attempt_mode=%u exact_precode_attempt=%u "
         "exact_packet_attempt=%u construction_seed_basis=%s "
         "seed_schedule_sha256=%s source_git_commit=%s\n",
@@ -3908,6 +3984,7 @@ int CmdPrecodeFail(int argc, char** argv)
         paired_overhead_stream ? "paired" : "salted",
         full_payload_solve ? 1u : 0u,
         PacketScheduleName(schedule_kind),
+        ColdSolveWideXorModeName(cold_solve_wide_xor_mode),
         exact_attempt_mode ? 1u : 0u,
         exact_precode_attempt,
         exact_packet_attempt,
@@ -3945,7 +4022,9 @@ int CmdPrecodeFail(int argc, char** argv)
                 (wirehair_v2::SetPacketRowSeedAvalancheForTesting(
                      packet_row_seed_avalanche), true) &&
                 (wirehair_v2::SetOddPacketPeelSeedXorForTesting(
-                     odd_packet_peel_seed_xor), true);
+                     odd_packet_peel_seed_xor), true) &&
+                wirehair_v2::SetColdSolveWideXorModeForTesting(
+                    cold_solve_wide_xor_mode);
         };
         if (!configure_test_thread())
         {

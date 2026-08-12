@@ -196,6 +196,17 @@ expect_success("v2_precode[ ]+8[ ]+1[ ]+0" compare --nlo 64 --nhi 64
 expect_success("precode_profile_handoff=encoder-selected-v1" compare
     --nlo 64 --nhi 64 --trials 1 --bb-list 8 --max-message-mib 1
     --loss 0 --precode)
+foreach(mode IN ITEMS off policy on)
+    expect_success("cold_solve_wide_xor=${mode}" compare
+        --nlo 64 --nhi 64 --trials 1 --bb-list 8 --max-message-mib 1
+        --loss 0 --precode --cold-solve-wide-xor ${mode})
+endforeach()
+expect_failure("expects off, policy, or on" compare
+    --nlo 64 --nhi 64 --trials 1 --bb-list 8 --max-message-mib 1
+    --loss 0 --precode --cold-solve-wide-xor invalid)
+expect_failure("expects off, policy, or on" compare
+    --nlo 64 --nhi 64 --trials 1 --bb-list 8 --max-message-mib 1
+    --loss 0 --precode --cold-solve-wide-xor)
 expect_success("packet_row_seed_multiplier=0x9e3779b1.*packet_row_seed_avalanche=1"
     compare --nlo 64 --nhi 64 --trials 1 --bb-list 8 --max-message-mib 1
     --loss 0 --precode
@@ -221,6 +232,17 @@ expect_success("# peelcost:" peelcost --N 2 --bb-list 8 --trials 1
     --structures lt_m1_c16 --precode dense --overhead 0)
 expect_success("# precodefail:" precodefail --N 64 --bb-list 8
     --overhead 0,1 --trials 4 --threads 2 --loss 0.1)
+foreach(mode IN ITEMS off policy on)
+    expect_success("cold_solve_wide_xor=${mode}" precodefail
+        --N 64 --bb-list 8 --overhead 0 --trials 2 --threads 2
+        --loss 0 --full-payload-solve --cold-solve-wide-xor ${mode})
+endforeach()
+expect_failure("expects off, policy, or on" precodefail
+    --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0
+    --cold-solve-wide-xor invalid)
+expect_failure("expects off, policy, or on" precodefail
+    --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0
+    --cold-solve-wide-xor)
 expect_success("64,8,periodic,2,[^,]*,[^,]*,[^,]*,[^,]*,[^,]*,0,2,"
     precodefail --N 64 --bb-list 8
     --overhead 0 --trials 2 --threads 2 --loss 0.1 --mix-count 2)

@@ -23,11 +23,73 @@
 namespace wirehair_v2 {
 namespace {
 
+#if !defined(GF256_TARGET_MOBILE) && defined(GF256_TRY_WIDE_XOR)
+constexpr uint32_t kColdSolveWideXorMinBlockBytes = 512u;
+#endif
+
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 thread_local uint32_t OddPacketPeelSeedXor = 0u;
 thread_local uint32_t PacketRowSeedMultiplier = 1u;
 thread_local bool PacketRowSeedAvalanche = false;
+thread_local int ColdSolveWideXorTestMode = 0;
+thread_local uint64_t ColdSolveWideXorObservationCount = 0u;
+thread_local int LastColdSolveWideXorSelection = 0;
 #endif
+
+class ScopedColdSolveWideXorSelection
+{
+public:
+    explicit ScopedColdSolveWideXorSelection(uint32_t block_bytes)
+        : Active(false)
+        , Previous(0)
+    {
+        (void)block_bytes;
+        bool select_wide = false;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        const int mode = ColdSolveWideXorTestMode;
+        if (mode < 0) {
+            select_wide = false;
+            Active = true;
+        }
+        else if (mode > 0) {
+            select_wide = true;
+            Active = true;
+        }
+        ++ColdSolveWideXorObservationCount;
+#endif
+#if !defined(GF256_TARGET_MOBILE) && defined(GF256_TRY_WIDE_XOR)
+        if (!Active && block_bytes >= kColdSolveWideXorMinBlockBytes)
+        {
+            gf256_x86_cpu_features features = {};
+            gf256_get_active_x86_cpu_features(&features);
+            select_wide = features.AVX2 != 0;
+            Active = select_wide;
+        }
+#endif
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        LastColdSolveWideXorSelection = select_wide ? 1 : 0;
+#endif
+        if (Active) {
+            Previous = gf256_set_thread_wide_xor(select_wide ? 1 : 0);
+        }
+    }
+
+    ~ScopedColdSolveWideXorSelection() noexcept
+    {
+        if (Active) {
+            (void)gf256_set_thread_wide_xor(Previous);
+        }
+    }
+
+    ScopedColdSolveWideXorSelection(
+        const ScopedColdSolveWideXorSelection&) = delete;
+    ScopedColdSolveWideXorSelection& operator=(
+        const ScopedColdSolveWideXorSelection&) = delete;
+
+private:
+    bool Active;
+    int Previous;
+};
 
 constexpr uint32_t PackedWordCount(uint32_t bit_count)
 {
@@ -1302,6 +1364,31 @@ void ResetBinaryPeelOracleComparisonsForTesting()
 uint64_t BinaryPeelOracleComparisonsForTesting()
 {
     return BinaryPeelOracleComparisons.load(std::memory_order_relaxed);
+}
+
+bool SetColdSolveWideXorModeForTesting(int mode)
+{
+    if (mode < -1 || mode > 1) {
+        return false;
+    }
+    ColdSolveWideXorTestMode = mode;
+    return true;
+}
+
+void ResetColdSolveWideXorObservationsForTesting()
+{
+    ColdSolveWideXorObservationCount = 0u;
+    LastColdSolveWideXorSelection = 0;
+}
+
+uint64_t ColdSolveWideXorObservationCountForTesting()
+{
+    return ColdSolveWideXorObservationCount;
+}
+
+int LastColdSolveWideXorSelectionForTesting()
+{
+    return LastColdSolveWideXorSelection;
 }
 #endif
 
@@ -2989,6 +3076,7 @@ WirehairResult SolvePrecodeSystemWithRuntime(
     PrecodeSolveStats* stats,
     PrecodeSolveResumeState* resume_state)
 {
+    const ScopedColdSolveWideXorSelection wide_xor(block_bytes);
     return SolvePrecodeSystemImpl(
         system, config, runtime, packets, block_bytes,
         intermediate_blocks_out, stats, resume_state, true);
@@ -3004,6 +3092,7 @@ WirehairResult SolvePrecodeSystemForValidatedSystemWithRuntime(
     PrecodeSolveStats* stats,
     PrecodeSolveResumeState* resume_state)
 {
+    const ScopedColdSolveWideXorSelection wide_xor(block_bytes);
     return SolvePrecodeSystemImpl(
         system, config, runtime, packets, block_bytes,
         intermediate_blocks_out, stats, resume_state, false);

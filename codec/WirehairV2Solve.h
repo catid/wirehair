@@ -122,6 +122,20 @@ void SetBinaryPeelOracleForTesting(bool enabled);
 void ResetBinaryPeelOracleComparisonsForTesting();
 uint64_t BinaryPeelOracleComparisonsForTesting();
 
+/**
+    Override the production cold-solve wide-XOR policy in the calling thread.
+    -1 forces compact XOR, zero automatically enables the built wide kernel
+    for block sizes >= 512 bytes on AVX2 hosts, and +1 forces wide XOR.
+    Automatic compact cases preserve the caller's ambient GF256 selection.
+    Other values are rejected without changing the mode.
+*/
+bool SetColdSolveWideXorModeForTesting(int mode);
+
+/** Reset/read per-thread observations and the last policy-requested mode. */
+void ResetColdSolveWideXorObservationsForTesting();
+uint64_t ColdSolveWideXorObservationCountForTesting();
+int LastColdSolveWideXorSelectionForTesting();
+
 #endif
 
 /**
