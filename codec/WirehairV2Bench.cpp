@@ -3354,6 +3354,41 @@ bool ParseHeavyFamilies(
     return !families.empty();
 }
 
+const char* DenseAnchorLayoutName(wirehair_v2::DenseAnchorLayout layout)
+{
+    switch (layout)
+    {
+    case wirehair_v2::DenseAnchorLayout::Disabled:
+        return "disabled";
+    case wirehair_v2::DenseAnchorLayout::Two07:
+        return "two07";
+    case wirehair_v2::DenseAnchorLayout::Four0369:
+        return "four0369";
+    }
+    return "invalid";
+}
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+bool ParseDenseAnchorLayout(
+    const char* text,
+    wirehair_v2::DenseAnchorLayout& layout)
+{
+    if (!std::strcmp(text, "disabled")) {
+        layout = wirehair_v2::DenseAnchorLayout::Disabled;
+    }
+    else if (!std::strcmp(text, "two07")) {
+        layout = wirehair_v2::DenseAnchorLayout::Two07;
+    }
+    else if (!std::strcmp(text, "four0369")) {
+        layout = wirehair_v2::DenseAnchorLayout::Four0369;
+    }
+    else {
+        return false;
+    }
+    return true;
+}
+#endif
+
 std::string CountHistogram(const std::map<uint32_t, uint32_t>& histogram)
 {
     std::string out;
@@ -3528,8 +3563,11 @@ int CmdPrecodeFail(int argc, char** argv)
     uint32_t exact_packet_attempt = 0u;
     bool exact_attempt_mode = false;
     bool raw_architecture_seeds = false;
+    wirehair_v2::DenseAnchorLayout dense_anchor_layout =
+        wirehair_v2::DenseAnchorLayout::Disabled;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     uint32_t fail_thread_launch_after = UINT32_MAX;
+    bool dense_anchor_layout_explicit = false;
     bool source_hits_explicit = false;
     bool binary_dense_rows_explicit = false;
     bool gf256_heavy_rows_explicit = false;
@@ -3641,6 +3679,20 @@ int CmdPrecodeFail(int argc, char** argv)
                 return 1;
             }
             source_hits_explicit = true;
+        }
+        else if (!std::strcmp(argv[i], "--dense-anchors")) {
+            if (dense_anchor_layout_explicit ||
+                !TakeArg(
+                    "precodefail", "--dense-anchors",
+                    argc, argv, i, value) ||
+                !ParseDenseAnchorLayout(value, dense_anchor_layout))
+            {
+                std::fprintf(stderr,
+                    "precodefail --dense-anchors expects exactly one of "
+                    "disabled, two07, or four0369\n");
+                return 1;
+            }
+            dense_anchor_layout_explicit = true;
         }
         else if (!std::strcmp(argv[i], "--binary-dense-rows")) {
             if (!TakeArg(
@@ -3964,6 +4016,7 @@ int CmdPrecodeFail(int argc, char** argv)
         "# precodefail: trials=%u threads=%u loss=%.17g seed=0x%llx "
         "source_hits_override=%u packet_peel_seed_xor=0x%x "
         "binary_dense_rows_override=%u gf256_heavy_rows_override=%u "
+        "dense_anchor_layout=%s "
         "odd_packet_peel_seed_xor=0x%x "
         "packet_row_seed_multiplier=0x%x "
         "packet_row_seed_avalanche=%u seed_block_bytes_override=%u "
@@ -3977,6 +4030,7 @@ int CmdPrecodeFail(int argc, char** argv)
         packet_peel_seed_xor,
         binary_dense_rows_override,
         gf256_heavy_rows_override,
+        DenseAnchorLayoutName(dense_anchor_layout),
         odd_packet_peel_seed_xor,
         packet_row_seed_multiplier,
         packet_row_seed_avalanche ? 1u : 0u,
@@ -4073,6 +4127,7 @@ int CmdPrecodeFail(int argc, char** argv)
             wirehair_v2::PacketRowConfig base_config = canonical_config;
             base_config.MixCount = (uint32_t)mix_count_value;
             wirehair_v2::PrecodeParams base_params = canonical_params;
+            base_params.DenseAnchors = dense_anchor_layout;
             if (source_hits_override != 0u) {
                 base_params.SourceHits = source_hits_override;
             }

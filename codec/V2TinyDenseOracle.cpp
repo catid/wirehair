@@ -51,43 +51,55 @@ WirehairResult SolvePrecodeSystemTinyDenseOracle(
         block_bytes == 0u || block_bytes > kTinyOracleMaxBlockBytes ||
         P_wide > UINT32_MAX ||
         !IsPacketRowDomainValid(K, (uint32_t)P_wide, config.MixCount) ||
-        !ValidatePrecodeSystem(system))
+        !HasValidPrecodeSystemShape(system))
     {
         return Wirehair_InvalidInput;
     }
+
     for (const SolvePacket& packet : packets) {
         if (!packet.Data) {
             return Wirehair_InvalidInput;
         }
     }
-    if (packets.size() < K) {
-        return Wirehair_NeedMore;
+    if (packets.size() > 1024u) {
+        return Wirehair_InvalidInput;
     }
-    if (gf256_init() != 0) {
-        return Wirehair_UnsupportedPlatform;
-    }
-
     const uint32_t P = (uint32_t)P_wide;
     const uint64_t L_wide = (uint64_t)K + P;
     const uint64_t row_count_wide = P_wide + packets.size();
-    // These structural caps keep the cubic oracle useful and bounded even if
-    // a caller supplies an otherwise-valid but fuzz-hostile custom precode.
-    if (L_wide > 512u || row_count_wide > 1024u) {
-        return Wirehair_InvalidInput;
-    }
     const uint32_t L = (uint32_t)L_wide;
     const uint32_t row_count = (uint32_t)row_count_wide;
 
     size_t matrix_bytes = 0u, rhs_bytes = 0u, output_bytes = 0u;
-    if (!CheckedAllocation(row_count, L, matrix_bytes) ||
-        !CheckedAllocation(row_count, block_bytes, rhs_bytes) ||
-        !CheckedAllocation(L, block_bytes, output_bytes))
+    if (packets.size() >= K)
     {
-        return Wirehair_InvalidInput;
+        // These structural caps keep the cubic oracle useful and bounded even
+        // if a caller supplies an otherwise-valid but fuzz-hostile precode.
+        if (L_wide > 512u || row_count_wide > 1024u ||
+            !CheckedAllocation(row_count, L, matrix_bytes) ||
+            !CheckedAllocation(row_count, block_bytes, rhs_bytes) ||
+            !CheckedAllocation(L, block_bytes, output_bytes))
+        {
+            return Wirehair_InvalidInput;
+        }
     }
 
     try
     {
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        TriggerSolveAllocationFailureForTesting(
+            SolveAllocationFailurePoint::TinyDenseOracleValidation);
+#endif
+        if (!ValidatePrecodeSystem(system)) {
+            return Wirehair_InvalidInput;
+        }
+        if (packets.size() < K) {
+            return Wirehair_NeedMore;
+        }
+        if (gf256_init() != 0) {
+            return Wirehair_UnsupportedPlatform;
+        }
+
         std::vector<uint8_t> matrix(matrix_bytes, 0u);
         std::vector<uint8_t> rhs(rhs_bytes, 0u);
         uint32_t row = 0u;
@@ -118,7 +130,8 @@ WirehairResult SolvePrecodeSystemTinyDenseOracle(
                 return Wirehair_InvalidInput;
             }
         }
-        for (const std::vector<uint32_t>& columns : system.DenseRowColumns) {
+        for (const std::vector<uint32_t>& columns :
+                system.DenseBasisRowColumns) {
             if (!add_binary(columns, nullptr)) {
                 return Wirehair_InvalidInput;
             }

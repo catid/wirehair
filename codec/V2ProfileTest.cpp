@@ -861,11 +861,40 @@ bool CheckNonzeroAttemptProfile()
         }
         result = wirehair_v2_decode(decoder, id, &block, bytes);
     }
+    uint8_t repair = 0u;
+    uint32_t repair_bytes = 0u;
+    if (!Check(result == WirehairV2_Success,
+            "nonzero-attempt systematic decode") ||
+        !Check(wirehair_v2_encode(
+                encoder, 2u, &repair, sizeof(repair), &repair_bytes) ==
+                    WirehairV2_Success && repair_bytes == 1u,
+            "nonzero-attempt repair encode"))
+    {
+        wirehair_v2_free(encoder);
+        wirehair_v2_free(decoder);
+        return false;
+    }
+    repair ^= 1u;
+    if (!Check(wirehair_v2_decode(
+                decoder, 2u, &repair, repair_bytes) == WirehairV2_Error,
+            "nonzero-attempt corrupt repair rejection"))
+    {
+        wirehair_v2_free(encoder);
+        wirehair_v2_free(decoder);
+        return false;
+    }
+    repair ^= 1u;
+    if (!Check(wirehair_v2_decode(
+                decoder, 2u, &repair, repair_bytes) == WirehairV2_Success,
+            "nonzero-attempt repair validation"))
+    {
+        wirehair_v2_free(encoder);
+        wirehair_v2_free(decoder);
+        return false;
+    }
     uint8_t recovered[2] = {};
     uint64_t recovered_bytes = 0u;
-    const bool ok = Check(result == WirehairV2_Success,
-            "nonzero-attempt decode") &&
-        Check(wirehair_v2_recover(
+    const bool ok = Check(wirehair_v2_recover(
             decoder, recovered, sizeof(recovered), &recovered_bytes) ==
                 WirehairV2_Success,
             "nonzero-attempt recovery") &&

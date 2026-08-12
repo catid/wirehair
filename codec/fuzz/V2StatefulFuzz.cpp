@@ -318,37 +318,128 @@ bool OomRetry(
     (void)fixture; (void)encoder; (void)packets;
     return Fail(failure, "OOM fuzz scenario requires test hooks");
 #else
-    wirehair_v2::MessagePrecodeDecoder decoder;
-    if (!InitializeDecoder(fixture, encoder, decoder, failure)) return false;
-    for (uint32_t id = 0; id + 1u < fixture.K; ++id) {
-        if (decoder.DecodeResult(
+    DecoderAllocationReset reset;
+
+    // Preserve the original cold-solve OOM coverage without allowing the
+    // all-systematic direct path to bypass the solver.  The K-th unique packet
+    // is a repair; its identical retry must immediately run attempt two.  If
+    // rank is still short, the one missing source packet deterministically
+    // completes the ordinary equation set.
+    wirehair_v2::MessagePrecodeDecoder cold_decoder;
+    if (!InitializeDecoder(
+            fixture, encoder, cold_decoder, failure))
+    {
+        return false;
+    }
+    for (uint32_t id = 0; id + 1u < fixture.K; ++id)
+    {
+        if (cold_decoder.DecodeResult(
                 id, packets[id].Data.data(), packets[id].Bytes) !=
                 Wirehair_NeedMore)
         {
-            return Fail(failure, "OOM prefix did not need more");
+            return Fail(failure, "cold OOM prefix did not need more");
         }
     }
-    DecoderAllocationReset reset;
+    const Packet& repair_packet = packets[fixture.K];
     wirehair_v2::SetDecoderAllocationFailureCountdownForTesting(0);
-    const Packet& final_packet = packets[fixture.K - 1u];
-    if (decoder.DecodeResult(
-            final_packet.Id,
-            final_packet.Data.data(),
-            final_packet.Bytes) != Wirehair_OOM ||
-        decoder.IsDecoded() || decoder.ReceivedCount() != fixture.K)
+    if (cold_decoder.DecodeResult(
+            repair_packet.Id,
+            repair_packet.Data.data(),
+            repair_packet.Bytes) != Wirehair_OOM ||
+        cold_decoder.IsDecoded() ||
+        cold_decoder.ReceivedCount() != fixture.K ||
+        cold_decoder.SolveAttemptCount() != 1u)
     {
-        return Fail(failure, "injected solve OOM state mismatch");
+        return Fail(failure, "injected cold-solve OOM state mismatch");
     }
     wirehair_v2::SetDecoderAllocationFailureCountdownForTesting(-1);
-    if (decoder.DecodeResult(
-            final_packet.Id,
-            final_packet.Data.data(),
-            final_packet.Bytes) != Wirehair_Success ||
-        !decoder.IsDecoded())
+    WirehairResult cold_result = cold_decoder.DecodeResult(
+        repair_packet.Id,
+        repair_packet.Data.data(),
+        repair_packet.Bytes);
+    if ((cold_result != Wirehair_NeedMore &&
+            cold_result != Wirehair_Success) ||
+        cold_decoder.SolveAttemptCount() != 2u)
     {
-        return Fail(failure, "identical packet did not retry OOM solve");
+        return Fail(failure, "cold OOM duplicate did not run attempt two");
     }
-    return RecoverExact(fixture, decoder, failure);
+    if (cold_result == Wirehair_NeedMore)
+    {
+        const Packet& missing_source = packets[fixture.K - 1u];
+        cold_result = cold_decoder.DecodeResult(
+            missing_source.Id,
+            missing_source.Data.data(),
+            missing_source.Bytes);
+    }
+    if (cold_result != Wirehair_Success ||
+        !cold_decoder.IsDecoded() ||
+        !RecoverExact(fixture, cold_decoder, failure))
+    {
+        return Fail(failure, "cold OOM retry did not recover");
+    }
+
+    const auto run_lazy_oom = [&](bool canonicalize_before_oom) -> bool
+    {
+        wirehair_v2::MessagePrecodeDecoder decoder;
+        if (!InitializeDecoder(fixture, encoder, decoder, failure)) {
+            return false;
+        }
+        for (uint32_t id = 0; id < fixture.K; ++id)
+        {
+            const WirehairResult result = decoder.DecodeResult(
+                id, packets[id].Data.data(), packets[id].Bytes);
+            const WirehairResult expected = id + 1u == fixture.K ?
+                Wirehair_Success : Wirehair_NeedMore;
+            if (result != expected)
+            {
+                return Fail(
+                    failure, "OOM direct-systematic prefix mismatch");
+            }
+        }
+        // Tiny K retains the id/hash allocation after canonicalization, but
+        // source-order lazy materialization must ignore that unused mapping
+        // and synthesize source ids directly.
+        if (canonicalize_before_oom &&
+            !RecoverExact(fixture, decoder, failure))
+        {
+            return false;
+        }
+        wirehair_v2::SetDecoderAllocationFailureCountdownForTesting(0);
+        if (decoder.DecodeResult(
+                repair_packet.Id,
+                repair_packet.Data.data(),
+                repair_packet.Bytes) != Wirehair_OOM ||
+            !decoder.IsDecoded() || decoder.ReceivedCount() != fixture.K ||
+            decoder.IntermediateBlocks() != nullptr)
+        {
+            return Fail(failure, canonicalize_before_oom ?
+                "injected source-order lazy OOM state mismatch" :
+                "injected arrival-order lazy OOM state mismatch");
+        }
+        // Preserve a post-OOM recovery check on the source-order branch.  The
+        // arrival-order branch must remain untouched until the retry below or
+        // RecoverExact would canonicalize it and make that coverage vacuous.
+        if (canonicalize_before_oom &&
+            !RecoverExact(fixture, decoder, failure))
+        {
+            return false;
+        }
+        wirehair_v2::SetDecoderAllocationFailureCountdownForTesting(-1);
+        if (decoder.DecodeResult(
+                repair_packet.Id,
+                repair_packet.Data.data(),
+                repair_packet.Bytes) != Wirehair_Success ||
+            !decoder.IsDecoded() || decoder.IntermediateBlocks() == nullptr)
+        {
+            return Fail(failure, "identical repair did not retry lazy solve");
+        }
+        return RecoverExact(fixture, decoder, failure);
+    };
+
+    if (!run_lazy_oom(false)) {
+        return false;
+    }
+    return run_lazy_oom(true);
 #endif
 }
 

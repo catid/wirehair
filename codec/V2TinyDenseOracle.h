@@ -19,9 +19,10 @@ static const size_t kTinyOracleMaxAllocationBytes =
     It accepts arbitrary packet ids, duplicate/conflicting equations, and
     overdetermined inputs.  Success, rank deficiency, and inconsistency map to
     the same WirehairResult values as SolvePrecodeSystem().  On every failure
-    intermediate_blocks_out is unchanged.  The source-domain cap is 128 and
-    no individual allocation is allowed to exceed 64 MiB, making this safe for
-    deterministic and coverage-guided fuzz targets.
+    intermediate_blocks_out is unchanged, and allocation or length failures
+    map to Wirehair_OOM.  The source-domain cap is 128 and no individual
+    allocation is allowed to exceed 64 MiB, making this safe for deterministic
+    and coverage-guided fuzz targets.
 */
 WirehairResult SolvePrecodeSystemTinyDenseOracle(
     const PrecodeSystem& system,

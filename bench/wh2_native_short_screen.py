@@ -21,6 +21,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import stat
 import sys
 import tempfile
@@ -32,7 +33,9 @@ import wh2_benchmark_contract as contract_api
 
 TRACE_RECORD_SCHEMA = "wirehair.wh2.native-trace-record.v1"
 RECOVERY_RECORD_SCHEMA = "wirehair.wh2.native-recovery-record.v1"
-RAW_RECOVERY_RECORD_SCHEMA = "wirehair.wh2.native-recovery-record.v2"
+LEGACY_RAW_RECOVERY_RECORD_SCHEMA = \
+    "wirehair.wh2.native-recovery-record.v2"
+RAW_RECOVERY_RECORD_SCHEMA = "wirehair.wh2.native-recovery-record.v3"
 TIMING_RECORD_SCHEMA = "wirehair.wh2.native-timing-record.v4"
 TIMING_QUALIFICATION_RECORD_SCHEMA = \
     "wirehair.wh2.native-timing-qualification-record.v1"
@@ -40,9 +43,10 @@ TIMING_QUALIFICATION_EXECUTION_SCHEMA = \
     "wirehair.wh2.native-timing-qualification-execution-receipt.v1"
 SAMPLER_SCHEMA = "wirehair.wh2.sampler-attestation.v1"
 EXECUTION_SCHEMA = "wirehair.wh2.native-execution-receipt.v1"
-RAW_EXECUTION_SCHEMA = "wirehair.wh2.native-execution-receipt.v2"
+LEGACY_RAW_EXECUTION_SCHEMA = "wirehair.wh2.native-execution-receipt.v2"
+RAW_EXECUTION_SCHEMA = "wirehair.wh2.native-execution-receipt.v3"
 TIMING_EXECUTION_SCHEMA = \
-    "wirehair.wh2.native-timing-execution-receipt.v1"
+    "wirehair.wh2.native-timing-execution-receipt.v2"
 
 SHA256_FIELDS = frozenset((
     "worker_binary_sha256", "message_sha256", "work_sha256",
@@ -92,6 +96,21 @@ TIMING_EXECUTION_FIELDS = EXECUTION_FIELDS | frozenset((
     "qualification_worker_end_monotonic_ns", "qualification_worker_cpus",
     "qualification_workers", "qualification_thermal",
     "timing_qualification_execution_receipt_sha256",
+    "sibling_isolation",
+))
+SIBLING_ISOLATION_SCHEMA = \
+    "wirehair.wh2.timing-sibling-isolation-attestation.v1"
+SIBLING_ISOLATION_FIELDS = frozenset((
+    "schema", "policy", "worker_cpus", "controller_cpu",
+    "protected_cpus", "sibling_cpus", "paused_processes", "checks",
+    "check_count", "checks_sha256", "first_check_monotonic_ns",
+    "last_check_monotonic_ns", "terminal_status",
+))
+SIBLING_ISOLATION_CHECK_FIELDS = frozenset((
+    "ordinal", "stage", "monotonic_ns", "foreign_task_count",
+))
+SIBLING_ISOLATION_PAUSED_PROCESS_FIELDS = frozenset((
+    "pid", "process_start_ticks", "cpu_affinity",
 ))
 TIMING_QUALIFICATION_EXECUTION_FIELDS = frozenset((
     "schema", "contract_sha256", "phase", "source_git_commit",
@@ -616,6 +635,194 @@ def _cpu_physical_core(
     return values[0], values[1]
 
 
+def timing_sibling_cpus(
+        protected_cpus: Sequence[int],
+        sysfs_root: Optional[Path] = None) -> List[int]:
+    """Return every online SMT sibling outside a protected timing roster."""
+    if (not isinstance(protected_cpus, Sequence) or
+            isinstance(protected_cpus, (str, bytes))):
+        fail("timing protected CPUs must be a sequence")
+    protected = list(protected_cpus)
+    if (not protected or
+            any(type(cpu) is not int or cpu < 0 for cpu in protected) or
+            protected != sorted(set(protected))):
+        fail("timing protected CPUs must be sorted unique CPU IDs")
+    root = CPU_SYSFS_ROOT if sysfs_root is None else sysfs_root
+    protected_cores = {
+        _cpu_physical_core(cpu, root) for cpu in protected
+    }
+    candidates: List[int] = []
+    try:
+        entries = list(root.iterdir())
+    except OSError as exc:
+        fail("cannot enumerate CPU topology: {}".format(exc))
+    for entry in entries:
+        match = re.fullmatch(r"cpu(0|[1-9][0-9]*)", entry.name)
+        if match is None:
+            continue
+        try:
+            entry_info = entry.stat()
+        except OSError as exc:
+            fail("cannot inspect CPU topology entry {}: {}".format(
+                entry.name, exc))
+        if not stat.S_ISDIR(entry_info.st_mode):
+            fail("CPU topology entry {} is not a directory".format(
+                entry.name))
+        cpu = int(match.group(1))
+        if cpu in protected:
+            continue
+        online_path = entry / "online"
+        try:
+            online = online_path.read_text(encoding="ascii").strip()
+        except FileNotFoundError:
+            online = "1"
+        except (OSError, UnicodeError) as exc:
+            fail("cannot read CPU {} online state: {}".format(cpu, exc))
+        if online not in ("0", "1"):
+            fail("CPU {} has a noncanonical online state".format(cpu))
+        if online == "0":
+            continue
+        try:
+            core = _cpu_physical_core(cpu, root)
+        except NativeEvidenceError:
+            raise
+        if core in protected_cores:
+            candidates.append(cpu)
+    return sorted(candidates)
+
+
+def validate_sibling_isolation(
+        value: Mapping[str, Any], worker_start_ns: int, worker_end_ns: int,
+        worker_cpus: Sequence[int], controller_cpu: int,
+        sysfs_root: Optional[Path] = None,
+        wave_intervals: Optional[Sequence[Tuple[int, int]]] = None) \
+        -> Mapping[str, Any]:
+    """Validate the exact-affinity SMT-isolation evidence for one T interval."""
+    attestation = _exact_keys(
+        value, SIBLING_ISOLATION_FIELDS,
+        "timing sibling-isolation attestation")
+    workers = list(worker_cpus)
+    if (type(worker_start_ns) is not int or type(worker_end_ns) is not int or
+            worker_start_ns < 0 or worker_end_ns < worker_start_ns or
+            any(type(cpu) is not int or cpu < 0 for cpu in workers) or
+            workers != sorted(set(workers)) or
+            type(controller_cpu) is not int or controller_cpu < 0 or
+            controller_cpu in workers):
+        fail("timing sibling-isolation validation has invalid interval/CPUs")
+    protected = sorted(workers + [controller_cpu])
+    siblings = timing_sibling_cpus(protected, sysfs_root)
+    attested_workers = attestation["worker_cpus"]
+    attested_protected = attestation["protected_cpus"]
+    attested_siblings = attestation["sibling_cpus"]
+    if (not isinstance(attested_workers, list) or
+            any(type(cpu) is not int for cpu in attested_workers) or
+            not isinstance(attested_protected, list) or
+            any(type(cpu) is not int for cpu in attested_protected) or
+            not isinstance(attested_siblings, list) or
+            any(type(cpu) is not int for cpu in attested_siblings) or
+            type(attestation["controller_cpu"]) is not int or
+            type(attestation["first_check_monotonic_ns"]) is not int or
+            type(attestation["last_check_monotonic_ns"]) is not int or
+            attestation["schema"] != SIBLING_ISOLATION_SCHEMA or
+            attestation["policy"] != "exact-affinity-wave-boundary-v1" or
+            attestation["terminal_status"] != "clean" or
+            attested_workers != workers or
+            attestation["controller_cpu"] != controller_cpu or
+            attested_protected != protected or
+            attested_siblings != siblings):
+        fail("timing sibling-isolation topology/policy is invalid")
+    checks = attestation["checks"]
+    if (not isinstance(checks, list) or len(checks) < 2 or
+            type(attestation["check_count"]) is not int or
+            attestation["check_count"] != len(checks) or
+            not _is_sha256(attestation["checks_sha256"]) or
+            attestation["checks_sha256"] !=
+                contract_api.sha256_json(checks)):
+        fail("timing sibling-isolation checks are missing or unbound")
+    normalized_wave_intervals: Optional[List[Tuple[int, int]]] = None
+    if wave_intervals is not None:
+        if (not isinstance(wave_intervals, Sequence) or
+                isinstance(wave_intervals, (str, bytes)) or
+                not wave_intervals):
+            fail("timing sibling-isolation wave intervals are invalid")
+        normalized_wave_intervals = []
+        prior_wave_end = -1
+        for raw_interval in wave_intervals:
+            if (not isinstance(raw_interval, Sequence) or
+                    isinstance(raw_interval, (str, bytes)) or
+                    len(raw_interval) != 2 or
+                    type(raw_interval[0]) is not int or
+                    type(raw_interval[1]) is not int or
+                    raw_interval[0] < worker_start_ns or
+                    raw_interval[1] < raw_interval[0] or
+                    raw_interval[1] > worker_end_ns or
+                    raw_interval[0] < prior_wave_end):
+                fail("timing sibling-isolation wave intervals are invalid")
+            interval = (raw_interval[0], raw_interval[1])
+            normalized_wave_intervals.append(interval)
+            prior_wave_end = interval[1]
+        expected_stages = ["before-worker-spawn", "before-timing-window"]
+        for wave_ordinal in range(len(normalized_wave_intervals)):
+            expected_stages.extend((
+                "before-timing-wave-{}".format(wave_ordinal),
+                "after-timing-wave-{}".format(wave_ordinal),
+            ))
+        expected_stages.append("after-timing-interval")
+        if (len(checks) != len(expected_stages) or
+                [check.get("stage") if isinstance(check, dict) else None
+                 for check in checks] != expected_stages):
+            fail("timing sibling-isolation wave checks are incomplete")
+    prior_ns: Optional[int] = None
+    for ordinal, raw in enumerate(checks):
+        check = _exact_keys(
+            raw, SIBLING_ISOLATION_CHECK_FIELDS,
+            "timing sibling-isolation check")
+        if (type(check["ordinal"]) is not int or
+                check["ordinal"] != ordinal or
+                not isinstance(check["stage"], str) or
+                not check["stage"] or len(check["stage"]) > 128 or
+                type(check["monotonic_ns"]) is not int or
+                check["monotonic_ns"] < 0 or
+                (prior_ns is not None and
+                 check["monotonic_ns"] <= prior_ns) or
+                check["foreign_task_count"] != 0 or
+                type(check["foreign_task_count"]) is not int):
+            fail("timing sibling-isolation check is invalid")
+        prior_ns = check["monotonic_ns"]
+    if normalized_wave_intervals is not None:
+        for wave_ordinal, (wave_start, wave_end) in enumerate(
+                normalized_wave_intervals):
+            before = checks[2 + wave_ordinal * 2]["monotonic_ns"]
+            after = checks[3 + wave_ordinal * 2]["monotonic_ns"]
+            if before > wave_start or after < wave_end:
+                fail("timing sibling-isolation check misses its native wave")
+    first_ns = checks[0]["monotonic_ns"]
+    last_ns = checks[-1]["monotonic_ns"]
+    if (attestation["first_check_monotonic_ns"] != first_ns or
+            attestation["last_check_monotonic_ns"] != last_ns or
+            not first_ns <= worker_start_ns <= worker_end_ns <= last_ns):
+        fail("timing sibling-isolation checks do not cover the T interval")
+    paused = attestation["paused_processes"]
+    if not isinstance(paused, list):
+        fail("timing sibling-isolation paused roster is invalid")
+    prior_pid = 0
+    for raw in paused:
+        process = _exact_keys(
+            raw, SIBLING_ISOLATION_PAUSED_PROCESS_FIELDS,
+            "timing paused sibling process")
+        affinity = process["cpu_affinity"]
+        if (type(process["pid"]) is not int or process["pid"] <= prior_pid or
+                type(process["process_start_ticks"]) is not int or
+                process["process_start_ticks"] <= 0 or
+                not isinstance(affinity, list) or not affinity or
+                any(type(cpu) is not int for cpu in affinity) or
+                affinity != sorted(set(affinity)) or
+                not set(affinity).issubset(set(siblings))):
+            fail("timing paused sibling process is invalid")
+        prior_pid = process["pid"]
+    return attestation
+
+
 def _thermal_window(
         sampler: Mapping[str, Any], worker_start_ns: int, worker_end_ns: int,
         worker_cpus: Sequence[int], verify_live_sampler: bool,
@@ -1002,10 +1209,13 @@ def recovery_record_schema_fields(
     raw_arm = frozen_arm.get("construction_seed_basis") == \
         contract_api.RAW_CONSTRUCTION_SEED_BASIS
     if raw_arm:
-        if freeze.get("schema") != contract_api.RAW_FREEZE_SCHEMA:
-            fail("uniform raw payload is not bound by a raw v2 freeze")
-        return (RAW_RECOVERY_RECORD_SCHEMA,
-                contract_api.RAW_RECOVERY_RECORD_FIELDS)
+        if freeze.get("schema") == contract_api.RAW_FREEZE_SCHEMA:
+            return (RAW_RECOVERY_RECORD_SCHEMA,
+                    contract_api.RAW_RECOVERY_RECORD_FIELDS)
+        if freeze.get("schema") == contract_api.LEGACY_RAW_FREEZE_SCHEMA:
+            return (LEGACY_RAW_RECOVERY_RECORD_SCHEMA,
+                    contract_api.LEGACY_RAW_RECOVERY_RECORD_FIELDS)
+        fail("uniform raw payload is not bound by a raw freeze")
     return RECOVERY_RECORD_SCHEMA, contract_api.LEDGER_FIELDS
 
 
@@ -1209,8 +1419,8 @@ def _validate_timing_qualification_records(
     allowed_cpus = observed_cpus
     if expected_cpus is not None:
         requested = list(expected_cpus)
-        if (requested != sorted(set(requested)) or
-                any(type(cpu) is not int or cpu < 0 for cpu in requested)):
+        if (any(type(cpu) is not int or cpu < 0 for cpu in requested) or
+                requested != sorted(set(requested))):
             fail("qualification CPU roster is malformed")
         if observed_cpus != requested:
             fail("qualification did not exercise every allowed logical CPU")
@@ -1314,12 +1524,21 @@ def load_timing_qualification_execution_receipt(
     allowed_cpus = receipt["qualification_allowed_cpus"]
     worker_cpus = receipt["qualification_worker_cpus"]
     if (not isinstance(allowed_cpus, list) or not allowed_cpus or
-            allowed_cpus != sorted(set(allowed_cpus)) or
             any(type(cpu) is not int or cpu < 0 for cpu in allowed_cpus) or
-            worker_cpus != allowed_cpus):
+            allowed_cpus != sorted(set(allowed_cpus)) or
+            not isinstance(worker_cpus, list) or
+            any(type(cpu) is not int or cpu < 0 for cpu in worker_cpus) or
+            contract_api.canonical_json(worker_cpus) !=
+                contract_api.canonical_json(allowed_cpus)):
         fail("timing qualification execution receipt CPU roster is invalid")
-    if expected_cpus is not None and list(expected_cpus) != allowed_cpus:
-        fail("timing qualification execution receipt changes allowed affinity")
+    if expected_cpus is not None:
+        expected_cpu_list = list(expected_cpus)
+        if (any(type(cpu) is not int or cpu < 0
+                for cpu in expected_cpu_list) or
+                contract_api.canonical_json(expected_cpu_list) !=
+                    contract_api.canonical_json(allowed_cpus)):
+            fail("timing qualification execution receipt changes allowed "
+                 "affinity")
     records = _load_canonical_jsonl(
         native_path, "native timing qualification stream")
     _, _, metadata_with_runtime = _validate_timing_qualification_records(
@@ -1338,7 +1557,8 @@ def load_timing_qualification_execution_receipt(
             "qualification_worker_end_monotonic_ns",
             "qualification_worker_cpus", "qualification_workers",
             "qualification_worker_binary_sha256s"):
-        if receipt[field] != metadata[field]:
+        if contract_api.canonical_json(receipt[field]) != \
+                contract_api.canonical_json(metadata[field]):
             fail("timing qualification execution receipt {} differs from "
                  "native evidence".format(field))
     if (type(receipt["qualification_attempt_count"]) is not int or
@@ -1351,12 +1571,17 @@ def load_timing_qualification_execution_receipt(
             len(receipt["qualification_workers"]) != len(allowed_cpus) or
             any(not isinstance(worker, dict) or set(worker) != WORKER_FIELDS
                 for worker in receipt["qualification_workers"]) or
+            any(type(worker["cpu"]) is not int or worker["cpu"] < 0 or
+                type(worker["pid"]) is not int or worker["pid"] <= 0 or
+                type(worker["process_start_ticks"]) is not int or
+                worker["process_start_ticks"] <= 0
+                for worker in receipt["qualification_workers"]) or
             not isinstance(receipt["qualification_worker_binary_sha256s"], list) or
             not receipt["qualification_worker_binary_sha256s"] or
-            receipt["qualification_worker_binary_sha256s"] != sorted(set(
-                receipt["qualification_worker_binary_sha256s"])) or
             any(not _is_sha256(value) for value in
-                receipt["qualification_worker_binary_sha256s"])):
+                receipt["qualification_worker_binary_sha256s"]) or
+            receipt["qualification_worker_binary_sha256s"] != sorted(set(
+                receipt["qualification_worker_binary_sha256s"]))):
         fail("timing qualification execution receipt provenance is malformed")
     return receipt, metadata
 
@@ -1656,7 +1881,7 @@ def _validate_timing_execution_geometry(
         contract: Mapping[str, Any], freeze: Mapping[str, Any], phase: str,
         envelopes: Sequence[Mapping[str, Any]],
         timing_qualification: contract_api.TimingQualification,
-        sysfs_root: Optional[Path] = None) -> None:
+        sysfs_root: Optional[Path] = None) -> List[Tuple[int, int]]:
     """Verify exact v5 round-major placement and every inter-wave barrier."""
     worker_cpus = _timing_worker_roster(contract, freeze)
     worker_cores = [
@@ -1773,6 +1998,7 @@ def _validate_timing_execution_geometry(
             row["finished_monotonic_ns"]))
 
     prior_wave_finish: Optional[int] = None
+    wave_intervals: List[Tuple[int, int]] = []
     for wave_ordinal, values in enumerate(waves):
         round_index = wave_ordinal // cohort_count
         expected_replicates = list(range(
@@ -1787,6 +2013,8 @@ def _validate_timing_execution_geometry(
                 prior_wave_finish > minimum_start:
             fail("timing waves overlap across a frozen barrier")
         prior_wave_finish = maximum_finish
+        wave_intervals.append((minimum_start, maximum_finish))
+    return wave_intervals
 
 
 def _validate_native_records(
@@ -1916,8 +2144,9 @@ def _validate_native_records(
         fail("native result stream has no worker interval")
     if any(value is None for value in work_by_ordinal):
         fail("native result stream has an incomplete work-hash roster")
+    timing_wave_intervals: Optional[List[Tuple[int, int]]] = None
     if evidence_kind == "timing":
-        _validate_timing_execution_geometry(
+        timing_wave_intervals = _validate_timing_execution_geometry(
             contract, freeze, phase,
             [value for value in envelope_ordered if value is not None],
             timing_qualification,
@@ -1953,6 +2182,7 @@ def _validate_native_records(
         "work_set_sha256": contract_api.sha256_json(work_by_ordinal),
         "native_stream_sha256": _sha256_jsonl(records),
         "_runtime_workers": runtime_workers,
+        "_timing_wave_intervals": timing_wave_intervals,
     }
     return payloads, metadata
 
@@ -1983,6 +2213,7 @@ def assemble_results(
         timing_qualification_sampler_path: Optional[Path] = None,
         timing_qualification_execution_receipt_path: Optional[Path] = None,
         timing_qualification_execution_receipt_sha256: Optional[str] = None,
+        sibling_isolation: Optional[Mapping[str, Any]] = None,
         ) -> Mapping[str, Any]:
     """Validate and publish one complete recovery ledger or timing receipt."""
     if output_path.exists() or execution_receipt_path.exists():
@@ -2013,6 +2244,8 @@ def assemble_results(
                 timing_qualification_execution_receipt_path,
                 expected_receipt_sha256=
                     timing_qualification_execution_receipt_sha256)
+    elif sibling_isolation is not None:
+        fail("recovery evidence cannot carry timing sibling isolation")
     try:
         freeze = contract_api.load_freeze_manifest(
             contract, phase, freeze_path, evidence_kind,
@@ -2025,10 +2258,21 @@ def assemble_results(
         timing_qualification,
         verify_live_workers=verify_live_sampler)
     runtime_workers = metadata_with_runtime["_runtime_workers"]
+    timing_wave_intervals = metadata_with_runtime["_timing_wave_intervals"]
     metadata = {
         key: value for key, value in metadata_with_runtime.items()
-        if key != "_runtime_workers"
+        if not key.startswith("_")
     }
+    validated_sibling_isolation: Optional[Mapping[str, Any]] = None
+    if evidence_kind == "timing":
+        if sibling_isolation is None:
+            fail("timing evidence requires sibling-isolation attestation")
+        controller_cpu = freeze.get("host_identity", {}).get("controller_cpu")
+        validated_sibling_isolation = validate_sibling_isolation(
+            sibling_isolation,
+            metadata["worker_start_monotonic_ns"],
+            metadata["worker_end_monotonic_ns"], metadata["worker_cpus"],
+            controller_cpu, wave_intervals=timing_wave_intervals)
     if qualification_metadata is not None:
         if qualification_metadata[
                 "qualification_worker_end_monotonic_ns"] > \
@@ -2163,9 +2407,13 @@ def assemble_results(
         if evidence_kind == "timing":
             receipt_schema = TIMING_EXECUTION_SCHEMA
         else:
-            receipt_schema = RAW_EXECUTION_SCHEMA \
-                if freeze.get("schema") == contract_api.RAW_FREEZE_SCHEMA \
-                else EXECUTION_SCHEMA
+            if freeze.get("schema") == contract_api.RAW_FREEZE_SCHEMA:
+                receipt_schema = RAW_EXECUTION_SCHEMA
+            elif freeze.get("schema") == \
+                    contract_api.LEGACY_RAW_FREEZE_SCHEMA:
+                receipt_schema = LEGACY_RAW_EXECUTION_SCHEMA
+            else:
+                receipt_schema = EXECUTION_SCHEMA
         receipt: Dict[str, Any] = {
             "schema": receipt_schema,
             "contract_sha256": contract_api.contract_sha256(contract),
@@ -2199,6 +2447,7 @@ def assemble_results(
                     for field in TIMING_QUALIFICATION_EMBEDDED_FIELDS
                 },
                 "qualification_thermal": qualification_thermal,
+                "sibling_isolation": validated_sibling_isolation,
             })
         receipt["receipt_sha256"] = contract_api.sha256_json(receipt)
         _write_canonical_object(staged_receipt, receipt)
@@ -2253,7 +2502,8 @@ def assemble_results(
             timing_qualification_execution_receipt_path=
                 timing_qualification_execution_receipt_path,
             timing_qualification_execution_receipt_sha256=
-                timing_qualification_execution_receipt_sha256)
+                timing_qualification_execution_receipt_sha256,
+            sibling_isolation=sibling_isolation)
         if (validated["summary"] != summary or
                 validated["execution_receipt"] != receipt):
             fail("published result pair differs after terminal validation")
@@ -2304,6 +2554,7 @@ def validate_execution_receipt(
         timing_qualification_sampler_path: Optional[Path] = None,
         timing_qualification_execution_receipt_path: Optional[Path] = None,
         timing_qualification_execution_receipt_sha256: Optional[str] = None,
+        sibling_isolation: Optional[Mapping[str, Any]] = None,
         ) -> Mapping[str, Any]:
     """Revalidate a terminal receipt against every bound source artifact."""
     if sampler_path is None:
@@ -2339,6 +2590,8 @@ def validate_execution_receipt(
                 timing_qualification_execution_receipt_path,
                 expected_receipt_sha256=
                     timing_qualification_execution_receipt_sha256)
+    elif sibling_isolation is not None:
+        fail("recovery validation cannot carry timing sibling isolation")
     try:
         freeze = contract_api.load_freeze_manifest(
             contract, phase, freeze_path, evidence_kind,
@@ -2348,9 +2601,12 @@ def validate_execution_receipt(
     if evidence_kind == "timing":
         expected_receipt_schema = TIMING_EXECUTION_SCHEMA
     else:
-        expected_receipt_schema = RAW_EXECUTION_SCHEMA \
-            if freeze.get("schema") == contract_api.RAW_FREEZE_SCHEMA \
-            else EXECUTION_SCHEMA
+        if freeze.get("schema") == contract_api.RAW_FREEZE_SCHEMA:
+            expected_receipt_schema = RAW_EXECUTION_SCHEMA
+        elif freeze.get("schema") == contract_api.LEGACY_RAW_FREEZE_SCHEMA:
+            expected_receipt_schema = LEGACY_RAW_EXECUTION_SCHEMA
+        else:
+            expected_receipt_schema = EXECUTION_SCHEMA
     if receipt["schema"] != expected_receipt_schema:
         fail("execution receipt has an unknown schema")
     unsigned = {key: value for key, value in receipt.items()
@@ -2379,18 +2635,34 @@ def validate_execution_receipt(
         timing_qualification,
         verify_live_workers=verify_live_sampler)
     runtime_workers = metadata_with_runtime["_runtime_workers"]
+    timing_wave_intervals = metadata_with_runtime["_timing_wave_intervals"]
     metadata = {
         key: value for key, value in metadata_with_runtime.items()
-        if key != "_runtime_workers"
+        if not key.startswith("_")
     }
     for field in (
             "record_count", "worker_start_monotonic_ns",
             "worker_end_monotonic_ns", "worker_cpus", "workers",
             "worker_binary_sha256s", "message_set_sha256",
             "work_set_sha256", "native_stream_sha256"):
-        if receipt[field] != metadata[field]:
+        # Python's structural equality aliases JSON true/false and integral
+        # floats with integers.  Receipt authentication is over exact JSON
+        # values, so compare canonical encodings at every derived boundary.
+        if contract_api.canonical_json(receipt[field]) != \
+                contract_api.canonical_json(metadata[field]):
             fail("execution receipt {} differs from native evidence".format(
                 field))
+    if evidence_kind == "timing":
+        validated_isolation = validate_sibling_isolation(
+            receipt["sibling_isolation"],
+            metadata["worker_start_monotonic_ns"],
+            metadata["worker_end_monotonic_ns"], metadata["worker_cpus"],
+            freeze.get("host_identity", {}).get("controller_cpu"),
+            wave_intervals=timing_wave_intervals)
+        if (sibling_isolation is not None and
+                contract_api.canonical_json(sibling_isolation) !=
+                contract_api.canonical_json(validated_isolation)):
+            fail("timing sibling-isolation input differs from its receipt")
     if timing_qualification is not None and \
             qualification_metadata is not None:
         qualification_bindings = {
@@ -2410,7 +2682,8 @@ def validate_execution_receipt(
             },
         }
         for field, expected in qualification_bindings.items():
-            if receipt[field] != expected:
+            if contract_api.canonical_json(receipt[field]) != \
+                    contract_api.canonical_json(expected):
                 fail("execution receipt {} differs from qualification evidence".
                      format(field))
         if receipt["qualification_worker_end_monotonic_ns"] > \
@@ -2436,7 +2709,8 @@ def validate_execution_receipt(
             receipt["qualification_worker_start_monotonic_ns"],
             receipt["qualification_worker_end_monotonic_ns"],
             receipt["qualification_worker_cpus"], verify_live_sampler)
-        if actual_qualification_thermal != qualification_thermal:
+        if contract_api.canonical_json(actual_qualification_thermal) != \
+                contract_api.canonical_json(qualification_thermal):
             fail("qualification thermal summary differs from sampler bytes")
     if receipt["result_stream_sha256"] != _sha256_jsonl(payloads):
         fail("execution receipt result hash differs from native payloads")
@@ -2479,14 +2753,16 @@ def validate_execution_receipt(
     sampler_attestation = _exact_keys(
         _load_canonical_object(sampler_path, "sampler attestation"),
         SAMPLER_FIELDS, "sampler attestation")
-    if sampler_attestation != sampler:
+    if contract_api.canonical_json(sampler_attestation) != \
+            contract_api.canonical_json(sampler):
         fail("execution receipt sampler binding differs from its attestation")
     actual_thermal = _thermal_window(
         sampler_attestation, receipt["worker_start_monotonic_ns"],
         receipt["worker_end_monotonic_ns"], receipt["worker_cpus"],
         verify_live_sampler,
         controller_cpu=freeze.get("host_identity", {}).get("controller_cpu"))
-    if actual_thermal != thermal:
+    if contract_api.canonical_json(actual_thermal) != \
+            contract_api.canonical_json(thermal):
         fail("execution receipt thermal summary differs from sampler bytes")
     if evidence_kind == "timing":
         _require_one_continuous_sampler(
@@ -2537,7 +2813,15 @@ def validate_execution_receipt(
         _load_canonical_object(
             execution_receipt_path, "execution receipt after validation"),
         receipt_fields, "execution receipt after validation")
-    if final_receipt != receipt:
+    final_unsigned = {
+        key: value for key, value in final_receipt.items()
+        if key != "receipt_sha256"
+    }
+    if (not _is_sha256(final_receipt["receipt_sha256"]) or
+            final_receipt["receipt_sha256"] !=
+                contract_api.sha256_json(final_unsigned) or
+            contract_api.canonical_json(final_receipt) !=
+                contract_api.canonical_json(receipt)):
         fail("execution receipt changed during authoritative validation")
     try:
         final_freeze = contract_api.load_freeze_manifest(
@@ -2568,8 +2852,10 @@ def validate_execution_receipt(
         receipt["worker_end_monotonic_ns"], receipt["worker_cpus"],
         verify_live_sampler,
         controller_cpu=freeze.get("host_identity", {}).get("controller_cpu"))
-    if (final_sampler_attestation != sampler_attestation or
-            final_thermal != thermal):
+    if (contract_api.canonical_json(final_sampler_attestation) !=
+            contract_api.canonical_json(sampler_attestation) or
+            contract_api.canonical_json(final_thermal) !=
+            contract_api.canonical_json(thermal)):
         fail("timing sampler evidence changed during receipt validation")
     if timing_qualification is not None and \
             qualification_metadata is not None and \
@@ -2619,6 +2905,9 @@ def _command_trace(args: argparse.Namespace) -> int:
 
 def _command_results(args: argparse.Namespace) -> int:
     contract = contract_api.load_contract(args.contract)
+    sibling_isolation = _load_canonical_object(
+        args.sibling_isolation, "timing sibling-isolation attestation") \
+        if args.sibling_isolation is not None else None
     result = assemble_results(
         contract, args.kind, args.phase, args.freeze_manifest,
         args.trace_manifest, args.native, args.sampler_attestation,
@@ -2632,7 +2921,8 @@ def _command_results(args: argparse.Namespace) -> int:
         timing_qualification_execution_receipt_path=
             args.timing_qualification_execution_receipt,
         timing_qualification_execution_receipt_sha256=
-            args.timing_qualification_execution_receipt_sha256)
+            args.timing_qualification_execution_receipt_sha256,
+        sibling_isolation=sibling_isolation)
     print(json.dumps(result["summary"], sort_keys=True, indent=2))
     return 0
 
@@ -2648,6 +2938,9 @@ def _command_attest_sampler(args: argparse.Namespace) -> int:
 
 def _command_validate_execution(args: argparse.Namespace) -> int:
     contract = contract_api.load_contract(args.contract)
+    sibling_isolation = _load_canonical_object(
+        args.sibling_isolation, "timing sibling-isolation attestation") \
+        if args.sibling_isolation is not None else None
     result = validate_execution_receipt(
         contract, args.kind, args.phase, args.freeze_manifest,
         args.trace_manifest, args.native, args.result,
@@ -2662,7 +2955,8 @@ def _command_validate_execution(args: argparse.Namespace) -> int:
         timing_qualification_execution_receipt_path=
             args.timing_qualification_execution_receipt,
         timing_qualification_execution_receipt_sha256=
-            args.timing_qualification_execution_receipt_sha256)
+            args.timing_qualification_execution_receipt_sha256,
+        sibling_isolation=sibling_isolation)
     print(json.dumps(result["summary"], sort_keys=True, indent=2))
     return 0
 
@@ -2714,6 +3008,7 @@ def main(argv: Sequence[str] = ()) -> int:
         "--timing-qualification-execution-receipt", type=Path)
     result.add_argument(
         "--timing-qualification-execution-receipt-sha256")
+    result.add_argument("--sibling-isolation", type=Path)
     result.set_defaults(function=_command_results)
     validate = commands.add_parser(
         "validate-execution", help="revalidate a native execution receipt")
@@ -2735,6 +3030,7 @@ def main(argv: Sequence[str] = ()) -> int:
         "--timing-qualification-execution-receipt", type=Path)
     validate.add_argument(
         "--timing-qualification-execution-receipt-sha256")
+    validate.add_argument("--sibling-isolation", type=Path)
     validate.set_defaults(function=_command_validate_execution)
     args = parser.parse_args(argv if argv else None)
     try:

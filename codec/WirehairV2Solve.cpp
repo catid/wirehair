@@ -34,6 +34,28 @@ thread_local bool PacketRowSeedAvalanche = false;
 thread_local int ColdSolveWideXorTestMode = 0;
 thread_local uint64_t ColdSolveWideXorObservationCount = 0u;
 thread_local int LastColdSolveWideXorSelection = 0;
+thread_local test::SolveAllocationFailurePoint
+    ActiveSolveAllocationFailurePoint =
+        test::SolveAllocationFailurePoint::None;
+thread_local test::SolveAllocationFailureException
+    ActiveSolveAllocationFailureException =
+        test::SolveAllocationFailureException::BadAlloc;
+thread_local uint32_t ActiveSolveAllocationFailureHits = 0u;
+thread_local int PackedBinaryResidualTestMode = 0;
+thread_local uint64_t PackedBinaryResidualUseCount = 0u;
+thread_local int ProjectionAVX2TestMode = 0;
+thread_local uint64_t ProjectionAVX2BatchUseCount = 0u;
+thread_local uint64_t ProjectionFallbackBatchUseCount = 0u;
+thread_local int SingleWordProjectionTestMode = 0;
+thread_local uint64_t SingleWordProjectionUseCount = 0u;
+thread_local uint64_t GeneralProjectionUseCount = 0u;
+thread_local int TinyPeriodicHeavyTransposeTestMode = 0;
+thread_local uint64_t TinyPeriodicHeavyTransposeUseCount = 0u;
+thread_local uint64_t TinyPeriodicHeavyLegacyUseCount = 0u;
+thread_local bool TinyPeriodicHeavyTimingEnabled = false;
+thread_local uint64_t TinyPeriodicHeavyTimedCalls = 0u;
+thread_local uint64_t TinyPeriodicHeavyTimedNanoseconds = 0u;
+thread_local uint64_t TinyPeriodicHeavyTimedDataRows = 0u;
 #endif
 
 class ScopedColdSolveWideXorSelection
@@ -91,6 +113,33 @@ private:
     int Previous;
 };
 
+#if defined(GF256_TRY_TARGET_AVX2) && !defined(__AVX2__)
+// SolvePrecodeSystemImpl enables this only after gf256's shared x86/OS
+// capability check.  Keeping the choice per-thread makes nested or concurrent
+// solves independent without changing the portable gf256 context layout.
+thread_local bool TargetProjectionAVX2 = false;
+#endif
+
+PacketRowEquationIdentity CurrentPacketRowEquationIdentity() noexcept
+{
+    PacketRowEquationIdentity identity;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    identity.BlockIdMultiplier = PacketRowSeedMultiplier;
+    identity.BlockIdAvalanche = PacketRowSeedAvalanche ? 1u : 0u;
+    identity.OddPeelSeedXor = OddPacketPeelSeedXor;
+#endif
+    return identity;
+}
+
+bool SamePacketRowEquationIdentity(
+    const PacketRowEquationIdentity& a,
+    const PacketRowEquationIdentity& b) noexcept
+{
+    return a.BlockIdMultiplier == b.BlockIdMultiplier &&
+        a.BlockIdAvalanche == b.BlockIdAvalanche &&
+        a.OddPeelSeedXor == b.OddPeelSeedXor;
+}
+
 constexpr uint32_t PackedWordCount(uint32_t bit_count)
 {
     return bit_count / 64u + ((bit_count & 63u) != 0u ? 1u : 0u);
@@ -99,6 +148,168 @@ constexpr uint32_t PackedWordCount(uint32_t bit_count)
 static_assert(
     PackedWordCount(UINT32_MAX) == UINT32_C(67108864),
     "packed word count must not wrap at the uint32 boundary");
+
+struct PrecodeSystemFingerprint
+{
+    uint64_t First;
+    uint64_t Second;
+};
+
+static GF256_FORCE_INLINE void SystemFingerprintSipRound(
+    uint64_t& v0,
+    uint64_t& v1,
+    uint64_t& v2,
+    uint64_t& v3) noexcept
+{
+    v0 += v1;
+    v1 = CAT_ROL64(v1, 13);
+    v1 ^= v0;
+    v0 = CAT_ROL64(v0, 32);
+    v2 += v3;
+    v3 = CAT_ROL64(v3, 16);
+    v3 ^= v2;
+    v0 += v3;
+    v3 = CAT_ROL64(v3, 21);
+    v3 ^= v0;
+    v2 += v1;
+    v1 = CAT_ROL64(v1, 17);
+    v1 ^= v2;
+    v2 = CAT_ROL64(v2, 32);
+}
+
+class PrecodeSystemFingerprintBuilder
+{
+public:
+    PrecodeSystemFingerprintBuilder() noexcept
+        : A0(UINT64_C(0x736f6d6570736575) ^
+              UINT64_C(0x0f8f4ab39d72e615))
+        , A1(UINT64_C(0x646f72616e646f6d) ^
+              UINT64_C(0x6c91d20a57b438ef))
+        , A2(UINT64_C(0x6c7967656e657261) ^
+              UINT64_C(0x0f8f4ab39d72e615))
+        , A3(UINT64_C(0x7465646279746573) ^
+              UINT64_C(0x6c91d20a57b438ef))
+        , B0(UINT64_C(0x736f6d6570736575) ^
+              UINT64_C(0xc4ceb9fe1a85ec53))
+        , B1(UINT64_C(0x646f72616e646f6d) ^
+              UINT64_C(0x9e3779b97f4a7c15))
+        , B2(UINT64_C(0x6c7967656e657261) ^
+              UINT64_C(0xc4ceb9fe1a85ec53))
+        , B3(UINT64_C(0x7465646279746573) ^
+              UINT64_C(0x9e3779b97f4a7c15))
+    {
+    }
+
+    void Add(uint64_t word) noexcept
+    {
+        A3 ^= word;
+        SystemFingerprintSipRound(A0, A1, A2, A3);
+        SystemFingerprintSipRound(A0, A1, A2, A3);
+        A0 ^= word;
+        B3 ^= word;
+        SystemFingerprintSipRound(B0, B1, B2, B3);
+        SystemFingerprintSipRound(B0, B1, B2, B3);
+        B0 ^= word;
+        ++WordCount;
+    }
+
+    PrecodeSystemFingerprint Finish() noexcept
+    {
+        // Every input token is represented by one canonical little-endian
+        // 64-bit word.  SipHash's final word therefore contains only length.
+        const uint64_t tail = (WordCount * UINT64_C(8)) << 56;
+        A3 ^= tail;
+        SystemFingerprintSipRound(A0, A1, A2, A3);
+        SystemFingerprintSipRound(A0, A1, A2, A3);
+        A0 ^= tail;
+        A2 ^= UINT64_C(0xff);
+        SystemFingerprintSipRound(A0, A1, A2, A3);
+        SystemFingerprintSipRound(A0, A1, A2, A3);
+        SystemFingerprintSipRound(A0, A1, A2, A3);
+        SystemFingerprintSipRound(A0, A1, A2, A3);
+
+        B3 ^= tail;
+        SystemFingerprintSipRound(B0, B1, B2, B3);
+        SystemFingerprintSipRound(B0, B1, B2, B3);
+        B0 ^= tail;
+        B2 ^= UINT64_C(0xff);
+        SystemFingerprintSipRound(B0, B1, B2, B3);
+        SystemFingerprintSipRound(B0, B1, B2, B3);
+        SystemFingerprintSipRound(B0, B1, B2, B3);
+        SystemFingerprintSipRound(B0, B1, B2, B3);
+
+        PrecodeSystemFingerprint result;
+        result.First = A0 ^ A1 ^ A2 ^ A3;
+        result.Second = B0 ^ B1 ^ B2 ^ B3;
+        return result;
+    }
+
+private:
+    uint64_t A0;
+    uint64_t A1;
+    uint64_t A2;
+    uint64_t A3;
+    uint64_t B0;
+    uint64_t B1;
+    uint64_t B2;
+    uint64_t B3;
+    uint64_t WordCount = 0u;
+};
+
+bool SamePrecodeParams(
+    const PrecodeParams& a,
+    const PrecodeParams& b) noexcept
+{
+    return a.BlockCount == b.BlockCount &&
+        a.Staircase == b.Staircase &&
+        a.DenseRows == b.DenseRows &&
+        a.HeavyRows == b.HeavyRows &&
+        a.SourceHits == b.SourceHits &&
+        a.DenseIdentityCorner == b.DenseIdentityCorner &&
+        a.HeavyFamily == b.HeavyFamily &&
+        a.DenseAnchors == b.DenseAnchors &&
+        a.Seed == b.Seed;
+}
+
+PrecodeSystemFingerprint FingerprintPrecodeSystem(
+    const PrecodeSystem& system) noexcept
+{
+    PrecodeSystemFingerprintBuilder builder;
+    const PrecodeParams& params = system.Params;
+    builder.Add(UINT64_C(0x574832535953544d)); // "WH2SYSTM"
+    builder.Add(kPrecodeContractVersion);
+    builder.Add(params.BlockCount);
+    builder.Add(params.Staircase);
+    builder.Add(params.DenseRows);
+    builder.Add(params.HeavyRows);
+    builder.Add(params.SourceHits);
+    builder.Add(params.DenseIdentityCorner ? 1u : 0u);
+    builder.Add((uint32_t)params.HeavyFamily);
+    builder.Add((uint32_t)params.DenseAnchors);
+    builder.Add(params.Seed);
+
+    builder.Add(UINT64_C(0x5354414952434153)); // "STAIRCAS"
+    builder.Add(system.StaircaseRows.size());
+    for (const std::vector<uint32_t>& row : system.StaircaseRows)
+    {
+        builder.Add(row.size());
+        for (uint32_t column : row) {
+            builder.Add(column);
+        }
+    }
+
+    builder.Add(UINT64_C(0x44454e5345424153)); // "DENSEBAS"
+    builder.Add(system.DenseBasisRowColumns.size());
+    for (const std::vector<uint32_t>& row :
+            system.DenseBasisRowColumns)
+    {
+        builder.Add(row.size());
+        for (uint32_t column : row) {
+            builder.Add(column);
+        }
+    }
+    return builder.Finish();
+}
 
 struct ColumnSpan
 {
@@ -324,6 +535,11 @@ static_assert(
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 std::atomic<uint32_t> BinaryPeelOracleUsers(0u);
 std::atomic<uint64_t> BinaryPeelOracleComparisons(0u);
+std::atomic<uint32_t> HeavyProjectionOracleUsers(0u);
+std::atomic<uint64_t> HeavyProjectionOracleComparisons(0u);
+std::atomic<uint64_t> HeavyProjectionLegacyFallbacks(0u);
+std::atomic<uint64_t> TinyPeriodicHeavyUses(0u);
+std::atomic<uint64_t> ResumeSystemFingerprintChecks(0u);
 #endif
 
 bool CheckedBlockStorage(
@@ -592,14 +808,19 @@ struct ProjectionSourceBatch<0u>
 
 };
 
+#if defined(GF256_TRY_TARGET_AVX2) && !defined(__AVX2__)
+// Paired portable-build solves put the stable crossover at eight packed
+// words.  Four-to-seven-word rows do not amortize the target-helper call and
+// can slightly regress wide-RHS solves even when the isolated XOR is faster.
+constexpr uint32_t kTargetProjectionAVX2MinWords = 8u;
+
 template<uint32_t Count>
-static GF256_FORCE_INLINE void XorProjectionSourceBatch(
+static GF256_AVX2_TARGET uint32_t XorProjectionSourceBatchAVX2(
     uint64_t* GF256_RESTRICT destination,
     const uint64_t* const* GF256_RESTRICT sources,
     uint32_t words)
 {
     uint32_t word = 0u;
-#if defined(__AVX2__)
     for (; words - word >= 4u; word += 4u)
     {
         const __m256i destination0 = _mm256_loadu_si256(
@@ -608,6 +829,54 @@ static GF256_FORCE_INLINE void XorProjectionSourceBatch(
             reinterpret_cast<__m256i*>(destination + word),
             ProjectionSourceBatch<Count>::Xor256(
                 destination0, sources, word));
+    }
+    return word;
+}
+#endif
+
+template<uint32_t Count>
+static GF256_FORCE_INLINE void XorProjectionSourceBatch(
+    uint64_t* GF256_RESTRICT destination,
+    const uint64_t* const* GF256_RESTRICT sources,
+    uint32_t words)
+{
+    uint32_t word = 0u;
+#if defined(__AVX2__)
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    if (ProjectionAVX2TestMode >= 0)
+    {
+#endif
+    for (; words - word >= 4u; word += 4u)
+    {
+        const __m256i destination0 = _mm256_loadu_si256(
+            reinterpret_cast<const __m256i*>(destination + word));
+        _mm256_storeu_si256(
+            reinterpret_cast<__m256i*>(destination + word),
+            ProjectionSourceBatch<Count>::Xor256(
+                destination0, sources, word));
+    }
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    }
+#endif
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    if (word != 0u) {
+        ++ProjectionAVX2BatchUseCount;
+    }
+#endif
+#elif defined(GF256_TRY_TARGET_AVX2)
+    if (TargetProjectionAVX2) {
+        word = XorProjectionSourceBatchAVX2<Count>(
+            destination, sources, words);
+    }
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    if (word != 0u) {
+        ++ProjectionAVX2BatchUseCount;
+    }
+#endif
+#endif
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    if (word == 0u) {
+        ++ProjectionFallbackBatchUseCount;
     }
 #endif
 #if defined(GF256_TARGET_X86_SIMD)
@@ -642,6 +911,58 @@ static GF256_FORCE_INLINE void XorProjectionSourceBatch(
             destination[word], sources, word);
     }
 }
+
+#if defined(GF256_TRY_TARGET_AVX2) && !defined(__AVX2__)
+static bool ShouldUseTargetProjectionAVX2()
+{
+    gf256_x86_cpu_features features = {};
+    gf256_get_active_x86_cpu_features(&features);
+    const bool available = features.AVX2 != 0;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    if (ProjectionAVX2TestMode < 0) {
+        return false;
+    }
+    // A forced request still observes the real CPU/OS capability boundary.
+#endif
+    return available;
+}
+
+class ScopedTargetProjectionAVX2
+{
+public:
+    ScopedTargetProjectionAVX2()
+        : Previous(TargetProjectionAVX2)
+    {
+        TargetProjectionAVX2 = false;
+    }
+
+    void SelectForWordCount(uint32_t words)
+    {
+        bool eligible = words >= kTargetProjectionAVX2MinWords;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        if (ProjectionAVX2TestMode > 0) {
+            // Forced differential coverage may exercise the helper below the
+            // measured crossover, but never on a sub-vector row.
+            eligible = words >= 4u;
+        }
+#endif
+        TargetProjectionAVX2 =
+            eligible && ShouldUseTargetProjectionAVX2();
+    }
+
+    ~ScopedTargetProjectionAVX2()
+    {
+        TargetProjectionAVX2 = Previous;
+    }
+
+    ScopedTargetProjectionAVX2(const ScopedTargetProjectionAVX2&) = delete;
+    ScopedTargetProjectionAVX2& operator=(
+        const ScopedTargetProjectionAVX2&) = delete;
+
+private:
+    bool Previous;
+};
+#endif
 
 class BatchedProjectionXorAccumulator
 {
@@ -703,6 +1024,133 @@ private:
     const uint64_t* Sources[kBatchSize];
     uint32_t Count = 0u;
 };
+
+#if defined(_MSC_VER)
+#define WH2_SINGLE_WORD_NOINLINE __declspec(noinline)
+#elif defined(__GNUC__) && !defined(__clang__) && defined(__ELF__)
+#define WH2_SINGLE_WORD_NOINLINE \
+    __attribute__((noinline, noclone, section(".text.wh2_single_word")))
+#elif defined(__clang__) && defined(__ELF__)
+#define WH2_SINGLE_WORD_NOINLINE \
+    __attribute__((noinline, section(".text.wh2_single_word")))
+#elif defined(__GNUC__) || defined(__clang__)
+#define WH2_SINGLE_WORD_NOINLINE __attribute__((noinline))
+#else
+#define WH2_SINGLE_WORD_NOINLINE
+#endif
+
+// Keep the one-word per-row accumulators out of SolvePrecodeSystemImpl.  The
+// generic two-word boundary is performance-sensitive too, and inlining these
+// loops measurably perturbs its instruction layout even when they are never
+// selected.  GCC's noclone also prevents IPA constant-propagation clones from
+// escaping the isolated text section in ordinary non-LTO objects.
+template<class XorAccumulator>
+static GF256_FORCE_INLINE uint32_t
+AccumulateSingleWordProjectionConstantImpl(
+    uint32_t column,
+    const BinaryEquationView& equation,
+    const std::vector<uint32_t>& inactive_index,
+    const std::vector<uint64_t>& projection,
+    const std::vector<uint8_t>& values,
+    uint32_t block_bytes,
+    uint64_t& accumulator,
+    XorAccumulator& constant_xor,
+    PrecodeSolveStats& stats)
+{
+    uint64_t accumulated = 0u;
+    uint32_t solve_column_offset = UINT32_MAX;
+    for (const uint32_t* current = equation.Columns.begin();
+         current != equation.Columns.end();
+         ++current)
+    {
+        const uint32_t other = *current;
+        if (other == column) {
+            solve_column_offset = (uint32_t)(
+                current - equation.Columns.begin());
+            continue;
+        }
+        const uint32_t index = inactive_index[other];
+        if (index != UINT32_MAX) {
+            accumulated ^= UINT64_C(1) << (index & 63u);
+        }
+        else
+        {
+            accumulated ^= projection[other];
+            // Inactive value slots are still the zero constant at this
+            // stage.  Only peeled columns can contribute to the affine RHS.
+            constant_xor.Add(
+                values.data() + (size_t)other * block_bytes);
+            ++stats.BlockXors;
+        }
+    }
+    accumulator = accumulated;
+    return solve_column_offset;
+}
+
+static WH2_SINGLE_WORD_NOINLINE uint32_t
+AccumulateSingleWordProjectionConstant(
+    uint32_t column,
+    const BinaryEquationView& equation,
+    const std::vector<uint32_t>& inactive_index,
+    const std::vector<uint64_t>& projection,
+    const std::vector<uint8_t>& values,
+    uint32_t block_bytes,
+    uint64_t& accumulator,
+    BatchedBlockXorInitializer& constant_xor,
+    PrecodeSolveStats& stats)
+{
+    return AccumulateSingleWordProjectionConstantImpl(
+        column, equation, inactive_index, projection, values, block_bytes,
+        accumulator, constant_xor, stats);
+}
+
+static WH2_SINGLE_WORD_NOINLINE uint32_t
+AccumulateSingleWordProjectionConstant(
+    uint32_t column,
+    const BinaryEquationView& equation,
+    const std::vector<uint32_t>& inactive_index,
+    const std::vector<uint64_t>& projection,
+    const std::vector<uint8_t>& values,
+    uint32_t block_bytes,
+    uint64_t& accumulator,
+    BatchedBlockXorAccumulator& constant_xor,
+    PrecodeSolveStats& stats)
+{
+    return AccumulateSingleWordProjectionConstantImpl(
+        column, equation, inactive_index, projection, values, block_bytes,
+        accumulator, constant_xor, stats);
+}
+
+static WH2_SINGLE_WORD_NOINLINE void
+AccumulateSingleWordResidualProjection(
+    const BinaryEquationView& equation,
+    const std::vector<uint32_t>& inactive_index,
+    const std::vector<uint64_t>& projection,
+    const std::vector<uint8_t>& values,
+    uint32_t block_bytes,
+    uint64_t& accumulator,
+    BatchedBlockXorAccumulator& rhs_xor,
+    PrecodeSolveStats& stats)
+{
+    uint64_t accumulated = 0u;
+    for (uint32_t column : equation.Columns)
+    {
+        const uint32_t index = inactive_index[column];
+        if (index != UINT32_MAX) {
+            accumulated ^= UINT64_C(1) << (index & 63u);
+        }
+        else
+        {
+            accumulated ^= projection[column];
+            rhs_xor.Add(
+                values.data() + (size_t)column * block_bytes);
+            ++stats.BlockXors;
+        }
+    }
+    accumulator = accumulated;
+}
+
+#undef WH2_SINGLE_WORD_NOINLINE
 
 template<class XorAccumulator>
 static GF256_FORCE_INLINE uint32_t AccumulatePeeledProjectionConstant(
@@ -789,6 +1237,33 @@ static WH2_RESIDUAL_COLD_NOINLINE void ReduceResidualRowWithBatchedRhs(
 
 #undef WH2_RESIDUAL_COLD_NOINLINE
 
+#if defined(_MSC_VER)
+#define WH2_PACKED_RESIDUAL_NOINLINE __declspec(noinline)
+#elif defined(__ELF__) && (defined(__GNUC__) || defined(__clang__)) && \
+    !defined(WIREHAIR_V2_DISABLE_PACKED_RESIDUAL_TEXT_SECTION)
+#define WH2_PACKED_RESIDUAL_NOINLINE \
+    __attribute__((noinline, section(".text.wh2_packed_residual")))
+#elif defined(__GNUC__) || defined(__clang__)
+#define WH2_PACKED_RESIDUAL_NOINLINE __attribute__((noinline))
+#else
+#define WH2_PACKED_RESIDUAL_NOINLINE
+#endif
+
+static WH2_PACKED_RESIDUAL_NOINLINE ResidualInsertResult
+InsertPackedBinaryResidualRow(
+    std::vector<uint64_t>& coeff,
+    std::vector<uint8_t>& rhs,
+    uint32_t R,
+    uint32_t words,
+    uint32_t block_bytes,
+    std::vector<uint64_t>& pivot_coeff,
+    std::vector<uint8_t>& pivot_rhs,
+    std::vector<uint8_t>& have_pivot,
+    uint32_t& rank,
+    PrecodeSolveStats& stats);
+
+#undef WH2_PACKED_RESIDUAL_NOINLINE
+
 constexpr uint32_t kProjectedBackSubMinBlockBytes = 64u;
 // Paired whole-solver runs show the fused path loses below these scales even
 // though the isolated payload kernel is faster.
@@ -836,6 +1311,476 @@ CachedPeriodicHeavyTable()
         }();
     return table;
 }
+
+// Project the production H=12 coefficient rows through the binary peel
+// schedule without visiting every set bit in every dense affine projection.
+// A selected binary row has the form
+//
+//     x[column] = rhs + XOR(x[dependency]).
+//
+// PeelOrder is chronological, so each dependency is inactive or was resolved
+// earlier.  Traversing that order backward substitutes the selected variable
+// out of all twelve heavy rows at once.  GF(256) addition is byte XOR, allowing
+// the twelve coefficients to travel as two packed 64-bit words.
+void ProjectCachedPeriodicHeavyByPeel(
+    const BinaryEquationArena& rows,
+    const PeelResult& peel,
+    uint32_t column_count,
+    std::vector<uint64_t>& projected_heavy)
+{
+    static_assert(
+        kCachedPeriodicWords == 2u,
+        "the production H=12 propagation path requires two packed words");
+    CAT_DEBUG_ASSERT(
+        peel.PeelOrder.size() + peel.InactiveOrder.size() == column_count);
+    CAT_DEBUG_ASSERT(
+        projected_heavy.size() ==
+            peel.InactiveOrder.size() * kCachedPeriodicWords);
+
+    std::vector<uint64_t> propagated(
+        (size_t)column_count * kCachedPeriodicWords, uint64_t{0});
+    const uint64_t* const periodic = CachedPeriodicHeavyTable().data();
+    uint32_t residue = 0u;
+    for (uint32_t column = 0u; column < column_count; ++column)
+    {
+        uint64_t* const destination = propagated.data() +
+            (size_t)column * kCachedPeriodicWords;
+        const uint64_t* const source = periodic +
+            (size_t)residue * kCachedPeriodicWords;
+        destination[0] = source[0];
+        destination[1] = source[1];
+        if (++residue == kCachedPeriodicWindow) {
+            residue = 0u;
+        }
+    }
+
+    for (size_t peel_i = peel.PeelOrder.size(); peel_i-- > 0u;)
+    {
+        const uint32_t column = peel.PeelOrder[peel_i];
+        CAT_DEBUG_ASSERT(column < column_count);
+        const uint32_t solve_row = peel.SolveRow[column];
+        CAT_DEBUG_ASSERT(solve_row != UINT32_MAX);
+        const BinaryEquationView dependencies =
+            rows.SolveDependencies(solve_row);
+        uint64_t* const packed = propagated.data() +
+            (size_t)column * kCachedPeriodicWords;
+        // Snapshot before writing any destination.  This also makes duplicate
+        // dependency cancellation well-defined, while the existing row
+        // uniqueness invariant still requires the solve column exactly once.
+        const uint64_t low = packed[0];
+        const uint64_t high = packed[1];
+        for (uint32_t dependency : dependencies.Columns)
+        {
+            CAT_DEBUG_ASSERT(dependency < column_count);
+            uint64_t* const destination = propagated.data() +
+                (size_t)dependency * kCachedPeriodicWords;
+            destination[0] ^= low;
+            destination[1] ^= high;
+        }
+    }
+
+    for (uint32_t inactive = 0u;
+         inactive < (uint32_t)peel.InactiveOrder.size();
+         ++inactive)
+    {
+        const uint32_t column = peel.InactiveOrder[inactive];
+        CAT_DEBUG_ASSERT(column < column_count);
+        const uint64_t* const source = propagated.data() +
+            (size_t)column * kCachedPeriodicWords;
+        uint64_t* const destination = projected_heavy.data() +
+            (size_t)inactive * kCachedPeriodicWords;
+        destination[0] = source[0];
+        destination[1] = source[1];
+    }
+}
+
+// Tiny H=12 systems visit fewer than one complete coefficient period.  Keep
+// their coefficient reuse path out of SolvePrecodeSystemImpl: adding table
+// ownership or per-column mode checks to that already-large routine measurably
+// perturbs disabled tiny/wide solves.  The caller selects this helper only for
+// PeriodicCauchy, H=12, and L<244, so HeavyCoefficient() is the exact equation
+// dispatch and the packed coefficient lanes can travel through the selected
+// peel equations without multiplying every peeled block value into the heavy
+// RHS.
+#if defined(_MSC_VER)
+#define WH2_TINY_PERIODIC_NOINLINE __declspec(noinline)
+#elif defined(__GNUC__) && !defined(__clang__) && defined(__ELF__)
+#define WH2_TINY_PERIODIC_NOINLINE \
+    __attribute__((noinline, noclone, section(".text.wh2_tiny_periodic")))
+#elif defined(__clang__) && defined(__ELF__)
+#define WH2_TINY_PERIODIC_NOINLINE \
+    __attribute__((noinline, section(".text.wh2_tiny_periodic")))
+#elif defined(__GNUC__) || defined(__clang__)
+#define WH2_TINY_PERIODIC_NOINLINE __attribute__((noinline))
+#else
+#define WH2_TINY_PERIODIC_NOINLINE
+#endif
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+static void PrepareTinyPeriodicHeavyLegacyForTesting(
+    const std::vector<uint32_t>& inactive_index,
+    const std::vector<uint64_t>& projection,
+    const std::vector<uint8_t>& values,
+    std::vector<uint64_t>& projected_heavy,
+    std::vector<uint8_t>& heavy_rhs,
+    PrecodeSolveStats& stats)
+{
+    static_assert(
+        kCachedPeriodicWords == 2u,
+        "the tiny production H=12 path requires two packed words");
+    const uint32_t L = (uint32_t)inactive_index.size();
+    const uint32_t R =
+        (uint32_t)(projected_heavy.size() / kCachedPeriodicWords);
+    const uint32_t words = PackedWordCount(R);
+    const uint32_t block_bytes =
+        (uint32_t)(heavy_rhs.size() / kCachedPeriodicHeavyRows);
+    CAT_DEBUG_ASSERT(L < kCachedPeriodicWindow);
+    CAT_DEBUG_ASSERT(
+        projection.size() == (size_t)L * words);
+    CAT_DEBUG_ASSERT(
+        projected_heavy.size() == (size_t)R * kCachedPeriodicWords);
+    CAT_DEBUG_ASSERT(
+        values.size() == (size_t)L * block_bytes);
+    CAT_DEBUG_ASSERT(
+        heavy_rhs.size() ==
+            (size_t)kCachedPeriodicHeavyRows * block_bytes);
+
+    std::vector<uint64_t> packed_heavy(
+        (size_t)L * kCachedPeriodicWords, uint64_t{0});
+    for (uint32_t column = 0u; column < L; ++column)
+    {
+        uint64_t* const column_heavy = packed_heavy.data() +
+            (size_t)column * kCachedPeriodicWords;
+        for (uint32_t heavy = 0;
+             heavy < kCachedPeriodicHeavyRows;
+             ++heavy)
+        {
+            column_heavy[heavy >> 3] |=
+                (uint64_t)HeavyCoefficient(
+                    heavy, column, kCachedPeriodicHeavyRows) <<
+                ((heavy & 7u) * 8u);
+        }
+        const auto xor_packed = [&](uint32_t index) {
+            uint64_t* const destination = projected_heavy.data() +
+                (size_t)index * kCachedPeriodicWords;
+            destination[0] ^= column_heavy[0];
+            destination[1] ^= column_heavy[1];
+        };
+        const uint32_t inactive = inactive_index[column];
+        if (inactive != UINT32_MAX) {
+            xor_packed(inactive);
+            continue;
+        }
+        const uint64_t* const bits =
+            projection.data() + (size_t)column * words;
+        for (uint32_t w = 0; w < words; ++w)
+        {
+            uint64_t word = bits[w];
+            while (word != 0u)
+            {
+                const uint32_t bit =
+                    wirehair::NonzeroLowestBitIndex64(word);
+                const uint32_t projected = (w << 6) + bit;
+                if (projected < R) {
+                    xor_packed(projected);
+                }
+                word &= word - 1u;
+            }
+        }
+    }
+
+    void* heavy_destinations[kCachedPeriodicHeavyRows];
+    uint8_t heavy_scales[kCachedPeriodicHeavyRows];
+    for (uint32_t heavy = 0;
+         heavy < kCachedPeriodicHeavyRows;
+         ++heavy)
+    {
+        heavy_destinations[heavy] =
+            heavy_rhs.data() + (size_t)heavy * block_bytes;
+    }
+    // L is shorter than the 244-column coefficient period, so each residue
+    // contains exactly one column.  Inactive columns have no constant value;
+    // skip them instead of issuing twelve muladds from an all-zero bucket.
+    // Peeled columns can feed their value directly, avoiding a redundant
+    // zero/fill/XOR pass through a temporary block.
+    for (uint32_t column = 0; column < L; ++column)
+    {
+        if (inactive_index[column] != UINT32_MAX) {
+            continue;
+        }
+        const uint64_t* const packed = packed_heavy.data() +
+            (size_t)column * kCachedPeriodicWords;
+        for (uint32_t heavy = 0;
+             heavy < kCachedPeriodicHeavyRows;
+             ++heavy)
+        {
+            heavy_scales[heavy] = (uint8_t)(
+                packed[heavy >> 3] >> ((heavy & 7u) * 8u));
+        }
+        AddScaledBlocks(
+            heavy_destinations,
+            heavy_scales,
+            kCachedPeriodicHeavyRows,
+            values.data() + (size_t)column * block_bytes,
+            block_bytes,
+            stats);
+    }
+}
+#endif
+
+// Substitute selected peel equations into all twelve production heavy rows
+// in reverse peel order.  A selected row has
+//
+//     x[column] + XOR(x[dependency]) = data,
+//
+// so substituting coefficient a adds a*data to the heavy RHS and XORs a into
+// each dependency coefficient.  This is algebraically identical to forming
+// every peeled value first and multiplying all of them into the heavy RHS,
+// but only data-bearing selected rows issue full-block GF(256) operations.
+template <bool Transposed>
+static GF256_FORCE_INLINE uint32_t PrepareTinyPeriodicHeavyByPeelImpl(
+    const BinaryEquationArena& rows,
+    const PeelResult& peel,
+    uint32_t column_count,
+    uint32_t block_bytes,
+    std::vector<uint64_t>& projected_heavy,
+    std::vector<uint8_t>& heavy_rhs,
+    PrecodeSolveStats& stats)
+{
+    static_assert(
+        kCachedPeriodicWords == 2u,
+        "the tiny production H=12 path requires two packed words");
+    const uint32_t R = (uint32_t)peel.InactiveOrder.size();
+    CAT_DEBUG_ASSERT(column_count < kCachedPeriodicWindow);
+    CAT_DEBUG_ASSERT(
+        peel.PeelOrder.size() + peel.InactiveOrder.size() == column_count);
+    CAT_DEBUG_ASSERT(
+        projected_heavy.size() == (size_t)R * kCachedPeriodicWords);
+    CAT_DEBUG_ASSERT(
+        heavy_rhs.size() ==
+            (size_t)kCachedPeriodicHeavyRows * block_bytes);
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    test::TriggerSolveAllocationFailureForTesting(
+        test::SolveAllocationFailurePoint::TinyPeriodicHeavyStorage);
+#endif
+    std::vector<uint64_t> propagated(
+        (size_t)column_count * kCachedPeriodicWords, uint64_t{0});
+    for (uint32_t column = 0u; column < column_count; ++column)
+    {
+        // The caller proves H=12 and L<244, so the periodic Cauchy X value is
+        // exactly 12+column with no wrap.  Use the inline inverse-table lookup
+        // directly instead of paying one out-of-line HeavyCoefficient call
+        // and modulus for every packed lane.
+        const uint32_t x = kCachedPeriodicHeavyRows + column;
+        uint64_t* const packed = propagated.data() +
+            (size_t)column * kCachedPeriodicWords;
+        for (uint32_t heavy = 0u;
+             heavy < kCachedPeriodicHeavyRows;
+             ++heavy)
+        {
+            packed[heavy >> 3] |=
+                (uint64_t)gf256_inv((uint8_t)(x ^ heavy)) <<
+                ((heavy & 7u) * 8u);
+        }
+    }
+
+    void* heavy_destinations[kCachedPeriodicHeavyRows];
+    uint8_t heavy_scales[kCachedPeriodicHeavyRows];
+    const void* data_sources[kCachedPeriodicWindow - 1u];
+    uint8_t data_scales[kCachedPeriodicHeavyRows]
+        [kCachedPeriodicWindow - 1u];
+    uint32_t data_source_count = 0u;
+    for (uint32_t heavy = 0u;
+         heavy < kCachedPeriodicHeavyRows;
+         ++heavy)
+    {
+        heavy_destinations[heavy] =
+            heavy_rhs.data() + (size_t)heavy * block_bytes;
+    }
+
+    for (size_t peel_i = peel.PeelOrder.size(); peel_i-- > 0u;)
+    {
+        const uint32_t column = peel.PeelOrder[peel_i];
+        CAT_DEBUG_ASSERT(column < column_count);
+        const uint32_t solve_row = peel.SolveRow[column];
+        CAT_DEBUG_ASSERT(solve_row != UINT32_MAX);
+        const BinaryEquationView equation =
+            rows.SolveDependencies(solve_row);
+        const uint64_t* const packed = propagated.data() +
+            (size_t)column * kCachedPeriodicWords;
+        // Snapshot before updating dependencies.  A defensive duplicate
+        // dependency would then cancel exactly as in binary row algebra.
+        const uint64_t low = packed[0];
+        const uint64_t high = packed[1];
+        if (equation.Data)
+        {
+            CAT_DEBUG_ASSERT(
+                data_source_count < kCachedPeriodicWindow - 1u);
+            const uint32_t data_source = data_source_count++;
+            for (uint32_t heavy = 0u;
+                 heavy < kCachedPeriodicHeavyRows;
+                 ++heavy)
+            {
+                heavy_scales[heavy] = (uint8_t)(
+                    (heavy < 8u ? low : high) >>
+                    ((heavy & 7u) * 8u));
+                if (Transposed)
+                {
+                    data_scales[heavy][data_source] =
+                        heavy_scales[heavy];
+                    if (heavy_scales[heavy] == 1u) {
+                        ++stats.BlockXors;
+                    }
+                    else if (heavy_scales[heavy] > 1u) {
+                        ++stats.BlockMulAdds;
+                    }
+                }
+            }
+            if (Transposed)
+            {
+                data_sources[data_source] = equation.Data;
+            }
+            else
+            {
+                AddScaledBlocks(
+                    heavy_destinations,
+                    heavy_scales,
+                    kCachedPeriodicHeavyRows,
+                    equation.Data,
+                    block_bytes,
+                    stats);
+            }
+        }
+        for (uint32_t dependency : equation.Columns)
+        {
+            CAT_DEBUG_ASSERT(dependency < column_count);
+            uint64_t* const destination = propagated.data() +
+                (size_t)dependency * kCachedPeriodicWords;
+            destination[0] ^= low;
+            destination[1] ^= high;
+        }
+    }
+
+    if (Transposed && data_source_count != 0u)
+    {
+        for (uint32_t heavy = 0u;
+             heavy < kCachedPeriodicHeavyRows;
+             ++heavy)
+        {
+            gf256_mulset_multi_mem(
+                heavy_destinations[heavy],
+                data_sources,
+                data_scales[heavy],
+                (int)data_source_count,
+                (int)block_bytes);
+        }
+    }
+
+    for (uint32_t inactive = 0u; inactive < R; ++inactive)
+    {
+        const uint32_t column = peel.InactiveOrder[inactive];
+        CAT_DEBUG_ASSERT(column < column_count);
+        const uint64_t* const source = propagated.data() +
+            (size_t)column * kCachedPeriodicWords;
+        uint64_t* const destination = projected_heavy.data() +
+            (size_t)inactive * kCachedPeriodicWords;
+        destination[0] = source[0];
+        destination[1] = source[1];
+    }
+    return data_source_count;
+}
+
+static WH2_TINY_PERIODIC_NOINLINE uint32_t
+PrepareTinyPeriodicHeavyLegacyByPeel(
+    const BinaryEquationArena& rows,
+    const PeelResult& peel,
+    uint32_t column_count,
+    uint32_t block_bytes,
+    std::vector<uint64_t>& projected_heavy,
+    std::vector<uint8_t>& heavy_rhs,
+    PrecodeSolveStats& stats)
+{
+    return PrepareTinyPeriodicHeavyByPeelImpl<false>(
+        rows, peel, column_count, block_bytes, projected_heavy, heavy_rhs,
+        stats);
+}
+
+static WH2_TINY_PERIODIC_NOINLINE uint32_t
+PrepareTinyPeriodicHeavyTransposedByPeel(
+    const BinaryEquationArena& rows,
+    const PeelResult& peel,
+    uint32_t column_count,
+    uint32_t block_bytes,
+    std::vector<uint64_t>& projected_heavy,
+    std::vector<uint8_t>& heavy_rhs,
+    PrecodeSolveStats& stats)
+{
+    return PrepareTinyPeriodicHeavyByPeelImpl<true>(
+        rows, peel, column_count, block_bytes, projected_heavy, heavy_rhs,
+        stats);
+}
+
+static GF256_FORCE_INLINE bool ShouldTransposeTinyPeriodicHeavy(
+    uint32_t block_bytes)
+{
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    if (TinyPeriodicHeavyTransposeTestMode < 0) {
+        return false;
+    }
+    if (TinyPeriodicHeavyTransposeTestMode > 0) {
+        return true;
+    }
+#endif
+    // Same-binary ordinary-solve screens found gains at every tested
+    // 64-byte-aligned width from 64 through 1280 and again at 2048, 4096, and
+    // 16384 bytes for K=8/32/100.  Widths ending one byte before an alignment
+    // boundary could regress sharply in the scalar remainder.  The
+    // destination-major traffic advantage grows with block width, so keep the
+    // GFNI gate uncapped but retain the legacy helper for unaligned widths.
+    if (block_bytes < 64u || (block_bytes & 63u) != 0u) {
+        return false;
+    }
+    // GF256's active dispatch is immutable after its one-time initialization.
+    // Cache the query so a non-GFNI legacy fallback does not repeatedly enter
+    // gf256_init() merely to rediscover the same capability result.
+    static const bool active_gfni = []() {
+        gf256_x86_cpu_features features = {};
+        gf256_get_active_x86_cpu_features(&features);
+        return features.GFNI != 0;
+    }();
+    return active_gfni;
+}
+
+static WH2_TINY_PERIODIC_NOINLINE uint32_t
+PrepareTinyPeriodicHeavySelectedByPeel(
+    const BinaryEquationArena& rows,
+    const PeelResult& peel,
+    uint32_t column_count,
+    uint32_t block_bytes,
+    std::vector<uint64_t>& projected_heavy,
+    std::vector<uint8_t>& heavy_rhs,
+    PrecodeSolveStats& stats
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    , bool& transposed
+#endif
+    )
+{
+    const bool use_transposed =
+        ShouldTransposeTinyPeriodicHeavy(block_bytes);
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    transposed = use_transposed;
+#endif
+    return use_transposed ?
+        PrepareTinyPeriodicHeavyTransposedByPeel(
+            rows, peel, column_count, block_bytes, projected_heavy,
+            heavy_rhs, stats) :
+        PrepareTinyPeriodicHeavyLegacyByPeel(
+            rows, peel, column_count, block_bytes, projected_heavy,
+            heavy_rhs, stats);
+}
+
+#undef WH2_TINY_PERIODIC_NOINLINE
 
 void AddScaledResidualCoefficients(
     uint8_t* destination,
@@ -1390,6 +2335,377 @@ int LastColdSolveWideXorSelectionForTesting()
 {
     return LastColdSolveWideXorSelection;
 }
+
+void SetHeavyProjectionOracleForTesting(bool enabled)
+{
+    if (enabled) {
+        HeavyProjectionOracleUsers.fetch_add(1u, std::memory_order_relaxed);
+        return;
+    }
+    uint32_t users =
+        HeavyProjectionOracleUsers.load(std::memory_order_relaxed);
+    while (users != 0u &&
+           !HeavyProjectionOracleUsers.compare_exchange_weak(
+               users, users - 1u,
+               std::memory_order_relaxed,
+               std::memory_order_relaxed))
+    {
+    }
+    CAT_DEBUG_ASSERT(users != 0u);
+}
+
+void ResetHeavyProjectionOracleCountersForTesting()
+{
+    HeavyProjectionOracleComparisons.store(0u, std::memory_order_relaxed);
+    HeavyProjectionLegacyFallbacks.store(0u, std::memory_order_relaxed);
+    TinyPeriodicHeavyUses.store(0u, std::memory_order_relaxed);
+}
+
+uint64_t HeavyProjectionOracleComparisonsForTesting()
+{
+    return HeavyProjectionOracleComparisons.load(std::memory_order_relaxed);
+}
+
+uint64_t HeavyProjectionLegacyFallbacksForTesting()
+{
+    return HeavyProjectionLegacyFallbacks.load(std::memory_order_relaxed);
+}
+
+uint64_t TinyPeriodicHeavyUsesForTesting()
+{
+    return TinyPeriodicHeavyUses.load(std::memory_order_relaxed);
+}
+
+bool SetTinyPeriodicHeavyTransposeModeForTesting(int mode)
+{
+    if (mode < -1 || mode > 1) {
+        return false;
+    }
+    TinyPeriodicHeavyTransposeTestMode = mode;
+    return true;
+}
+
+int TinyPeriodicHeavyTransposeModeForTesting()
+{
+    return TinyPeriodicHeavyTransposeTestMode;
+}
+
+void ResetTinyPeriodicHeavyTransposeCountersForTesting()
+{
+    TinyPeriodicHeavyTransposeUseCount = 0u;
+    TinyPeriodicHeavyLegacyUseCount = 0u;
+    TinyPeriodicHeavyTimedCalls = 0u;
+    TinyPeriodicHeavyTimedNanoseconds = 0u;
+    TinyPeriodicHeavyTimedDataRows = 0u;
+}
+
+uint64_t TinyPeriodicHeavyTransposeUsesForTesting()
+{
+    return TinyPeriodicHeavyTransposeUseCount;
+}
+
+uint64_t TinyPeriodicHeavyLegacyUsesForTesting()
+{
+    return TinyPeriodicHeavyLegacyUseCount;
+}
+
+void SetTinyPeriodicHeavyTimingForTesting(bool enabled)
+{
+    TinyPeriodicHeavyTimingEnabled = enabled;
+}
+
+uint64_t TinyPeriodicHeavyTimedCallsForTesting()
+{
+    return TinyPeriodicHeavyTimedCalls;
+}
+
+uint64_t TinyPeriodicHeavyTimedNanosecondsForTesting()
+{
+    return TinyPeriodicHeavyTimedNanoseconds;
+}
+
+uint64_t TinyPeriodicHeavyTimedDataRowsForTesting()
+{
+    return TinyPeriodicHeavyTimedDataRows;
+}
+
+bool SetProjectionAVX2ModeForTesting(int mode)
+{
+    if (mode < -1 || mode > 1) {
+        return false;
+    }
+    ProjectionAVX2TestMode = mode;
+    return true;
+}
+
+int ProjectionAVX2ModeForTesting()
+{
+    return ProjectionAVX2TestMode;
+}
+
+bool ProjectionAVX2AvailableForTesting()
+{
+#if defined(__AVX2__) || defined(GF256_TRY_TARGET_AVX2)
+    if (gf256_init() != 0) {
+        return false;
+    }
+    gf256_x86_cpu_features features = {};
+    gf256_get_active_x86_cpu_features(&features);
+    return features.AVX2 != 0;
+#else
+    return false;
+#endif
+}
+
+void ResetProjectionAVX2CountersForTesting()
+{
+    ProjectionAVX2BatchUseCount = 0u;
+    ProjectionFallbackBatchUseCount = 0u;
+}
+
+uint64_t ProjectionAVX2BatchesForTesting()
+{
+    return ProjectionAVX2BatchUseCount;
+}
+
+uint64_t ProjectionFallbackBatchesForTesting()
+{
+    return ProjectionFallbackBatchUseCount;
+}
+
+bool SetSingleWordProjectionModeForTesting(int mode)
+{
+    if (mode < -1 || mode > 1) {
+        return false;
+    }
+    SingleWordProjectionTestMode = mode;
+    return true;
+}
+
+int SingleWordProjectionModeForTesting()
+{
+    return SingleWordProjectionTestMode;
+}
+
+void ResetSingleWordProjectionCountersForTesting()
+{
+    SingleWordProjectionUseCount = 0u;
+    GeneralProjectionUseCount = 0u;
+}
+
+uint64_t SingleWordProjectionUsesForTesting()
+{
+    return SingleWordProjectionUseCount;
+}
+
+uint64_t GeneralProjectionUsesForTesting()
+{
+    return GeneralProjectionUseCount;
+}
+
+bool SetPackedBinaryResidualModeForTesting(int mode)
+{
+    if (mode < -1 || mode > 1) {
+        return false;
+    }
+    PackedBinaryResidualTestMode = mode;
+    return true;
+}
+
+int PackedBinaryResidualModeForTesting()
+{
+    return PackedBinaryResidualTestMode;
+}
+
+void ResetPackedBinaryResidualUsesForTesting()
+{
+    PackedBinaryResidualUseCount = 0u;
+}
+
+uint64_t PackedBinaryResidualUsesForTesting()
+{
+    return PackedBinaryResidualUseCount;
+}
+
+bool PackedBinaryResidualInsertionOracleForTesting()
+{
+    static const uint32_t kWidths[] = {
+        1u, 2u, 63u, 64u, 65u, 127u, 128u, 129u
+    };
+    static const uint32_t block_bytes = 7u;
+    uint32_t random = UINT32_C(0x8f31a25c);
+    const auto next_random = [&random]() {
+        random ^= random << 13;
+        random ^= random >> 17;
+        random ^= random << 5;
+        return random;
+    };
+
+    for (uint32_t R : kWidths)
+    {
+        const uint32_t words = PackedWordCount(R);
+        std::vector<uint8_t> byte_pivots((size_t)R * R, 0u);
+        std::vector<uint64_t> packed_pivots(
+            (size_t)R * words, uint64_t{0});
+        std::vector<uint8_t> byte_pivot_rhs(
+            (size_t)R * block_bytes, 0u);
+        std::vector<uint8_t> packed_pivot_rhs(
+            (size_t)R * block_bytes, 0u);
+        std::vector<uint8_t> byte_have(R, 0u);
+        std::vector<uint8_t> packed_have(R, 0u);
+        uint32_t byte_rank = 0u;
+        uint32_t packed_rank = 0u;
+        PrecodeSolveStats byte_stats = {};
+        PrecodeSolveStats packed_stats = {};
+
+        const auto compare_row = [&] (
+            const std::vector<uint8_t>& input_coeff,
+            const std::vector<uint8_t>& input_rhs,
+            bool poison_tail) -> bool
+        {
+            std::vector<uint8_t> byte_coeff = input_coeff;
+            std::vector<uint8_t> byte_rhs = input_rhs;
+            std::vector<uint64_t> packed_coeff(words, uint64_t{0});
+            for (uint32_t column = 0u; column < R; ++column) {
+                if (input_coeff[column] != 0u) {
+                    packed_coeff[column >> 6] |=
+                        UINT64_C(1) << (column & 63u);
+                }
+            }
+            if (poison_tail && (R & 63u) != 0u) {
+                packed_coeff[words - 1u] |=
+                    ~((UINT64_C(1) << (R & 63u)) - UINT64_C(1));
+            }
+            std::vector<uint8_t> packed_rhs = input_rhs;
+            const ResidualInsertResult byte_result = InsertResidualRow(
+                byte_coeff, byte_rhs, R, block_bytes,
+                byte_pivots, byte_pivot_rhs, byte_have,
+                byte_rank, byte_stats, true, kNeverBatchResidualRhs);
+            const ResidualInsertResult packed_result =
+                InsertPackedBinaryResidualRow(
+                    packed_coeff, packed_rhs, R, words, block_bytes,
+                    packed_pivots, packed_pivot_rhs, packed_have,
+                    packed_rank, packed_stats);
+
+            std::vector<uint8_t> expanded_coeff(R, 0u);
+            std::vector<uint8_t> expanded_pivots((size_t)R * R, 0u);
+            for (uint32_t column = 0u; column < R; ++column) {
+                expanded_coeff[column] = (uint8_t)(
+                    (packed_coeff[column >> 6] >> (column & 63u)) & 1u);
+            }
+            for (uint32_t pivot = 0u; pivot < R; ++pivot) {
+                for (uint32_t column = 0u; column < R; ++column) {
+                    expanded_pivots[(size_t)pivot * R + column] =
+                        (uint8_t)((packed_pivots[
+                            (size_t)pivot * words + (column >> 6)] >>
+                            (column & 63u)) & 1u);
+                }
+            }
+            const uint64_t tail_mask = (R & 63u) == 0u ?
+                UINT64_MAX :
+                (UINT64_C(1) << (R & 63u)) - UINT64_C(1);
+            for (uint32_t pivot = 0u; pivot < R; ++pivot) {
+                if ((packed_pivots[
+                        (size_t)pivot * words + words - 1u] &
+                        ~tail_mask) != 0u)
+                {
+                    return false;
+                }
+            }
+            return byte_result == packed_result &&
+                byte_coeff == expanded_coeff && byte_rhs == packed_rhs &&
+                byte_rank == packed_rank && byte_have == packed_have &&
+                byte_pivots == expanded_pivots &&
+                byte_pivot_rhs == packed_pivot_rhs &&
+                byte_stats.BlockXors == packed_stats.BlockXors &&
+                byte_stats.BlockMulAdds == packed_stats.BlockMulAdds;
+        };
+
+        for (uint32_t row = 0u; row < R + 17u; ++row)
+        {
+            std::vector<uint8_t> coeff(R, 0u);
+            std::vector<uint8_t> rhs(block_bytes, 0u);
+            for (uint32_t column = 0u; column < R; ++column) {
+                coeff[column] = (uint8_t)((next_random() >> 31) & 1u);
+            }
+            for (uint32_t i = 0u; i < block_bytes; ++i) {
+                rhs[i] = (uint8_t)next_random();
+            }
+            if (!compare_row(coeff, rhs, true)) {
+                return false;
+            }
+        }
+        // Canonical rows deterministically complete any rank left by the
+        // random prefix and exercise pivots at both sides of word boundaries.
+        for (uint32_t column = 0u; column < R; ++column)
+        {
+            std::vector<uint8_t> coeff(R, 0u);
+            std::vector<uint8_t> rhs(block_bytes, 0u);
+            coeff[column] = 1u;
+            for (uint32_t i = 0u; i < block_bytes; ++i) {
+                rhs[i] = (uint8_t)next_random();
+            }
+            if (!compare_row(coeff, rhs, true)) {
+                return false;
+            }
+        }
+        std::vector<uint8_t> zero_coeff(R, 0u);
+        std::vector<uint8_t> zero_rhs(block_bytes, 0u);
+        if (byte_rank != R || packed_rank != R ||
+            !compare_row(zero_coeff, zero_rhs, true))
+        {
+            return false;
+        }
+        zero_rhs[0] = 1u;
+        if (!compare_row(zero_coeff, zero_rhs, true)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+namespace test {
+
+void SetSolveAllocationFailurePointForTesting(
+    SolveAllocationFailurePoint point,
+    SolveAllocationFailureException exception)
+{
+    ActiveSolveAllocationFailurePoint = point;
+    ActiveSolveAllocationFailureException = exception;
+    ActiveSolveAllocationFailureHits = 0u;
+}
+
+uint32_t SolveAllocationFailureHitsForTesting()
+{
+    return ActiveSolveAllocationFailureHits;
+}
+
+void TriggerSolveAllocationFailureForTesting(
+    SolveAllocationFailurePoint point)
+{
+    if (ActiveSolveAllocationFailurePoint != point) {
+        return;
+    }
+    ++ActiveSolveAllocationFailureHits;
+    if (ActiveSolveAllocationFailureException ==
+        SolveAllocationFailureException::LengthError)
+    {
+        throw std::length_error("injected WH2 allocation length failure");
+    }
+    throw std::bad_alloc();
+}
+
+} // namespace test
+
+void ResetResumeSystemFingerprintChecksForTesting()
+{
+    ResumeSystemFingerprintChecks.store(0u, std::memory_order_relaxed);
+}
+
+uint64_t ResumeSystemFingerprintChecksForTesting()
+{
+    return ResumeSystemFingerprintChecks.load(std::memory_order_relaxed);
+}
 #endif
 
 void PrecodeSolveResumeState::Clear()
@@ -1409,7 +2725,11 @@ void PrecodeSolveResumeState::Swap(
     swap(InactiveCount, other.InactiveCount);
     swap(ProjectionWords, other.ProjectionWords);
     swap(Rank, other.Rank);
+    swap(SystemParams, other.SystemParams);
+    swap(SystemFingerprint0, other.SystemFingerprint0);
+    swap(SystemFingerprint1, other.SystemFingerprint1);
     swap(Config, other.Config);
+    swap(PacketEquation, other.PacketEquation);
     swap(Runtime, other.Runtime);
     swap(Stats, other.Stats);
     InactiveIndex.swap(other.InactiveIndex);
@@ -1699,7 +3019,8 @@ static bool EvaluatePacketBlockImpl(
     if (!intermediate_blocks ||
         !block_out || block_bytes == 0u || block_bytes > 0x7fffffffu ||
         P_wide > UINT32_MAX ||
-        !runtime.IsValidFor(K, (uint32_t)P_wide, config.MixCount))
+        !runtime.IsValidFor(K, (uint32_t)P_wide, config.MixCount) ||
+        (validate_system && !HasValidPrecodeSystemShape(system)))
     {
         return false;
     }
@@ -1734,8 +3055,15 @@ static bool EvaluatePacketBlockImpl(
     {
         return false;
     }
-    if (validate_system && !ValidatePrecodeSystem(system)) {
-        return false;
+    if (validate_system)
+    {
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        test::TriggerSolveAllocationFailureForTesting(
+            test::SolveAllocationFailurePoint::EvaluateValidation);
+#endif
+        if (!ValidatePrecodeSystem(system)) {
+            return false;
+        }
     }
     const uint32_t P = (uint32_t)P_wide;
 
@@ -1952,23 +3280,32 @@ bool EvaluatePacketBlock(
     uint8_t* block_out,
     uint64_t* block_ops_out)
 {
-    if (gf256_init() != 0) {
-        return false;
-    }
-    const uint64_t P_wide = (uint64_t)system.Params.Staircase +
-        system.Params.DenseRows + system.Params.HeavyRows;
-    PacketRowRuntime runtime;
-    if (P_wide > UINT32_MAX ||
-        !runtime.Initialize(
-            system.Params.BlockCount,
-            (uint32_t)P_wide,
-            config.MixCount))
+    try
     {
+        if (gf256_init() != 0) {
+            return false;
+        }
+        const uint64_t P_wide = (uint64_t)system.Params.Staircase +
+            system.Params.DenseRows + system.Params.HeavyRows;
+        PacketRowRuntime runtime;
+        if (P_wide > UINT32_MAX ||
+            !runtime.Initialize(
+                system.Params.BlockCount,
+                (uint32_t)P_wide,
+                config.MixCount))
+        {
+            return false;
+        }
+        return EvaluatePacketBlockImpl(
+            system, config, runtime, intermediate_blocks, block_bytes,
+            block_id, block_out, block_ops_out, true);
+    }
+    catch (const std::bad_alloc&) {
         return false;
     }
-    return EvaluatePacketBlockImpl(
-        system, config, runtime, intermediate_blocks, block_bytes, block_id,
-        block_out, block_ops_out, true);
+    catch (const std::length_error&) {
+        return false;
+    }
 }
 
 bool EvaluatePacketBlockForValidatedSystem(
@@ -2023,20 +3360,29 @@ WirehairResult SolvePrecodeSystem(
     if (resume_state && stats == &resume_state->Stats) {
         return Wirehair_InvalidInput;
     }
-    const uint64_t P_wide = (uint64_t)system.Params.Staircase +
-        system.Params.DenseRows + system.Params.HeavyRows;
-    PacketRowRuntime runtime;
-    if (P_wide > UINT32_MAX ||
-        !runtime.Initialize(
-            system.Params.BlockCount,
-            (uint32_t)P_wide,
-            config.MixCount))
+    try
     {
-        return Wirehair_InvalidInput;
+        const uint64_t P_wide = (uint64_t)system.Params.Staircase +
+            system.Params.DenseRows + system.Params.HeavyRows;
+        PacketRowRuntime runtime;
+        if (P_wide > UINT32_MAX ||
+            !runtime.Initialize(
+                system.Params.BlockCount,
+                (uint32_t)P_wide,
+                config.MixCount))
+        {
+            return Wirehair_InvalidInput;
+        }
+        return SolvePrecodeSystemWithRuntime(
+            system, config, runtime, packets, block_bytes,
+            intermediate_blocks_out, stats, resume_state);
     }
-    return SolvePrecodeSystemWithRuntime(
-        system, config, runtime, packets, block_bytes,
-        intermediate_blocks_out, stats, resume_state);
+    catch (const std::bad_alloc&) {
+        return Wirehair_OOM;
+    }
+    catch (const std::length_error&) {
+        return Wirehair_OOM;
+    }
 }
 
 static bool SolveOutputAliasesResumeState(
@@ -2051,6 +3397,13 @@ static bool SolveOutputAliasesResumeState(
         &output == &state.RhsScratch;
 }
 
+static bool VerifyPrecodeSolutionImpl(
+    const PrecodeSystem& system,
+    const PacketRowConfig& config,
+    const std::vector<SolvePacket>& packets,
+    const uint8_t* intermediate_blocks,
+    uint32_t block_bytes);
+
 static WirehairResult SolvePrecodeSystemImpl(
     const PrecodeSystem& system,
     const PacketRowConfig& config,
@@ -2060,12 +3413,18 @@ static WirehairResult SolvePrecodeSystemImpl(
     std::vector<uint8_t>& intermediate_blocks_out,
     PrecodeSolveStats* stats,
     PrecodeSolveResumeState* resume_state,
+    size_t resume_persistent_byte_limit,
+    PackedBinaryResidualPolicy packed_residual_policy,
     bool validate_system)
 {
-    if (resume_state &&
-        (stats == &resume_state->Stats ||
-         SolveOutputAliasesResumeState(
-             intermediate_blocks_out, *resume_state)))
+    if ((packed_residual_policy !=
+            PackedBinaryResidualPolicy::GenericCheckpoint &&
+         packed_residual_policy !=
+            PackedBinaryResidualPolicy::DecoderReceive) ||
+        (resume_state &&
+         (stats == &resume_state->Stats ||
+          SolveOutputAliasesResumeState(
+              intermediate_blocks_out, *resume_state))))
     {
         return Wirehair_InvalidInput;
     }
@@ -2077,19 +3436,28 @@ static WirehairResult SolvePrecodeSystemImpl(
     const uint64_t P_wide = (uint64_t)S + D2 + H;
     if (P_wide > UINT32_MAX ||
         !runtime.IsValidFor(K, (uint32_t)P_wide, config.MixCount) ||
-        (validate_system && !ValidatePrecodeSystem(system)))
+        (validate_system && !HasValidPrecodeSystemShape(system)))
     {
         return Wirehair_InvalidInput;
     }
     const uint32_t P = (uint32_t)P_wide;
     const uint32_t L = K + P;
     size_t value_bytes = 0u;
-    if (!CheckedBlockStorage(L, block_bytes, value_bytes))
-    {
+    if (!CheckedBlockStorage(L, block_bytes, value_bytes)) {
         return Wirehair_InvalidInput;
     }
     for (const SolvePacket& packet : packets) {
         if (!packet.Data) {
+            return Wirehair_InvalidInput;
+        }
+    }
+    if (validate_system)
+    {
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        test::TriggerSolveAllocationFailureForTesting(
+            test::SolveAllocationFailurePoint::ColdSolveValidation);
+#endif
+        if (!ValidatePrecodeSystem(system)) {
             return Wirehair_InvalidInput;
         }
     }
@@ -2099,6 +3467,9 @@ static WirehairResult SolvePrecodeSystemImpl(
     if (gf256_init() != 0) {
         return Wirehair_UnsupportedPlatform;
     }
+#if defined(GF256_TRY_TARGET_AVX2) && !defined(__AVX2__)
+    ScopedTargetProjectionAVX2 projection_avx2_scope;
+#endif
     const auto terminal_error = [&]() -> WirehairResult {
         if (stats) {
             *stats = st;
@@ -2116,6 +3487,8 @@ static WirehairResult SolvePrecodeSystemImpl(
             return Wirehair_OOM;
         }
         const size_t row_count = (size_t)row_count_wide;
+        const std::vector<std::vector<uint32_t>>& dense_basis_rows =
+            system.DenseBasisRowColumns;
         size_t reference_count = 0u;
         const auto add_references = [&reference_count](size_t count) {
             if (count > std::numeric_limits<size_t>::max() - reference_count) {
@@ -2129,7 +3502,7 @@ static WirehairResult SolvePrecodeSystemImpl(
                 return Wirehair_OOM;
             }
         }
-        for (const std::vector<uint32_t>& columns : system.DenseRowColumns) {
+        for (const std::vector<uint32_t>& columns : dense_basis_rows) {
             if (!add_references(columns.size())) {
                 return Wirehair_OOM;
             }
@@ -2158,7 +3531,7 @@ static WirehairResult SolvePrecodeSystemImpl(
             rows.AppendRow(columns, nullptr);
             st.BinaryRowReferences += columns.size();
         }
-        for (const std::vector<uint32_t>& columns : system.DenseRowColumns)
+        for (const std::vector<uint32_t>& columns : dense_basis_rows)
         {
             rows.AppendRow(columns, nullptr);
             st.BinaryRowReferences += columns.size();
@@ -2221,6 +3594,9 @@ static WirehairResult SolvePrecodeSystemImpl(
         }
         phase_start = phase_end;
         const uint32_t words = PackedWordCount(R);
+#if defined(GF256_TRY_TARGET_AVX2) && !defined(__AVX2__)
+        projection_avx2_scope.SelectForWordCount(words);
+#endif
 
         std::vector<uint32_t> inactive_index(L, UINT32_MAX);
         for (uint32_t i = 0; i < R; ++i) {
@@ -2290,53 +3666,125 @@ static WirehairResult SolvePrecodeSystemImpl(
         const bool enable_fused_block_initialization =
             K >= kFusedBlockXorInitMinBlockCount &&
             block_bytes >= kFusedBlockXorInitMinBlockBytes;
+        bool single_word_projection = words == 1u;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        if (SingleWordProjectionTestMode < 0) {
+            single_word_projection = false;
+        }
+        if (words != 0u)
+        {
+            if (single_word_projection) {
+                ++SingleWordProjectionUseCount;
+            }
+            else {
+                ++GeneralProjectionUseCount;
+            }
+        }
+#endif
 
         // Affine projection of peeled columns onto inactive variables.  The
         // block stored in values[column] is the constant term.
-        for (uint32_t column : peel.PeelOrder)
+        if (!single_word_projection)
         {
-            std::fill(accumulator.begin(), accumulator.end(), uint64_t{0});
-            uint8_t* constant =
-                values.data() + (size_t)column * block_bytes;
-            const uint32_t solve_row = peel.SolveRow[column];
-            const BinaryEquationView equation =
-                rows[solve_row];
-            if (equation.Columns.size() == 0u) {
-                return terminal_error();
-            }
-            const size_t initialization_sources =
-                equation.Columns.size() - 1u +
-                (equation.Data ? 1u : 0u);
-            uint32_t solve_column_offset = UINT32_MAX;
-            if (enable_fused_block_initialization &&
-                initialization_sources <= 16u)
+            for (uint32_t column : peel.PeelOrder)
             {
-                BatchedBlockXorInitializer constant_xor(
-                    constant, block_bytes, equation.Data, true);
-                solve_column_offset = AccumulatePeeledProjectionConstant(
-                    column, equation, inactive_index, words, projection,
-                    values, block_bytes, accumulator, constant_xor, st);
-                constant_xor.Flush();
-            }
-            else
-            {
-                if (equation.Data) {
-                    std::memcpy(constant, equation.Data, block_bytes);
+                std::fill(
+                    accumulator.begin(), accumulator.end(), uint64_t{0});
+                uint8_t* constant =
+                    values.data() + (size_t)column * block_bytes;
+                const uint32_t solve_row = peel.SolveRow[column];
+                const BinaryEquationView equation = rows[solve_row];
+                if (equation.Columns.size() == 0u) {
+                    return terminal_error();
                 }
-                BatchedBlockXorAccumulator constant_xor(
-                    constant, block_bytes);
-                solve_column_offset = AccumulatePeeledProjectionConstant(
-                    column, equation, inactive_index, words, projection,
-                    values, block_bytes, accumulator, constant_xor, st);
-                constant_xor.Flush();
+                const size_t initialization_sources =
+                    equation.Columns.size() - 1u +
+                    (equation.Data ? 1u : 0u);
+                uint32_t solve_column_offset = UINT32_MAX;
+                if (enable_fused_block_initialization &&
+                    initialization_sources <= 16u)
+                {
+                    BatchedBlockXorInitializer constant_xor(
+                        constant, block_bytes, equation.Data, true);
+                    solve_column_offset =
+                        AccumulatePeeledProjectionConstant(
+                            column, equation, inactive_index, words,
+                            projection, values, block_bytes, accumulator,
+                            constant_xor, st);
+                    constant_xor.Flush();
+                }
+                else
+                {
+                    if (equation.Data) {
+                        std::memcpy(constant, equation.Data, block_bytes);
+                    }
+                    BatchedBlockXorAccumulator constant_xor(
+                        constant, block_bytes);
+                    solve_column_offset =
+                        AccumulatePeeledProjectionConstant(
+                            column, equation, inactive_index, words,
+                            projection, values, block_bytes, accumulator,
+                            constant_xor, st);
+                    constant_xor.Flush();
+                }
+                CAT_DEBUG_ASSERT(solve_column_offset != UINT32_MAX);
+                if (solve_column_offset == UINT32_MAX) {
+                    return terminal_error();
+                }
+                rows.MoveSolveColumnToEnd(solve_row, solve_column_offset);
+                for (uint32_t w = 0; w < words; ++w) {
+                    projection[(size_t)column * words + w] = accumulator[w];
+                }
             }
-            CAT_DEBUG_ASSERT(solve_column_offset != UINT32_MAX);
-            if (solve_column_offset == UINT32_MAX) {
-                return terminal_error();
-            }
-            rows.MoveSolveColumnToEnd(solve_row, solve_column_offset);
-            for (uint32_t w = 0; w < words; ++w) {
-                projection[(size_t)column * words + w] = accumulator[w];
+        }
+        else
+        {
+            for (uint32_t column : peel.PeelOrder)
+            {
+                uint64_t accumulated_word = 0u;
+                uint8_t* constant =
+                    values.data() + (size_t)column * block_bytes;
+                const uint32_t solve_row = peel.SolveRow[column];
+                const BinaryEquationView equation = rows[solve_row];
+                if (equation.Columns.size() == 0u) {
+                    return terminal_error();
+                }
+                const size_t initialization_sources =
+                    equation.Columns.size() - 1u +
+                    (equation.Data ? 1u : 0u);
+                uint32_t solve_column_offset = UINT32_MAX;
+                if (enable_fused_block_initialization &&
+                    initialization_sources <= 16u)
+                {
+                    BatchedBlockXorInitializer constant_xor(
+                        constant, block_bytes, equation.Data, true);
+                    solve_column_offset =
+                        AccumulateSingleWordProjectionConstant(
+                            column, equation, inactive_index, projection,
+                            values, block_bytes, accumulated_word,
+                            constant_xor, st);
+                    constant_xor.Flush();
+                }
+                else
+                {
+                    if (equation.Data) {
+                        std::memcpy(constant, equation.Data, block_bytes);
+                    }
+                    BatchedBlockXorAccumulator constant_xor(
+                        constant, block_bytes);
+                    solve_column_offset =
+                        AccumulateSingleWordProjectionConstant(
+                            column, equation, inactive_index, projection,
+                            values, block_bytes, accumulated_word,
+                            constant_xor, st);
+                    constant_xor.Flush();
+                }
+                CAT_DEBUG_ASSERT(solve_column_offset != UINT32_MAX);
+                if (solve_column_offset == UINT32_MAX) {
+                    return terminal_error();
+                }
+                rows.MoveSolveColumnToEnd(solve_row, solve_column_offset);
+                projection[column] = accumulated_word;
             }
         }
         phase_end = SolveClock::now();
@@ -2369,7 +3817,7 @@ static WirehairResult SolvePrecodeSystemImpl(
                     return terminal_error();
                 }
             }
-            if (!VerifyPrecodeSolution(
+            if (!VerifyPrecodeSolutionImpl(
                     system,
                     config,
                     packets,
@@ -2391,19 +3839,92 @@ static WirehairResult SolvePrecodeSystemImpl(
             return Wirehair_Success;
         }
 
-        if ((uint64_t)R * R >
-            (uint64_t)std::numeric_limits<size_t>::max())
+        // The decoder can prove that the established byte checkpoint cannot
+        // fit its retained-memory policy before a deficient packed solve pays
+        // to materialize it.  Capacities already allocated above are exact
+        // lower bounds; requested sizes are allocator-independent minima for
+        // the remaining byte-basis vectors.
+        size_t legacy_resume_min_bytes = 0u;
+        const auto add_legacy_resume_min =
+            [&legacy_resume_min_bytes](size_t count, size_t width) {
+                if (width != 0u &&
+                    count >
+                        (std::numeric_limits<size_t>::max() -
+                            legacy_resume_min_bytes) / width)
+                {
+                    legacy_resume_min_bytes =
+                        std::numeric_limits<size_t>::max();
+                }
+                else {
+                    legacy_resume_min_bytes += count * width;
+                }
+            };
+        if (resume_state)
+        {
+            add_legacy_resume_min(
+                inactive_index.capacity(), sizeof(uint32_t));
+            add_legacy_resume_min(
+                peel.InactiveOrder.capacity(), sizeof(uint32_t));
+            add_legacy_resume_min(projection.capacity(), sizeof(uint64_t));
+            add_legacy_resume_min(values.capacity(), sizeof(uint8_t));
+            add_legacy_resume_min(R, R);
+            add_legacy_resume_min(R, block_bytes);
+            add_legacy_resume_min(R, sizeof(uint8_t));
+            add_legacy_resume_min(R, sizeof(uint8_t));
+            add_legacy_resume_min(block_bytes, sizeof(uint8_t));
+        }
+        const bool legacy_resume_cannot_fit =
+            resume_state != nullptr &&
+            legacy_resume_min_bytes > resume_persistent_byte_limit;
+
+        // A caller that does not request a checkpoint always gets the compact
+        // factorization.  The generic checkpoint policy retains the established
+        // 2048-byte seam; measured decoder receive-to-success work promotes the
+        // packed path at 1280 bytes.  Budget-rejected checkpoints are packed at
+        // every width because materialization/publication will be skipped.
+        const uint32_t packed_residual_min_block_bytes =
+            packed_residual_policy ==
+                    PackedBinaryResidualPolicy::DecoderReceive ?
+                kDecoderPackedBinaryResidualMinBlockBytes :
+                kGenericPackedBinaryResidualMinBlockBytes;
+        bool use_packed_binary_residual =
+            resume_state == nullptr ||
+            block_bytes >= packed_residual_min_block_bytes ||
+            legacy_resume_cannot_fit;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        if (PackedBinaryResidualTestMode < 0) {
+            use_packed_binary_residual = false;
+        }
+        else if (PackedBinaryResidualTestMode > 0) {
+            use_packed_binary_residual = true;
+        }
+        if (use_packed_binary_residual) {
+            ++PackedBinaryResidualUseCount;
+        }
+#endif
+        if ((!use_packed_binary_residual &&
+                (uint64_t)R * R >
+                    (uint64_t)std::numeric_limits<size_t>::max()) ||
+            (use_packed_binary_residual &&
+                (uint64_t)R * words >
+                    (uint64_t)std::numeric_limits<size_t>::max() /
+                        sizeof(uint64_t)))
         {
             return Wirehair_OOM;
         }
-        std::vector<uint8_t> pivot_coeff((size_t)R * R, 0u);
+        std::vector<uint8_t> pivot_coeff(
+            use_packed_binary_residual ? 0u : (size_t)R * R, 0u);
+        std::vector<uint64_t> binary_pivot_coeff(
+            use_packed_binary_residual ? (size_t)R * words : 0u,
+            uint64_t{0});
         size_t residual_value_bytes = 0u;
         if (!CheckedBlockStorage(R, block_bytes, residual_value_bytes)) {
             return Wirehair_OOM;
         }
         std::vector<uint8_t> pivot_rhs(residual_value_bytes, 0u);
         std::vector<uint8_t> have_pivot(R, 0u);
-        std::vector<uint8_t> coeff(R, 0u);
+        std::vector<uint8_t> coeff(
+            use_packed_binary_residual ? 0u : R, 0u);
         std::vector<uint8_t> rhs(block_bytes, 0u);
         uint32_t rank = 0u;
         const uint32_t batched_rhs_min_block_bytes =
@@ -2416,62 +3937,84 @@ static WirehairResult SolvePrecodeSystemImpl(
                 continue;
             }
             ++st.ResidualRows;
-            std::fill(
-                accumulator.begin(), accumulator.end(), uint64_t{0});
             std::fill(rhs.begin(), rhs.end(), uint8_t{0});
             if (rows[r].Data) {
                 std::memcpy(rhs.data(), rows[r].Data, block_bytes);
             }
             BatchedBlockXorAccumulator rhs_xor(rhs.data(), block_bytes);
-            BatchedProjectionXorAccumulator projection_xor(
-                accumulator.data(), projection.data(), words);
-            for (uint32_t column : rows[r].Columns)
+            if (single_word_projection)
             {
-                const uint32_t index = inactive_index[column];
-                if (index != UINT32_MAX) {
-                    accumulator[index >> 6] ^=
-                        UINT64_C(1) << (index & 63u);
-                }
-                else
-                {
-                    projection_xor.Add(column);
-                    rhs_xor.Add(
-                        values.data() + (size_t)column * block_bytes);
-                    ++st.BlockXors;
-                }
+                AccumulateSingleWordResidualProjection(
+                    rows[r], inactive_index, projection, values,
+                    block_bytes, accumulator[0], rhs_xor, st);
             }
-            projection_xor.Flush();
-            rhs_xor.Flush();
-            // GF(256) completion consumes one byte per projected
-            // coefficient.  Expand each final parity bit exactly once.
-            std::fill(coeff.begin(), coeff.end(), uint8_t{0});
-            for (uint32_t w = 0; w < words; ++w)
+            else
             {
-                uint64_t word = accumulator[w];
-                while (word != 0u)
+                std::fill(
+                    accumulator.begin(), accumulator.end(), uint64_t{0});
+                BatchedProjectionXorAccumulator projection_xor(
+                    accumulator.data(), projection.data(), words);
+                for (uint32_t column : rows[r].Columns)
                 {
-                    const uint32_t bit =
-                        wirehair::NonzeroLowestBitIndex64(word);
-                    const uint32_t projected = (w << 6) + bit;
-                    if (projected < R) {
-                        coeff[projected] = 1u;
+                    const uint32_t index = inactive_index[column];
+                    if (index != UINT32_MAX) {
+                        accumulator[index >> 6] ^=
+                            UINT64_C(1) << (index & 63u);
                     }
-                    word &= word - 1u;
+                    else
+                    {
+                        projection_xor.Add(column);
+                        rhs_xor.Add(
+                            values.data() + (size_t)column * block_bytes);
+                        ++st.BlockXors;
+                    }
                 }
+                projection_xor.Flush();
             }
-            const ResidualInsertResult insertion = InsertResidualRow(
-                coeff, rhs, R, block_bytes,
-                pivot_coeff, pivot_rhs, have_pivot,
-                rank, st, true, batched_rhs_min_block_bytes);
+            rhs_xor.Flush();
+            ResidualInsertResult insertion;
+            if (use_packed_binary_residual)
+            {
+                insertion = InsertPackedBinaryResidualRow(
+                    accumulator, rhs, R, words, block_bytes,
+                    binary_pivot_coeff, pivot_rhs, have_pivot,
+                    rank, st);
+            }
+            else
+            {
+                // The test-only byte reference expands each final parity bit
+                // exactly once before the ordinary GF(256) insertion.
+                std::fill(coeff.begin(), coeff.end(), uint8_t{0});
+                for (uint32_t w = 0; w < words; ++w)
+                {
+                    uint64_t word = accumulator[w];
+                    while (word != 0u)
+                    {
+                        const uint32_t bit =
+                            wirehair::NonzeroLowestBitIndex64(word);
+                        const uint32_t projected = (w << 6) + bit;
+                        if (projected < R) {
+                            coeff[projected] = 1u;
+                        }
+                        word &= word - 1u;
+                    }
+                }
+                insertion = InsertResidualRow(
+                    coeff, rhs, R, block_bytes,
+                    pivot_coeff, pivot_rhs, have_pivot,
+                    rank, st, true, batched_rhs_min_block_bytes);
+            }
             if (insertion == ResidualInsertResult::Inconsistent)
             {
                 return terminal_error();
             }
         }
 
-        // Heavy RHS values are bucketed by the coefficient period, avoiding
-        // H*L full-block multiplications.  Heavy coefficient vectors are
-        // packed eight rows per word so each projection bit is visited once.
+        // Tiny production H=12 rows are reverse-substituted through the peel
+        // schedule; larger periodic systems bucket RHS values by coefficient
+        // period.  Both avoid H*L full-block multiplications.  Heavy
+        // coefficient vectors are packed eight rows per word, while other
+        // geometries retain the exact projection-bit scan.
         st.BinaryResidualRank = rank;
         const uint32_t window = 256u - H;
         const uint32_t heavy_words = (H + 7u) / 8u;
@@ -2484,6 +4027,11 @@ static WirehairResult SolvePrecodeSystemImpl(
                 HeavyCoefficientFamily::PeriodicCauchy &&
             H == kCachedPeriodicHeavyRows &&
             L >= kCachedPeriodicWindow;
+        const bool tiny_periodic_direct =
+            system.Params.HeavyFamily ==
+                HeavyCoefficientFamily::PeriodicCauchy &&
+            H == kCachedPeriodicHeavyRows &&
+            L < kCachedPeriodicWindow;
         if (heavy_words != 0u &&
             (uint64_t)R * heavy_words >
                 (uint64_t)std::numeric_limits<size_t>::max() /
@@ -2493,15 +4041,23 @@ static WirehairResult SolvePrecodeSystemImpl(
         }
         std::vector<uint64_t> projected_heavy(
             (size_t)R * heavy_words, 0u);
-        std::vector<uint64_t> packed_heavy(
-            cached_periodic ? 0u : heavy_words, uint64_t{0});
         const uint64_t* periodic_packed = cached_periodic ?
             CachedPeriodicHeavyTable().data() :
             nullptr;
-        if (H > 0u)
+
+        // Retain the projection-bit implementation both as the fallback for
+        // every non-production geometry and as an explicitly enabled test
+        // oracle for the H=12 propagation path.
+        const auto project_heavy_legacy =
+            [&](std::vector<uint64_t>& output)
         {
+            std::vector<uint64_t> packed_heavy(
+                cached_periodic ? 0u : heavy_words, uint64_t{0});
+            if (H == 0u) {
+                return;
+            }
             uint32_t residue = 0u;
-            for (uint32_t column = 0; column < L; ++column)
+            for (uint32_t column = 0u; column < L; ++column)
             {
                 const uint64_t* column_heavy = nullptr;
                 if (cached_periodic)
@@ -2526,7 +4082,7 @@ static WirehairResult SolvePrecodeSystemImpl(
                     column_heavy = packed_heavy.data();
                 }
                 const auto xor_packed = [&](uint32_t index) {
-                    uint64_t* destination = projected_heavy.data() +
+                    uint64_t* destination = output.data() +
                         (size_t)index * heavy_words;
                     for (uint32_t w = 0; w < heavy_words; ++w) {
                         destination[w] ^= column_heavy[w];
@@ -2554,6 +4110,38 @@ static WirehairResult SolvePrecodeSystemImpl(
                     }
                 }
             }
+        };
+
+        if (cached_periodic)
+        {
+            ProjectCachedPeriodicHeavyByPeel(
+                rows, peel, L, projected_heavy);
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            if (HeavyProjectionOracleUsers.load(
+                    std::memory_order_relaxed) != 0u)
+            {
+                std::vector<uint64_t> legacy(
+                    (size_t)R * heavy_words, uint64_t{0});
+                project_heavy_legacy(legacy);
+                if (legacy != projected_heavy) {
+                    return terminal_error();
+                }
+                HeavyProjectionOracleComparisons.fetch_add(
+                    1u, std::memory_order_relaxed);
+            }
+#endif
+        }
+        else if (!tiny_periodic_direct)
+        {
+            project_heavy_legacy(projected_heavy);
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            if (HeavyProjectionOracleUsers.load(
+                    std::memory_order_relaxed) != 0u)
+            {
+                HeavyProjectionLegacyFallbacks.fetch_add(
+                    1u, std::memory_order_relaxed);
+            }
+#endif
         }
 
         std::vector<uint8_t> heavy_rhs((size_t)H * block_bytes, 0u);
@@ -2563,7 +4151,118 @@ static WirehairResult SolvePrecodeSystemImpl(
             heavy_destinations[heavy] =
                 heavy_rhs.data() + (size_t)heavy * block_bytes;
         }
-        if (system.Params.HeavyFamily ==
+        if (tiny_periodic_direct)
+        {
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            bool transpose = false;
+            const uint64_t block_xors_before = st.BlockXors;
+            const uint64_t block_muladds_before = st.BlockMulAdds;
+            const std::chrono::steady_clock::time_point helper_start =
+                TinyPeriodicHeavyTimingEnabled ?
+                    std::chrono::steady_clock::now() :
+                    std::chrono::steady_clock::time_point();
+            uint32_t data_rows;
+            // The profile fuzzer's tiny-oracle arm uses byte-sized blocks,
+            // for which production dispatch can never select the transposed
+            // GFNI path.
+            // Keep the forced-positive test seam intact, but avoid entering a
+            // second noinline dispatch frame for the normal and forced-legacy
+            // cases.  This branch is compiled only into the hook-enabled
+            // policy archive; the ordinary production solve remains byte-for-
+            // byte unchanged.
+            if (block_bytes < 64u &&
+                TinyPeriodicHeavyTransposeTestMode <= 0)
+            {
+                data_rows = PrepareTinyPeriodicHeavyLegacyByPeel(
+                    rows, peel, L, block_bytes, projected_heavy, heavy_rhs,
+                    st);
+            }
+            else
+            {
+                data_rows = PrepareTinyPeriodicHeavySelectedByPeel(
+                    rows, peel, L, block_bytes, projected_heavy, heavy_rhs,
+                    st, transpose);
+            }
+            if (transpose) {
+                ++TinyPeriodicHeavyTransposeUseCount;
+            }
+            else {
+                ++TinyPeriodicHeavyLegacyUseCount;
+            }
+            if (TinyPeriodicHeavyTimingEnabled)
+            {
+                const std::chrono::steady_clock::time_point helper_end =
+                    std::chrono::steady_clock::now();
+                ++TinyPeriodicHeavyTimedCalls;
+                TinyPeriodicHeavyTimedNanoseconds +=
+                    (uint64_t)std::chrono::duration_cast<
+                        std::chrono::nanoseconds>(
+                            helper_end - helper_start).count();
+                TinyPeriodicHeavyTimedDataRows += data_rows;
+            }
+            TinyPeriodicHeavyUses.fetch_add(
+                1u, std::memory_order_relaxed);
+            if (HeavyProjectionOracleUsers.load(
+                    std::memory_order_relaxed) != 0u)
+            {
+                std::vector<uint64_t> legacy_projected(
+                    (size_t)R * heavy_words, uint64_t{0});
+                std::vector<uint8_t> legacy_rhs(
+                    (size_t)H * block_bytes, uint8_t{0});
+                PrecodeSolveStats legacy_stats;
+                const uint32_t legacy_data_rows = transpose ?
+                    PrepareTinyPeriodicHeavyLegacyByPeel(
+                        rows,
+                        peel,
+                        L,
+                        block_bytes,
+                        legacy_projected,
+                        legacy_rhs,
+                        legacy_stats) :
+                    PrepareTinyPeriodicHeavyTransposedByPeel(
+                            rows,
+                            peel,
+                            L,
+                            block_bytes,
+                            legacy_projected,
+                            legacy_rhs,
+                            legacy_stats);
+                if (legacy_projected != projected_heavy ||
+                    legacy_rhs != heavy_rhs ||
+                    legacy_data_rows != data_rows ||
+                    legacy_stats.BlockXors !=
+                        st.BlockXors - block_xors_before ||
+                    legacy_stats.BlockMulAdds !=
+                        st.BlockMulAdds - block_muladds_before)
+                {
+                    return terminal_error();
+                }
+                std::vector<uint64_t> reference_projected(
+                    (size_t)R * heavy_words, uint64_t{0});
+                std::vector<uint8_t> reference_rhs(
+                    (size_t)H * block_bytes, uint8_t{0});
+                PrecodeSolveStats reference_stats;
+                PrepareTinyPeriodicHeavyLegacyForTesting(
+                    inactive_index,
+                    projection,
+                    values,
+                    reference_projected,
+                    reference_rhs,
+                    reference_stats);
+                if (reference_projected != projected_heavy ||
+                    reference_rhs != heavy_rhs)
+                {
+                    return terminal_error();
+                }
+                HeavyProjectionOracleComparisons.fetch_add(
+                    1u, std::memory_order_relaxed);
+            }
+#else
+            (void)PrepareTinyPeriodicHeavySelectedByPeel(
+                rows, peel, L, block_bytes, projected_heavy, heavy_rhs, st);
+#endif
+        }
+        else if (system.Params.HeavyFamily ==
             HeavyCoefficientFamily::PeriodicCauchy)
         {
             std::vector<uint8_t> residue_bucket(block_bytes, 0u);
@@ -2645,12 +4344,12 @@ static WirehairResult SolvePrecodeSystemImpl(
         // turn cheap XOR relationships into an R-wide GF(256) Gauss-Jordan
         // solve.  The quotient has at most H columns in the useful regime.
         const uint32_t binary_rank = rank;
-        // The quotient replaces GF(256) block operations with a few more
-        // scalar coefficient passes.  Keep the original insertion strategy
-        // for MTU-sized blocks where measurements show that trade is neutral
-        // or slightly negative; large blocks receive the material win.
+        // Production always reaches the quotient through the packed basis.
+        // The old width gate remains only for the forced byte reference so
+        // differential tests retain both established byte algorithms.
         const bool use_binary_quotient =
-            block_bytes >= kBinaryQuotientMinBlockBytes;
+            use_packed_binary_residual ||
+            block_bytes >= kLegacyByteQuotientMinBlockBytes;
         std::vector<uint32_t> free_columns;
         if (use_binary_quotient)
         {
@@ -2692,30 +4391,87 @@ static WirehairResult SolvePrecodeSystemImpl(
             for (uint32_t heavy = 0; heavy < H; ++heavy)
             {
                 ++st.ResidualRows;
-                std::fill(coeff.begin(), coeff.end(), uint8_t{0});
                 std::memcpy(
                     rhs.data(),
                     heavy_rhs.data() + (size_t)heavy * block_bytes,
                     block_bytes);
-                for (uint32_t index = 0; index < R; ++index) {
-                    coeff[index] = (uint8_t)(
-                        projected_heavy[
-                            (size_t)index * heavy_words + (heavy >> 3)] >>
-                        ((heavy & 7u) * 8u));
-                }
 
-                // Reduce by the binary basis without inserting into it.  This
-                // leaves coefficients and RHS for the free-variable system.
-                const ResidualInsertResult reduced = InsertResidualRow(
-                    coeff, rhs, R, block_bytes,
-                    pivot_coeff, pivot_rhs, have_pivot,
-                    rank, st, false,
-                    batched_rhs_min_block_bytes);
-                if (reduced == ResidualInsertResult::Inconsistent) {
-                    return terminal_error();
+                if (use_packed_binary_residual)
+                {
+                    // The packed binary basis is in RREF.  Substitute each
+                    // pivot relation directly into the heavy row:
+                    //
+                    //   Q = C_F + C_P B,   d' = d + C_P r.
+                    //
+                    // B is binary, so quotient-coefficient updates are XORs;
+                    // RHS scales remain GF(256) and preserve ascending-pivot
+                    // order from the byte reference.
+                    for (uint32_t i = 0u; i < quotient_columns; ++i)
+                    {
+                        const uint32_t free_column = free_columns[i];
+                        quotient_coeff[i] = (uint8_t)(
+                            projected_heavy[
+                                (size_t)free_column * heavy_words +
+                                (heavy >> 3)] >>
+                            ((heavy & 7u) * 8u));
+                    }
+                    for (uint32_t pivot = 0u; pivot < R; ++pivot)
+                    {
+                        if (!have_pivot[pivot]) {
+                            continue;
+                        }
+                        const uint8_t scale = (uint8_t)(
+                            projected_heavy[
+                                (size_t)pivot * heavy_words +
+                                (heavy >> 3)] >>
+                            ((heavy & 7u) * 8u));
+                        if (scale == 0u) {
+                            continue;
+                        }
+                        const uint64_t* relation =
+                            binary_pivot_coeff.data() +
+                                (size_t)pivot * words;
+                        for (uint32_t i = 0u; i < quotient_columns; ++i)
+                        {
+                            const uint32_t free_column = free_columns[i];
+                            if ((relation[free_column >> 6] &
+                                    (UINT64_C(1) <<
+                                        (free_column & 63u))) != 0u)
+                            {
+                                quotient_coeff[i] ^= scale;
+                            }
+                        }
+                        AddScaledBlock(
+                            rhs.data(), scale,
+                            pivot_rhs.data() +
+                                (size_t)pivot * block_bytes,
+                            block_bytes, st);
+                    }
                 }
-                for (uint32_t i = 0; i < quotient_columns; ++i) {
-                    quotient_coeff[i] = coeff[free_columns[i]];
+                else
+                {
+                    std::fill(coeff.begin(), coeff.end(), uint8_t{0});
+                    for (uint32_t index = 0; index < R; ++index) {
+                        coeff[index] = (uint8_t)(
+                            projected_heavy[
+                                (size_t)index * heavy_words +
+                                (heavy >> 3)] >>
+                            ((heavy & 7u) * 8u));
+                    }
+
+                    // Reduce by the byte-expanded binary basis without
+                    // inserting into it.  This leaves the free-variable row.
+                    const ResidualInsertResult reduced = InsertResidualRow(
+                        coeff, rhs, R, block_bytes,
+                        pivot_coeff, pivot_rhs, have_pivot,
+                        rank, st, false,
+                        batched_rhs_min_block_bytes);
+                    if (reduced == ResidualInsertResult::Inconsistent) {
+                        return terminal_error();
+                    }
+                    for (uint32_t i = 0; i < quotient_columns; ++i) {
+                        quotient_coeff[i] = coeff[free_columns[i]];
+                    }
                 }
                 std::memcpy(
                     quotient_rhs.data(), rhs.data(), block_bytes);
@@ -2772,8 +4528,93 @@ static WirehairResult SolvePrecodeSystemImpl(
         // therefore materialize the legacy combined pivot form before it can
         // publish a checkpoint.  Successful solves stay on the fast quotient
         // path, and callers that do not request resume avoid this fallback.
+        // A conservative decoder budget can prove that the checkpoint would be
+        // discarded; in that case preserve NeedMore/stats but skip both byte
+        // materialization and checkpoint publication.
+        if (rank < R && legacy_resume_cannot_fit) {
+            resume_state = nullptr;
+        }
         if (rank < R && resume_state && use_binary_quotient)
         {
+            const uint32_t expected_rank = rank;
+            if (use_packed_binary_residual)
+            {
+                // The public resume state deliberately keeps its established
+                // byte-pivot representation.  Release quotient-only storage,
+                // build both replacement vectors in fresh storage, and swap
+                // them into local solve state only after both allocations
+                // succeed.  The caller's checkpoint remains untouched until
+                // final publication below.
+                std::vector<uint8_t>().swap(quotient_pivot_coeff);
+                std::vector<uint8_t>().swap(quotient_pivot_rhs);
+                std::vector<uint8_t>().swap(quotient_have_pivot);
+                std::vector<uint8_t>().swap(quotient_coeff);
+                std::vector<uint8_t>().swap(quotient_rhs);
+                std::vector<uint32_t>().swap(free_columns);
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+                test::TriggerSolveAllocationFailureForTesting(
+                    test::SolveAllocationFailurePoint::
+                        PackedResumePivotMaterialization);
+#endif
+                std::vector<uint8_t> materialized_pivot_coeff(
+                    (size_t)R * R, 0u);
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+                test::TriggerSolveAllocationFailureForTesting(
+                    test::SolveAllocationFailurePoint::
+                        PackedResumeScratchMaterialization);
+#endif
+                std::vector<uint8_t> materialized_coeff(R, 0u);
+
+                // H=0 checkpoints preserve the last reduced binary row as
+                // reusable scratch.  If no unused row was processed, the byte
+                // reference scratch remained all-zero.
+                for (uint32_t word = 0u;
+                     H == 0u && st.ResidualRows != 0u && word < words;
+                     ++word)
+                {
+                    uint64_t bits = accumulator[word];
+                    while (bits != 0u)
+                    {
+                        const uint32_t bit =
+                            wirehair::NonzeroLowestBitIndex64(bits);
+                        const uint32_t column = (word << 6) + bit;
+                        if (column < R) {
+                            materialized_coeff[column] = 1u;
+                        }
+                        bits &= bits - 1u;
+                    }
+                }
+                for (uint32_t pivot = 0u; pivot < R; ++pivot)
+                {
+                    if (!have_pivot[pivot]) {
+                        continue;
+                    }
+                    const uint64_t* relation =
+                        binary_pivot_coeff.data() +
+                            (size_t)pivot * words;
+                    uint8_t* expanded =
+                        materialized_pivot_coeff.data() +
+                            (size_t)pivot * R;
+                    for (uint32_t word = 0u; word < words; ++word)
+                    {
+                        uint64_t bits = relation[word];
+                        while (bits != 0u)
+                        {
+                            const uint32_t bit =
+                                wirehair::NonzeroLowestBitIndex64(bits);
+                            const uint32_t column = (word << 6) + bit;
+                            if (column < R) {
+                                expanded[column] = 1u;
+                            }
+                            bits &= bits - 1u;
+                        }
+                    }
+                }
+                pivot_coeff.swap(materialized_pivot_coeff);
+                coeff.swap(materialized_coeff);
+                std::vector<uint64_t>().swap(binary_pivot_coeff);
+            }
             rank = binary_rank;
             for (uint32_t heavy = 0; heavy < H; ++heavy)
             {
@@ -2799,6 +4640,9 @@ static WirehairResult SolvePrecodeSystemImpl(
                 }
             }
             st.ResidualRank = rank;
+            if (rank != expected_rank) {
+                return terminal_error();
+            }
         }
 
         phase_end = SolveClock::now();
@@ -2808,6 +4652,11 @@ static WirehairResult SolvePrecodeSystemImpl(
         if (rank < R) {
             if (resume_state)
             {
+                // This full graph walk is confined to the rare checkpoint
+                // publication path.  Successful cold solves, including those
+                // passed a resume_state, pay no fingerprinting cost.
+                const PrecodeSystemFingerprint system_fingerprint =
+                    FingerprintPrecodeSystem(system);
                 PrecodeSolveResumeState checkpoint;
                 checkpoint.SourceCount = K;
                 checkpoint.PrecodeCount = P;
@@ -2816,7 +4665,12 @@ static WirehairResult SolvePrecodeSystemImpl(
                 checkpoint.InactiveCount = R;
                 checkpoint.ProjectionWords = words;
                 checkpoint.Rank = rank;
+                checkpoint.SystemParams = system.Params;
+                checkpoint.SystemFingerprint0 = system_fingerprint.First;
+                checkpoint.SystemFingerprint1 = system_fingerprint.Second;
                 checkpoint.Config = config;
+                checkpoint.PacketEquation =
+                    CurrentPacketRowEquationIdentity();
                 checkpoint.Runtime = runtime;
                 checkpoint.Stats = st;
                 checkpoint.InactiveIndex.swap(inactive_index);
@@ -2829,7 +4683,11 @@ static WirehairResult SolvePrecodeSystemImpl(
                 checkpoint.CoefficientScratch.swap(coeff);
                 checkpoint.RhsScratch.swap(rhs);
                 checkpoint.Active = true;
-                resume_state->Swap(checkpoint);
+                if (checkpoint.PersistentBytes() <=
+                    resume_persistent_byte_limit)
+                {
+                    resume_state->Swap(checkpoint);
+                }
             }
             if (stats) {
                 *stats = st;
@@ -2877,18 +4735,44 @@ static WirehairResult SolvePrecodeSystemImpl(
                     value,
                     pivot_rhs.data() + (size_t)pivot * block_bytes,
                     block_bytes);
-                const uint8_t* relation =
-                    pivot_coeff.data() + (size_t)pivot * R;
-                for (uint32_t i = 0; i < quotient_columns; ++i)
+                if (use_packed_binary_residual)
                 {
-                    const uint8_t scale = relation[free_columns[i]];
-                    AddScaledBlock(
-                        value,
-                        scale,
-                        values.data() + (size_t)peel.InactiveOrder[
-                            free_columns[i]] * block_bytes,
-                        block_bytes,
-                        st);
+                    const uint64_t* relation =
+                        binary_pivot_coeff.data() +
+                            (size_t)pivot * words;
+                    for (uint32_t i = 0; i < quotient_columns; ++i)
+                    {
+                        const uint32_t free_column = free_columns[i];
+                        if ((relation[free_column >> 6] &
+                                (UINT64_C(1) <<
+                                    (free_column & 63u))) == 0u)
+                        {
+                            continue;
+                        }
+                        AddScaledBlock(
+                            value,
+                            1u,
+                            values.data() + (size_t)peel.InactiveOrder[
+                                free_column] * block_bytes,
+                            block_bytes,
+                            st);
+                    }
+                }
+                else
+                {
+                    const uint8_t* relation =
+                        pivot_coeff.data() + (size_t)pivot * R;
+                    for (uint32_t i = 0; i < quotient_columns; ++i)
+                    {
+                        const uint8_t scale = relation[free_columns[i]];
+                        AddScaledBlock(
+                            value,
+                            scale,
+                            values.data() + (size_t)peel.InactiveOrder[
+                                free_columns[i]] * block_bytes,
+                            block_bytes,
+                            st);
+                    }
                 }
             }
         }
@@ -3010,6 +4894,119 @@ static WirehairResult SolvePrecodeSystemImpl(
 namespace {
 
 #if defined(_MSC_VER)
+#define WH2_PACKED_RESIDUAL_NOINLINE __declspec(noinline)
+#elif defined(__ELF__) && (defined(__GNUC__) || defined(__clang__)) && \
+    !defined(WIREHAIR_V2_DISABLE_PACKED_RESIDUAL_TEXT_SECTION)
+#define WH2_PACKED_RESIDUAL_NOINLINE \
+    __attribute__((noinline, section(".text.wh2_packed_residual")))
+#elif defined(__GNUC__) || defined(__clang__)
+#define WH2_PACKED_RESIDUAL_NOINLINE __attribute__((noinline))
+#else
+#define WH2_PACKED_RESIDUAL_NOINLINE
+#endif
+
+static WH2_PACKED_RESIDUAL_NOINLINE ResidualInsertResult
+InsertPackedBinaryResidualRow(
+    std::vector<uint64_t>& coeff,
+    std::vector<uint8_t>& rhs,
+    uint32_t R,
+    uint32_t words,
+    uint32_t block_bytes,
+    std::vector<uint64_t>& pivot_coeff,
+    std::vector<uint8_t>& pivot_rhs,
+    std::vector<uint8_t>& have_pivot,
+    uint32_t& rank,
+    PrecodeSolveStats& stats)
+{
+    CAT_DEBUG_ASSERT(
+        R > 0u && words == PackedWordCount(R) &&
+        coeff.size() == words &&
+        pivot_coeff.size() == (size_t)R * words &&
+        pivot_rhs.size() == (size_t)R * block_bytes &&
+        have_pivot.size() == R);
+
+    // Projection words may carry poison outside the logical inactive domain.
+    // Mask once before pivot search so no tail bit can become a fake column.
+    if ((R & 63u) != 0u) {
+        coeff[words - 1u] &=
+            (UINT64_C(1) << (R & 63u)) - UINT64_C(1);
+    }
+
+    // Reduce in ascending pivot order.  Binary coefficients need only packed
+    // word XORs; payload RHS operations stay identical to the byte reference.
+    for (uint32_t column = 0u; column < R; ++column)
+    {
+        const uint64_t bit = UINT64_C(1) << (column & 63u);
+        if ((coeff[column >> 6] & bit) == 0u || !have_pivot[column]) {
+            continue;
+        }
+        const uint64_t* pivot =
+            pivot_coeff.data() + (size_t)column * words;
+        for (uint32_t word = column >> 6; word < words; ++word) {
+            coeff[word] ^= pivot[word];
+        }
+        AddScaledBlock(
+            rhs.data(), 1u,
+            pivot_rhs.data() + (size_t)column * block_bytes,
+            block_bytes, stats);
+    }
+
+    uint32_t pivot_column = R;
+    for (uint32_t word = 0u; word < words; ++word)
+    {
+        if (coeff[word] != 0u) {
+            pivot_column = (word << 6) +
+                wirehair::NonzeroLowestBitIndex64(coeff[word]);
+            break;
+        }
+    }
+    if (pivot_column >= R) {
+        return RowIsZero(rhs.data(), block_bytes) ?
+            ResidualInsertResult::Dependent :
+            ResidualInsertResult::Inconsistent;
+    }
+    if (have_pivot[pivot_column]) {
+        return ResidualInsertResult::Inconsistent;
+    }
+
+    // Eliminate the new pivot from every established row to keep the packed
+    // basis in RREF.  Direct quotient formation relies on zero coefficients in
+    // all other pivot columns.
+    const uint32_t pivot_word = pivot_column >> 6;
+    const uint64_t pivot_bit =
+        UINT64_C(1) << (pivot_column & 63u);
+    for (uint32_t existing = 0u; existing < R; ++existing)
+    {
+        if (!have_pivot[existing]) {
+            continue;
+        }
+        uint64_t* existing_coeff =
+            pivot_coeff.data() + (size_t)existing * words;
+        if ((existing_coeff[pivot_word] & pivot_bit) == 0u) {
+            continue;
+        }
+        for (uint32_t word = pivot_word; word < words; ++word) {
+            existing_coeff[word] ^= coeff[word];
+        }
+        AddScaledBlock(
+            pivot_rhs.data() + (size_t)existing * block_bytes,
+            1u, rhs.data(), block_bytes, stats);
+    }
+
+    std::memcpy(
+        pivot_coeff.data() + (size_t)pivot_column * words,
+        coeff.data(), (size_t)words * sizeof(uint64_t));
+    std::memcpy(
+        pivot_rhs.data() + (size_t)pivot_column * block_bytes,
+        rhs.data(), block_bytes);
+    have_pivot[pivot_column] = 1u;
+    ++rank;
+    return ResidualInsertResult::Inserted;
+}
+
+#undef WH2_PACKED_RESIDUAL_NOINLINE
+
+#if defined(_MSC_VER)
 #define WH2_RESIDUAL_COLD_NOINLINE __declspec(noinline)
 #elif defined(__GNUC__) || defined(__clang__)
 #define WH2_RESIDUAL_COLD_NOINLINE __attribute__((noinline, cold))
@@ -3077,9 +5074,20 @@ WirehairResult SolvePrecodeSystemWithRuntime(
     PrecodeSolveResumeState* resume_state)
 {
     const ScopedColdSolveWideXorSelection wide_xor(block_bytes);
-    return SolvePrecodeSystemImpl(
-        system, config, runtime, packets, block_bytes,
-        intermediate_blocks_out, stats, resume_state, true);
+    try
+    {
+        return SolvePrecodeSystemImpl(
+            system, config, runtime, packets, block_bytes,
+            intermediate_blocks_out, stats, resume_state,
+            std::numeric_limits<size_t>::max(),
+            PackedBinaryResidualPolicy::GenericCheckpoint, true);
+    }
+    catch (const std::bad_alloc&) {
+        return Wirehair_OOM;
+    }
+    catch (const std::length_error&) {
+        return Wirehair_OOM;
+    }
 }
 
 WirehairResult SolvePrecodeSystemForValidatedSystemWithRuntime(
@@ -3090,15 +5098,18 @@ WirehairResult SolvePrecodeSystemForValidatedSystemWithRuntime(
     uint32_t block_bytes,
     std::vector<uint8_t>& intermediate_blocks_out,
     PrecodeSolveStats* stats,
-    PrecodeSolveResumeState* resume_state)
+    PrecodeSolveResumeState* resume_state,
+    size_t resume_persistent_byte_limit,
+    PackedBinaryResidualPolicy packed_residual_policy)
 {
     const ScopedColdSolveWideXorSelection wide_xor(block_bytes);
     return SolvePrecodeSystemImpl(
         system, config, runtime, packets, block_bytes,
-        intermediate_blocks_out, stats, resume_state, false);
+        intermediate_blocks_out, stats, resume_state,
+        resume_persistent_byte_limit, packed_residual_policy, false);
 }
 
-WirehairResult ResumePrecodeSystem(
+static WirehairResult ResumePrecodeSystemImpl(
     const PrecodeSystem& system,
     const PacketRowConfig& config,
     uint32_t block_id,
@@ -3107,7 +5118,8 @@ WirehairResult ResumePrecodeSystem(
     PrecodeSolveResumeState& state,
     std::vector<uint8_t>& intermediate_blocks_out,
     PrecodeSolveStats* stats,
-    bool allow_insert)
+    bool allow_insert,
+    bool verify_system_fingerprint)
 {
     if (stats == &state.Stats ||
         SolveOutputAliasesResumeState(intermediate_blocks_out, state))
@@ -3121,8 +5133,11 @@ WirehairResult ResumePrecodeSystem(
         state.SourceCount != K || state.PrecodeCount != (uint32_t)P_wide ||
         state.ColumnCount != K + (uint32_t)P_wide ||
         state.BlockBytes != block_bytes || block_bytes == 0u ||
+        !SamePrecodeParams(state.SystemParams, system.Params) ||
         state.Config.PeelSeed != config.PeelSeed ||
         state.Config.MixCount != config.MixCount ||
+        !SamePacketRowEquationIdentity(
+            state.PacketEquation, CurrentPacketRowEquationIdentity()) ||
         !state.Runtime.IsValidFor(
             K, (uint32_t)P_wide, config.MixCount) ||
         state.InactiveCount == 0u ||
@@ -3148,6 +5163,29 @@ WirehairResult ResumePrecodeSystem(
     {
         typedef std::chrono::steady_clock SolveClock;
         const SolveClock::time_point build_start = SolveClock::now();
+        if (verify_system_fingerprint)
+        {
+            // Resume state contains substitutions and residual pivots derived
+            // from every accepted precode equation.  Matching dimensions and
+            // construction parameters are insufficient because PrecodeSystem
+            // deliberately exposes validated explicit row graphs.  Recompute
+            // their stable content identity before row generation or any
+            // caller-visible mutation.  This accepts a distinct but value-
+            // equivalent PrecodeSystem object, and accounts the graph walk as
+            // build work.  Decoder-owned immutable systems use the internal
+            // entry point below and preserve every other validation check.
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            ResumeSystemFingerprintChecks.fetch_add(
+                1u, std::memory_order_relaxed);
+#endif
+            const PrecodeSystemFingerprint system_fingerprint =
+                FingerprintPrecodeSystem(system);
+            if (state.SystemFingerprint0 != system_fingerprint.First ||
+                state.SystemFingerprint1 != system_fingerprint.Second)
+            {
+                return Wirehair_InvalidInput;
+            }
+        }
         const std::vector<uint32_t> columns =
             GeneratePacketMatrixRowWithRuntime(
                 K, (uint32_t)P_wide, block_id, config, state.Runtime);
@@ -3333,6 +5371,38 @@ WirehairResult ResumePrecodeSystem(
     }
 }
 
+WirehairResult ResumePrecodeSystem(
+    const PrecodeSystem& system,
+    const PacketRowConfig& config,
+    uint32_t block_id,
+    const uint8_t* block_data,
+    uint32_t block_bytes,
+    PrecodeSolveResumeState& state,
+    std::vector<uint8_t>& intermediate_blocks_out,
+    PrecodeSolveStats* stats,
+    bool allow_insert)
+{
+    return ResumePrecodeSystemImpl(
+        system, config, block_id, block_data, block_bytes, state,
+        intermediate_blocks_out, stats, allow_insert, true);
+}
+
+WirehairResult ResumePrecodeSystemForValidatedSystem(
+    const PrecodeSystem& system,
+    const PacketRowConfig& config,
+    uint32_t block_id,
+    const uint8_t* block_data,
+    uint32_t block_bytes,
+    PrecodeSolveResumeState& state,
+    std::vector<uint8_t>& intermediate_blocks_out,
+    PrecodeSolveStats* stats,
+    bool allow_insert)
+{
+    return ResumePrecodeSystemImpl(
+        system, config, block_id, block_data, block_bytes, state,
+        intermediate_blocks_out, stats, allow_insert, false);
+}
+
 WirehairResult SelectSystematicPacketConfig(
     const PrecodeSystem& system,
     const PacketRowConfig& base_config,
@@ -3345,13 +5415,20 @@ WirehairResult SelectSystematicPacketConfig(
     if (P_wide > UINT32_MAX ||
         !IsPacketRowDomainValid(
             K, (uint32_t)P_wide, base_config.MixCount) ||
-        !ValidatePrecodeSystem(system))
+        !HasValidPrecodeSystemShape(system))
     {
         return Wirehair_InvalidInput;
     }
 
     try
     {
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        test::TriggerSolveAllocationFailureForTesting(
+            test::SolveAllocationFailurePoint::SelectPacketValidation);
+#endif
+        if (!ValidatePrecodeSystem(system)) {
+            return Wirehair_InvalidInput;
+        }
         const uint8_t zero = 0u;
         std::vector<SolvePacket> packets(K);
         for (uint32_t block_id = 0; block_id < K; ++block_id)
@@ -3501,7 +5578,7 @@ WirehairResult ClassifyExactSystematicConstructionFailure(
     }
 }
 
-bool VerifyPrecodeSolution(
+static bool VerifyPrecodeSolutionImpl(
     const PrecodeSystem& system,
     const PacketRowConfig& config,
     const std::vector<SolvePacket>& packets,
@@ -3520,7 +5597,7 @@ bool VerifyPrecodeSolution(
     const uint64_t P_wide = (uint64_t)S + D2 + H;
     if (P_wide > UINT32_MAX ||
         !IsPacketRowDomainValid(K, (uint32_t)P_wide, config.MixCount) ||
-        !ValidatePrecodeSystem(system))
+        !HasValidPrecodeSystemShape(system))
     {
         return false;
     }
@@ -3531,9 +5608,26 @@ bool VerifyPrecodeSolution(
     {
         return false;
     }
+    for (const SolvePacket& packet : packets) {
+        if (!packet.Data) {
+            return false;
+        }
+    }
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    test::TriggerSolveAllocationFailureForTesting(
+        test::SolveAllocationFailurePoint::VerifyValidation);
+#endif
+    if (!ValidatePrecodeSystem(system)) {
+        return false;
+    }
     if (gf256_init() != 0) {
         return false;
     }
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    test::TriggerSolveAllocationFailureForTesting(
+        test::SolveAllocationFailurePoint::VerifyValueScratch);
+#endif
     std::vector<uint8_t> value(block_bytes, 0u);
 
     const auto verify_binary = [&](const std::vector<uint32_t>& columns,
@@ -3555,16 +5649,18 @@ bool VerifyPrecodeSolution(
             return false;
         }
     }
-    for (const std::vector<uint32_t>& row : system.DenseRowColumns) {
+    for (const std::vector<uint32_t>& row :
+            system.DenseBasisRowColumns) {
         if (!verify_binary(row, nullptr)) {
             return false;
         }
     }
     for (const SolvePacket& packet : packets)
     {
-        if (!packet.Data) {
-            return false;
-        }
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        test::TriggerSolveAllocationFailureForTesting(
+            test::SolveAllocationFailurePoint::VerifyPacketRow);
+#endif
         const std::vector<uint32_t> row =
             GeneratePacketMatrixRow(K, P, packet.BlockId, config);
         if (row.empty() || !verify_binary(row, packet.Data))
@@ -3599,6 +5695,26 @@ bool VerifyPrecodeSolution(
         }
     }
     return true;
+}
+
+bool VerifyPrecodeSolution(
+    const PrecodeSystem& system,
+    const PacketRowConfig& config,
+    const std::vector<SolvePacket>& packets,
+    const uint8_t* intermediate_blocks,
+    uint32_t block_bytes)
+{
+    try
+    {
+        return VerifyPrecodeSolutionImpl(
+            system, config, packets, intermediate_blocks, block_bytes);
+    }
+    catch (const std::bad_alloc&) {
+        return false;
+    }
+    catch (const std::length_error&) {
+        return false;
+    }
 }
 
 } // namespace wirehair_v2

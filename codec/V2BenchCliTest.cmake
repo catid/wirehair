@@ -451,6 +451,18 @@ expect_success("hashed" precodefail --N 64 --bb-list 1
 expect_failure("unknown --heavy-family" precodefail --N 64 --bb-list 1
     --overhead 0 --trials 1 --threads 1 --loss 0.1
     --heavy-family unknown)
+expect_success("dense_anchor_layout=two07" precodefail --N 64 --bb-list 1
+    --overhead 0 --trials 1 --threads 1 --loss 0.1
+    --dense-anchors two07)
+expect_success("dense_anchor_layout=four0369" precodefail --N 64 --bb-list 1
+    --overhead 0 --trials 1 --threads 1 --loss 0.1
+    --dense-anchors four0369)
+expect_failure("--dense-anchors expects" precodefail --N 64 --bb-list 1
+    --overhead 0 --trials 1 --threads 1 --loss 0.1
+    --dense-anchors unknown)
+expect_failure("--dense-anchors expects" precodefail --N 64 --bb-list 1
+    --overhead 0 --trials 1 --threads 1 --loss 0.1
+    --dense-anchors two07 --dense-anchors four0369)
 
 # Thread parsing and the partially-launched worker cleanup path.
 expect_failure("bad --threads value" precodefail --N 64 --bb-list 8

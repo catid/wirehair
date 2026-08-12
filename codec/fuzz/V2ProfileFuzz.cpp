@@ -29,6 +29,7 @@ bool SameParams(
         a.HeavyRows == b.HeavyRows &&
         a.SourceHits == b.SourceHits &&
         a.HeavyFamily == b.HeavyFamily &&
+        a.DenseAnchors == b.DenseAnchors &&
         a.DenseIdentityCorner == b.DenseIdentityCorner &&
         a.Seed == b.Seed;
 }
@@ -39,7 +40,7 @@ bool SameSystem(
 {
     return SameParams(a.Params, b.Params) &&
         a.StaircaseRows == b.StaircaseRows &&
-        a.DenseRowColumns == b.DenseRowColumns;
+        a.DenseBasisRowColumns == b.DenseBasisRowColumns;
 }
 
 bool Fail(std::string& failure, const char* message)
@@ -53,7 +54,7 @@ bool FuzzParams(wirehair_v2::fuzz::Input& input, std::string& failure)
     const uint32_t K = 2u + input.U8() % 127u;
     wirehair_v2::PrecodeParams params =
         wirehair_v2::MakeCertifiedParams(K, input.U64());
-    const unsigned mutation = input.U8() % 16u;
+    const unsigned mutation = input.U8() % 18u;
     bool expected_valid = false;
     switch (mutation)
     {
@@ -87,10 +88,22 @@ bool FuzzParams(wirehair_v2::fuzz::Input& input, std::string& failure)
         params.HeavyFamily =
             static_cast<wirehair_v2::HeavyCoefficientFamily>(UINT32_MAX);
         break;
-    default:
+    case 15:
         params.HeavyFamily =
             wirehair_v2::HeavyCoefficientFamily::HashedNonzero;
         expected_valid = true;
+        break;
+    case 16:
+        params.DenseAnchors =
+            static_cast<wirehair_v2::DenseAnchorLayout>(UINT32_MAX);
+        break;
+    default:
+        params.DenseAnchors = input.Bool() ?
+            wirehair_v2::DenseAnchorLayout::Two07 :
+            wirehair_v2::DenseAnchorLayout::Four0369;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        expected_valid = true;
+#endif
         break;
     }
 
@@ -98,7 +111,7 @@ bool FuzzParams(wirehair_v2::fuzz::Input& input, std::string& failure)
     sentinel.Params.BlockCount = 7u;
     sentinel.Params.Staircase = 3u;
     sentinel.StaircaseRows.push_back(std::vector<uint32_t>{1u, 2u});
-    sentinel.DenseRowColumns.push_back(std::vector<uint32_t>{3u});
+    sentinel.DenseBasisRowColumns.push_back(std::vector<uint32_t>{4u});
     wirehair_v2::PrecodeSystem output = sentinel;
     const bool built = wirehair_v2::BuildPrecodeSystem(params, output);
     if (built != expected_valid) {
@@ -143,8 +156,8 @@ bool FuzzSystem(wirehair_v2::fuzz::Input& input, std::string& failure)
         break;
     case 5:
         std::reverse(
-            system.DenseRowColumns[0].begin(),
-            system.DenseRowColumns[0].end());
+            system.DenseBasisRowColumns[0].begin(),
+            system.DenseBasisRowColumns[0].end());
         break;
     case 6: ++system.Params.DenseRows; break;
     case 7: system.Params.HeavyRows = 129u; break;

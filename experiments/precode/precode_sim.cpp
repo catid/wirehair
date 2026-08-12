@@ -1003,7 +1003,8 @@ static GeneratedSystem GenerateSystem(
         const unsigned deck_span = scheme.IdentCorner ?
             K + scheme.D : K + scheme.D + scheme.Dense2;
         bool first_dense = true;
-        for (const std::vector<uint32_t>& columns : codec_sys.DenseRowColumns)
+        for (const std::vector<uint32_t>& columns :
+                codec_sys.DenseBasisRowColumns)
         {
             SparseRow row;
             row.IsConstraint = true;

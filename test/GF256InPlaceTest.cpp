@@ -410,6 +410,239 @@ static bool TestMultiSource()
     return true;
 }
 
+static bool TestScaledMultiSource()
+{
+    static const unsigned kLengths[] = {
+        0, 1, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65,
+        127, 128, 129, 255, 256, 257, 1279, 1280, 1281,
+        32767, 32768, 32769
+    };
+    static const unsigned kOffsets[] = { 0, 1, 15, 31, 63 };
+    static const int kCounts[] = {
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+        15, 16, 17, 31, 32, 33, 243
+    };
+    static const int kMaxSources = 243;
+    bool coefficient_seen[256] = {};
+
+    for (unsigned length_i = 0;
+         length_i < sizeof(kLengths) / sizeof(kLengths[0]); ++length_i)
+    {
+        const unsigned bytes = kLengths[length_i];
+        const unsigned destination_offset =
+            kOffsets[length_i %
+                (sizeof(kOffsets) / sizeof(kOffsets[0]))];
+        for (unsigned count_i = 0;
+             count_i < sizeof(kCounts) / sizeof(kCounts[0]); ++count_i)
+        {
+            const int count = kCounts[count_i];
+            // Counts through 12 retain the exhaustive length matrix.  Larger
+            // counts exercise both 16-source scalar grouping boundaries and
+            // the 64/256/1024-byte SIMD boundaries on a compact permanent
+            // subset, keeping the normal CTest gate quick.
+            const bool extended_length =
+                bytes == 31u || bytes == 32u || bytes == 33u ||
+                bytes == 63u || bytes == 64u || bytes == 65u ||
+                bytes == 257u || bytes == 1281u;
+            if (count > 12 && !extended_length) {
+                continue;
+            }
+
+            std::vector<std::vector<uint8_t> > sources((size_t)count);
+            std::vector<std::vector<uint8_t> > source_before((size_t)count);
+            std::vector<const void*> pointers((size_t)count);
+            for (int source = 0; source < count; ++source)
+            {
+                const unsigned source_offset = kOffsets[
+                    ((unsigned)source * 3u + length_i + 1u) %
+                    (sizeof(kOffsets) / sizeof(kOffsets[0]))];
+                sources[(size_t)source].resize(
+                    bytes + 2u * kGuardBytes + 2u * kAlignment);
+                for (size_t i = 0; i < sources[(size_t)source].size(); ++i) {
+                    sources[(size_t)source][i] = (uint8_t)(
+                        i * 53u + (unsigned)source * 97u + bytes);
+                }
+                pointers[(size_t)source] =
+                    sources[(size_t)source].data() + kGuardBytes +
+                    source_offset;
+                source_before[(size_t)source] = sources[(size_t)source];
+            }
+
+            for (unsigned pattern = 0; pattern < 4u; ++pattern)
+            {
+                uint8_t scales[kMaxSources];
+                for (int source = 0; source < count; ++source)
+                {
+                    uint8_t scale = 0u;
+                    if (pattern == 0u) {
+                        scale = (uint8_t)(source * 73u + length_i * 19u + 2u);
+                        if (source == 0) scale = 0u;
+                        if (source == 1) scale = 1u;
+                    } else if (pattern == 1u) {
+                        scale = 0u;
+                    } else if (pattern == 2u) {
+                        scale = source + 1 == count ? 1u : 0u;
+                    } else {
+                        scale = (uint8_t)(source * 61u + length_i * 31u + 2u);
+                        if (scale <= 1u) scale = (uint8_t)(scale + 2u);
+                    }
+                    scales[source] = scale;
+                    if (count == kMaxSources) {
+                        coefficient_seen[scale] = true;
+                    }
+                }
+
+                std::vector<uint8_t> destination(
+                    bytes + 2u * kGuardBytes + 2u * kAlignment);
+                for (size_t i = 0; i < destination.size(); ++i) {
+                    destination[i] = (uint8_t)(
+                        i * 29u + bytes + (unsigned)count * 7u + pattern);
+                }
+                std::vector<uint8_t> expected = destination;
+                const size_t destination_start =
+                    kGuardBytes + destination_offset;
+                if (count > 0)
+                {
+                    for (unsigned byte = 0; byte < bytes; ++byte)
+                    {
+                        uint8_t value = 0u;
+                        for (int source = 0; source < count; ++source) {
+                            value ^= gf256_mul(
+                                static_cast<const uint8_t*>(
+                                    pointers[(size_t)source])[byte],
+                                scales[source]);
+                        }
+                        expected[destination_start + byte] = value;
+                    }
+                }
+
+                gf256_mulset_multi_mem(
+                    destination.data() + destination_start,
+                    count == 0 ? nullptr : pointers.data(),
+                    count == 0 ? nullptr : scales,
+                    count,
+                    (int)bytes);
+                if (destination != expected)
+                {
+                    std::fprintf(stderr,
+                        "scaled multi-source mismatch bytes=%u offset=%u "
+                        "count=%d pattern=%u\n",
+                        bytes, destination_offset, count, pattern);
+                    return false;
+                }
+                if (sources != source_before)
+                {
+                    std::fprintf(stderr,
+                        "scaled multi-source input changed bytes=%u count=%d "
+                        "pattern=%u\n",
+                        bytes, count, pattern);
+                    return false;
+                }
+            }
+
+            if (count >= 2)
+            {
+                // The destination must be disjoint, but source ranges may
+                // overlap each other.  Pin that documented contract by
+                // deliberately reusing the first source pointer.
+                pointers[1] = pointers[0];
+                uint8_t scales[kMaxSources] = {};
+                scales[0] = 1u;
+                scales[1] = 1u;
+                std::vector<uint8_t> destination(
+                    bytes + 2u * kGuardBytes + 2u * kAlignment, 0xa5u);
+                std::vector<uint8_t> expected = destination;
+                const size_t destination_start =
+                    kGuardBytes + destination_offset;
+                if (bytes > 0) {
+                    std::fill(
+                        expected.begin() + destination_start,
+                        expected.begin() + destination_start + bytes,
+                        uint8_t{0});
+                }
+                gf256_mulset_multi_mem(
+                    destination.data() + destination_start,
+                    pointers.data(), scales, count, (int)bytes);
+                if (destination != expected) {
+                    std::fprintf(stderr,
+                        "scaled overlapping-source mismatch bytes=%u "
+                        "count=%d\n", bytes, count);
+                    return false;
+                }
+            }
+        }
+    }
+
+    for (unsigned coefficient = 0; coefficient < 256u; ++coefficient) {
+        if (!coefficient_seen[coefficient]) {
+            std::fprintf(stderr,
+                "scaled multi-source coefficient %u was not tested\n",
+                coefficient);
+            return false;
+        }
+    }
+
+    // Isolate every coefficient as a single-source differential so a faulty
+    // product cannot cancel against another source in a large XOR.  The size
+    // crosses the 64/256/1024-byte dispatch boundaries and leaves a tail.
+    {
+        static const unsigned kCoefficientBytes = 1281u;
+        static const size_t kSourceStart = kGuardBytes + 15u;
+        static const size_t kDestinationStart = kGuardBytes + 31u;
+        std::vector<uint8_t> source(
+            kCoefficientBytes + 2u * kGuardBytes + 2u * kAlignment);
+        for (size_t i = 0; i < source.size(); ++i) {
+            source[i] = (uint8_t)(i * 109u + (i >> 3) * 37u + 23u);
+        }
+        const std::vector<uint8_t> source_before = source;
+        const void* source_pointer = source.data() + kSourceStart;
+
+        for (unsigned coefficient = 0; coefficient < 256u; ++coefficient)
+        {
+            std::vector<uint8_t> destination(
+                kCoefficientBytes + 2u * kGuardBytes + 2u * kAlignment);
+            for (size_t i = 0; i < destination.size(); ++i) {
+                destination[i] = (uint8_t)(i * 43u + coefficient * 17u);
+            }
+            std::vector<uint8_t> expected = destination;
+            for (unsigned byte = 0; byte < kCoefficientBytes; ++byte) {
+                expected[kDestinationStart + byte] = gf256_mul(
+                    source[kSourceStart + byte], (uint8_t)coefficient);
+            }
+            const uint8_t scale = (uint8_t)coefficient;
+            gf256_mulset_multi_mem(
+                destination.data() + kDestinationStart,
+                &source_pointer, &scale, 1, (int)kCoefficientBytes);
+            if (destination != expected) {
+                std::fprintf(stderr,
+                    "scaled multi-source isolated coefficient %u mismatch\n",
+                    coefficient);
+                return false;
+            }
+        }
+        if (source != source_before) {
+            std::fprintf(stderr,
+                "scaled multi-source coefficient sweep changed input\n");
+            return false;
+        }
+    }
+
+    uint8_t destination[17];
+    std::memset(destination, 0x5a, sizeof(destination));
+    const std::vector<uint8_t> before(destination, destination + sizeof(destination));
+    gf256_mulset_multi_mem(nullptr, nullptr, nullptr, 0, 17);
+    gf256_mulset_multi_mem(nullptr, nullptr, nullptr, -1, 17);
+    gf256_mulset_multi_mem(nullptr, nullptr, nullptr, 1, 0);
+    gf256_mulset_multi_mem(nullptr, nullptr, nullptr, 1, -1);
+    gf256_mulset_multi_mem(destination, nullptr, nullptr, -1, 17);
+    gf256_mulset_multi_mem(destination, nullptr, nullptr, 1, -1);
+    if (!std::equal(before.begin(), before.end(), destination)) {
+        std::fprintf(stderr, "scaled multi-source negative extent changed output\n");
+        return false;
+    }
+    return true;
+}
+
 static void RunBenchmark()
 {
     static const size_t kBytes = 4u * 1024u * 1024u;
@@ -507,7 +740,8 @@ int main(int argc, char** argv)
 
     if (!TestOperation(Operation::Multiply) ||
         !TestOperation(Operation::Divide) ||
-        !TestMultiSource())
+        !TestMultiSource() ||
+        !TestScaledMultiSource())
     {
         return 1;
     }

@@ -1,18 +1,21 @@
-# Wirehair2 benchmark contract v3, timing protocol v6
+# Wirehair2 benchmark contract v4, timing protocol v6
 
 The machine-readable source of truth is
-[`wh2_benchmark_contract_v3.json`](wh2_benchmark_contract_v3.json).  The
+[`wh2_benchmark_contract_v4.json`](wh2_benchmark_contract_v4.json).  The
 companion checker, [`wh2_benchmark_contract.py`](wh2_benchmark_contract.py),
 validates its exact domains and rejects result ledgers that omit or replace a
 cell.  This is intentionally a small contract and checker, not another
 campaign framework.
 
-The top-level JSON schema remains `wirehair.wh2.benchmark-contract.v3` because
-the recovery enumeration, packet-trace algorithm, cells, and all five recovery
-domain hashes are byte-identical.  The contract identity is
-`wh2-pure-gf256-1pct-v6`; v6 changes only timing identity and qualification.
+The top-level JSON schema is `wirehair.wh2.benchmark-contract.v4`.  The
+recovery enumeration, packet-trace algorithm, cells, and all five recovery
+domain hashes remain byte-identical, but v4 freezes the asymmetric development
+roles: production WH2 and Wirehair1 are descriptive controls, uniform-raw
+D12/H12 is the recovery reference, Two07 is the sole candidate, and production
+WH2 is the structure-only timing proxy.  The contract identity is
+`wh2-pure-gf256-1pct-v7`.
 Recovery trace-manifest v1 includes the top-level contract SHA-256 in its hash
-header, so its enclosing manifest digest necessarily changes with the v6
+header, so its enclosing manifest digest necessarily changes with the v7
 contract SHA even though every recovery row, cell hash, packet trace, and
 recovery-domain hash is unchanged.  Do not describe that envelope digest as a
 preserved recovery hash.
@@ -30,6 +33,16 @@ are compared using isolated solve time.  Wirehair1 peels while packets are fed,
 so the fair cross-codec metric is full receive-to-success time; timing only its
 last API call would hide Wirehair1 work.  Encoder initialization plus the first
 K symbols is measured separately.
+
+The receive-to-success scope constructs each decoder before the clock.  Its
+timed interval feeds every symbol through the codec's normal receive API and
+ends only after full message recovery: Wirehair2 uses
+`MessagePrecodeDecoder::DecodeResult()` plus `RecoverResult()` around the arm's
+exact validated native system/configuration/attempt, and Wirehair1 uses its
+public decode plus recover path.  A benchmark-local direct solve/resume model
+is not a valid substitute because it omits receive payload copies, packet-slot
+bookkeeping, cold packet assembly, checkpoint pending storage, and recovery
+preflight.
 
 ## Bounded development screen
 
@@ -61,56 +74,100 @@ multiplicity, repairs, and introductions are reported, but an individual weak
 unit is not an architecture veto.  This preserves the distinction between
 choosing the best architecture and repairing its seeds afterward.
 
-For every overhead tail and every aggregate/band/width/stratum scope, a candidate
-may exceed each control by at most 0.1 percentage point, rounded up to at least
-one cell.  Find the eligible minimum aggregate overhead-zero count, then form a
+For every overhead tail and every aggregate/band/width/stratum scope, the
+Two07 candidate may exceed the uniform-raw D12/H12 recovery reference by at
+most 0.1 percentage point, rounded up to at least one cell.  Production WH2
+and Wirehair1 recovery results remain reported but are descriptive and cannot
+veto the raw architecture choice.  Find the eligible minimum aggregate
+overhead-zero count, then form a
 recovery-equivalent set containing every eligible candidate within the same
 0.1-percentage-point allowance of that minimum.  Order that set by the
 equal-cell aggregate paired mean log ratio for isolated decoder solve, then
 failures at overhead 1, 2, and 4, and finally stable arm identifier.  The
-checker implements this ordering in `select_development_architecture`.  Raw
+path-only selector implements this ordering after reopening all evidence.  Raw
 weak-seed count is descriptive and is deliberately absent from the tie-break
-list.  The resulting canonical selection receipt binds both domain hashes,
-both freeze hashes, the shared architecture-artifact hash, exact cardinalities,
-the complete candidate roster, every eligible overhead-zero count, and the
-ordered result.  It separately seals the winner's semantic identity from its
-arm name, codec kind, and architecture descriptor.  This descriptor remains
-fixed across later equation-preserving implementation optimization even when
-the source commit or binary hash changes.
+list.  The resulting v2 receipt binds the exact roles, source, ordered four-arm
+recovery and three-arm timing rosters, both domains and freezes, separate full
+recovery and timing architecture-artifact hashes, both result and execution
+receipts, both terminal run summaries, timing qualification execution,
+timing-proxy witness, all three work/rank hashes, exact cardinalities, and the
+ordered result.  The selector projects recovery onto
+`[wirehair2_head, wirehair1, Two07]` and hashes that projection under the same
+architecture-artifact domain; it must equal the complete timing artifact.
+The winner's semantic identity is separately sealed from its arm name, codec
+kind, and architecture descriptor.  This descriptor remains fixed across
+later equation-preserving implementation optimization even when the source
+commit or binary hash changes.
 
 ### Raw seed-policy evidence boundary
 
 Closed uniform-raw architecture recovery uses
-`wirehair.wh2.benchmark-freeze.v2`. Every frozen arm separately binds its
-`construction_seed_basis` and `seed_schedule_sha256`: the certified head uses
-`production-profile-v1`, Wirehair1 uses `not-applicable`, and raw experimental
-arms use `uniform-raw-v1` plus schedule SHA-256
+`wirehair.wh2.benchmark-freeze.v3`. Its exact four-arm roster is descriptive
+production WH2 and Wirehair1 controls, the disabled-anchor uniform-raw D12/H12
+recovery reference, and the uniform-raw Two07 candidate. Every frozen arm
+separately binds `construction_seed_basis`, `seed_schedule_sha256`, and
+`dense_anchor_layout`: the certified head uses `production-profile-v1` and
+`disabled`, Wirehair1 uses `not-applicable`, D12 uses `uniform-raw-v1` and
+`disabled`, and Two07 uses `uniform-raw-v1` and `two07`. The raw schedule is
+SHA-256
 `90a98a3db207852dabdf5fb27573ef48bce52e0228cee4e291d96fa44ed509a7`.
 The seed policy is deliberately alongside, not inside, the structure-only arm
 descriptor, so structure and seed-schedule changes cannot masquerade as one
 another.
 
-Raw native records, logical ledgers, and execution receipts use their v2
+Raw native records, logical ledgers, and execution receipts use their v3
 schemas. Each raw row binds the paired precode/packet attempts, effective
 seeds, and realized staircase, binary-dense, and GF(256)-heavy geometry; the
-realized-construction hash covers all of those fields. The work/rank sidecar
+v2 realized-construction hash also covers the dense-anchor layout. The v3
+work/rank sidecar
 independently emits the same identity, and combination requires an exact
 native-to-sidecar trace and construction join for every raw cell. Missing or
-forged policy fields and legacy v1 freezes that claim a closed raw arm name or
-descriptor are rejected.
+forged policy fields are rejected. Legacy raw-v2 evidence remains readable
+only for its historical disabled-anchor descriptors and cannot authenticate
+Two07 or silently downgrade its layout.
 
-The four current raw descriptors form a closed descriptor-to-arm/geometry
-map: D12/H11, D12/H12, D12/H13, and D13/H12, all periodic-Cauchy with mix
-count three. Validation also reproduces the certified `GetDenseCount(K)`
-staircase exactly for every K in 2..64,000, requires the certified source-hit
-boundary (two below K=10,000 and three thereafter), and requires the dense
-identity corner to remain disabled. Recomputing a realized-construction hash
-therefore cannot relabel one descriptor with another arm or geometry.
+The promotional v3 descriptor roster is D12/H12/disabled and
+D12/H12/Two07, both periodic-Cauchy with mix count three. Validation also
+reproduces the certified `GetDenseCount(K)` staircase exactly for every K in
+2..64,000, requires the certified source-hit boundary (two below K=10,000 and
+three thereafter), and requires the dense identity corner to remain disabled.
+Recomputing a realized-construction hash therefore cannot relabel a descriptor
+with another arm, geometry, or anchor layout.
 
-Production and timing evidence remains on `benchmark-freeze.v1` and the
-existing v1 native receipt schemas. Selecting a raw-named architecture does
-not rewrite later repaired/validation production receipts; the schema boundary
-distinguishes raw construction evidence from the arm's human-readable name.
+The timing-proxy witness is structure-only. At the frozen development
+attempt-0 coordinates it proves that D12/H12/disabled non-seed geometry under
+the production timing seed policy equals the production head, while separately
+binding and showing the distinct uniform-raw recovery seeds. It does not claim
+equal graph, peel, rank, or solve work, and another attempt policy requires a
+new witness.
+
+Development recovery under contract v4 must use `benchmark-freeze.v3`; a
+generic v1 freeze cannot relabel arbitrary experimental evidence into this
+architecture comparison. Development timing and later production evidence
+remain on `benchmark-freeze.v1`. In particular, `final_raw` intentionally
+retains its generic production v1 freeze, as do repaired and validation phases.
+
+The development short-screen controller is timing-only. Its exact roster is
+production WH2, Wirehair1, and Two07; it emits only timing (`T`) worker
+commands and never emits, synthesizes, or validates recovery output. The
+four-arm recovery campaign is produced by the dedicated recovery controller.
+Before spawning the timing workers, the controller enumerates executable tasks
+whose complete affinity is contained in the worker/controller cores or their
+online SMT siblings. It repeats that fail-closed check at every timing-wave
+boundary and binds the clean check ledger into the v2 timing execution receipt;
+the validator requires each before/after timestamp to bracket its corresponding
+native wave interval, not merely the outer timing window.
+Explicit background-load PIDs may be paused only when they are owned by the
+invoking user, all their tasks share one sibling-only affinity, and the
+controller retains an exact Linux pidfd for SIGSTOP/SIGCONT cleanup, so PID
+reuse cannot redirect or suppress resume. A fresh cleanup grace period is
+reserved even after the campaign hard wall expires. Qualification remains a
+separate all-logical-CPU saturation phase and is reaped before this timing
+isolation boundary.
+`load_completed_timing_screen` reopens the fixed timing freeze, trace, native
+stream, result, execution receipt, qualification map/audit/native stream,
+qualification receipt, sampler attestations, and the self-hashed v2 run
+summary before returning a validated bundle to the selector.
 
 ## Final recovery phases
 
@@ -149,10 +206,16 @@ shapes remain 63,999 × 3 × 3 = 575,991 cells per arm.
 Final acceptance is a joint decision, never a collection of unrelated
 per-phase passes.  `final_raw`, `final_repaired`, `final_validation`,
 `cross_width_validation`, and final timing contain the two controls plus the
-same one selected candidate and reuse the exact source commit, host, codec
-kinds, binaries, descriptors, repair-training trace, and production map
-hashes.  `validate-final-continuity` also requires the exact development
-selection receipt and the final ordered timing trace manifest.  It replays the
+same selected Two07 candidate in that exact order; the development D12
+reference is forbidden. All five final phases reuse the exact final source
+commit, host, codec kinds, binaries, descriptors, repair-training trace, and
+production map hashes. The final source and binary may differ from the
+development measurement after equation-preserving optimization, but the
+head, Wirehair1, and selected arm/codec/descriptor semantics may not; neither
+may the selected semantic architecture hash.
+`validate-final-continuity` recomputes the v2 development selection from its
+three authoritative artifact directories, exact-compares the published
+receipt, and also requires the final ordered timing trace manifest. It replays the
 manifest against the supplied final qualification map, so another valid map
 with the same offsets and qualified domain but different terminal traces is
 rejected.  It also rejects a different sole candidate and checks semantic
@@ -189,10 +252,16 @@ The recovery cell key is:
  base_seed_attempt, loss_seed, overhead_cap)
 ```
 
-The arm name is intentionally excluded.  Before any result is read, one
-canonical freeze manifest becomes the sole authority for the exact contract,
-source commit, ordered arm roster, per-arm binary and descriptor hashes, domain
-hash, trace-manifest hash, repair-map hashes, commands, affinity, and host.
+The arm name is intentionally excluded. Before any result is read, one
+phase-scoped canonical freeze manifest becomes the sole authority for the exact
+contract, source commit, ordered arm roster, per-arm binary and descriptor
+hashes, domain hash, trace-manifest hash, repair-map hashes, commands, affinity,
+and host. Development raw recovery requires freeze v3, which additionally
+freezes each arm's seed basis, seed schedule, dense-anchor layout, the exact
+architecture roles, timing-proxy witness, and all three work/rank sidecar
+hashes. Timing and non-development production phases continue to use generic
+freeze v1. Read-only legacy raw-v2 development evidence cannot authenticate a
+dense-anchor arm.
 The command-line caller cannot substitute a smaller roster.  Every arm must
 then provide exactly one result for every frozen key.  Missing,
 duplicate, extra, seed-swapped, partial, wrong-band, wrong-loss, or roster-drift
@@ -214,9 +283,13 @@ at all retained thresholds, and contribute four to capped-overhead sums.
 Fatal or internal errors abort instead of becoming scoreable rows.  An
 architecture with a limited K range is selectable only as an explicitly
 measured routed composite whose fallback participates in all common cells.
-An `unsupported` row in either mandatory control invalidates architecture
-selection rather than gifting the candidate an easier baseline; a measured
-control construction failure remains a scored recovery outcome.
+For raw-v3 architecture selection, the two production recovery controls are
+descriptive: their `unsupported` or failed rows remain visibly scored but do
+not veto a candidate that passes the closed D12 recovery-reference comparison.
+An `unsupported` row in the D12 reference or candidate does invalidate that
+comparison.  Timing qualification still requires both controls to recover the
+chosen loss trace before any candidate timing begins, so descriptive recovery
+status cannot gift the candidate an easier timing baseline.
 Every result also binds the realized public construction-attempt index, the
 SHA-256 of the realized construction descriptor, and the arm's repair-map
 SHA-256.  Raw WH2 phases require the cell's base attempt and an all-zero no-map
@@ -436,11 +509,12 @@ eight-worker timing topology.  Timing evidence embeds this qualification
 receipt's SHA-256 and rejects a surviving or overlapping worker identity.
 
 The timing trace-manifest v2 hash header binds the qualification-map SHA-256
-plus the base and qualified domain hashes.  Its selected trace at each ordinal
-must equal the terminal audit row.  The unchanged freeze v1 directly binds the
-qualified domain and this v2 manifest hash, thereby transitively binding the
-map, audit, offsets, and selected trace roster without adding recovery-freeze
-fields or depending on a future candidate.
+plus the base and qualified domain hashes. Its selected trace at each ordinal
+must equal the terminal audit row. Timing's phase-scoped generic freeze v1
+directly binds the qualified domain and this v2 manifest hash, thereby
+transitively binding the map, audit, offsets, and selected trace roster. This
+timing use of v1 does not weaken the separate raw-v3 requirement for
+development recovery.
 
 After qualification, a candidate non-success carries eight null durations,
 remains explicit, and makes the affected panel non-selectable.  It never
@@ -517,6 +591,19 @@ raw-cell and timing streams.  Separate final-phase native emitters remain
 required before promotion.  Aggregate `compare` or `precodefail` output remains
 diagnostic and cannot satisfy this contract.
 
+Select the development winner only from the three completed artifact
+directories. There is deliberately no summary-only CLI, and a no-winner run
+publishes no receipt:
+
+```bash
+PYTHONWARNINGS=error python3 \
+  bench/wh2_select_development_architecture.py \
+  --recovery-campaign-dir development-recovery-run \
+  --work-rank-dir development-work-rank-run \
+  --timing-screen-dir development-timing-run \
+  --output development-selection.json
+```
+
 Before final promotion, run the continuity check with one argument for each
 required freeze:
 
@@ -524,6 +611,9 @@ required freeze:
 PYTHONWARNINGS=error python3 bench/wh2_benchmark_contract.py \
   validate-final-continuity \
   --selection-receipt development-selection.json \
+  --development-recovery-campaign-dir development-recovery-run \
+  --development-work-rank-dir development-work-rank-run \
+  --development-timing-screen-dir development-timing-run \
   --timing-qualification-map final-timing-qualification.json \
   --timing-qualification-audit final-timing-qualification.jsonl \
   --timing-qualification-map-sha256 MAP_SHA256 \

@@ -1,5 +1,10 @@
 #pragma once
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS) && \
+    defined(WIREHAIR_V2_ENABLE_BENCHMARK_EQUATIONS)
+#error "WH2 test hooks and benchmark equations are mutually exclusive"
+#endif
+
 #include <stdint.h>
 
 #include <vector>
@@ -45,6 +50,21 @@ enum class HeavyCoefficientFamily : uint32_t
     HashedNonzero = 1
 };
 
+/**
+    Experiment-only segmentation of the D=12 Shuffle-2 dense equations.
+
+    An anchor is a freshly shuffled balanced half-row.  Rows between anchors
+    retain the certified one-set/one-clear two-column delta cadence.  The
+    layouts are pure binary/GF(256) architecture arms; named/public profiles
+    always use Disabled.
+*/
+enum class DenseAnchorLayout : uint32_t
+{
+    Disabled = 0,
+    Two07 = 1,    ///< independent anchors at rows {0, 7}
+    Four0369 = 2 ///< independent anchors at rows {0, 3, 6, 9}
+};
+
 struct PrecodeParams
 {
     uint32_t BlockCount = 0;   ///< K: source blocks
@@ -75,6 +95,8 @@ struct PrecodeParams
     HeavyCoefficientFamily HeavyFamily =
         HeavyCoefficientFamily::PeriodicCauchy;
 
+    DenseAnchorLayout DenseAnchors = DenseAnchorLayout::Disabled;
+
     uint64_t Seed = 0;         ///< constraint-generation seed
 };
 
@@ -99,28 +121,34 @@ struct PrecodeSystem
     std::vector<std::vector<uint32_t>> StaircaseRows;
 
     /**
-        Shuffle-2 dense rows.
+        Equation-preserving Shuffle-2 dense basis.
 
-        Row r (r in [0, D2)) is a GF(2) constraint over binary columns
-        [0, K + S + D2), stored as a sorted column list.  In the certified
-        construction, row 0 has exactly ceil((K+S+D2)/2) columns and every
-        row r > 0 differs from row r - 1 in exactly two columns.  In the
-        identity-corner variant, the deck spans only K+S known columns and
-        each row additionally owns dense column K+S+r; consecutive full rows
-        differ in four columns, but their known-column part still changes by
-        exactly two deck flips.
+        Each segment starts with its balanced half-dense anchor row.  Every
+        later entry is the sorted two-column delta from the preceding
+        equation rather than a stored copy of that half-dense equation.  In
+        the identity-corner variant, a delta additionally contains the old
+        and new owned dense columns, for four entries total.  Applying these
+        elementary row additions preserves the exact original equation span
+        while avoiding duplicate full-row construction and storage.
 
         Known limitation (inherited from the certified reference
         construction): at tiny EVEN spans (K=2 and K=4 with the certified
-        table) a later row's weight can walk down to exactly zero — a dead
-        constraint — at roughly 1e-4 systems.  Guarding would break the
+        table) a reconstructed later row can walk down to exactly zero — a
+        dead constraint — at roughly 1e-4 systems.  Guarding would break the
         exact-2-difference invariant.  Version-4 message initialization
         instead rejects rank-deficient attempts and deterministically selects
         a full-rank joint packet/precode seed; exhaustive tiny-K tests pin the
         selected attempts.
     */
-    std::vector<std::vector<uint32_t>> DenseRowColumns;
+    std::vector<std::vector<uint32_t>> DenseBasisRowColumns;
 };
+
+/**
+    Allocation-free validation of Params and the two outer row-vector sizes.
+    This is the exact prefix checked by ValidatePrecodeSystem before it
+    allocates source-hit scratch.
+*/
+bool HasValidPrecodeSystemShape(const PrecodeSystem& system);
 
 /**
     Build the staircase + Shuffle-2 constraint structure.
@@ -128,13 +156,18 @@ struct PrecodeSystem
     Returns false for invalid parameters (BlockCount outside [2, 64000],
     Staircase == 0, SourceHits outside [1, 8], DenseRows > 64,
     HeavyRows > 128, or a full symbol domain that does not fit uint16) or if
-    the generated structure fails ValidatePrecodeSystem().
+    the generated structure fails ValidatePrecodeSystem().  This low-level
+    construction primitive may throw std::bad_alloc or std::length_error;
+    status-bearing API boundaries translate those exceptions to Wirehair_OOM.
 */
 bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out);
 
 /**
     Validate every structural invariant consumed by the encoder.  Validation
-    uses widened arithmetic and performs no writes to block data.
+    uses widened arithmetic and performs no writes to block data.  Validation
+    allocates bounded source-hit scratch and may throw std::bad_alloc or
+    std::length_error; bool and WirehairResult API boundaries that invoke it
+    define their own exception translation.
 */
 bool ValidatePrecodeSystem(const PrecodeSystem& system);
 

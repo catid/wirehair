@@ -792,46 +792,90 @@ if(BUILD_TESTS)
     set_tests_properties(wirehair_wh2_native_panel_test PROPERTIES
         TIMEOUT 120
         LABELS "wh2;benchmark;contract;native;timing;affinity")
-    add_executable(wirehair_wh2_native_codec_test
-        bench/Wh2NativeCodec.cpp
-        bench/Wh2NativeCodec.h
-        bench/Wh2NativeCodecTest.cpp)
-    target_link_libraries(wirehair_wh2_native_codec_test PRIVATE
-        ${WIREHAIR_INTERNAL_LIBRARY})
-    wirehair_apply_project_options(wirehair_wh2_native_codec_test)
-    add_test(
-        NAME wirehair_wh2_native_codec_test
-        COMMAND wirehair_wh2_native_codec_test)
-    set_tests_properties(wirehair_wh2_native_codec_test PROPERTIES
-        TIMEOUT 180
-        LABELS "wh2;benchmark;contract;native;codec")
-    add_executable(wirehair_wh2_contract_worker
-        bench/Wh2ContractWorker.cpp
-        bench/Wh2FrozenTrace.cpp
-        bench/Wh2FrozenTrace.h
-        bench/Wh2FrozenTiming.cpp
-        bench/Wh2FrozenTiming.h
-        bench/Wh2NativeCodec.cpp
-        bench/Wh2NativeCodec.h
-        bench/Wh2NativePanel.cpp
-        bench/Wh2NativePanel.h)
-    target_compile_definitions(wirehair_wh2_contract_worker PRIVATE
-        "WIREHAIR_WH2_SOURCE_GIT_COMMIT=\"${WIREHAIR_WH2_SOURCE_GIT_COMMIT}\"")
-    target_link_libraries(wirehair_wh2_contract_worker PRIVATE
-        ${WIREHAIR_INTERNAL_LIBRARY}
-        Threads::Threads)
-    wirehair_apply_project_options(wirehair_wh2_contract_worker)
-    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT CMAKE_CROSSCOMPILING)
+    if(BUILD_CODEC_V2)
+        # These native experiment targets execute test-hook-only equation
+        # transforms.  The production library intentionally rejects them.
+        add_executable(wirehair_wh2_native_codec_test
+            bench/Wh2NativeCodec.cpp
+            bench/Wh2NativeCodec.h
+            bench/Wh2NativeCodecTest.cpp)
+        target_link_libraries(wirehair_wh2_native_codec_test PRIVATE
+            wirehair_v2_policy)
+        wirehair_apply_project_options(wirehair_wh2_native_codec_test)
         add_test(
-            NAME wirehair_wh2_contract_worker_cli_test
-            COMMAND ${Python3_EXECUTABLE}
-                ${PROJECT_SOURCE_DIR}/bench/wh2_contract_worker_cli_test.py
-                $<TARGET_FILE:wirehair_wh2_contract_worker>)
-        set_tests_properties(wirehair_wh2_contract_worker_cli_test PROPERTIES
-            WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
-            ENVIRONMENT "PYTHONWARNINGS=error"
-            TIMEOUT 120
-            LABELS "wh2;benchmark;contract;native;worker;recovery")
+            NAME wirehair_wh2_native_codec_test
+            COMMAND wirehair_wh2_native_codec_test)
+        set_tests_properties(wirehair_wh2_native_codec_test PROPERTIES
+            TIMEOUT 180
+            LABELS "wh2;benchmark;contract;native;codec")
+        add_executable(wirehair_wh2_phase_attribution_test
+            bench/Wh2NativeCodec.cpp
+            bench/Wh2NativeCodec.h
+            bench/Wh2NativePanel.cpp
+            bench/Wh2NativePanel.h
+            bench/Wh2PhaseAttribution.cpp
+            bench/Wh2PhaseAttribution.h
+            bench/Wh2PhaseAttributionTest.cpp)
+        target_link_libraries(wirehair_wh2_phase_attribution_test PRIVATE
+            wirehair_v2_timing_policy)
+        wirehair_apply_project_options(wirehair_wh2_phase_attribution_test)
+        add_test(
+            NAME wirehair_wh2_phase_attribution_test
+            COMMAND wirehair_wh2_phase_attribution_test)
+        set_tests_properties(wirehair_wh2_phase_attribution_test PROPERTIES
+            TIMEOUT 180
+            LABELS "wh2;benchmark;contract;native;timing;phase")
+        add_executable(wirehair_wh2_contract_worker
+            bench/Wh2ContractWorker.cpp
+            bench/Wh2FrozenTrace.cpp
+            bench/Wh2FrozenTrace.h
+            bench/Wh2FrozenTiming.cpp
+            bench/Wh2FrozenTiming.h
+            bench/Wh2NativeCodec.cpp
+            bench/Wh2NativeCodec.h
+            bench/Wh2NativePanel.cpp
+            bench/Wh2NativePanel.h
+            bench/Wh2PhaseAttribution.cpp
+            bench/Wh2PhaseAttribution.h)
+        target_compile_definitions(wirehair_wh2_contract_worker PRIVATE
+            "WIREHAIR_WH2_SOURCE_GIT_COMMIT=\"${WIREHAIR_WH2_SOURCE_GIT_COMMIT}\"")
+        target_link_libraries(wirehair_wh2_contract_worker PRIVATE
+            wirehair_v2_timing_policy
+            Threads::Threads)
+        wirehair_apply_project_options(wirehair_wh2_contract_worker)
+        if(CMAKE_NM)
+            add_test(
+                NAME wirehair_wh2_timing_policy_symbol_audit
+                COMMAND ${CMAKE_COMMAND}
+                    "-DNM=${CMAKE_NM}"
+                    "-DOBJDUMP=${CMAKE_OBJDUMP}"
+                    "-DSYSTEM_NAME=${CMAKE_SYSTEM_NAME}"
+                    "-DLTO_MODE=${WH_LTO}"
+                    "-DTIMING_POLICY=$<TARGET_FILE:wirehair_v2_timing_policy>"
+                    "-DCONTRACT_WORKER=$<TARGET_FILE:wirehair_wh2_contract_worker>"
+                    "-DPHASE_TIMING=$<TARGET_FILE:wirehair_wh2_phase_attribution_test>"
+                    -P ${PROJECT_SOURCE_DIR}/cmake/Wh2TimingPolicySymbolAudit.cmake)
+            set_tests_properties(
+                wirehair_wh2_timing_policy_symbol_audit
+                PROPERTIES
+                    TIMEOUT 30
+                    LABELS "wh2;benchmark;contract;timing;symbols")
+        endif()
+    endif()
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT CMAKE_CROSSCOMPILING)
+        if(BUILD_CODEC_V2)
+            add_test(
+                NAME wirehair_wh2_contract_worker_cli_test
+                COMMAND ${Python3_EXECUTABLE}
+                    ${PROJECT_SOURCE_DIR}/bench/wh2_contract_worker_cli_test.py
+                    $<TARGET_FILE:wirehair_wh2_contract_worker>)
+            set_tests_properties(wirehair_wh2_contract_worker_cli_test
+                PROPERTIES
+                WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+                ENVIRONMENT "PYTHONWARNINGS=error"
+                TIMEOUT 120
+                LABELS "wh2;benchmark;contract;native;worker;recovery")
+        endif()
         add_test(
             NAME wh2_run_native_recovery_screen_test
             COMMAND ${Python3_EXECUTABLE} -m unittest -v
@@ -850,6 +894,33 @@ if(BUILD_TESTS)
             ENVIRONMENT "PYTHONWARNINGS=error"
             TIMEOUT 180
             LABELS "wh2;benchmark;contract;recovery;precodefail;runner")
+        add_test(
+            NAME wh2_select_development_architecture_test
+            COMMAND ${Python3_EXECUTABLE} -m unittest -v
+                bench/test_wh2_select_development_architecture.py)
+        set_tests_properties(wh2_select_development_architecture_test PROPERTIES
+            WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+            ENVIRONMENT "PYTHONWARNINGS=error"
+            TIMEOUT 120
+            LABELS "wh2;benchmark;contract;selection;recovery;timing")
+        add_test(
+            NAME wh2_phase_attribution_python_test
+            COMMAND ${Python3_EXECUTABLE} -m unittest -v
+                bench/test_wh2_phase_attribution.py)
+        set_tests_properties(wh2_phase_attribution_python_test PROPERTIES
+            WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+            ENVIRONMENT "PYTHONWARNINGS=error"
+            TIMEOUT 180
+            LABELS "wh2;benchmark;contract;native;timing;phase")
+        add_test(
+            NAME wh2_run_native_phase_attribution_test
+            COMMAND ${Python3_EXECUTABLE} -m unittest -v
+                bench/test_wh2_run_native_phase_attribution.py)
+        set_tests_properties(wh2_run_native_phase_attribution_test PROPERTIES
+            WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+            ENVIRONMENT "PYTHONWARNINGS=error"
+            TIMEOUT 180
+            LABELS "wh2;benchmark;contract;native;runner;timing;phase")
     endif()
     add_test(
         NAME wh2_benchmark_contract_test
@@ -876,7 +947,10 @@ if(BUILD_TESTS)
     set_tests_properties(wh2_run_native_short_screen_test PROPERTIES
         WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
         ENVIRONMENT "PYTHONWARNINGS=error"
-        TIMEOUT 120
+        # The fault-injection/cleanup matrix is validated separately on Python
+        # 3.8 and current interpreters and takes roughly five to six minutes
+        # per configured interpreter on one core under full-system load.
+        TIMEOUT 600
         LABELS "wh2;benchmark;contract;native;runner;affinity")
 endif()
 

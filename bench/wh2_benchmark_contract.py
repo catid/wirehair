@@ -20,15 +20,16 @@ from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Seque
 import weakref
 
 
-SCHEMA = "wirehair.wh2.benchmark-contract.v3"
+SCHEMA = "wirehair.wh2.benchmark-contract.v4"
 FREEZE_SCHEMA = "wirehair.wh2.benchmark-freeze.v1"
-RAW_FREEZE_SCHEMA = "wirehair.wh2.benchmark-freeze.v2"
+LEGACY_RAW_FREEZE_SCHEMA = "wirehair.wh2.benchmark-freeze.v2"
+RAW_FREEZE_SCHEMA = "wirehair.wh2.benchmark-freeze.v3"
 REPAIR_MAP_SCHEMA = "wirehair.wh2.repair-map.v1"
 TIMING_QUALIFICATION_MAP_SCHEMA = \
     "wirehair.wh2.timing-qualification-map.v1"
 TIMING_QUALIFICATION_AUDIT_SCHEMA = \
     "wirehair.wh2.timing-qualification-audit.v1"
-DEFAULT_CONTRACT = Path(__file__).with_name("wh2_benchmark_contract_v3.json")
+DEFAULT_CONTRACT = Path(__file__).with_name("wh2_benchmark_contract_v4.json")
 MAX_JSON_LINE_BYTES = 64 * 1024
 HEX64 = re.compile(r"0x[0-9a-f]{16}\Z")
 HEX32 = re.compile(r"0x[0-9a-f]{8}\Z")
@@ -64,21 +65,31 @@ RAW_STRUCTURE_BY_DESCRIPTOR = {
         "arm": "wirehair2_raw_d12_h11_periodic",
         "binary_dense_rows": 12, "gf256_heavy_rows": 11,
         "heavy_family": "periodic-cauchy", "mix_count": 3,
+        "dense_anchor_layout": "disabled",
     },
     "739092a7824449e6168f08b46661dfbe8ad5495ea4166b36073c79cd3bacdd11": {
         "arm": "wirehair2_raw_d12_h12_periodic",
         "binary_dense_rows": 12, "gf256_heavy_rows": 12,
         "heavy_family": "periodic-cauchy", "mix_count": 3,
+        "dense_anchor_layout": "disabled",
     },
     "7c7889747a97ac160726b807fb03349344d49d4bec84c9e8220aa4689b00d2ca": {
         "arm": "wirehair2_raw_d12_h13_periodic",
         "binary_dense_rows": 12, "gf256_heavy_rows": 13,
         "heavy_family": "periodic-cauchy", "mix_count": 3,
+        "dense_anchor_layout": "disabled",
     },
     "c70e0f57bb8d7783fa29b0decbed5da5058a8eb532d57d540f72108e114f091a": {
         "arm": "wirehair2_raw_d13_h12_periodic",
         "binary_dense_rows": 13, "gf256_heavy_rows": 12,
         "heavy_family": "periodic-cauchy", "mix_count": 3,
+        "dense_anchor_layout": "disabled",
+    },
+    "9527f200ad38c7eec6502b2f768fdd67b92787fb227eed3d7616274ffc2df388": {
+        "arm": "wirehair2_dense_two07_basis_v1",
+        "binary_dense_rows": 12, "gf256_heavy_rows": 12,
+        "heavy_family": "periodic-cauchy", "mix_count": 3,
+        "dense_anchor_layout": "two07",
     },
 }
 RAW_ARM_DESCRIPTOR_SHA256S = LEGACY_RAW_ARM_DESCRIPTOR_SHA256S | frozenset(
@@ -461,6 +472,29 @@ EXPECTED_INVALID_TIMER_POLICY = (
 )
 EXPECTED_SELECTION_POLICY = {
     "controls": ["wirehair2_head", "wirehair1"],
+    "development_architecture_roles": {
+        "descriptive_controls": ["wirehair2_head", "wirehair1"],
+        "recovery_reference": "wirehair2_raw_d12_h12_periodic",
+        "recovery_candidates": ["wirehair2_dense_two07_basis_v1"],
+        "timing_proxy": "wirehair2_head",
+        "timing_candidates": ["wirehair2_dense_two07_basis_v1"],
+    },
+    "development_recovery_eligibility": (
+        "candidate eligibility is gated only against the uniform-raw D12/H12 "
+        "recovery reference; production WH2 and Wirehair1 are descriptive "
+        "non-vetoing controls"
+    ),
+    "development_timing_eligibility": (
+        "time only the frozen Two07 candidate against the production-head "
+        "D12 structure proxy; the raw D12 recovery reference has no timing "
+        "panel"
+    ),
+    "development_timing_proxy_policy": (
+        "the witness proves only D12-disabled non-seed structure equivalence "
+        "under development attempt-0 production timing seeds, separately "
+        "binds the distinct uniform-raw recovery seed schedule, and requires "
+        "a new witness for any other attempt semantics"
+    ),
     "noninferiority_margin_ppm": 1000,
     "architecture_failure_equivalence_ppm": 1000,
     "raw_weak_seed_definition": (
@@ -506,15 +540,30 @@ EXPECTED_SELECTION_POLICY = {
 }
 EXPECTED_EVIDENCE_POLICY = {
     "freeze_before_results": [
-        "source_git_commit", "benchmark_binary_sha256", "contract_sha256",
-        "arm_roster_sha256", "recovery_domain_sha256", "timing_domain_sha256",
-        "trace_manifest_sha256", "arm_descriptor_sha256", "repair_map_sha256",
-        "repair_training_trace_manifest_sha256", "commands", "CPU_affinity",
-        "host_identity",
+        "all freezes: source_git_commit", "all freezes: contract_sha256",
+        "all freezes: arm_roster_sha256", "all freezes: domain_sha256",
+        "all freezes: trace_manifest_sha256",
+        "all freezes per arm: binary_sha256",
+        "all freezes per arm: arm_descriptor_sha256",
+        "all freezes per arm: repair_map_sha256",
+        "all freezes: repair_training_trace_manifest_sha256",
+        "all freezes: commands", "all freezes: cpu_affinity",
+        "all freezes: host_identity",
+        "development raw-v3 per arm: construction_seed_basis",
+        "development raw-v3 per arm: seed_schedule_sha256",
+        "development raw-v3 per arm: dense_anchor_layout",
+        "development raw-v3: architecture_roles",
+        "development raw-v3: timing_proxy_witness_sha256",
+        "development raw-v3: work_rank_summary_sha256",
+        "development raw-v3: work_rank_result_stream_sha256",
+        "development raw-v3: work_rank_domain_sha256",
     ],
     "freeze_manifest_schema": (
-        "wirehair.wh2.benchmark-freeze.v1 canonical JSON object; it is the "
-        "sole arm-roster and artifact authority"
+        "phase-scoped canonical JSON: benchmark-freeze.v3 is mandatory for "
+        "development raw recovery; benchmark-freeze.v1 remains mandatory "
+        "for timing and non-development production phases; read-only legacy "
+        "raw-v2 development evidence cannot authenticate dense-anchor arms; "
+        "each accepted manifest is the sole arm-roster and artifact authority"
     ),
     "trace_manifest_schema": (
         "recovery uses wirehair.wh2.trace-manifest.v1; timing uses v2 with "
@@ -552,7 +601,9 @@ EXPECTED_EVIDENCE_POLICY = {
         "qualification_map_drift", "qualification_audit_drift",
         "loss_retry_drift", "source_identity_drift",
         "timing_panel_drift", "timing_order_drift", "timing_batch_drift",
-        "timing_geometry_drift",
+        "timing_geometry_drift", "raw_schema_downgrade",
+        "dense_anchor_layout_drift", "architecture_role_drift",
+        "timing_proxy_witness_drift", "work_rank_binding_drift",
     ],
     "selectable_excluded_cells": 0,
     "unsupported_policy": (
@@ -577,13 +628,18 @@ LEDGER_FIELDS = frozenset((
     "arm_descriptor_sha256", "construction_attempt",
     "realized_construction_sha256", "repair_map_sha256",
 ))
-RAW_CONSTRUCTION_FIELDS = (
+LEGACY_RAW_CONSTRUCTION_FIELDS = (
     "construction_seed_basis", "seed_schedule_sha256",
     "precode_attempt", "packet_attempt", "effective_precode_seed",
     "effective_packet_seed", "staircase", "binary_dense_rows",
     "gf256_heavy_rows", "source_hits", "dense_identity_corner",
     "heavy_family", "mix_count",
 )
+RAW_CONSTRUCTION_FIELDS = LEGACY_RAW_CONSTRUCTION_FIELDS + (
+    "dense_anchor_layout",
+)
+LEGACY_RAW_RECOVERY_RECORD_FIELDS = LEDGER_FIELDS | frozenset(
+    LEGACY_RAW_CONSTRUCTION_FIELDS)
 RAW_RECOVERY_RECORD_FIELDS = LEDGER_FIELDS | frozenset(
     RAW_CONSTRUCTION_FIELDS)
 TIMING_RECEIPT_FIELDS = frozenset((
@@ -618,6 +674,25 @@ FREEZE_ARM_FIELDS = frozenset((
 RAW_FREEZE_ARM_FIELDS = FREEZE_ARM_FIELDS | frozenset((
     "construction_seed_basis", "seed_schedule_sha256",
 ))
+RAW_V3_FREEZE_ARM_FIELDS = RAW_FREEZE_ARM_FIELDS | frozenset((
+    "dense_anchor_layout",
+))
+RAW_V3_FREEZE_FIELDS = FREEZE_FIELDS | frozenset((
+    "architecture_roles", "timing_proxy_witness_sha256",
+    "work_rank_summary_sha256", "work_rank_result_stream_sha256",
+    "work_rank_domain_sha256",
+))
+RAW_ARCHITECTURE_ROLE_FIELDS = frozenset((
+    "descriptive_controls", "recovery_reference", "recovery_candidates",
+    "timing_proxy", "timing_candidates",
+))
+EXPECTED_RAW_ARCHITECTURE_ROLES = {
+    "descriptive_controls": ["wirehair2_head", "wirehair1"],
+    "recovery_reference": "wirehair2_raw_d12_h12_periodic",
+    "recovery_candidates": ["wirehair2_dense_two07_basis_v1"],
+    "timing_proxy": "wirehair2_head",
+    "timing_candidates": ["wirehair2_dense_two07_basis_v1"],
+}
 REPAIR_MAP_FIELDS = frozenset((
     "schema", "contract_sha256", "training_domain_sha256", "arm",
     "source_git_commit", "binary_sha256", "arm_descriptor_sha256",
@@ -652,16 +727,43 @@ FINAL_FREEZE_KEYS = frozenset((
     ("timing", "final"),
 ))
 SELECTION_FIELDS = frozenset((
-    "schema", "contract_sha256", "recovery_domain_sha256",
-    "timing_base_domain_sha256", "timing_domain_sha256",
-    "timing_qualification_map_sha256", "recovery_freeze_manifest_sha256",
-    "timing_freeze_manifest_sha256", "architecture_artifact_sha256",
-    "recovery_cells_per_arm", "timing_rows", "candidate_roster",
-    "eligible_candidates", "eligible_overhead0_failures",
-    "minimum_overhead0_failures", "recovery_equivalence_allowance",
-    "recovery_equivalent_candidates", "ranking", "selected_arm",
-    "selected_codec", "selected_arm_descriptor_sha256",
-    "selected_architecture_sha256", "selection_sha256",
+    "schema", "contract_sha256", "source_git_commit",
+    "architecture_roles", "recovery_arm_roster", "timing_arm_roster",
+    "recovery_domain_sha256", "timing_base_domain_sha256",
+    "timing_domain_sha256", "timing_qualification_map_sha256",
+    "recovery_freeze_manifest_sha256",
+    "recovery_architecture_artifact_sha256",
+    "recovery_run_summary_sha256", "recovery_result_stream_sha256",
+    "recovery_execution_receipt_sha256",
+    "timing_freeze_manifest_sha256",
+    "timing_architecture_artifact_sha256",
+    "timing_run_summary_sha256", "timing_result_stream_sha256",
+    "timing_execution_receipt_sha256",
+    "timing_qualification_execution_receipt_sha256",
+    "timing_proxy_witness_sha256", "work_rank_summary_sha256",
+    "work_rank_result_stream_sha256", "work_rank_domain_sha256",
+    "recovery_reference_arm", "recovery_reference_codec",
+    "recovery_reference_binary_sha256",
+    "recovery_reference_arm_descriptor_sha256",
+    "wirehair1_control_arm", "wirehair1_control_codec",
+    "wirehair1_control_binary_sha256",
+    "wirehair1_control_arm_descriptor_sha256", "timing_proxy_arm",
+    "timing_proxy_codec", "timing_proxy_binary_sha256",
+    "timing_proxy_arm_descriptor_sha256", "recovery_cells_per_arm",
+    "timing_rows", "candidate_roster", "eligible_candidates",
+    "eligible_overhead0_failures", "minimum_overhead0_failures",
+    "recovery_equivalence_allowance", "recovery_equivalent_candidates",
+    "ranking", "selected_arm", "selected_codec",
+    "selected_arm_descriptor_sha256", "selected_architecture_sha256",
+    "selection_sha256",
+))
+SELECTION_PROVENANCE_FIELDS = frozenset((
+    "recovery_run_summary_sha256", "recovery_result_stream_sha256",
+    "recovery_execution_receipt_sha256", "timing_run_summary_sha256",
+    "timing_result_stream_sha256", "timing_execution_receipt_sha256",
+    "timing_qualification_execution_receipt_sha256",
+    "timing_proxy_witness_sha256", "work_rank_summary_sha256",
+    "work_rank_result_stream_sha256", "work_rank_domain_sha256",
 ))
 
 
@@ -722,6 +824,57 @@ def _timing_qualification_registry() -> Tuple[Any, Any]:
 
 _seal_timing_qualification, _timing_qualification_is_registered = \
     _timing_qualification_registry()
+
+
+ARCHITECTURE_SELECTION_HANDLE_FIELDS = (
+    "contract_sha256", "selection_sha256", "canonical_receipt",
+)
+
+
+class ArchitectureSelection:
+    """Opaque handle for an artifact-recomputed architecture selection."""
+
+    __slots__ = ARCHITECTURE_SELECTION_HANDLE_FIELDS + ("__weakref__",)
+
+    def __new__(cls, *_args: Any, **_kwargs: Any) -> "ArchitectureSelection":
+        fail("ArchitectureSelection objects must come from the strict loader")
+        raise AssertionError("unreachable")
+
+    def __setattr__(self, _name: str, _value: Any) -> None:
+        raise AttributeError("ArchitectureSelection is immutable")
+
+
+def _architecture_selection_registry() -> Tuple[Any, Any]:
+    """Return a strict-loader sealer and out-of-band provenance verifier."""
+    snapshots: Any = weakref.WeakKeyDictionary()
+    fields = ARCHITECTURE_SELECTION_HANDLE_FIELDS
+
+    def snapshot(value: ArchitectureSelection) -> Tuple[Any, ...]:
+        return tuple(getattr(value, field) for field in fields)
+
+    def seal(values: Mapping[str, Any]) -> ArchitectureSelection:
+        if set(values) != set(fields):
+            fail("internal architecture-selection seal has the wrong schema")
+        value = object.__new__(ArchitectureSelection)
+        for field in fields:
+            object.__setattr__(value, field, values[field])
+        snapshots[value] = snapshot(value)
+        return value
+
+    def verify(value: Any) -> bool:
+        if type(value) is not ArchitectureSelection:
+            return False
+        try:
+            expected = snapshots.get(value)
+            return expected is not None and expected == snapshot(value)
+        except (AttributeError, TypeError):
+            return False
+
+    return seal, verify
+
+
+_seal_architecture_selection_handle, _architecture_selection_is_registered = \
+    _architecture_selection_registry()
 
 
 def fail(message: str) -> None:
@@ -814,7 +967,8 @@ def freeze_manifest_sha256(value: Mapping[str, Any]) -> str:
         key: item for key, item in value.items() if key != "arms_by_name"
     }
     schema = manifest.get("schema")
-    if schema not in (FREEZE_SCHEMA, RAW_FREEZE_SCHEMA):
+    if schema not in (
+            FREEZE_SCHEMA, LEGACY_RAW_FREEZE_SCHEMA, RAW_FREEZE_SCHEMA):
         fail("cannot hash an unknown freeze-manifest schema")
     digest = hashlib.sha256()
     digest.update(schema.encode("ascii") + b"\0")
@@ -922,8 +1076,11 @@ def _effective_raw_packet_seed(attempt: int) -> str:
 
 
 def _validate_raw_construction_fields(
-        value: Mapping[str, Any], context: str) -> Mapping[str, Any]:
-    _exact_keys(value, RAW_CONSTRUCTION_FIELDS, context)
+        value: Mapping[str, Any], context: str,
+        require_dense_anchor_layout: bool = True) -> Mapping[str, Any]:
+    fields = RAW_CONSTRUCTION_FIELDS if require_dense_anchor_layout else \
+        LEGACY_RAW_CONSTRUCTION_FIELDS
+    _exact_keys(value, fields, context)
     if value["construction_seed_basis"] != RAW_CONSTRUCTION_SEED_BASIS:
         fail("{} uses an unknown construction seed basis".format(context))
     if value["seed_schedule_sha256"] != RAW_SEED_SCHEDULE_SHA256:
@@ -958,6 +1115,10 @@ def _validate_raw_construction_fields(
         fail("{} dense_identity_corner must be boolean".format(context))
     if value["heavy_family"] != "periodic-cauchy":
         fail("{} heavy_family must be periodic-cauchy".format(context))
+    if require_dense_anchor_layout and value["dense_anchor_layout"] not in (
+            "disabled", "two07"):
+        fail("{} dense_anchor_layout must be disabled or two07".format(
+            context))
     return value
 
 
@@ -985,6 +1146,11 @@ def _validate_raw_descriptor_structure(
     if value["dense_identity_corner"] is not False:
         fail("{} dense identity corner disagrees with the raw descriptor".format(
             context))
+    expected_layout = expected["dense_anchor_layout"]
+    actual_layout = value.get("dense_anchor_layout", "disabled")
+    if actual_layout != expected_layout:
+        fail("{} dense anchor layout disagrees with the raw descriptor".format(
+            context))
 
 
 def raw_realized_construction_sha256(
@@ -992,7 +1158,7 @@ def raw_realized_construction_sha256(
         block_bytes: int, raw_fields: Mapping[str, Any]) -> str:
     if codec != "wirehair2_experiment":
         fail("raw realized construction requires an experimental WH2 codec")
-    if (not isinstance(arm, str) or not arm.startswith("wirehair2_raw_") or
+    if (not isinstance(arm, str) or not arm or
             not isinstance(arm_descriptor_sha256, str) or
             SHA256.fullmatch(arm_descriptor_sha256) is None):
         fail("raw realized construction has an invalid arm identity")
@@ -1001,7 +1167,43 @@ def raw_realized_construction_sha256(
             block_bytes >= 1 << 32 or K * block_bytes >= 1 << 64):
         fail("raw realized construction has invalid dimensions")
     fields = _validate_raw_construction_fields(
-        raw_fields, "raw realized construction")
+        raw_fields, "raw realized construction", True)
+    _validate_raw_descriptor_structure(
+        arm, arm_descriptor_sha256, K, fields,
+        "raw realized construction")
+    return sha256_json({
+        "schema": "wirehair.wh2.raw-realized-construction.v2",
+        "codec": codec,
+        "arm": arm,
+        "arm_descriptor_sha256": arm_descriptor_sha256,
+        "K": K,
+        "block_bytes": block_bytes,
+        **{field: fields[field] for field in RAW_CONSTRUCTION_FIELDS},
+    })
+
+
+def legacy_raw_realized_construction_sha256(
+        codec: str, arm: str, arm_descriptor_sha256: str, K: int,
+        block_bytes: int, raw_fields: Mapping[str, Any]) -> str:
+    """Recompute legacy raw-v2 evidence without permitting Two07 downgrade."""
+    if codec != "wirehair2_experiment":
+        fail("legacy raw realized construction requires experimental WH2")
+    if (not isinstance(arm, str) or not arm.startswith("wirehair2_raw_") or
+            not isinstance(arm_descriptor_sha256, str) or
+            SHA256.fullmatch(arm_descriptor_sha256) is None):
+        fail("legacy raw realized construction has an invalid arm identity")
+    structure = RAW_STRUCTURE_BY_DESCRIPTOR.get(arm_descriptor_sha256)
+    if structure is None or structure["dense_anchor_layout"] != "disabled":
+        fail("legacy raw evidence cannot authenticate a dense-anchor layout")
+    if (type(K) is not int or not 2 <= K <= 64000 or
+            type(block_bytes) is not int or block_bytes <= 0 or
+            block_bytes >= 1 << 32 or K * block_bytes >= 1 << 64):
+        fail("legacy raw realized construction has invalid dimensions")
+    fields = _validate_raw_construction_fields(
+        raw_fields, "legacy raw realized construction", False)
+    _validate_raw_descriptor_structure(
+        arm, arm_descriptor_sha256, K, fields,
+        "legacy raw realized construction")
     return sha256_json({
         "schema": "wirehair.wh2.raw-realized-construction.v1",
         "codec": codec,
@@ -1009,7 +1211,8 @@ def raw_realized_construction_sha256(
         "arm_descriptor_sha256": arm_descriptor_sha256,
         "K": K,
         "block_bytes": block_bytes,
-        **{field: fields[field] for field in RAW_CONSTRUCTION_FIELDS},
+        **{field: fields[field]
+           for field in LEGACY_RAW_CONSTRUCTION_FIELDS},
     })
 
 
@@ -1043,9 +1246,11 @@ def _load_json_bytes(data: bytes, context: str) -> Any:
 def _exact_keys(value: Any, keys: Iterable[str], context: str) -> Mapping[str, Any]:
     expected = set(keys)
     if not isinstance(value, dict) or set(value) != expected:
+        actual = sorted(
+            "{}:{!r}".format(type(key).__name__, key) for key in value
+        ) if isinstance(value, dict) else type(value).__name__
         fail("{}: expected keys {}, got {}".format(
-            context, sorted(expected),
-            sorted(value) if isinstance(value, dict) else type(value).__name__,
+            context, sorted(expected), actual,
         ))
     return value
 
@@ -1117,9 +1322,9 @@ def _validate_structure(contract: Any, check_domain_hashes: bool) -> Mapping[str
     ), "contract")
     if top["schema"] != SCHEMA:
         fail("unexpected contract schema")
-    if (top["contract_id"] != "wh2-pure-gf256-1pct-v6" or
+    if (top["contract_id"] != "wh2-pure-gf256-1pct-v7" or
             top["field"] != "GF(256)"):
-        fail("v3 is pure GF(256) only")
+        fail("v4 is pure GF(256) only")
 
     goal = _exact_keys(top["goal"], (
         "primary_failure_threshold_ppm", "primary_overhead",
@@ -1134,7 +1339,7 @@ def _validate_structure(contract: Any, check_domain_hashes: bool) -> Mapping[str
                            "final bad-seed count") != 0 or
             goal["primary_speed_scope"] != "decoder_solve" or
             goal["cross_codec_speed_scope"] != "receive_to_success"):
-        fail("v3 goal constants changed without a schema bump")
+        fail("v4 goal constants changed without a schema bump")
 
     bands = top["k_bands"]
     if not isinstance(bands, list) or len(bands) != 6:
@@ -1157,7 +1362,7 @@ def _validate_structure(contract: Any, check_domain_hashes: bool) -> Mapping[str
     actual_bands = tuple(
         (band["name"], band["first"], band["last"]) for band in bands)
     if actual_bands != EXPECTED_BANDS:
-        fail("v3 K bands changed without a schema bump")
+        fail("v4 K bands changed without a schema bump")
 
     k_sets = _exact_keys(top["k_sets"], ("short", "timing_short", "all"), "k_sets")
     all_set = _exact_keys(k_sets["all"], ("first", "last"), "k_sets.all")
@@ -1175,7 +1380,7 @@ def _validate_structure(contract: Any, check_domain_hashes: bool) -> Mapping[str
             fail("{} K set must cover all six bands".format(name))
     if tuple(k_sets["short"]) != EXPECTED_SHORT_K or \
             tuple(k_sets["timing_short"]) != EXPECTED_TIMING_SHORT_K:
-        fail("v3 bounded K cohorts changed without a schema bump")
+        fail("v4 bounded K cohorts changed without a schema bump")
 
     seeds = _exact_keys(top["seeds"], (
         "raw_base_seed_attempts", "production_base_seed_attempt",
@@ -1189,7 +1394,7 @@ def _validate_structure(contract: Any, check_domain_hashes: bool) -> Mapping[str
             len(set(raw_base_attempts)) != 3):
         fail("raw_base_seed_attempts must contain three unique uint8 values")
     if tuple(raw_base_attempts) != EXPECTED_RAW_BASE_ATTEMPTS:
-        fail("v3 raw base seed attempts changed without a schema bump")
+        fail("v4 raw base seed attempts changed without a schema bump")
     _exact_integer(seeds["production_base_seed_attempt"], 0,
                    "production base seed attempt")
     if seeds["production_base_seed_attempt"] not in raw_base_attempts:
@@ -1205,7 +1410,7 @@ def _validate_structure(contract: Any, check_domain_hashes: bool) -> Mapping[str
     if (tuple(seeds["training_loss_roots"]) != EXPECTED_TRAINING_LOSS_ROOTS or
             tuple(seeds["validation_loss_roots"]) !=
             EXPECTED_VALIDATION_LOSS_ROOTS):
-        fail("v3 loss roots changed without a schema bump")
+        fail("v4 loss roots changed without a schema bump")
     if not set(seeds["training_loss_roots"]).isdisjoint(
             seeds["validation_loss_roots"]):
         fail("training and validation loss roots must be disjoint")
@@ -1230,7 +1435,7 @@ def _validate_structure(contract: Any, check_domain_hashes: bool) -> Mapping[str
         for set_name in strata_sets
     }
     if actual_strata != EXPECTED_STRATA_SETS:
-        fail("v3 loss/schedule strata changed without a schema bump")
+        fail("v4 loss/schedule strata changed without a schema bump")
 
     recovery = _exact_keys(top["recovery"], (
         "overhead_thresholds", "overhead_cap", "raw_construction_attempts",
@@ -1250,13 +1455,13 @@ def _validate_structure(contract: Any, check_domain_hashes: bool) -> Mapping[str
                            "raw production seed fixups") != 0 or
             _exact_integer(recovery["max_construction_attempts"], 256,
                            "maximum construction attempts") != 256):
-        fail("v3 raw/overhead constants changed without a schema bump")
+        fail("v4 raw/overhead constants changed without a schema bump")
     if (recovery["phase_seed_policy"] != EXPECTED_PHASE_SEED_POLICY or
             recovery["repair_rule"] != EXPECTED_REPAIR_RULE or
             recovery["attempt_derivation"] != EXPECTED_ATTEMPT_DERIVATION):
-        fail("v3 raw/repaired seed policy changed without a schema bump")
+        fail("v4 raw/repaired seed policy changed without a schema bump")
     if recovery["packet_trace"] != EXPECTED_PACKET_TRACE:
-        fail("v3 packet-trace algorithm changed without a schema bump")
+        fail("v4 packet-trace algorithm changed without a schema bump")
     expected_key = [
         "phase", "band", "K", "block_bytes", "loss_ppm", "schedule",
         "trial", "base_seed_attempt", "loss_seed", "overhead_cap",
@@ -1268,7 +1473,7 @@ def _validate_structure(contract: Any, check_domain_hashes: bool) -> Mapping[str
         "fatal_or_internal",
     ), "recovery outcomes")
     if outcomes != EXPECTED_OUTCOMES:
-        fail("v3 recovery outcomes changed without a schema bump")
+        fail("v4 recovery outcomes changed without a schema bump")
 
     domains = recovery["domains"]
     expected_phases = {
@@ -1288,13 +1493,13 @@ def _validate_structure(contract: Any, check_domain_hashes: bool) -> Mapping[str
             if isinstance(domain["block_bytes"], list) else ()
         if (domain["k_set"] != expected_k_set or
                 actual_widths != expected_widths):
-            fail("v3 {} K set or widths changed without a schema bump".format(
+            fail("v4 {} K set or widths changed without a schema bump".format(
                 phase))
         if (domain["seed_mode"] != expected_seed_mode or
                 domain["strata_set"] != expected_strata_set or
                 type(domain["expected_cells_per_arm"]) is not int or
                 domain["expected_cells_per_arm"] != expected_count):
-            fail("v3 {} recovery domain changed without a schema bump".format(
+            fail("v4 {} recovery domain changed without a schema bump".format(
                 phase))
         widths = domain["block_bytes"]
         if (not isinstance(widths, list) or not widths or
@@ -1415,8 +1620,9 @@ def _validate_structure(contract: Any, check_domain_hashes: bool) -> Mapping[str
             fail("timing-v6 {} domain changed without a contract revision".
                  format(phase))
         widths = domain["block_bytes"]
-        if (not isinstance(widths, list) or widths != sorted(set(widths)) or
-                any(type(width) is not int or width <= 0 for width in widths)):
+        if (not isinstance(widths, list) or
+                any(type(width) is not int or width <= 0 for width in widths) or
+                widths != sorted(set(widths))):
             fail("{} timing widths must be sorted unique positive".format(phase))
         count = len(_k_values(top, k_name)) * len(widths) * repetitions
         if count != expected_count:
@@ -1433,7 +1639,10 @@ def _validate_structure(contract: Any, check_domain_hashes: bool) -> Mapping[str
                     phase, digest))
 
     selection = _exact_keys(top["selection"], (
-        "controls", "noninferiority_margin_ppm",
+        "controls", "development_architecture_roles",
+        "development_recovery_eligibility",
+        "development_timing_eligibility",
+        "development_timing_proxy_policy", "noninferiority_margin_ppm",
         "architecture_failure_equivalence_ppm", "raw_weak_seed_definition",
         "raw_individual_weak_seeds_are_vetoes",
         "raw_repairs_and_introductions_are_descriptive", "architecture_order",
@@ -1449,7 +1658,7 @@ def _validate_structure(contract: Any, check_domain_hashes: bool) -> Mapping[str
             selection["raw_individual_weak_seeds_are_vetoes"] is not False or
             selection["raw_repairs_and_introductions_are_descriptive"] is not True or
             selection["development_resolved_slowdown_rejects"] is not True):
-        fail("v3 comparison/weak-seed policy changed without a schema bump")
+        fail("v4 comparison/weak-seed policy changed without a schema bump")
     evidence = _exact_keys(top["evidence"], (
         "freeze_before_results", "freeze_manifest_schema",
         "trace_manifest_schema", "repair_map_schema",
@@ -1495,9 +1704,12 @@ def load_freeze_manifest(
         timing_qualification: Optional[TimingQualification] = None,
         ) -> Mapping[str, Any]:
     manifest = _load_canonical_json_file(path, "freeze manifest")
-    _exact_keys(manifest, FREEZE_FIELDS, "freeze manifest")
-    schema = manifest["schema"]
-    if (schema not in (FREEZE_SCHEMA, RAW_FREEZE_SCHEMA) or
+    schema = manifest.get("schema")
+    manifest_fields = RAW_V3_FREEZE_FIELDS if schema == RAW_FREEZE_SCHEMA \
+        else FREEZE_FIELDS
+    _exact_keys(manifest, manifest_fields, "freeze manifest")
+    if (schema not in (
+            FREEZE_SCHEMA, LEGACY_RAW_FREEZE_SCHEMA, RAW_FREEZE_SCHEMA) or
             manifest["contract_sha256"] != contract_sha256(contract) or
             manifest["evidence_kind"] != evidence_kind or
             manifest["phase"] != phase):
@@ -1558,8 +1770,13 @@ def load_freeze_manifest(
     raw_phase = evidence_kind == "recovery" and \
         contract["recovery"]["phase_seed_policy"].get(phase) == \
         "one_base_attempt_no_retry"
-    if schema == RAW_FREEZE_SCHEMA and not raw_phase:
-        fail("raw v2 freezes are restricted to raw recovery phases")
+    if schema == FREEZE_SCHEMA and evidence_kind == "recovery" and \
+            phase == "development" and \
+            contract.get("schema") == SCHEMA:
+        fail("v4 development recovery receipts categorically require a raw freeze schema")
+    if schema in (LEGACY_RAW_FREEZE_SCHEMA, RAW_FREEZE_SCHEMA) and \
+            (evidence_kind != "recovery" or phase != "development"):
+        fail("raw freezes are restricted to development recovery evidence")
     # Development timing uses an unrepaired production-profile attempt, but it
     # is not raw architecture evidence and must never accept the raw v2 schema.
     unrepaired_phase = raw_phase or \
@@ -1573,8 +1790,26 @@ def load_freeze_manifest(
             training_trace_sha != manifest["trace_manifest_sha256"]:
         fail("the repaired training phase must bind its own frozen traces")
     raw_candidate_count = 0
-    arm_fields = RAW_FREEZE_ARM_FIELDS if schema == RAW_FREEZE_SCHEMA else \
-        FREEZE_ARM_FIELDS
+    if schema == RAW_FREEZE_SCHEMA:
+        arm_fields = RAW_V3_FREEZE_ARM_FIELDS
+    elif schema == LEGACY_RAW_FREEZE_SCHEMA:
+        arm_fields = RAW_FREEZE_ARM_FIELDS
+    else:
+        arm_fields = FREEZE_ARM_FIELDS
+    if schema == RAW_FREEZE_SCHEMA:
+        roles = _exact_keys(
+            manifest["architecture_roles"], RAW_ARCHITECTURE_ROLE_FIELDS,
+            "raw architecture roles")
+        if roles != EXPECTED_RAW_ARCHITECTURE_ROLES:
+            fail("raw v3 freeze does not bind the exact architecture roles")
+        for field in (
+                "timing_proxy_witness_sha256", "work_rank_summary_sha256",
+                "work_rank_result_stream_sha256", "work_rank_domain_sha256"):
+            if (not isinstance(manifest[field], str) or
+                    SHA256.fullmatch(manifest[field]) is None or
+                    manifest[field] == "0" * 64):
+                fail("raw v3 freeze {} is not a nonzero SHA-256".format(
+                    field))
     for index, arm_value in enumerate(arm_values):
         arm = _exact_keys(arm_value, arm_fields,
                           "freeze arm {}".format(index))
@@ -1601,22 +1836,28 @@ def load_freeze_manifest(
         raw_named = name.startswith("wirehair2_raw_")
         raw_descriptor = arm["arm_descriptor_sha256"] in \
             RAW_ARM_DESCRIPTOR_SHA256S
-        if schema == FREEZE_SCHEMA and raw_phase and \
+        if schema == FREEZE_SCHEMA and evidence_kind == "recovery" and \
+                phase == "development" and \
                 (raw_named or raw_descriptor):
             fail("legacy v1 freezes cannot authenticate raw WH2 arms")
-        if schema == RAW_FREEZE_SCHEMA:
+        if schema in (LEGACY_RAW_FREEZE_SCHEMA, RAW_FREEZE_SCHEMA):
             if name not in controls:
-                if arm["codec"] != "wirehair2_experiment" or not raw_named:
-                    fail("raw v2 candidates must be raw-named experimental WH2")
+                if arm["codec"] != "wirehair2_experiment":
+                    fail("raw candidates must be experimental WH2")
                 expected_structure = RAW_STRUCTURE_BY_DESCRIPTOR.get(
                     arm["arm_descriptor_sha256"])
                 if expected_structure is None:
-                    fail("raw v2 candidates must use a current closed descriptor")
+                    fail("raw candidates must use a current closed descriptor")
                 if name != expected_structure["arm"]:
-                    fail("raw v2 candidate name disagrees with its descriptor")
+                    fail("raw candidate name disagrees with its descriptor")
+                if (schema == LEGACY_RAW_FREEZE_SCHEMA and
+                        (not raw_named or
+                         expected_structure["dense_anchor_layout"] !=
+                            "disabled")):
+                    fail("raw v2 cannot authenticate dense-anchor evidence")
                 raw_candidate_count += 1
             if arm["codec"] == "routed_composite":
-                fail("raw v2 freezes cannot contain routed composites")
+                fail("raw freezes cannot contain routed composites")
         expected_policy = "raw_base" if unrepaired_phase else "repair_map"
         if arm["codec"] == "wirehair1":
             expected_policy = "not_applicable"
@@ -1630,7 +1871,7 @@ def load_freeze_manifest(
         if arm["codec"] == "wirehair1" and \
                 arm["repair_map_sha256"] != "0" * 64:
             fail("Wirehair1 must use the no-map marker")
-        if schema == RAW_FREEZE_SCHEMA:
+        if schema in (LEGACY_RAW_FREEZE_SCHEMA, RAW_FREEZE_SCHEMA):
             seed_basis = arm["construction_seed_basis"]
             seed_schedule_sha256 = arm["seed_schedule_sha256"]
             if arm["codec"] == "wirehair2_certified":
@@ -1648,9 +1889,28 @@ def load_freeze_manifest(
                     SHA256.fullmatch(seed_schedule_sha256) is None or
                     seed_schedule_sha256 != expected_schedule_sha256):
                 fail("raw v2 freeze arm uses the wrong seed schedule")
+        if schema == RAW_FREEZE_SCHEMA:
+            if arm["codec"] == "wirehair1":
+                expected_layout = "not-applicable"
+            elif arm["codec"] == "wirehair2_certified":
+                expected_layout = "disabled"
+            else:
+                structure = RAW_STRUCTURE_BY_DESCRIPTOR.get(
+                    arm["arm_descriptor_sha256"])
+                expected_layout = None if structure is None else \
+                    structure["dense_anchor_layout"]
+            if arm["dense_anchor_layout"] != expected_layout:
+                fail("raw v3 freeze arm uses the wrong dense-anchor layout")
         arms[name] = arm
-    if schema == RAW_FREEZE_SCHEMA and raw_candidate_count == 0:
-        fail("raw v2 freeze must contain at least one raw candidate")
+    if schema in (LEGACY_RAW_FREEZE_SCHEMA, RAW_FREEZE_SCHEMA) and \
+            raw_candidate_count == 0:
+        fail("raw freeze must contain at least one raw candidate")
+    if schema == RAW_FREEZE_SCHEMA:
+        expected_roster = roles["descriptive_controls"] + [
+            roles["recovery_reference"]] + roles["recovery_candidates"]
+        if roster != expected_roster or roles["timing_proxy"] not in \
+                roles["descriptive_controls"]:
+            fail("raw v3 freeze roster disagrees with its architecture roles")
     if qualification is not None:
         if qualification.source_git_commit != manifest["source_git_commit"]:
             fail("timing qualification substitutes the frozen source commit")
@@ -1669,40 +1929,91 @@ def load_freeze_manifest(
     return result
 
 
+def _nonzero_sha256(value: Any) -> bool:
+    return isinstance(value, str) and SHA256.fullmatch(value) is not None and \
+        value != "0" * 64
+
+
+def _exact_string_roster(
+        value: Any, expected: Sequence[str], context: str) -> List[str]:
+    if (not isinstance(value, list) or
+            any(not isinstance(item, str) or not item for item in value) or
+            value != list(expected)):
+        fail("{} is not the exact ordered roster".format(context))
+    return value
+
+
 def validate_selection_receipt(
         contract: Mapping[str, Any], value: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Validate the closed v2 winner receipt (not its artifact provenance)."""
     _exact_keys(value, SELECTION_FIELDS, "architecture selection receipt")
     unsigned = {key: item for key, item in value.items()
                 if key != "selection_sha256"}
-    for field in (
-            "selection_sha256", "recovery_freeze_manifest_sha256",
-            "timing_freeze_manifest_sha256", "architecture_artifact_sha256",
-            "timing_domain_sha256", "timing_qualification_map_sha256",
-            "selected_arm_descriptor_sha256",
-            "selected_architecture_sha256"):
-        if (not isinstance(value[field], str) or
-                SHA256.fullmatch(value[field]) is None):
-            fail("architecture selection {} is not a SHA-256".format(field))
-    if (value["schema"] != SCHEMA + ".architecture-selection.v1" or
+    try:
+        expected_selection_sha256 = sha256_json(unsigned)
+    except (TypeError, ValueError, OverflowError, RecursionError) as exc:
+        fail("architecture selection receipt is not canonical JSON: {}".format(
+            exc))
+    hash_fields = (
+        "contract_sha256", "recovery_domain_sha256",
+        "timing_base_domain_sha256", "timing_domain_sha256",
+        "timing_qualification_map_sha256",
+        "recovery_freeze_manifest_sha256",
+        "recovery_architecture_artifact_sha256",
+        "recovery_run_summary_sha256", "recovery_result_stream_sha256",
+        "recovery_execution_receipt_sha256",
+        "timing_freeze_manifest_sha256",
+        "timing_architecture_artifact_sha256",
+        "timing_run_summary_sha256", "timing_result_stream_sha256",
+        "timing_execution_receipt_sha256",
+        "timing_qualification_execution_receipt_sha256",
+        "timing_proxy_witness_sha256", "work_rank_summary_sha256",
+        "work_rank_result_stream_sha256", "work_rank_domain_sha256",
+        "recovery_reference_binary_sha256",
+        "recovery_reference_arm_descriptor_sha256",
+        "wirehair1_control_binary_sha256",
+        "wirehair1_control_arm_descriptor_sha256",
+        "timing_proxy_binary_sha256",
+        "timing_proxy_arm_descriptor_sha256",
+        "selected_arm_descriptor_sha256", "selected_architecture_sha256",
+        "selection_sha256",
+    )
+    for field in hash_fields:
+        if not _nonzero_sha256(value[field]):
+            fail("architecture selection {} is not a nonzero SHA-256".format(
+                field))
+    roles = _exact_keys(
+        value["architecture_roles"], RAW_ARCHITECTURE_ROLE_FIELDS,
+        "architecture selection roles")
+    if roles != EXPECTED_RAW_ARCHITECTURE_ROLES:
+        fail("architecture selection roles differ from the closed funnel")
+    recovery_roster = roles["descriptive_controls"] + [
+        roles["recovery_reference"]] + roles["recovery_candidates"]
+    timing_roster = roles["descriptive_controls"] + roles["timing_candidates"]
+    _exact_string_roster(
+        value["recovery_arm_roster"], recovery_roster,
+        "architecture selection recovery arm roster")
+    _exact_string_roster(
+        value["timing_arm_roster"], timing_roster,
+        "architecture selection timing arm roster")
+    candidate_roster = _exact_string_roster(
+        value["candidate_roster"], roles["timing_candidates"],
+        "architecture selection candidate roster")
+    if (value["schema"] != SCHEMA + ".architecture-selection.v2" or
+            not isinstance(value["source_git_commit"], str) or
+            GIT_COMMIT.fullmatch(value["source_git_commit"]) is None or
+            value["source_git_commit"] == "0" * 40 or
             value["contract_sha256"] != contract_sha256(contract) or
             value["recovery_domain_sha256"] != contract["recovery"][
                 "domains"]["development"]["domain_sha256"] or
             value["timing_base_domain_sha256"] != contract["timing"][
                 "domains"]["development"]["base_domain_sha256"] or
-            value["selection_sha256"] != sha256_json(unsigned)):
+            value["selection_sha256"] != expected_selection_sha256):
         fail("architecture selection receipt identity is invalid")
     _exact_integer(
         value["recovery_cells_per_arm"], contract["recovery"]["domains"]
         ["development"]["expected_cells_per_arm"],
         "architecture selection recovery cells")
-    candidate_roster = value["candidate_roster"]
-    controls = set(contract["selection"]["controls"])
-    if (not isinstance(candidate_roster, list) or not candidate_roster or
-            any(not isinstance(arm, str) or not arm
-                for arm in candidate_roster) or
-            candidate_roster != sorted(set(candidate_roster)) or
-            set(candidate_roster) & controls):
-        fail("architecture selection candidate roster is malformed")
     protocol = contract["timing"]["panel_protocol"]
     panel_count = len(protocol["control_aa"]) + len(candidate_roster) * (
         len(protocol["candidate_aa_scopes"]) + len(protocol["candidate_ab"]))
@@ -1710,21 +2021,32 @@ def validate_selection_receipt(
         "expected_cells"] * panel_count
     _exact_integer(value["timing_rows"], expected_timing_rows,
                    "architecture selection timing rows")
-    eligible = value["eligible_candidates"]
+
+    reference = roles["recovery_reference"]
+    timing_proxy = roles["timing_proxy"]
+    if (value["recovery_reference_arm"] != reference or
+            value["recovery_reference_codec"] != "wirehair2_experiment" or
+            RAW_STRUCTURE_BY_DESCRIPTOR.get(
+                value["recovery_reference_arm_descriptor_sha256"], {}).get(
+                    "arm") != reference or
+            value["wirehair1_control_arm"] != "wirehair1" or
+            value["wirehair1_control_codec"] != "wirehair1" or
+            value["timing_proxy_arm"] != timing_proxy or
+            value["timing_proxy_codec"] != "wirehair2_certified"):
+        fail("architecture selection reference/proxy identity is invalid")
+
+    eligible = _exact_string_roster(
+        value["eligible_candidates"], candidate_roster,
+        "architecture selection eligible roster")
+    equivalent = _exact_string_roster(
+        value["recovery_equivalent_candidates"], candidate_roster,
+        "architecture selection recovery-equivalent roster")
     eligible_failures = value["eligible_overhead0_failures"]
-    equivalent = value["recovery_equivalent_candidates"]
-    if (not isinstance(eligible, list) or
-            any(not isinstance(arm, str) or not arm for arm in eligible) or
-            eligible != sorted(set(eligible)) or
-            not isinstance(equivalent, list) or
-            any(not isinstance(arm, str) or not arm for arm in equivalent) or
-            equivalent != sorted(set(equivalent)) or
-            not isinstance(eligible_failures, dict) or
+    if (not isinstance(eligible_failures, dict) or
             set(eligible_failures) != set(eligible) or
-            any(type(count) is not int for count in eligible_failures.values()) or
-            not set(eligible).issubset(candidate_roster) or
-            not set(equivalent).issubset(eligible)):
-        fail("architecture selection candidate sets are malformed")
+            any(type(count) is not int for count in
+                eligible_failures.values())):
+        fail("architecture selection eligible failure counts are malformed")
     selected = value["selected_arm"]
     selected_codec = value["selected_codec"]
     minimum = value["minimum_overhead0_failures"]
@@ -1736,18 +2058,20 @@ def validate_selection_receipt(
         "architecture_failure_equivalence_ppm"]
     expected_allowance = max(
         1, (margin_ppm * cells + 1000000 - 1) // 1000000)
-    if (not isinstance(selected, str) or not selected or
-            selected not in equivalent or type(minimum) is not int or
-            not 0 <= minimum <= cells or type(allowance) is not int or
-            allowance != expected_allowance or
-            selected_codec not in ("wirehair2_experiment", "routed_composite") or
+    if (selected != candidate_roster[0] or selected not in equivalent or
+            type(minimum) is not int or not 0 <= minimum <= cells or
+            type(allowance) is not int or allowance != expected_allowance or
+            selected_codec != "wirehair2_experiment" or
+            RAW_STRUCTURE_BY_DESCRIPTOR.get(
+                value["selected_arm_descriptor_sha256"], {}).get("arm") !=
+                    selected or
             not isinstance(ranking, list) or not ranking):
-        fail("architecture selection has no promotable winner")
+        fail("architecture selection has no closed-funnel promotable winner")
     if (any(not 0 <= count <= cells for count in eligible_failures.values()) or
             minimum != min(eligible_failures.values()) or
-            set(equivalent) != {
-                arm for arm, count in eligible_failures.items()
-                if count <= minimum + allowance}):
+            equivalent != [
+                arm for arm in eligible
+                if eligible_failures[arm] <= minimum + allowance]):
         fail("architecture recovery-equivalent set is invalid")
     selected_artifact = {
         "codec": selected_codec,
@@ -1755,7 +2079,7 @@ def validate_selection_receipt(
     }
     if value["selected_architecture_sha256"] != \
             selected_architecture_sha256(selected, selected_artifact):
-        fail("selected architecture identity is invalid")
+        fail("selected architecture semantic identity is invalid")
     ranking_values = []
     for index, item_value in enumerate(ranking):
         item = _exact_keys(item_value, (
@@ -1778,21 +2102,49 @@ def validate_selection_receipt(
             mean, counts[1], counts[2], counts[3], item["arm"]))
     ranked_arms = [item[-1] for item in ranking_values]
     if (ranking_values != sorted(ranking_values) or
-            len(set(ranked_arms)) != len(ranked_arms) or
-            set(ranked_arms) != set(equivalent) or
-            ranking_values[0][-1] != selected):
+            ranked_arms != equivalent or ranking_values[0][-1] != selected):
         fail("architecture ranking disagrees with the selected winner")
     return value
+
+
+def _seal_validated_architecture_selection(
+        contract: Mapping[str, Any], value: Mapping[str, Any],
+        ) -> ArchitectureSelection:
+    receipt = validate_selection_receipt(contract, value)
+    canonical_receipt = canonical_json(receipt)
+    return _seal_architecture_selection_handle({
+        "contract_sha256": contract_sha256(contract),
+        "selection_sha256": receipt["selection_sha256"],
+        "canonical_receipt": canonical_receipt,
+    })
+
+
+def _require_architecture_selection(
+        contract: Mapping[str, Any], value: Any) -> Mapping[str, Any]:
+    if not _architecture_selection_is_registered(value):
+        fail("final continuity requires an artifact-recomputed selection handle")
+    if value.contract_sha256 != contract_sha256(contract):
+        fail("architecture selection handle belongs to another contract")
+    receipt = _load_json_bytes(
+        value.canonical_receipt.encode("utf-8"),
+        "sealed architecture selection receipt")
+    if not isinstance(receipt, dict):
+        fail("sealed architecture selection receipt is malformed")
+    validate_selection_receipt(contract, receipt)
+    if receipt["selection_sha256"] != value.selection_sha256:
+        fail("architecture selection handle identity changed")
+    return receipt
 
 
 def validate_final_freeze_continuity(
         contract: Mapping[str, Any],
         freeze_paths: Mapping[Tuple[str, str], Path],
-        selection_receipt: Mapping[str, Any],
+        architecture_selection: ArchitectureSelection,
         timing_qualification: TimingQualification,
         timing_trace_manifest_path: Path,
         ) -> Mapping[str, Any]:
-    selection = validate_selection_receipt(contract, selection_receipt)
+    selection = _require_architecture_selection(
+        contract, architecture_selection)
     if set(freeze_paths) != FINAL_FREEZE_KEYS:
         fail("final continuity requires exactly the five frozen final phases")
     freezes = {
@@ -1807,22 +2159,50 @@ def validate_final_freeze_continuity(
         final_timing_freeze["trace_manifest_sha256"],
         timing_qualification)
     anchor = freezes[("recovery", "final_raw")]
-    controls = tuple(contract["selection"]["controls"])
-    candidates = tuple(
-        arm for arm in anchor["arm_roster"] if arm not in controls)
-    if len(candidates) != 1 or len(anchor["arm_roster"]) != len(controls) + 1:
-        fail("final phases must contain both controls and one selected candidate")
-    if candidates[0] != selection["selected_arm"]:
-        fail("final phases substitute the selected development architecture")
-    final_selected_artifact = frozen_arm_artifacts(anchor)[candidates[0]]
+    final_roster = list(contract["selection"]["controls"]) + [
+        selection["selected_arm"]]
+    for key, freeze in freezes.items():
+        _exact_string_roster(
+            freeze["arm_roster"], final_roster,
+            "{}:{} final arm roster".format(*key))
+    if selection["recovery_reference_arm"] in final_roster:
+        fail("final phases must not contain the development D12 reference")
+    final_artifacts = frozen_arm_artifacts(anchor)
+    semantic_bindings = {
+        selection["timing_proxy_arm"]: (
+            selection["timing_proxy_codec"],
+            selection["timing_proxy_arm_descriptor_sha256"]),
+        selection["wirehair1_control_arm"]: (
+            selection["wirehair1_control_codec"],
+            selection["wirehair1_control_arm_descriptor_sha256"]),
+        selection["selected_arm"]: (
+            selection["selected_codec"],
+            selection["selected_arm_descriptor_sha256"]),
+    }
+    for arm, (codec, descriptor) in semantic_bindings.items():
+        artifact = final_artifacts.get(arm)
+        if (not isinstance(artifact, dict) or
+                artifact.get("codec") != codec or
+                artifact.get("arm_descriptor_sha256") != descriptor):
+            fail("final phases substitute the {} semantic artifact".format(
+                arm))
+    final_selected_artifact = final_artifacts[selection["selected_arm"]]
+    if (final_selected_artifact["codec"] != selection["selected_codec"] or
+            final_selected_artifact["arm_descriptor_sha256"] !=
+                selection["selected_arm_descriptor_sha256"]):
+        fail("final phases substitute the selected codec or descriptor")
     if selected_architecture_sha256(
-            candidates[0], final_selected_artifact) != \
+            selection["selected_arm"], final_selected_artifact) != \
             selection["selected_architecture_sha256"]:
         fail("final phases substitute the selected architecture descriptor")
     artifact_sha256 = architecture_artifact_sha256(anchor)
     host_identity = canonical_json(anchor["host_identity"])
+    anchor_artifacts = canonical_json(frozen_arm_artifacts(anchor))
     for key, freeze in freezes.items():
-        if architecture_artifact_sha256(freeze) != artifact_sha256:
+        if (architecture_artifact_sha256(freeze) != artifact_sha256 or
+                freeze["source_git_commit"] != anchor["source_git_commit"] or
+                canonical_json(frozen_arm_artifacts(freeze)) !=
+                    anchor_artifacts):
             fail("{}:{} substitutes final architecture artifacts".format(*key))
         if canonical_json(freeze["host_identity"]) != host_identity:
             fail("{}:{} substitutes the final benchmark host".format(*key))
@@ -1849,15 +2229,21 @@ def validate_final_freeze_continuity(
     identity = {
         "contract_sha256": contract_sha256(contract),
         "architecture_artifact_sha256": artifact_sha256,
+        "final_source_git_commit": anchor["source_git_commit"],
+        "final_arm_roster": final_roster,
         "host_identity": anchor["host_identity"],
         "repair_training_trace_manifest_sha256": training_trace_sha256,
         "production_repair_maps": production_maps,
         "selection_sha256": selection["selection_sha256"],
     }
     return {
-        "schema": SCHEMA + ".final-continuity-summary.v1",
-        "selected_candidate": candidates[0],
+        "schema": SCHEMA + ".final-continuity-summary.v2",
+        "selected_candidate": selection["selected_arm"],
         "selection_sha256": selection["selection_sha256"],
+        "development_source_git_commit": selection["source_git_commit"],
+        "final_source_git_commit": anchor["source_git_commit"],
+        "final_arm_roster": final_roster,
+        "final_architecture_artifact_sha256": artifact_sha256,
         "promotion_identity_sha256": sha256_json(identity),
         "freeze_manifest_sha256": {
             "{}:{}".format(*key): freeze_manifest_sha256(freezes[key])
@@ -2742,7 +3128,14 @@ def validate_ledger(contract: Mapping[str, Any], phase: str, path: Path,
         contract, phase, freeze_manifest_path, "recovery")
     arms = tuple(freeze["arm_roster"])
     controls = tuple(contract["selection"]["controls"])
-    candidate_arms = tuple(arm for arm in arms if arm not in controls)
+    if freeze["schema"] == RAW_FREEZE_SCHEMA:
+        architecture_roles = freeze["architecture_roles"]
+        recovery_reference = architecture_roles["recovery_reference"]
+        candidate_arms = tuple(architecture_roles["recovery_candidates"])
+    else:
+        architecture_roles = None
+        recovery_reference = None
+        candidate_arms = tuple(arm for arm in arms if arm not in controls)
     domain = contract["recovery"]["domains"].get(phase)
     if domain is None:
         fail("unknown recovery phase: " + phase)
@@ -2784,11 +3177,16 @@ def validate_ledger(contract: Mapping[str, Any], phase: str, path: Path,
         if arm not in seen:
             fail("ledger contains an arm outside the frozen roster")
         frozen_arm = freeze["arms_by_name"][arm]
-        raw_arm = freeze["schema"] == RAW_FREEZE_SCHEMA and \
+        raw_arm = freeze["schema"] in (
+            LEGACY_RAW_FREEZE_SCHEMA, RAW_FREEZE_SCHEMA) and \
             frozen_arm["construction_seed_basis"] == \
             RAW_CONSTRUCTION_SEED_BASIS
-        expected_fields = RAW_RECOVERY_RECORD_FIELDS if raw_arm else \
-            LEDGER_FIELDS
+        if raw_arm:
+            expected_fields = RAW_RECOVERY_RECORD_FIELDS if \
+                freeze["schema"] == RAW_FREEZE_SCHEMA else \
+                LEGACY_RAW_RECOVERY_RECORD_FIELDS
+        else:
+            expected_fields = LEDGER_FIELDS
         if set(row) != expected_fields:
             fail("ledger row has an unexpected schema")
         for field in ("cell_sha256", "trace_sha256", "binary_sha256",
@@ -2818,10 +3216,15 @@ def validate_ledger(contract: Mapping[str, Any], phase: str, path: Path,
         if attempt != expected_attempt:
             fail("ledger construction attempt differs from the frozen seed policy")
         if raw_arm:
+            construction_fields = RAW_CONSTRUCTION_FIELDS if \
+                freeze["schema"] == RAW_FREEZE_SCHEMA else \
+                LEGACY_RAW_CONSTRUCTION_FIELDS
             raw_fields = {
-                field: row[field] for field in RAW_CONSTRUCTION_FIELDS
+                field: row[field] for field in construction_fields
             }
-            _validate_raw_construction_fields(raw_fields, "raw ledger row")
+            _validate_raw_construction_fields(
+                raw_fields, "raw ledger row",
+                freeze["schema"] == RAW_FREEZE_SCHEMA)
             _validate_raw_descriptor_structure(
                 arm, frozen_arm["arm_descriptor_sha256"], row["K"], raw_fields,
                 "raw ledger row")
@@ -2833,10 +3236,16 @@ def validate_ledger(contract: Mapping[str, Any], phase: str, path: Path,
             if (row["precode_attempt"] != attempt or
                     row["packet_attempt"] != attempt):
                 fail("raw ledger attempts differ from the frozen paired attempt")
-            expected_realized = raw_realized_construction_sha256(
-                frozen_arm["codec"], arm,
-                frozen_arm["arm_descriptor_sha256"], row["K"],
-                row["block_bytes"], raw_fields)
+            if freeze["schema"] == RAW_FREEZE_SCHEMA:
+                expected_realized = raw_realized_construction_sha256(
+                    frozen_arm["codec"], arm,
+                    frozen_arm["arm_descriptor_sha256"], row["K"],
+                    row["block_bytes"], raw_fields)
+            else:
+                expected_realized = legacy_raw_realized_construction_sha256(
+                    frozen_arm["codec"], arm,
+                    frozen_arm["arm_descriptor_sha256"], row["K"],
+                    row["block_bytes"], raw_fields)
         else:
             expected_realized = generic_realized_construction_sha256(
                 frozen_arm["codec"], frozen_arm["arm_descriptor_sha256"],
@@ -2944,7 +3353,9 @@ def validate_ledger(contract: Mapping[str, Any], phase: str, path: Path,
         summaries[control]["unsupported"] == 0 for control in controls)
     for arm in candidate_arms:
         control_comparisons = {}
-        for control in controls:
+        comparison_arms = controls if recovery_reference is None else \
+            (recovery_reference,) + controls
+        for control in comparison_arms:
             repairs = introductions = shared_failures = 0
             for left, right in zip(scores[control], scores[arm]):
                 left_failed = left > 0
@@ -2991,18 +3402,39 @@ def validate_ledger(contract: Mapping[str, Any], phase: str, path: Path,
                         for value in tail.values())
                 ),
             }
-        all_controls_noninferior = all(
-            value["all_noninferiority_gates_pass"]
-            for value in control_comparisons.values()) and \
-            summaries[arm]["unsupported"] == 0 and \
-            mandatory_controls_supported
-        comparisons[arm] = {
-            "controls": control_comparisons,
-            "all_controls_noninferior": all_controls_noninferior,
-            "architecture_eligible": (
-                all_controls_noninferior and
-                summaries[arm]["phase_recovery_gate_pass"]),
-        }
+        if recovery_reference is None:
+            all_controls_noninferior = all(
+                value["all_noninferiority_gates_pass"]
+                for value in control_comparisons.values()) and \
+                summaries[arm]["unsupported"] == 0 and \
+                mandatory_controls_supported
+            comparisons[arm] = {
+                "controls": control_comparisons,
+                "all_controls_noninferior": all_controls_noninferior,
+                "architecture_eligible": (
+                    all_controls_noninferior and
+                    summaries[arm]["phase_recovery_gate_pass"]),
+            }
+        else:
+            reference_comparison = control_comparisons[recovery_reference]
+            reference_noninferior = \
+                reference_comparison["all_noninferiority_gates_pass"] and \
+                summaries[arm]["unsupported"] == 0 and \
+                summaries[recovery_reference]["unsupported"] == 0
+            comparisons[arm] = {
+                "recovery_reference": recovery_reference,
+                "reference_comparison": reference_comparison,
+                "descriptive_controls": {
+                    control: control_comparisons[control]
+                    for control in controls
+                },
+                "reference_noninferior": reference_noninferior,
+                "architecture_eligible": (
+                    reference_noninferior and
+                    summaries[arm]["phase_recovery_gate_pass"] and
+                    summaries[recovery_reference][
+                        "phase_recovery_gate_pass"]),
+            }
     result = {
         "schema": SCHEMA + ".ledger-summary.v1",
         "phase": phase,
@@ -3017,9 +3449,21 @@ def validate_ledger(contract: Mapping[str, Any], phase: str, path: Path,
         "arms": summaries,
         "comparisons": comparisons,
     }
-    if freeze["schema"] == RAW_FREEZE_SCHEMA:
+    if freeze["schema"] == LEGACY_RAW_FREEZE_SCHEMA:
         result["schema"] = SCHEMA + ".ledger-summary.v2"
+        result["freeze_schema"] = LEGACY_RAW_FREEZE_SCHEMA
+    elif freeze["schema"] == RAW_FREEZE_SCHEMA:
+        result["schema"] = SCHEMA + ".ledger-summary.v3"
         result["freeze_schema"] = RAW_FREEZE_SCHEMA
+        result["architecture_roles"] = architecture_roles
+        result["timing_proxy_witness_sha256"] = \
+            freeze["timing_proxy_witness_sha256"]
+        result["work_rank_summary_sha256"] = \
+            freeze["work_rank_summary_sha256"]
+        result["work_rank_result_stream_sha256"] = \
+            freeze["work_rank_result_stream_sha256"]
+        result["work_rank_domain_sha256"] = \
+            freeze["work_rank_domain_sha256"]
     return result
 
 
@@ -3452,21 +3896,46 @@ def validate_timing_receipt(
     }
 
 
-def select_development_architecture(
+def _calculate_development_architecture_selection(
         contract: Mapping[str, Any], recovery: Mapping[str, Any],
-        timing: Mapping[str, Any],
-        timing_qualification: TimingQualification) -> Mapping[str, Any]:
-    """Apply the frozen architecture ordering to validated development summaries."""
+        timing: Mapping[str, Any], timing_qualification: TimingQualification,
+        recovery_freeze: Mapping[str, Any],
+        timing_freeze: Mapping[str, Any],
+        provenance: Mapping[str, Any],
+        ) -> Optional[Mapping[str, Any]]:
+    """Calculate a winner from strictly reopened development artifacts.
+
+    This private seam assumes that the path-only selector has independently
+    reopened and validated each evidence stream.  Returning ``None`` is the
+    only no-winner representation; an authoritative caller must not publish
+    an architecture-selection artifact in that case.
+    """
+    if any(not isinstance(value, dict) for value in (
+            recovery, timing, recovery_freeze, timing_freeze, provenance)):
+        fail("architecture selection inputs must be strict JSON objects")
+    provenance = _exact_keys(
+        provenance, SELECTION_PROVENANCE_FIELDS,
+        "architecture selection terminal provenance")
+    for field, digest in provenance.items():
+        if not _nonzero_sha256(digest):
+            fail("architecture selection provenance {} is malformed".format(
+                field))
     contract_digest = contract_sha256(contract)
     recovery_domain = contract["recovery"]["domains"]["development"]
     timing_domain = contract["timing"]["domains"]["development"]
     qualification = _require_timing_qualification(
         contract, "development", timing_qualification)
-    if (recovery.get("schema") != SCHEMA + ".ledger-summary.v2" or
-            timing.get("schema") != SCHEMA + ".timing-summary.v1" or
-            recovery.get("phase") != "development" or
+    if (recovery.get("schema") != SCHEMA + ".ledger-summary.v3" or
             recovery.get("freeze_schema") != RAW_FREEZE_SCHEMA or
+            recovery_freeze.get("schema") != RAW_FREEZE_SCHEMA or
+            timing.get("schema") != SCHEMA + ".timing-summary.v1" or
+            timing_freeze.get("schema") != FREEZE_SCHEMA or
+            recovery.get("phase") != "development" or
+            recovery_freeze.get("phase") != "development" or
+            recovery_freeze.get("evidence_kind") != "recovery" or
             timing.get("phase") != "development" or
+            timing_freeze.get("phase") != "development" or
+            timing_freeze.get("evidence_kind") != "timing" or
             recovery.get("contract_sha256") != contract_digest or
             timing.get("contract_sha256") != contract_digest or
             recovery.get("domain_sha256") != recovery_domain["domain_sha256"] or
@@ -3480,64 +3949,91 @@ def select_development_architecture(
             recovery.get("excluded_cells") != 0 or
             type(timing.get("excluded_cells")) is not int or
             timing.get("excluded_cells") != 0):
-        fail("architecture selection requires development validator summaries")
-    recovery_freeze = recovery.get("freeze_manifest_sha256")
-    timing_freeze = timing.get("freeze_manifest_sha256")
-    if (not isinstance(recovery_freeze, str) or
-            SHA256.fullmatch(recovery_freeze) is None or
-            not isinstance(timing_freeze, str) or
-            SHA256.fullmatch(timing_freeze) is None):
-        fail("development summaries lack frozen manifest identities")
-    recovery_artifacts = recovery.get("architecture_artifact_sha256")
-    if (not isinstance(recovery_artifacts, str) or
-            SHA256.fullmatch(recovery_artifacts) is None or
-            recovery_artifacts != timing.get("architecture_artifact_sha256")):
-        fail("development recovery and timing substitute architecture artifacts")
-    arm_artifacts = recovery.get("arm_artifacts")
-    if (not isinstance(arm_artifacts, dict) or
-            arm_artifacts != timing.get("arm_artifacts")):
-        fail("development summaries substitute per-arm artifacts")
-    recovery_comparisons = recovery.get("comparisons")
-    timing_candidates = timing.get("candidates")
-    recovery_arms = recovery.get("arms")
-    if (not isinstance(recovery_comparisons, dict) or
-            not isinstance(timing_candidates, dict) or
-            not isinstance(recovery_arms, dict) or
-            set(recovery_comparisons) != set(timing_candidates)):
-        fail("development summaries disagree on the candidate roster")
-    candidates = sorted(recovery_comparisons)
-    if not candidates:
-        fail("development summaries contain no candidate")
-    controls = tuple(contract["selection"]["controls"])
-    if set(candidates) & set(controls):
-        fail("reserved controls cannot enter the candidate roster")
-    if set(recovery_arms) != set(controls) | set(candidates):
-        fail("development recovery summary has the wrong arm roster")
-    if set(arm_artifacts) != set(recovery_arms):
-        fail("development per-arm artifacts have the wrong roster")
-    for arm, artifact_value in arm_artifacts.items():
-        artifact = _exact_keys(artifact_value, (
-            "codec", "binary_sha256", "arm_descriptor_sha256",
-        ), "development arm artifact " + arm)
-        if (not isinstance(artifact["codec"], str) or
-                any(not isinstance(artifact[field], str) or
-                    SHA256.fullmatch(artifact[field]) is None
-                    for field in ("binary_sha256", "arm_descriptor_sha256"))):
-            fail("development per-arm artifact is malformed")
-    panel_count = len(contract["timing"]["panel_protocol"]["control_aa"]) + \
-        len(candidates) * (
-            len(contract["timing"]["panel_protocol"]["candidate_aa_scopes"]) +
-            len(contract["timing"]["panel_protocol"]["candidate_ab"]))
-    expected_timing_rows = timing_domain["expected_cells"] * panel_count
-    if (type(timing.get("rows")) is not int or
-            timing.get("rows") != expected_timing_rows or
-            type(recovery.get("mandatory_controls_supported")) is not bool):
-        fail("development summaries have the wrong frozen cardinality")
+        fail("architecture selection requires strict development summaries")
+    source = recovery_freeze.get("source_git_commit")
+    if (not isinstance(source, str) or GIT_COMMIT.fullmatch(source) is None or
+            source == "0" * 40 or
+            timing_freeze.get("source_git_commit") != source or
+            qualification.source_git_commit != source):
+        fail("development recovery, timing, and qualification sources differ")
 
-    eligible = []
-    failures: Dict[str, Mapping[str, int]] = {}
+    roles = recovery_freeze.get("architecture_roles")
+    if (not isinstance(roles, dict) or
+            roles != EXPECTED_RAW_ARCHITECTURE_ROLES or
+            recovery.get("architecture_roles") != roles):
+        fail("development recovery roles differ from the closed funnel")
+    recovery_roster = roles["descriptive_controls"] + [
+        roles["recovery_reference"]] + roles["recovery_candidates"]
+    timing_roster = roles["descriptive_controls"] + roles["timing_candidates"]
+    _exact_string_roster(
+        recovery_freeze.get("arm_roster"), recovery_roster,
+        "development recovery freeze roster")
+    _exact_string_roster(
+        timing_freeze.get("arm_roster"), timing_roster,
+        "development timing freeze roster")
+
+    recovery_freeze_hash = freeze_manifest_sha256(recovery_freeze)
+    timing_freeze_hash = freeze_manifest_sha256(timing_freeze)
+    recovery_artifact_hash = architecture_artifact_sha256(recovery_freeze)
+    timing_artifact_hash = architecture_artifact_sha256(timing_freeze)
+    recovery_arm_artifacts = frozen_arm_artifacts(recovery_freeze)
+    timing_arm_artifacts = frozen_arm_artifacts(timing_freeze)
+    if (recovery.get("freeze_manifest_sha256") != recovery_freeze_hash or
+            timing.get("freeze_manifest_sha256") != timing_freeze_hash or
+            recovery.get("architecture_artifact_sha256") !=
+                recovery_artifact_hash or
+            timing.get("architecture_artifact_sha256") !=
+                timing_artifact_hash or
+            recovery.get("arm_artifacts") != recovery_arm_artifacts or
+            timing.get("arm_artifacts") != timing_arm_artifacts):
+        fail("development summaries differ from their reopened freezes")
+    if set(recovery_arm_artifacts) != set(recovery_roster) or \
+            set(timing_arm_artifacts) != set(timing_roster):
+        fail("development artifact maps have the wrong arm roster")
+    for arm in timing_roster:
+        if recovery_arm_artifacts.get(arm) != timing_arm_artifacts.get(arm):
+            fail("development recovery/timing common arm {} differs".format(
+                arm))
+    recovery_by_arm = {
+        arm["arm"]: arm for arm in recovery_freeze.get("arms", [])
+        if isinstance(arm, dict) and isinstance(arm.get("arm"), str)
+    } if isinstance(recovery_freeze.get("arms"), list) else {}
+    if set(recovery_by_arm) != set(recovery_roster):
+        fail("development recovery freeze arm records are malformed")
+    recovery_projection = {
+        "source_git_commit": source,
+        "arm_roster": timing_roster,
+        "arms": [recovery_by_arm[arm] for arm in timing_roster],
+    }
+    if architecture_artifact_sha256(recovery_projection) != \
+            timing_artifact_hash:
+        fail("development recovery projection differs from timing artifacts")
+
+    bound_fields = (
+        "timing_proxy_witness_sha256", "work_rank_summary_sha256",
+        "work_rank_result_stream_sha256", "work_rank_domain_sha256",
+    )
+    for field in bound_fields:
+        if (recovery.get(field) != recovery_freeze.get(field) or
+                recovery.get(field) != provenance[field]):
+            fail("development raw binding {} differs".format(field))
+
+    recovery_comparisons = recovery.get("comparisons")
+    recovery_arms = recovery.get("arms")
+    timing_candidates = timing.get("candidates")
+    candidates = list(roles["timing_candidates"])
+    reference = roles["recovery_reference"]
+    controls = list(roles["descriptive_controls"])
+    if (not isinstance(recovery_comparisons, dict) or
+            set(recovery_comparisons) != set(candidates) or
+            not isinstance(recovery_arms, dict) or
+            set(recovery_arms) != set(recovery_roster) or
+            not isinstance(timing_candidates, dict) or
+            set(timing_candidates) != set(candidates)):
+        fail("development summaries disagree with the closed arm roles")
     thresholds = contract["recovery"]["overhead_thresholds"]
-    for arm in sorted(recovery_arms):
+    failures: Dict[str, Mapping[str, int]] = {}
+    for arm in recovery_roster:
         arm_summary = recovery_arms.get(arm)
         if not isinstance(arm_summary, dict):
             fail("development arm summary is malformed")
@@ -3557,56 +4053,45 @@ def select_development_architecture(
             fail("development recovery tails are not nested")
         failures[arm] = tail
 
-    for arm in candidates:
-        comparison = recovery_comparisons[arm]
-        timing_summary = timing_candidates[arm]
-        if (not isinstance(comparison, dict) or
-                not isinstance(timing_summary, dict) or
-                type(comparison.get("architecture_eligible")) is not bool or
-                type(timing_summary.get("phase_speed_gate_pass")) is not bool or
-                not isinstance(comparison.get("controls"), dict) or
-                set(comparison["controls"]) != set(controls)):
-            fail("development candidate summary is malformed")
-        if (comparison.get("architecture_eligible") is True and
-                timing_summary.get("phase_speed_gate_pass") is True and
-                recovery["mandatory_controls_supported"] is True):
-            eligible.append(arm)
+    protocol = contract["timing"]["panel_protocol"]
+    panel_count = len(protocol["control_aa"]) + len(candidates) * (
+        len(protocol["candidate_aa_scopes"]) + len(protocol["candidate_ab"]))
+    expected_timing_rows = timing_domain["expected_cells"] * panel_count
+    if (type(timing.get("rows")) is not int or
+            timing.get("rows") != expected_timing_rows or
+            type(recovery.get("mandatory_controls_supported")) is not bool):
+        fail("development summaries have the wrong frozen cardinality")
 
-    bindings = {
-        "contract_sha256": contract_digest,
-        "recovery_domain_sha256": recovery_domain["domain_sha256"],
-        "timing_base_domain_sha256": timing_domain["base_domain_sha256"],
-        "timing_domain_sha256": timing["domain_sha256"],
-        "timing_qualification_map_sha256":
-            timing["timing_qualification_map_sha256"],
-        "recovery_freeze_manifest_sha256": recovery_freeze,
-        "timing_freeze_manifest_sha256": timing_freeze,
-        "architecture_artifact_sha256": recovery_artifacts,
-        "recovery_cells_per_arm": recovery_domain["expected_cells_per_arm"],
-        "timing_rows": expected_timing_rows,
-        "candidate_roster": candidates,
-    }
+    eligible: List[str] = []
+    for arm in candidates:
+        comparison = _exact_keys(recovery_comparisons[arm], (
+            "recovery_reference", "reference_comparison",
+            "descriptive_controls", "reference_noninferior",
+            "architecture_eligible",
+        ), "development recovery candidate comparison")
+        descriptive = comparison["descriptive_controls"]
+        timing_summary = timing_candidates[arm]
+        if (comparison["recovery_reference"] != reference or
+                not isinstance(comparison["reference_comparison"], dict) or
+                not isinstance(descriptive, dict) or
+                set(descriptive) != set(controls) or
+                type(comparison["reference_noninferior"]) is not bool or
+                type(comparison["architecture_eligible"]) is not bool or
+                not isinstance(timing_summary, dict) or
+                type(timing_summary.get("phase_speed_gate_pass")) is not bool):
+            fail("development candidate decision is malformed")
+        # Production recovery controls are descriptive.  Only the raw D12
+        # comparison plus the complete timing phase gate can veto promotion.
+        if (comparison["architecture_eligible"] is True and
+                timing_summary["phase_speed_gate_pass"] is True):
+            eligible.append(arm)
     if not eligible:
-        result = {
-            "schema": SCHEMA + ".architecture-selection.v1",
-            **bindings,
-            "eligible_candidates": [],
-            "eligible_overhead0_failures": {},
-            "minimum_overhead0_failures": None,
-            "recovery_equivalence_allowance": None,
-            "recovery_equivalent_candidates": [],
-            "selected_arm": None,
-            "selected_codec": None,
-            "selected_arm_descriptor_sha256": None,
-            "selected_architecture_sha256": None,
-            "ranking": [],
-        }
-        result["selection_sha256"] = sha256_json(result)
-        return result
+        return None
+
+    cells = recovery_domain["expected_cells_per_arm"]
     minimum = min(failures[arm]["0"] for arm in eligible)
     margin_ppm = contract["selection"][
         "architecture_failure_equivalence_ppm"]
-    cells = recovery_domain["expected_cells_per_arm"]
     allowance = max(1, (margin_ppm * cells + 1000000 - 1) // 1000000)
     equivalent = [
         arm for arm in eligible
@@ -3631,17 +4116,53 @@ def select_development_architecture(
         ))
     ranking_values.sort()
     selected = ranking_values[0][4]
-    selected_artifact = arm_artifacts[selected]
-    result = {
-        "schema": SCHEMA + ".architecture-selection.v1",
-        **bindings,
-        "eligible_candidates": sorted(eligible),
+    selected_artifact = timing_arm_artifacts[selected]
+    reference_artifact = recovery_arm_artifacts[reference]
+    proxy_artifact = timing_arm_artifacts[roles["timing_proxy"]]
+    wirehair1_artifact = timing_arm_artifacts["wirehair1"]
+    result: Dict[str, Any] = {
+        "schema": SCHEMA + ".architecture-selection.v2",
+        "contract_sha256": contract_digest,
+        "source_git_commit": source,
+        "architecture_roles": roles,
+        "recovery_arm_roster": recovery_roster,
+        "timing_arm_roster": timing_roster,
+        "recovery_domain_sha256": recovery_domain["domain_sha256"],
+        "timing_base_domain_sha256": timing_domain["base_domain_sha256"],
+        "timing_domain_sha256": timing["domain_sha256"],
+        "timing_qualification_map_sha256": qualification.map_sha256,
+        "recovery_freeze_manifest_sha256": recovery_freeze_hash,
+        "recovery_architecture_artifact_sha256": recovery_artifact_hash,
+        "timing_freeze_manifest_sha256": timing_freeze_hash,
+        "timing_architecture_artifact_sha256": timing_artifact_hash,
+        **dict(provenance),
+        "recovery_reference_arm": reference,
+        "recovery_reference_codec": reference_artifact["codec"],
+        "recovery_reference_binary_sha256":
+            reference_artifact["binary_sha256"],
+        "recovery_reference_arm_descriptor_sha256":
+            reference_artifact["arm_descriptor_sha256"],
+        "wirehair1_control_arm": "wirehair1",
+        "wirehair1_control_codec": wirehair1_artifact["codec"],
+        "wirehair1_control_binary_sha256":
+            wirehair1_artifact["binary_sha256"],
+        "wirehair1_control_arm_descriptor_sha256":
+            wirehair1_artifact["arm_descriptor_sha256"],
+        "timing_proxy_arm": roles["timing_proxy"],
+        "timing_proxy_codec": proxy_artifact["codec"],
+        "timing_proxy_binary_sha256": proxy_artifact["binary_sha256"],
+        "timing_proxy_arm_descriptor_sha256":
+            proxy_artifact["arm_descriptor_sha256"],
+        "recovery_cells_per_arm": cells,
+        "timing_rows": expected_timing_rows,
+        "candidate_roster": candidates,
+        "eligible_candidates": eligible,
         "eligible_overhead0_failures": {
-            arm: failures[arm]["0"] for arm in sorted(eligible)
+            arm: failures[arm]["0"] for arm in eligible
         },
         "minimum_overhead0_failures": minimum,
         "recovery_equivalence_allowance": allowance,
-        "recovery_equivalent_candidates": sorted(equivalent),
+        "recovery_equivalent_candidates": equivalent,
         "ranking": [
             {
                 "arm": value[4], "decoder_solve_mean_log_ratio": value[0],
@@ -3660,6 +4181,7 @@ def select_development_architecture(
             selected, selected_artifact),
     }
     result["selection_sha256"] = sha256_json(result)
+    validate_selection_receipt(contract, result)
     return result
 
 
@@ -3775,6 +4297,15 @@ def main(argv: Sequence[str] = ()) -> int:
         "--selection-receipt", required=True, type=Path,
         help="canonical development architecture-selection receipt")
     continuity.add_argument(
+        "--development-recovery-campaign-dir", required=True, type=Path,
+        help="completed four-arm native development recovery directory")
+    continuity.add_argument(
+        "--development-work-rank-dir", required=True, type=Path,
+        help="completed development raw work/rank sidecar directory")
+    continuity.add_argument(
+        "--development-timing-screen-dir", required=True, type=Path,
+        help="completed development timing-only evidence directory")
+    continuity.add_argument(
         "--timing-qualification-map", required=True, type=Path)
     continuity.add_argument(
         "--timing-qualification-audit", required=True, type=Path)
@@ -3791,14 +4322,28 @@ def main(argv: Sequence[str] = ()) -> int:
             return _command_describe(args.contract)
         contract = load_contract(args.contract)
         if args.command == "validate-final-continuity":
+            # When this file is executed as a script, make the dynamically
+            # imported path-only selector share these opaque-handle registries
+            # instead of loading a second module instance.
+            sys.modules.setdefault("wh2_benchmark_contract", sys.modules[__name__])
+            import wh2_select_development_architecture as selection_api
+            try:
+                architecture_selection = \
+                    selection_api.load_authoritative_selection(
+                        contract,
+                        args.development_recovery_campaign_dir,
+                        args.development_work_rank_dir,
+                        args.development_timing_screen_dir,
+                        args.selection_receipt)
+            except selection_api.SelectionError as exc:
+                fail(str(exc))
             timing_qualification = load_timing_qualification_map(
                 contract, "final", args.timing_qualification_map,
                 args.timing_qualification_audit,
                 args.timing_qualification_map_sha256)
             summary = validate_final_freeze_continuity(
                 contract, _final_freeze_arguments(args.freeze),
-                _load_canonical_json_file(
-                    args.selection_receipt, "architecture selection receipt"),
+                architecture_selection,
                 timing_qualification, args.timing_trace_manifest)
             print(json.dumps(summary, sort_keys=True, indent=2))
             return 0

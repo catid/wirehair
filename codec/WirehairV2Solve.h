@@ -25,13 +25,46 @@ static const uint32_t kMaxPacketSeedAttempts = 256u;
 static const uint32_t kMaxInactiveColumns = 4096u;
 static const uint32_t kMinPacketPrecodeCount = 2u;
 static const uint32_t kMaxPacketPrecodeCount = 65521u;
-static const uint32_t kBinaryQuotientMinBlockBytes = 2048u;
+// Generic checkpoint-producing solves retain the established 2048-byte seam:
+// below it the byte basis avoids materialization on a deficient tail.  The
+// decoder's measured receive-to-success policy promotes packed residuals at
+// 1280 bytes, while no-resume and checkpoint-budget-rejected solves are packed
+// at every width.  The forced byte reference keeps its legacy quotient seam.
+static const uint32_t kDecoderPackedBinaryResidualMinBlockBytes = 1280u;
+static const uint32_t kGenericPackedBinaryResidualMinBlockBytes = 2048u;
+static const uint32_t kLegacyByteQuotientMinBlockBytes = 2048u;
+
+enum class PackedBinaryResidualPolicy : uint8_t
+{
+    GenericCheckpoint = 0,
+    DecoderReceive = 1
+};
 
 struct PacketRowConfig
 {
     uint32_t PeelSeed = 0;
     uint32_t MixCount = kCertifiedPacketMixCount;
 };
+
+/**
+    Process-local controls that participate in the packet equation mapping.
+
+    Production builds always use the canonical {1, 0, 0} identity.  Test-hook
+    builds snapshot the calling thread's experimental block-id multiplier,
+    avalanche toggle, and odd-id peel-seed XOR.  Fixed-width integers keep the
+    checkpoint layout independent of the compiler's bool representation and
+    make the identity available even when test hooks are compiled out.
+*/
+struct PacketRowEquationIdentity
+{
+    uint32_t BlockIdMultiplier = 1u;
+    uint32_t BlockIdAvalanche = 0u;
+    uint32_t OddPeelSeedXor = 0u;
+};
+
+static_assert(
+    sizeof(PacketRowEquationIdentity) == 3u * sizeof(uint32_t),
+    "packet-row equation identity must remain three fixed-width words");
 
 /**
     Validated process-local invariants for one packet-row domain.
@@ -136,6 +169,132 @@ void ResetColdSolveWideXorObservationsForTesting();
 uint64_t ColdSolveWideXorObservationCountForTesting();
 int LastColdSolveWideXorSelectionForTesting();
 
+/**
+    Enable an exact legacy-scan comparison for the production H=12 packed
+    heavy-coefficient propagation path.  The optimized result is rejected if
+    any projected GF(256) coefficient byte differs.
+*/
+void SetHeavyProjectionOracleForTesting(bool enabled);
+
+/** Reset/read optimized, legacy-fallback, and tiny-direct observations. */
+void ResetHeavyProjectionOracleCountersForTesting();
+uint64_t HeavyProjectionOracleComparisonsForTesting();
+uint64_t HeavyProjectionLegacyFallbacksForTesting();
+uint64_t TinyPeriodicHeavyUsesForTesting();
+
+/**
+    Select the tiny PeriodicCauchy H=12 RHS implementation in this thread.
+
+    -1 forces the legacy source-major helper, zero restores production runtime
+    dispatch, and +1 forces the transposed destination-major helper.  The
+    forced transposed mode is test-only and may exercise the portable kernel;
+    production selects it only for the measured block-size and GFNI boundary.
+*/
+bool SetTinyPeriodicHeavyTransposeModeForTesting(int mode);
+int TinyPeriodicHeavyTransposeModeForTesting();
+
+/** Reset/read primary-helper observations and optional isolated timing. */
+void ResetTinyPeriodicHeavyTransposeCountersForTesting();
+uint64_t TinyPeriodicHeavyTransposeUsesForTesting();
+uint64_t TinyPeriodicHeavyLegacyUsesForTesting();
+void SetTinyPeriodicHeavyTimingForTesting(bool enabled);
+uint64_t TinyPeriodicHeavyTimedCallsForTesting();
+uint64_t TinyPeriodicHeavyTimedNanosecondsForTesting();
+uint64_t TinyPeriodicHeavyTimedDataRowsForTesting();
+
+/**
+    Select the portable x86 projection-XOR implementation in this thread.
+
+    -1 forces the SSE2/scalar fallback, zero restores production runtime
+    dispatch, and +1 requests the target-qualified AVX2 helper when the host
+    and OS support AVX2.  A forced request never bypasses the capability
+    check.  Other values are rejected without changing the active mode.
+*/
+bool SetProjectionAVX2ModeForTesting(int mode);
+int ProjectionAVX2ModeForTesting();
+
+/** Report whether the target-qualified AVX2 projection helper is usable. */
+bool ProjectionAVX2AvailableForTesting();
+
+/** Reset/read projection batches handled by AVX2 or wholly by the fallback. */
+void ResetProjectionAVX2CountersForTesting();
+uint64_t ProjectionAVX2BatchesForTesting();
+uint64_t ProjectionFallbackBatchesForTesting();
+
+/**
+    Select the one-word affine-projection implementation in this thread.
+
+    -1 forces the general packed-word reference, zero restores production
+    dispatch, and +1 requests the specialization when R fits one word.  A
+    forced request never applies when R needs two or more words.
+*/
+bool SetSingleWordProjectionModeForTesting(int mode);
+int SingleWordProjectionModeForTesting();
+
+/** Reset/read solve selections of the specialized or general projection. */
+void ResetSingleWordProjectionCountersForTesting();
+uint64_t SingleWordProjectionUsesForTesting();
+uint64_t GeneralProjectionUsesForTesting();
+
+/**
+    Select the binary-residual representation in the calling thread.
+
+    -1 forces the byte-expanded reference, zero restores production dispatch,
+    and +1 forces the packed GF(2) path.  Other values are rejected without
+    changing the active mode.
+*/
+bool SetPackedBinaryResidualModeForTesting(int mode);
+int PackedBinaryResidualModeForTesting();
+
+/** Reset/read production-or-forced packed residual selections in this thread. */
+void ResetPackedBinaryResidualUsesForTesting();
+uint64_t PackedBinaryResidualUsesForTesting();
+
+/** Exact byte/packed insertion oracle, including partial-word tail poison. */
+bool PackedBinaryResidualInsertionOracleForTesting();
+
+namespace test {
+
+/** Allocation-capable scopes exercised by the solve exception tests. */
+enum class SolveAllocationFailurePoint : uint8_t
+{
+    None,
+    EvaluateValidation,
+    ColdSolveValidation,
+    SelectPacketValidation,
+    VerifyValidation,
+    VerifyValueScratch,
+    VerifyPacketRow,
+    TinyDenseOracleValidation,
+    TinyPeriodicHeavyStorage,
+    PackedResumePivotMaterialization,
+    PackedResumeScratchMaterialization
+};
+
+enum class SolveAllocationFailureException : uint8_t
+{
+    BadAlloc,
+    LengthError
+};
+
+/** Select one thread-local, deterministic exception injection point. */
+void SetSolveAllocationFailurePointForTesting(
+    SolveAllocationFailurePoint point,
+    SolveAllocationFailureException exception);
+
+/** Number of times the selected point has injected since the last setter. */
+uint32_t SolveAllocationFailureHitsForTesting();
+
+/** Internal bridge shared with the independently compiled tiny oracle. */
+void TriggerSolveAllocationFailureForTesting(
+    SolveAllocationFailurePoint point);
+
+} // namespace test
+
+/** Count public resume calls that recompute the complete system fingerprint. */
+void ResetResumeSystemFingerprintChecksForTesting();
+uint64_t ResumeSystemFingerprintChecksForTesting();
+
 #endif
 
 /**
@@ -152,7 +311,21 @@ struct PrecodeSolveResumeState
     uint32_t InactiveCount = 0u;
     uint32_t ProjectionWords = 0u;
     uint32_t Rank = 0u;
+    // Exact parameters permit cheap rejection before recomputing the stable
+    // content fingerprint over the accepted precode row graphs.  PacketEquation
+    // separately binds process-local packet-row experiment controls that are
+    // not represented by Config.  The two
+    // words are independent fixed-key SipHash-2-4 results: equality uses the
+    // same operational 128-bit collision model as packet duplicate identity.
+    // Retaining a second full graph would add O(K) checkpoint memory and can
+    // disable the decoder's bounded resume policy.  Equivalent PrecodeSystem
+    // values remain interchangeable; object identity is not part of the
+    // checkpoint contract.
+    PrecodeParams SystemParams = {};
+    uint64_t SystemFingerprint0 = 0u;
+    uint64_t SystemFingerprint1 = 0u;
     PacketRowConfig Config = {};
+    PacketRowEquationIdentity PacketEquation = {};
     PacketRowRuntime Runtime = {};
     PrecodeSolveStats Stats = {};
     std::vector<uint32_t> InactiveIndex;
@@ -230,6 +403,8 @@ PrecodeParams PrecodeParamsForAttempt(
     `(K + P) * block_bytes` intermediate-block array.  When non-null, the
     `block_ops_out` object must not overlap either range.  Overlap is rejected
     before writing `block_out`, `block_ops_out`, or intermediate storage.
+    Allocation and length exceptions return false without writing either
+    output.
 */
 bool EvaluatePacketBlock(
     const PrecodeSystem& system,
@@ -270,9 +445,9 @@ bool EvaluatePacketBlockForValidatedSystemWithRuntime(
     Solve the complete V2 system over GF(256).
 
     Binary staircase/dense constraints and packet equations are peeled first.
-    Unused binary rows are projected onto the inactivated columns.  The
-    solver expands them into a GF(256) residual before inserting its
-    Cauchy heavy equations.  On success
+    Unused binary rows are projected onto the inactivated columns.  The solver
+    factors them over GF(2), projects the Cauchy heavy equations onto the
+    remaining GF(256) quotient, and reconstructs the binary pivots.  On success
     `intermediate_blocks_out` contains all
     K+S+D2+H block values.  The exact residual solve is bounded to
     kMaxInactiveColumns to contain adversarial memory use.  NeedMore means the
@@ -318,6 +493,11 @@ WirehairResult SolvePrecodeSystemWithRuntime(
     Internal cold solve for an immutable system validated by construction.
     The caller must retain exclusive ownership of that trust boundary: unlike
     SolvePrecodeSystemWithRuntime(), this does not inspect the stored row graph.
+    `resume_persistent_byte_limit` bounds checkpoint publication and allows a
+    rejected checkpoint to skip packed-to-byte materialization.  The explicit
+    packed policy leaves generic/public checkpoint semantics at 2048 bytes;
+    MessagePrecodeDecoder and its receive benchmark use DecoderReceive's
+    measured 1280-byte crossover.
 */
 WirehairResult SolvePrecodeSystemForValidatedSystemWithRuntime(
     const PrecodeSystem& system,
@@ -327,7 +507,10 @@ WirehairResult SolvePrecodeSystemForValidatedSystemWithRuntime(
     uint32_t block_bytes,
     std::vector<uint8_t>& intermediate_blocks_out,
     PrecodeSolveStats* stats = nullptr,
-    PrecodeSolveResumeState* resume_state = nullptr);
+    PrecodeSolveResumeState* resume_state = nullptr,
+    size_t resume_persistent_byte_limit = (size_t)-1,
+    PackedBinaryResidualPolicy packed_residual_policy =
+        PackedBinaryResidualPolicy::GenericCheckpoint);
 
 /**
     Append one packet equation to a rank-deficient solve checkpoint.
@@ -335,6 +518,9 @@ WirehairResult SolvePrecodeSystemForValidatedSystemWithRuntime(
     With allow_insert=false this performs a non-mutating duplicate consistency
     check.  With allow_insert=true an independent row is committed and Success
     is returned as soon as the complete intermediate vector is reconstructed.
+    The active process-local packet-row equation identity must match the cold
+    solve that published the checkpoint; mismatch returns InvalidInput before
+    row generation or caller-visible mutation.
     Allocations finish before an inserting call changes the algebraic state, so
     OOM is retryable.  On OOM, stats receives the unchanged checkpoint counters
     when non-null.  Output remains unchanged on NeedMore and every failure.
@@ -359,7 +545,32 @@ WirehairResult ResumePrecodeSystem(
     PrecodeSolveStats* stats = nullptr,
     bool allow_insert = true);
 
-/** Select the first deterministic packet seed whose K systematic rows rank. */
+/**
+    Internal resume path for a decoder-owned, validated immutable system.
+
+    The caller must retain exclusive ownership of the exact system graph that
+    produced the checkpoint.  All checkpoint, parameter, config, runtime,
+    packet-equation, alias, and transactional checks remain identical to the
+    public entry point; only the redundant O(K) graph fingerprint recomputation
+    is skipped.
+*/
+WirehairResult ResumePrecodeSystemForValidatedSystem(
+    const PrecodeSystem& system,
+    const PacketRowConfig& config,
+    uint32_t block_id,
+    const uint8_t* block_data,
+    uint32_t block_bytes,
+    PrecodeSolveResumeState& resume_state,
+    std::vector<uint8_t>& intermediate_blocks_out,
+    PrecodeSolveStats* stats = nullptr,
+    bool allow_insert = true);
+
+/**
+    Select the first deterministic packet seed whose K systematic rows rank.
+
+    Allocation and length exceptions return OOM.  Every failure preserves
+    selected_config and attempt_out.
+*/
 WirehairResult SelectSystematicPacketConfig(
     const PrecodeSystem& system,
     const PacketRowConfig& base_config,
@@ -392,7 +603,12 @@ WirehairResult ClassifyExactSystematicConstructionFailure(
     const PacketRowRuntime& runtime,
     WirehairResult solve_result);
 
-/** Expensive test/oracle validation of every supplied equation. */
+/**
+    Expensive test/oracle validation of every supplied equation.
+
+    Allocation and length exceptions return false.  The system, packets, and
+    intermediate block storage are always read-only.
+*/
 bool VerifyPrecodeSolution(
     const PrecodeSystem& system,
     const PacketRowConfig& config,

@@ -60,6 +60,34 @@ static const uint64_t kMessageRecoveryRowSeedSalt =
 void SetAllocationFailureCountdownForTesting(int64_t countdown);
 // Overrides the full residue-bucket scratch cap; production defaults to 64 MiB.
 void SetHeavyBucketStorageLimitForTesting(uint64_t bytes);
+
+namespace test {
+
+enum class EncodeAllocationFailurePoint : uint8_t
+{
+    None,
+    DenseCornerValidation,
+    PrecodeValuesValidation,
+    RecoveryBlockValidation,
+    EncodedBlockValidation,
+    EncodedBlockRow,
+    InitializeSolvedValidation
+};
+
+enum class EncodeAllocationFailureException : uint8_t
+{
+    BadAlloc,
+    LengthError
+};
+
+void SetEncodeAllocationFailurePointForTesting(
+    EncodeAllocationFailurePoint point,
+    EncodeAllocationFailureException exception);
+uint32_t EncodeAllocationFailureHitsForTesting();
+void TriggerEncodeAllocationFailureForTesting(
+    EncodeAllocationFailurePoint point);
+
+} // namespace test
 #endif
 
 struct PrecodeEncodeStats
@@ -98,6 +126,7 @@ struct PrecodeEncodeStats
     (the staircase part is always solvable and the heavy corner is always
     invertible, so this corner is the ONLY feasibility gate).  Requires
     DenseRows <= 64.  D2 == 0 counts as invertible.
+    Allocation and length failures return false.
 */
 bool DenseCornerInvertible(const PrecodeSystem& system);
 
@@ -114,6 +143,9 @@ bool DenseCornerInvertible(const PrecodeSystem& system);
     or when the D2 x D2 dense corner is singular.  On the singular-corner
     path stats (if given) still hold the staircase and dense known-part
     counts, so cost measurements do not require a feasible seed.
+    Allocation and length failures return false; this low-level helper does
+    not promise to roll back parity or stats work completed before a later
+    allocation.
 */
 bool ComputePrecodeValues(
     const PrecodeSystem& system,
@@ -134,6 +166,7 @@ bool ComputePrecodeValues(
     the zero block and zero ops.
 
     `block_out` must not overlap the source/parity block arrays.
+    Allocation and length failures return false before writing `block_out`.
 */
 bool ComputeRecoveryBlock(
     const PrecodeSystem& system,
@@ -156,6 +189,7 @@ bool ComputeRecoveryBlock(
     `parity_blocks` may be null only for source block ids; recovery ids require
     the S + D2 + H parity blocks already computed by ComputePrecodeValues().
     `block_out` must not overlap the source/parity block arrays.
+    Allocation and length failures return false before writing `block_out`.
 */
 bool ComputeEncodedBlock(
     const PrecodeSystem& system,
@@ -234,8 +268,8 @@ public:
 
     /**
         Returns the retained system descriptor.  Params are complete for every
-        initialized encoder; StaircaseRows and DenseRowColumns are complete
-        only when HasCompleteSystem() is true.
+        initialized encoder; StaircaseRows and DenseBasisRowColumns are
+        complete only when HasCompleteSystem() is true.
     */
     const PrecodeSystem& System() const;
 

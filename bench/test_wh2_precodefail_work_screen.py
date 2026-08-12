@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import copy
 import hashlib
 import json
 import os
@@ -46,6 +47,13 @@ RAW_PRECODE_BASE_SEED = 0x487468302aad7105
 RAW_PACKET_BASE_SEED = 0x4ec72102
 RAW_PRECODE_ATTEMPT_STRIDE = 0x9e3779b97f4a7c15
 RAW_PACKET_ATTEMPT_STRIDE = 0x9e3779b9
+STAIRCASE_BY_K = {
+    2: 2, 3: 3, 4: 3, 5: 5, 6: 6, 8: 6, 16: 13, 32: 13, 64: 19,
+    100: 26, 101: 26, 128: 30, 256: 30, 512: 38, 513: 38,
+    1000: 50, 1001: 50, 2048: 54, 4096: 70, 5000: 66, 5001: 66,
+    8192: 78, 10000: 86, 10001: 86, 16384: 114, 20000: 134,
+    20001: 134, 32768: 194, 49152: 378, 64000: 346,
+}
 
 args = sys.argv[1:]
 if not args or args[0] != "precodefail":
@@ -67,6 +75,7 @@ schedule = values["--schedule"]
 loss = float(values["--loss"])
 dense = int(values["--binary-dense-rows"])
 heavy = int(values["--gf256-heavy-rows"])
+dense_anchor_layout = values["--dense-anchors"]
 seed_basis = values["--construction-seed-basis"]
 if seed_basis != RAW_SEED_BASIS:
     raise SystemExit(2)
@@ -80,10 +89,12 @@ metadata = [
     "packet_peel_seed_xor=0x0",
     "binary_dense_rows_override={}".format(dense),
     "gf256_heavy_rows_override={}".format(heavy),
+    "dense_anchor_layout={}".format(dense_anchor_layout),
     "odd_packet_peel_seed_xor=0x0", "packet_row_seed_multiplier=0x1",
     "packet_row_seed_avalanche=0", "seed_block_bytes_override=0",
     "overhead_stream=paired", "full_payload_solve=1",
-    "schedule={}".format(schedule), "exact_attempt_mode=1",
+    "schedule={}".format(schedule), "cold_solve_wide_xor=policy",
+    "exact_attempt_mode=1",
     "exact_precode_attempt={}".format(trial),
     "exact_packet_attempt={}".format(trial),
     "construction_seed_basis={}".format(seed_basis),
@@ -92,13 +103,14 @@ metadata = [
 ]
 corruption = os.environ.get("WH2_FAKE_PRECODEFAIL_CORRUPTION", "")
 if corruption == "stdout_overflow" and schedule == "iid" and trial == 0 and \
-        heavy == 11:
+        dense_anchor_layout == "disabled":
     import time
     sys.stdout.write("x" * (2 * 1024 * 1024 + 1))
     sys.stdout.flush()
     time.sleep(10)
     raise SystemExit(9)
-if corruption == "metadata" and schedule == "iid" and trial == 0 and heavy == 11:
+if corruption == "metadata" and schedule == "iid" and trial == 0 and \
+        dense_anchor_layout == "disabled":
     metadata[0] = "trials=2"
 print("# precodefail: " + " ".join(metadata))
 print(HEADER)
@@ -115,7 +127,7 @@ for K in [int(value) for value in values["--N"].split(",")]:
         shortfall = int(rank_fail and binary_def <= heavy and gain < binary_def)
         block_xors = K * 3 + dense + overhead
         muladds = K + heavy * 2 + overhead
-        staircase = 20 + K % 10
+        staircase = STAIRCASE_BY_K[K]
         source_hits = 3 if K >= 10000 else 2
         row = [
             str(K), "2", "periodic", "3", str(staircase), str(dense),
@@ -134,7 +146,7 @@ for K in [int(value) for value in values["--N"].split(",")]:
             "0x{:08x}".format(effective_packet_seed),
         ]
         if corruption == "error" and schedule == "iid" and trial == 0 and \
-                heavy == 11 and K == 2 and overhead == 0:
+                dense_anchor_layout == "disabled" and K == 2 and overhead == 0:
             row[11:15] = ["0", "0", "1", "1.00000000"]
         print(",".join(row))
 '''
@@ -204,14 +216,10 @@ class PrecodefailWorkScreenTests(unittest.TestCase):
             provenance["wirehair_v2_raw_seed_source_sha256"],
             hashlib.sha256(subject.RAW_SEED_SOURCE.read_bytes()).hexdigest())
         self.assertEqual(subject.ARM_DESCRIPTOR_SHA256, {
-            "wirehair2_raw_d12_h11_periodic":
-                "91d7c1a558e1cf93b002fcf2062b7657d301faca03972215495bdf2429499e90",
             "wirehair2_raw_d12_h12_periodic":
                 "739092a7824449e6168f08b46661dfbe8ad5495ea4166b36073c79cd3bacdd11",
-            "wirehair2_raw_d12_h13_periodic":
-                "7c7889747a97ac160726b807fb03349344d49d4bec84c9e8220aa4689b00d2ca",
-            "wirehair2_raw_d13_h12_periodic":
-                "c70e0f57bb8d7783fa29b0decbed5da5058a8eb532d57d540f72108e114f091a",
+            "wirehair2_dense_two07_basis_v1":
+                "9527f200ad38c7eec6502b2f768fdd67b92787fb227eed3d7616274ffc2df388",
         })
         for arm in subject.ARM_TRANSFORMS:
             self.assertEqual(subject._arm_descriptor_sha256(arm),
@@ -230,9 +238,11 @@ class PrecodefailWorkScreenTests(unittest.TestCase):
         self.assertEqual(
             command[-2:], ["--construction-seed-basis",
                            subject.RAW_SEED_BASIS])
+        wide_mode_index = command.index("--cold-solve-wide-xor")
+        self.assertEqual(command[wide_mode_index + 1], "policy")
         self.assertEqual(first["heavy_family"], "periodic-cauchy")
         self.assertEqual(first["arm"],
-                         "wirehair2_raw_d12_h11_periodic")
+                         "wirehair2_raw_d12_h12_periodic")
         self.assertEqual(first["precode_attempt"], 0)
         self.assertEqual(first["packet_attempt"], 0)
         self.assertEqual(first["construction_seed_basis"],
@@ -242,9 +252,10 @@ class PrecodefailWorkScreenTests(unittest.TestCase):
         self.assertEqual(first["effective_precode_seed"],
                          "0x487468302aad7105")
         self.assertEqual(first["effective_packet_seed"], "0x4ec72102")
-        self.assertEqual(first["staircase"], 22)
+        self.assertEqual(first["staircase"], 2)
         self.assertEqual(first["binary_dense_rows"], 12)
-        self.assertEqual(first["gf256_heavy_rows"], 11)
+        self.assertEqual(first["gf256_heavy_rows"], 12)
+        self.assertEqual(first["dense_anchor_layout"], "disabled")
         self.assertEqual(first["source_hits"], 2)
         self.assertIs(first["dense_identity_corner"], False)
         self.assertEqual(first["arm_descriptor_sha256"],
@@ -782,7 +793,7 @@ class PrecodefailWorkScreenTests(unittest.TestCase):
         self.assertEqual(
             hashlib.sha256(result_bytes).hexdigest(),
             summary["result_stream_sha256"])
-        self.assertEqual(len(result_bytes.splitlines()), 5760)
+        self.assertEqual(len(result_bytes.splitlines()), 2880)
         parsed_summary = json.loads(summary_bytes)
         self.assertEqual(parsed_summary, summary)
         unsigned = dict(summary)
@@ -800,7 +811,7 @@ class PrecodefailWorkScreenTests(unittest.TestCase):
             summary["source_provenance_sha256"],
             subject._sha256_json(provenance))
         self.assertEqual([arm["rows"] for arm in summary["arms"]],
-                         [1440, 1440, 1440, 1440])
+                         [1440, 1440])
         for arm in summary["arms"]:
             self.assertEqual(
                 arm["overhead_zero_weak_cell_count"],
@@ -878,6 +889,54 @@ class PrecodefailWorkScreenTests(unittest.TestCase):
                 (subject._canonical(forged_summary) + "\n").encode("utf-8"))
             return directory
 
+        numeric_row_aliases = {
+            "block-bytes-float": ("block_bytes", 2.0),
+            "loss-ppm-float": ("loss_ppm", 100000.0),
+            "base-attempt-bool": ("base_seed_attempt", False),
+            "base-attempt-float": ("base_seed_attempt", 0.0),
+            "packet-count-float": ("packet_count", 2.0),
+        }
+        for name, (field, alias) in numeric_row_aliases.items():
+            aliased_rows = [json.loads(raw)
+                            for raw in result_bytes.splitlines()]
+            self.assertEqual(aliased_rows[0][field], alias)
+            aliased_rows[0][field] = alias
+            aliased_result = b"".join(
+                (subject._canonical(value) + "\n").encode("utf-8")
+                for value in aliased_rows)
+            aliased_summary = dict(summary)
+            aliased_summary["result_stream_sha256"] = hashlib.sha256(
+                aliased_result).hexdigest()
+            aliased_dir = write_forged(
+                name, aliased_summary, aliased_result)
+            with self.subTest(exact_row_alias=name), \
+                    self.assertRaises(subject.WorkScreenError):
+                subject.load_completed_work_screen(
+                    self.contract, aliased_dir)
+
+        summary_aliases = {}
+        for name, field in (("record-count-float", "record_count"),
+                            ("invocation-count-float", "invocation_count")):
+            mutation = copy.deepcopy(summary)
+            mutation[field] = float(mutation[field])
+            summary_aliases[name] = mutation
+        mutation = copy.deepcopy(summary)
+        mutation["trace_identity"]["total_attempted_candidates"] = float(
+            mutation["trace_identity"]["total_attempted_candidates"])
+        summary_aliases["trace-identity-float"] = mutation
+        mutation = copy.deepcopy(summary)
+        mutation["arms"][0]["rows"] = 1440.0
+        summary_aliases["arm-rows-float"] = mutation
+        mutation = copy.deepcopy(summary)
+        mutation["invocations"][0]["row_count"] = 120.0
+        summary_aliases["invocation-rows-float"] = mutation
+        for name, mutation in summary_aliases.items():
+            alias_dir = write_forged(name, mutation, result_bytes)
+            with self.subTest(exact_summary_alias=name), \
+                    self.assertRaises(subject.WorkScreenError):
+                subject.load_completed_work_screen(
+                    self.contract, alias_dir)
+
         forged_rows = [json.loads(raw) for raw in result_bytes.splitlines()]
         forged_rows[0]["staircase"] += 1
         forged_result = b"".join(
@@ -889,7 +948,7 @@ class PrecodefailWorkScreenTests(unittest.TestCase):
         forged_dir = write_forged(
             "forged-realized", forged_summary, forged_result)
         with self.assertRaisesRegex(subject.WorkScreenError,
-                                    "realized construction hash"):
+                                    "staircase disagrees|realized construction hash"):
             subject.load_completed_work_screen(self.contract, forged_dir)
 
         malformed_rows = [json.loads(raw) for raw in result_bytes.splitlines()]

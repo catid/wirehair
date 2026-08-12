@@ -1,4 +1,4 @@
-add_library(wirehair_v2_policy STATIC
+set(WIREHAIR_V2_POLICY_SOURCES
     WirehairV2Codec.cpp
     WirehairV2Codec.h
     WirehairV2Peel.cpp
@@ -19,11 +19,25 @@ add_library(wirehair_v2_policy STATIC
     WirehairV2Solve.h
 )
 
+add_library(wirehair_v2_policy STATIC ${WIREHAIR_V2_POLICY_SOURCES})
+
 target_include_directories(wirehair_v2_policy PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(wirehair_v2_policy PUBLIC ${WIREHAIR_INTERNAL_LIBRARY})
 wirehair_apply_project_options(wirehair_v2_policy)
 
 if (BUILD_TESTS)
+    # Promotional timing binaries need exact benchmark equations, but must
+    # never inherit the generic test hooks or their timed TLS counters.
+    add_library(wirehair_v2_timing_policy STATIC
+        ${WIREHAIR_V2_POLICY_SOURCES})
+    target_include_directories(wirehair_v2_timing_policy
+        PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(wirehair_v2_timing_policy
+        PUBLIC ${WIREHAIR_INTERNAL_LIBRARY})
+    target_compile_definitions(wirehair_v2_timing_policy
+        PUBLIC WIREHAIR_V2_ENABLE_BENCHMARK_EQUATIONS=1)
+    wirehair_apply_project_options(wirehair_v2_timing_policy)
+
     target_compile_definitions(wirehair_v2_policy
         PUBLIC WIREHAIR_V2_ENABLE_TEST_HOOKS=1)
 
