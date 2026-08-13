@@ -2624,8 +2624,12 @@ bool PackedBinaryResidualInsertionOracleForTesting()
     {
         const uint32_t words = PackedWordCount(R);
         std::vector<uint8_t> byte_pivots((size_t)R * R, 0u);
+        // The final packed row is an internal occupancy mask used by the
+        // production insertion helper.  Keeping it in the same allocation as
+        // the R pivot relations avoids adding a fixed-cost allocation to every
+        // cold solve.
         std::vector<uint64_t> packed_pivots(
-            (size_t)R * words, uint64_t{0});
+            ((size_t)R + 1u) * words, uint64_t{0});
         std::vector<uint8_t> byte_pivot_rhs(
             (size_t)R * block_bytes, 0u);
         std::vector<uint8_t> packed_pivot_rhs(
@@ -2690,6 +2694,19 @@ bool PackedBinaryResidualInsertionOracleForTesting()
                 {
                     return false;
                 }
+            }
+            const uint64_t* const packed_occupancy =
+                packed_pivots.data() + (size_t)R * words;
+            for (uint32_t column = 0u; column < R; ++column)
+            {
+                const bool occupied = (packed_occupancy[column >> 6] &
+                    (UINT64_C(1) << (column & 63u))) != 0u;
+                if (occupied != (packed_have[column] != 0u)) {
+                    return false;
+                }
+            }
+            if ((packed_occupancy[words - 1u] & ~tail_mask) != 0u) {
+                return false;
             }
             return byte_result == packed_result &&
                 byte_coeff == expanded_coeff && byte_rhs == packed_rhs &&
@@ -3985,7 +4002,7 @@ static WirehairResult SolvePrecodeSystemImpl(
                 (uint64_t)R * R >
                     (uint64_t)std::numeric_limits<size_t>::max()) ||
             (use_packed_binary_residual &&
-                (uint64_t)R * words >
+                ((uint64_t)R + 1u) * words >
                     (uint64_t)std::numeric_limits<size_t>::max() /
                         sizeof(uint64_t)))
         {
@@ -3993,8 +4010,13 @@ static WirehairResult SolvePrecodeSystemImpl(
         }
         std::vector<uint8_t> pivot_coeff(
             use_packed_binary_residual ? 0u : (size_t)R * R, 0u);
+        // Append one packed occupancy row to the R pivot relations.  The
+        // insertion helper uses it to visit only established pivots without a
+        // second allocation; all quotient/checkpoint consumers still address
+        // exactly the first R relation rows.
         std::vector<uint64_t> binary_pivot_coeff(
-            use_packed_binary_residual ? (size_t)R * words : 0u,
+            use_packed_binary_residual ?
+                ((size_t)R + 1u) * words : 0u,
             uint64_t{0});
         size_t residual_value_bytes = 0u;
         if (!CheckedBlockStorage(R, block_bytes, residual_value_bytes)) {
@@ -5000,9 +5022,11 @@ InsertPackedBinaryResidualRow(
     CAT_DEBUG_ASSERT(
         R > 0u && words == PackedWordCount(R) &&
         coeff.size() == words &&
-        pivot_coeff.size() == (size_t)R * words &&
+        pivot_coeff.size() == ((size_t)R + 1u) * words &&
         pivot_rhs.size() == (size_t)R * block_bytes &&
         have_pivot.size() == R);
+    uint64_t* const pivot_occupancy =
+        pivot_coeff.data() + (size_t)R * words;
 
     // Projection words may carry poison outside the logical inactive domain.
     // Mask once before pivot search so no tail bit can become a fake column.
@@ -5011,23 +5035,45 @@ InsertPackedBinaryResidualRow(
             (UINT64_C(1) << (R & 63u)) - UINT64_C(1);
     }
 
-    // Reduce in ascending pivot order.  Binary coefficients need only packed
-    // word XORs; payload RHS operations stay identical to the byte reference.
-    for (uint32_t column = 0u; column < R; ++column)
+    // Reduce in ascending pivot order.  Recompute the occupied coefficient
+    // bits after each row XOR rather than depending on the established RREF
+    // invariant that other occupied pivot columns are zero.  This preserves
+    // the byte reference's exact order while skipping unoccupied columns.
+    for (uint32_t word = 0u; word < words; ++word)
     {
-        const uint64_t bit = UINT64_C(1) << (column & 63u);
-        if ((coeff[column >> 6] & bit) == 0u || !have_pivot[column]) {
-            continue;
+        uint32_t minimum_bit = 0u;
+        for (;;)
+        {
+            uint64_t candidates = coeff[word] & pivot_occupancy[word];
+            if (minimum_bit != 0u) {
+                candidates &= UINT64_MAX << minimum_bit;
+            }
+            if (candidates == 0u) {
+                break;
+            }
+            const uint32_t bit =
+                wirehair::NonzeroLowestBitIndex64(candidates);
+            const uint32_t column = (word << 6) + bit;
+            CAT_DEBUG_ASSERT(column < R && have_pivot[column]);
+            const uint64_t* pivot =
+                pivot_coeff.data() + (size_t)column * words;
+            for (uint32_t pivot_word = word;
+                 pivot_word < words;
+                 ++pivot_word)
+            {
+                coeff[pivot_word] ^= pivot[pivot_word];
+            }
+            AddScaledBlock(
+                rhs.data(), 1u,
+                pivot_rhs.data() + (size_t)column * block_bytes,
+                block_bytes, stats);
+            // Avoid shifting by 64 while matching the old loop's final column
+            // advance at the word boundary.
+            if (bit == 63u) {
+                break;
+            }
+            minimum_bit = bit + 1u;
         }
-        const uint64_t* pivot =
-            pivot_coeff.data() + (size_t)column * words;
-        for (uint32_t word = column >> 6; word < words; ++word) {
-            coeff[word] ^= pivot[word];
-        }
-        AddScaledBlock(
-            rhs.data(), 1u,
-            pivot_rhs.data() + (size_t)column * block_bytes,
-            block_bytes, stats);
     }
 
     uint32_t pivot_column = R;
@@ -5054,22 +5100,30 @@ InsertPackedBinaryResidualRow(
     const uint32_t pivot_word = pivot_column >> 6;
     const uint64_t pivot_bit =
         UINT64_C(1) << (pivot_column & 63u);
-    for (uint32_t existing = 0u; existing < R; ++existing)
+    for (uint32_t occupied_word = 0u;
+         occupied_word < words;
+         ++occupied_word)
     {
-        if (!have_pivot[existing]) {
-            continue;
+        uint64_t occupied = pivot_occupancy[occupied_word];
+        while (occupied != 0u)
+        {
+            const uint32_t bit =
+                wirehair::NonzeroLowestBitIndex64(occupied);
+            const uint32_t existing = (occupied_word << 6) + bit;
+            CAT_DEBUG_ASSERT(existing < R && have_pivot[existing]);
+            uint64_t* existing_coeff =
+                pivot_coeff.data() + (size_t)existing * words;
+            if ((existing_coeff[pivot_word] & pivot_bit) != 0u)
+            {
+                for (uint32_t word = pivot_word; word < words; ++word) {
+                    existing_coeff[word] ^= coeff[word];
+                }
+                AddScaledBlock(
+                    pivot_rhs.data() + (size_t)existing * block_bytes,
+                    1u, rhs.data(), block_bytes, stats);
+            }
+            occupied &= occupied - 1u;
         }
-        uint64_t* existing_coeff =
-            pivot_coeff.data() + (size_t)existing * words;
-        if ((existing_coeff[pivot_word] & pivot_bit) == 0u) {
-            continue;
-        }
-        for (uint32_t word = pivot_word; word < words; ++word) {
-            existing_coeff[word] ^= coeff[word];
-        }
-        AddScaledBlock(
-            pivot_rhs.data() + (size_t)existing * block_bytes,
-            1u, rhs.data(), block_bytes, stats);
     }
 
     std::memcpy(
@@ -5079,6 +5133,7 @@ InsertPackedBinaryResidualRow(
         pivot_rhs.data() + (size_t)pivot_column * block_bytes,
         rhs.data(), block_bytes);
     have_pivot[pivot_column] = 1u;
+    pivot_occupancy[pivot_word] |= pivot_bit;
     ++rank;
     return ResidualInsertResult::Inserted;
 }
