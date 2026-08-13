@@ -1923,7 +1923,33 @@ ResidualInsertResult InsertResidualRow(
     return ResidualInsertResult::Inserted;
 }
 
-template<bool UseLowDegreeXor>
+bool CanUseDirectDegreeTwoKey(
+    uint32_t column_count,
+    uint32_t max_reference_count)
+{
+    return column_count <= UINT16_MAX &&
+        max_reference_count <= UINT16_MAX;
+}
+
+uint64_t MakeDirectDegreeTwoKey(
+    uint32_t live_references,
+    uint32_t total_references,
+    uint32_t column)
+{
+    CAT_DEBUG_ASSERT(live_references <= total_references);
+    CAT_DEBUG_ASSERT(total_references <= UINT16_MAX);
+    CAT_DEBUG_ASSERT(column < UINT16_MAX);
+    return (uint64_t)live_references << 32 |
+        (uint64_t)total_references << 16 |
+        ((uint32_t)UINT16_MAX - column);
+}
+
+uint32_t DirectDegreeTwoKeyColumn(uint64_t key)
+{
+    return (uint32_t)UINT16_MAX - (uint16_t)key;
+}
+
+template<bool UseLowDegreeXor, bool UseDirectDegreeTwoKey>
 PeelResult PeelBinaryRowsImplementation(
     uint32_t column_count,
     const BinaryEquationArena& rows)
@@ -2020,32 +2046,56 @@ PeelResult PeelBinaryRowsImplementation(
     reference_bucket_cursor = reference_bucket_offsets;
 
     // Degree-two priorities compare a changing reference count followed by
-    // the immutable total-reference count and reverse column id.  Replace
-    // the three-field heap node with one 64-bit key.  The low word is a
-    // precomputed rank that preserves the exact original tie order: larger
-    // total-reference counts first, then lower column ids.
-    std::vector<uint32_t> degree_two_tie_rank(column_count);
-    std::vector<uint32_t> degree_two_rank_column(column_count);
-    uint32_t next_tie_rank = 0u;
-    for (uint32_t references = 0u;
-         references <= max_reference_count;
-         ++references)
+    // the immutable total-reference count and reverse column id.  Validated
+    // codec systems fit the latter two fields directly into the low word:
+    // [ total references : 16 ][ UINT16_MAX - column : 16 ].  This removes
+    // two O(L) rank arrays and their construction pass from every cold solve.
+    // Retain the exact rank representation as a fail-closed fallback for the
+    // low-level solver's unusually large synthetic row domains.
+    const bool use_direct_degree_two_key =
+        UseDirectDegreeTwoKey &&
+        CanUseDirectDegreeTwoKey(column_count, max_reference_count);
+    std::vector<uint32_t> degree_two_tie_rank;
+    std::vector<uint32_t> degree_two_rank_column;
+    if (!use_direct_degree_two_key)
     {
-        const size_t begin = reference_bucket_offsets[references];
-        const size_t end =
-            reference_bucket_offsets[(size_t)references + 1u];
-        for (size_t index = end; index > begin; --index)
+        degree_two_tie_rank.resize(column_count);
+        degree_two_rank_column.resize(column_count);
+        uint32_t next_tie_rank = 0u;
+        for (uint32_t references = 0u;
+             references <= max_reference_count;
+             ++references)
         {
-            const uint32_t column = reference_columns[index - 1u];
-            degree_two_tie_rank[column] = next_tie_rank;
-            degree_two_rank_column[next_tie_rank++] = column;
+            const size_t begin = reference_bucket_offsets[references];
+            const size_t end =
+                reference_bucket_offsets[(size_t)references + 1u];
+            for (size_t index = end; index > begin; --index)
+            {
+                const uint32_t column = reference_columns[index - 1u];
+                degree_two_tie_rank[column] = next_tie_rank;
+                degree_two_rank_column[next_tie_rank++] = column;
+            }
         }
+        CAT_DEBUG_ASSERT(next_tie_rank == column_count);
     }
-    CAT_DEBUG_ASSERT(next_tie_rank == column_count);
 
     const auto degree_two_key = [&](uint32_t column) {
+        if (use_direct_degree_two_key)
+        {
+            const uint32_t total_references = (uint32_t)(
+                column_offsets[(size_t)column + 1u] -
+                column_offsets[column]);
+            return MakeDirectDegreeTwoKey(
+                degree_two_refs[column], total_references, column);
+        }
         return (uint64_t)degree_two_refs[column] << 32 |
             degree_two_tie_rank[column];
+    };
+    const auto degree_two_column = [&](uint64_t key) {
+        if (use_direct_degree_two_key) {
+            return DirectDegreeTwoKeyColumn(key);
+        }
+        return degree_two_rank_column[(uint32_t)key];
     };
 
     // Used rows are selected only at live degree one.  Resolving their sole
@@ -2164,8 +2214,7 @@ PeelResult PeelBinaryRowsImplementation(
         while (!degree_two_queue.empty())
         {
             const uint64_t candidate = degree_two_queue.top();
-            const uint32_t column =
-                degree_two_rank_column[(uint32_t)candidate];
+            const uint32_t column = degree_two_column(candidate);
             if (resolved[column] ||
                 degree_two_refs[column] != (uint32_t)(candidate >> 32))
             {
@@ -2206,12 +2255,15 @@ PeelResult PeelBinaryRows(
     uint32_t column_count,
     const BinaryEquationArena& rows)
 {
-    PeelResult out = PeelBinaryRowsImplementation<true>(column_count, rows);
+    PeelResult out =
+        PeelBinaryRowsImplementation<true, true>(column_count, rows);
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     if (BinaryPeelOracleUsers.load(std::memory_order_relaxed) != 0u)
     {
-        const PeelResult reference =
-            PeelBinaryRowsImplementation<false>(column_count, rows);
+        const PeelResult legacy =
+            PeelBinaryRowsImplementation<true, false>(column_count, rows);
+        const PeelResult scan =
+            PeelBinaryRowsImplementation<false, false>(column_count, rows);
         std::vector<uint32_t> last_row(column_count, UINT32_MAX);
         bool duplicate_free = true;
         for (uint32_t row = 0u; row < (uint32_t)rows.size(); ++row)
@@ -2228,14 +2280,20 @@ PeelResult PeelBinaryRows(
                 break;
             }
         }
-        if (!duplicate_free || out.SolveRow != reference.SolveRow ||
-            out.PeelOrder != reference.PeelOrder ||
-            out.InactiveOrder != reference.InactiveOrder ||
-            out.UsedRows != reference.UsedRows ||
-            out.AdjacencyStorageBytes !=
-                reference.AdjacencyStorageBytes ||
+        if (!duplicate_free || out.SolveRow != legacy.SolveRow ||
+            out.PeelOrder != legacy.PeelOrder ||
+            out.InactiveOrder != legacy.InactiveOrder ||
+            out.UsedRows != legacy.UsedRows ||
+            out.AdjacencyStorageBytes != legacy.AdjacencyStorageBytes ||
             out.AdjacencyStorageAllocations !=
-                reference.AdjacencyStorageAllocations)
+                legacy.AdjacencyStorageAllocations ||
+            out.SolveRow != scan.SolveRow ||
+            out.PeelOrder != scan.PeelOrder ||
+            out.InactiveOrder != scan.InactiveOrder ||
+            out.UsedRows != scan.UsedRows ||
+            out.AdjacencyStorageBytes != scan.AdjacencyStorageBytes ||
+            out.AdjacencyStorageAllocations !=
+                scan.AdjacencyStorageAllocations)
         {
             // Valid systems have at least two columns, so clearing both order
             // vectors turns an oracle disagreement into a terminal solve
@@ -2309,6 +2367,27 @@ void ResetBinaryPeelOracleComparisonsForTesting()
 uint64_t BinaryPeelOracleComparisonsForTesting()
 {
     return BinaryPeelOracleComparisons.load(std::memory_order_relaxed);
+}
+
+bool DirectDegreeTwoKeyEligibleForTesting(
+    uint32_t column_count,
+    uint32_t max_reference_count)
+{
+    return CanUseDirectDegreeTwoKey(column_count, max_reference_count);
+}
+
+uint64_t DirectDegreeTwoKeyForTesting(
+    uint32_t live_references,
+    uint32_t total_references,
+    uint32_t column)
+{
+    return MakeDirectDegreeTwoKey(
+        live_references, total_references, column);
+}
+
+uint32_t DirectDegreeTwoKeyColumnForTesting(uint64_t key)
+{
+    return DirectDegreeTwoKeyColumn(key);
 }
 
 bool SetColdSolveWideXorModeForTesting(int mode)

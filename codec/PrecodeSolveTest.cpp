@@ -5853,6 +5853,76 @@ bool CheckBinaryPeelLowDegreeXorOracle()
     return true;
 }
 
+bool CheckDirectDegreeTwoKey()
+{
+    if (!wirehair_v2::DirectDegreeTwoKeyEligibleForTesting(
+            UINT16_MAX, UINT16_MAX) ||
+        wirehair_v2::DirectDegreeTwoKeyEligibleForTesting(
+            (uint32_t)UINT16_MAX + 1u, UINT16_MAX) ||
+        wirehair_v2::DirectDegreeTwoKeyEligibleForTesting(
+            UINT16_MAX, (uint32_t)UINT16_MAX + 1u))
+    {
+        std::fprintf(stderr,
+            "solve: direct degree-two key eligibility boundary failed\n");
+        return false;
+    }
+
+    struct Priority
+    {
+        uint32_t Live;
+        uint32_t Total;
+        uint32_t Column;
+    };
+    const Priority cases[] = {
+        { 0u, 0u, 0u },
+        { 0u, 0u, (uint32_t)UINT16_MAX - 1u },
+        { 1u, 1u, 0u },
+        { 1u, 1u, 1u },
+        { 1u, 2u, 100u },
+        { 1u, UINT16_MAX, (uint32_t)UINT16_MAX - 1u },
+        { 2u, 2u, (uint32_t)UINT16_MAX - 1u },
+        { UINT16_MAX, UINT16_MAX, 0u }
+    };
+    const size_t case_count = sizeof(cases) / sizeof(cases[0]);
+    for (size_t i = 0u; i < case_count; ++i)
+    {
+        const uint64_t key_i =
+            wirehair_v2::DirectDegreeTwoKeyForTesting(
+                cases[i].Live, cases[i].Total, cases[i].Column);
+        if (wirehair_v2::DirectDegreeTwoKeyColumnForTesting(key_i) !=
+            cases[i].Column)
+        {
+            std::fprintf(stderr,
+                "solve: direct degree-two key decode failed case=%zu\n", i);
+            return false;
+        }
+        for (size_t j = 0u; j < case_count; ++j)
+        {
+            const uint64_t key_j =
+                wirehair_v2::DirectDegreeTwoKeyForTesting(
+                    cases[j].Live, cases[j].Total, cases[j].Column);
+            const int expected =
+                cases[i].Live != cases[j].Live ?
+                    (cases[i].Live > cases[j].Live ? 1 : -1) :
+                cases[i].Total != cases[j].Total ?
+                    (cases[i].Total > cases[j].Total ? 1 : -1) :
+                cases[i].Column != cases[j].Column ?
+                    (cases[i].Column < cases[j].Column ? 1 : -1) : 0;
+            const int observed = key_i > key_j ? 1 :
+                (key_i < key_j ? -1 : 0);
+            if (observed != expected)
+            {
+                std::fprintf(stderr,
+                    "solve: direct degree-two key order failed i=%zu j=%zu\n",
+                    i, j);
+                return false;
+            }
+        }
+    }
+    std::printf("direct degree-two priority key boundaries/order: PASS\n");
+    return true;
+}
+
 bool RunCase(
     uint32_t K,
     uint32_t block_bytes,
@@ -7397,6 +7467,7 @@ int main(int argc, char** argv)
 #endif
     ok = CheckColdSolveStatsAlias() && ok;
     ok = CheckColdSolveWideXorPolicy() && ok;
+    ok = CheckDirectDegreeTwoKey() && ok;
     ok = CheckBinaryPeelLowDegreeXorOracle() && ok;
     ok = CheckMixDomainValidation() && ok;
     ok = CheckPacketRowDomainBoundaries() && ok;

@@ -146,14 +146,25 @@ void SetPacketRowSeedAvalancheForTesting(bool enabled);
 void SetOddPacketPeelSeedXorForTesting(uint32_t seed_xor);
 
 /**
-    Enable an exact comparison between low-degree-XOR and row-scan binary
-    peeling.  The oracle also rejects duplicate columns within any equation.
+    Enable exact comparisons among direct-key, legacy-rank, and row-scan
+    binary peeling.  The oracle also rejects duplicate columns within any
+    equation.
 */
 void SetBinaryPeelOracleForTesting(bool enabled);
 
 /** Reset/read the number of successful optimized-versus-scan comparisons. */
 void ResetBinaryPeelOracleComparisonsForTesting();
 uint64_t BinaryPeelOracleComparisonsForTesting();
+
+/** Test-only accessors for the guarded direct degree-two priority encoding. */
+bool DirectDegreeTwoKeyEligibleForTesting(
+    uint32_t column_count,
+    uint32_t max_reference_count);
+uint64_t DirectDegreeTwoKeyForTesting(
+    uint32_t live_references,
+    uint32_t total_references,
+    uint32_t column);
+uint32_t DirectDegreeTwoKeyColumnForTesting(uint64_t key);
 
 /**
     Override the production cold-solve wide-XOR policy in the calling thread.
