@@ -23,6 +23,9 @@ namespace {
 
 static const uint32_t kMaxConstructionAttempt = 255u;
 static const uint32_t kRecoveryOverheadCap = 4u;
+static const char kNativeArmOwnedSource[] = "native-arm-owned-kxb-v1";
+static const char kFixtureSourceAcquisition[] =
+    "fixture-copy-before-clock-move-v1";
 
 uint64_t SplitMix64(uint64_t& state)
 {
@@ -67,6 +70,13 @@ bool DefaultWh2Options(
 
 bool ValidArmSpec(const NativeArmSpec& spec)
 {
+    if (spec.SystematicEmission !=
+            NativeSystematicEmission::EquationEvaluation &&
+        spec.SystematicEmission !=
+            NativeSystematicEmission::RetainedSourceDirect)
+    {
+        return false;
+    }
     if (spec.Wh2Options.CacheSystematicSource ||
         spec.Wh2Options.CacheReceivedSystematicPackets)
     {
@@ -79,7 +89,9 @@ bool ValidArmSpec(const NativeArmSpec& spec)
     {
         return spec.ConstructionAttempt == 0u && !spec.Transform &&
             !spec.TransformContext && DefaultWh2Options(spec.Wh2Options) &&
-            spec.BaseKind == NativeWh2BaseKind::ProductionProfile;
+            spec.BaseKind == NativeWh2BaseKind::ProductionProfile &&
+            spec.SystematicEmission ==
+                NativeSystematicEmission::EquationEvaluation;
     }
     if (spec.Kind == NativeArmKind::Wirehair2Certified)
     {
@@ -155,6 +167,44 @@ bool ValidPrecodeParamsShape(
         binary_span <= UINT16_MAX && total_span <= UINT16_MAX &&
         (!params.DenseIdentityCorner ||
          known_span >= 2u * (uint64_t)(params.DenseRows >> 1));
+}
+
+bool SamePrecodeParams(
+    const wirehair_v2::PrecodeParams& left,
+    const wirehair_v2::PrecodeParams& right)
+{
+    return left.BlockCount == right.BlockCount &&
+        left.Staircase == right.Staircase &&
+        left.DenseRows == right.DenseRows &&
+        left.HeavyRows == right.HeavyRows &&
+        left.SourceHits == right.SourceHits &&
+        left.DenseIdentityCorner == right.DenseIdentityCorner &&
+        left.HeavyFamily == right.HeavyFamily &&
+        left.DenseAnchors == right.DenseAnchors &&
+        left.Seed == right.Seed;
+}
+
+bool SameNormalizedSolveStats(
+    const wirehair_v2::PrecodeSolveStats& left,
+    const wirehair_v2::PrecodeSolveStats& right)
+{
+    return left.PacketRows == right.PacketRows &&
+        left.PeeledColumns == right.PeeledColumns &&
+        left.InactivatedColumns == right.InactivatedColumns &&
+        left.ResidualRows == right.ResidualRows &&
+        left.ResidualRank == right.ResidualRank &&
+        left.BinaryResidualRank == right.BinaryResidualRank &&
+        left.BinaryRowReferences == right.BinaryRowReferences &&
+        left.BinaryRowStorageBytes == right.BinaryRowStorageBytes &&
+        left.BinaryAdjacencyStorageBytes ==
+            right.BinaryAdjacencyStorageBytes &&
+        left.BinaryRowStorageAllocations ==
+            right.BinaryRowStorageAllocations &&
+        left.BinaryAdjacencyStorageAllocations ==
+            right.BinaryAdjacencyStorageAllocations &&
+        left.BlockXors == right.BlockXors &&
+        left.BlockMulAdds == right.BlockMulAdds &&
+        left.PacketSeedAttempt == right.PacketSeedAttempt;
 }
 
 uint32_t PrecodeCount(const wirehair_v2::PrecodeSystem& system)
@@ -321,19 +371,37 @@ struct NativeArm::Impl
     uint32_t K = 0u;
     uint32_t BlockBytes = 0u;
     uint32_t Attempt = 0u;
+    NativeSystematicEmission SystematicEmission =
+        NativeSystematicEmission::Invalid;
     std::vector<uint8_t> Source;
     WirehairCodec LegacyEncoder = nullptr;
     wirehair_v2::PrecodeSystem System = {};
     wirehair_v2::PacketRowConfig PacketConfig = {};
     wirehair_v2::PacketRowRuntime PacketRuntime = {};
+    wirehair_v2::PrecodeSolveStats Stats = {};
     std::vector<uint8_t> Intermediate;
     bool Initialized = false;
 };
+
+const char* NativeSystematicEmissionName(
+    NativeSystematicEmission emission)
+{
+    switch (emission)
+    {
+    case NativeSystematicEmission::EquationEvaluation:
+        return "equation-eval-v1";
+    case NativeSystematicEmission::RetainedSourceDirect:
+        return "retained-source-direct-v1";
+    default:
+        return nullptr;
+    }
+}
 
 NativeArmSpec MakeWirehair1Arm()
 {
     NativeArmSpec spec;
     spec.Kind = NativeArmKind::Wirehair1;
+    spec.SystematicEmission = NativeSystematicEmission::EquationEvaluation;
     return spec;
 }
 
@@ -341,6 +409,7 @@ NativeArmSpec MakeCertifiedWh2Arm(uint32_t construction_attempt)
 {
     NativeArmSpec spec;
     spec.Kind = NativeArmKind::Wirehair2Certified;
+    spec.SystematicEmission = NativeSystematicEmission::EquationEvaluation;
     spec.ConstructionAttempt = construction_attempt;
     return spec;
 }
@@ -354,6 +423,7 @@ NativeArmSpec MakeExperimentalWh2Arm(
 {
     NativeArmSpec spec;
     spec.Kind = NativeArmKind::Wirehair2Experiment;
+    spec.SystematicEmission = NativeSystematicEmission::EquationEvaluation;
     spec.BaseKind = base_kind;
     spec.ConstructionAttempt = construction_attempt;
     spec.Transform = transform;
@@ -532,6 +602,7 @@ WirehairResult NativeArm::InitializeOwnedSourceAfterGlobalInit(
         next->K = block_count;
         next->BlockBytes = block_bytes;
         next->Attempt = spec.ConstructionAttempt;
+        next->SystematicEmission = spec.SystematicEmission;
         next->Source = std::move(source);
 
         if (spec.Kind == NativeArmKind::Wirehair1)
@@ -608,6 +679,7 @@ WirehairResult NativeArm::InitializeOwnedSourceAfterGlobalInit(
         stats.PacketSeedAttempt = spec.ConstructionAttempt;
         next->System = std::move(system);
         next->PacketConfig = packet_config;
+        next->Stats = stats;
         next->Intermediate.swap(intermediate);
         next->Initialized = true;
         ImplValue.swap(next);
@@ -647,6 +719,66 @@ uint32_t NativeArm::BlockBytes() const
 uint32_t NativeArm::ConstructionAttempt() const
 {
     return IsInitialized() ? ImplValue->Attempt : 0u;
+}
+
+NativeSystematicEmission NativeArm::SystematicEmission() const
+{
+    return IsInitialized() ? ImplValue->SystematicEmission :
+        NativeSystematicEmission::Invalid;
+}
+
+bool NativeArm::UsesRetainedSourceFor(uint32_t block_id) const
+{
+    return IsInitialized() && ImplValue->Kind != NativeArmKind::Wirehair1 &&
+        UsesRetainedSourceForInitializedWh2(block_id);
+}
+
+bool NativeArm::UsesRetainedSourceForInitializedWh2(
+    uint32_t block_id) const
+{
+    return block_id < ImplValue->K &&
+        ImplValue->SystematicEmission ==
+            NativeSystematicEmission::RetainedSourceDirect;
+}
+
+bool NativeArm::HasSameWh2SolvedState(const NativeArm& other) const
+{
+    if (!IsInitialized() || !other.IsInitialized() ||
+        ImplValue->Kind == NativeArmKind::Wirehair1 ||
+        other.ImplValue->Kind == NativeArmKind::Wirehair1 ||
+        ImplValue->Kind != other.ImplValue->Kind ||
+        ImplValue->K != other.ImplValue->K ||
+        ImplValue->BlockBytes != other.ImplValue->BlockBytes ||
+        ImplValue->Attempt != other.ImplValue->Attempt ||
+        !SamePrecodeParams(
+            ImplValue->System.Params, other.ImplValue->System.Params) ||
+        ImplValue->System.StaircaseRows !=
+            other.ImplValue->System.StaircaseRows ||
+        ImplValue->System.DenseBasisRowColumns !=
+            other.ImplValue->System.DenseBasisRowColumns ||
+        ImplValue->PacketConfig.PeelSeed !=
+            other.ImplValue->PacketConfig.PeelSeed ||
+        ImplValue->PacketConfig.MixCount !=
+            other.ImplValue->PacketConfig.MixCount ||
+        ImplValue->PacketRuntime.SourcePrime() !=
+            other.ImplValue->PacketRuntime.SourcePrime() ||
+        ImplValue->PacketRuntime.PrecodePrime() !=
+            other.ImplValue->PacketRuntime.PrecodePrime() ||
+        ImplValue->Source != other.ImplValue->Source ||
+        ImplValue->Intermediate != other.ImplValue->Intermediate ||
+        !SameNormalizedSolveStats(ImplValue->Stats, other.ImplValue->Stats))
+    {
+        return false;
+    }
+    const uint32_t precode_count = PrecodeCount(ImplValue->System);
+    return ImplValue->PacketRuntime.IsValidFor(
+               ImplValue->K,
+               precode_count,
+               ImplValue->PacketConfig.MixCount) &&
+        other.ImplValue->PacketRuntime.IsValidFor(
+            other.ImplValue->K,
+            precode_count,
+            other.ImplValue->PacketConfig.MixCount);
 }
 
 WirehairResult NativeArm::Encode(
@@ -699,6 +831,15 @@ WirehairResult NativeArm::EncodeInto(
         }
         return data_bytes == ImplValue->BlockBytes ?
             Wirehair_Success : Wirehair_Error;
+    }
+    if (UsesRetainedSourceForInitializedWh2(block_id))
+    {
+        std::memmove(
+            packet_out,
+            ImplValue->Source.data() +
+                (size_t)block_id * ImplValue->BlockBytes,
+            ImplValue->BlockBytes);
+        return Wirehair_Success;
     }
     return wirehair_v2::EvaluatePacketBlockForValidatedSystemWithRuntime(
         ImplValue->System,
@@ -956,6 +1097,8 @@ WirehairResult NativeTimingControlProbe::Initialize(
     uint32_t block_bytes)
 {
     if (wirehair2_head_spec.Kind != NativeArmKind::Wirehair2Certified ||
+        wirehair2_head_spec.SystematicEmission !=
+            NativeSystematicEmission::EquationEvaluation ||
         !ValidArmSpec(wirehair2_head_spec) ||
         block_count < 2u || block_count > 64000u ||
         block_bytes == 0u || block_bytes > UINT32_C(0x7fffffff))
@@ -1287,6 +1430,24 @@ bool NativeEncoderFixture::IsInitialized() const
     return ImplValue && ImplValue->Initialized;
 }
 
+bool NativeEncoderFixture::GetStorageReceipt(
+    NativeEncoderStorageReceipt& receipt_out) const
+{
+    receipt_out = NativeEncoderStorageReceipt();
+    if (!IsInitialized() ||
+        (ImplValue->Spec.Kind != NativeArmKind::Wirehair2Certified &&
+         ImplValue->Spec.Kind != NativeArmKind::Wirehair2Experiment))
+    {
+        return false;
+    }
+    NativeEncoderStorageReceipt receipt;
+    receipt.SourceStorage = kNativeArmOwnedSource;
+    receipt.SourceAcquisition = kFixtureSourceAcquisition;
+    receipt.SystematicEmission = ImplValue->Spec.SystematicEmission;
+    receipt_out = receipt;
+    return true;
+}
+
 TimedArmResult NativeEncoderFixture::Run() const
 {
     TimedArmResult result;
@@ -1337,13 +1498,31 @@ TimedArmResult NativeEncoderFixture::Run() const
         if (invocation_result == Wirehair_Success)
         {
             result.BytesVerified = encoded == ImplValue->Source;
-            if (!result.BytesVerified || result.ElapsedNanoseconds == 0u) {
+            const uint64_t expected_direct =
+                ImplValue->Spec.SystematicEmission ==
+                    NativeSystematicEmission::RetainedSourceDirect ?
+                    ImplValue->K : 0u;
+            const bool direct_roster =
+                arm.UsesRetainedSourceFor(0u) &&
+                arm.UsesRetainedSourceFor(ImplValue->K - 1u) &&
+                !arm.UsesRetainedSourceFor(ImplValue->K);
+            const bool equation_roster =
+                !arm.UsesRetainedSourceFor(0u) &&
+                !arm.UsesRetainedSourceFor(ImplValue->K - 1u) &&
+                !arm.UsesRetainedSourceFor(ImplValue->K);
+            result.DirectSystematicPackets = direct_roster ?
+                ImplValue->K : 0u;
+            if (!result.BytesVerified || result.ElapsedNanoseconds == 0u ||
+                (!direct_roster && !equation_roster) ||
+                result.DirectSystematicPackets != expected_direct)
+            {
                 result.Result = Wirehair_Error;
             }
         }
         if (result.Result != Wirehair_Success) {
             result.ElapsedNanoseconds = 0u;
             result.BytesVerified = false;
+            result.DirectSystematicPackets = 0u;
         }
         return result;
     }
@@ -1384,7 +1563,10 @@ WirehairResult NativeReceiveFixture::Initialize(
     const std::vector<uint32_t>& packet_ids,
     uint32_t receive_overhead_cap)
 {
-    if (!arm.IsInitialized()) {
+    if (!arm.IsInitialized() ||
+        arm.SystematicEmission() !=
+            NativeSystematicEmission::EquationEvaluation)
+    {
         return Wirehair_InvalidInput;
     }
     try
@@ -1614,6 +1796,8 @@ WirehairResult NativeSolveFixture::Initialize(
 {
     if (!arm.IsInitialized() ||
         arm.Kind() == NativeArmKind::Wirehair1 ||
+        arm.SystematicEmission() !=
+            NativeSystematicEmission::EquationEvaluation ||
         fixed_received_overhead != kRecoveryOverheadCap)
     {
         return Wirehair_InvalidInput;

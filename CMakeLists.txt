@@ -825,6 +825,37 @@ if(BUILD_TESTS)
         set_tests_properties(wirehair_wh2_phase_attribution_test PROPERTIES
             TIMEOUT 180
             LABELS "wh2;benchmark;contract;native;timing;phase")
+        add_executable(wirehair_wh2_systematic_emission_screen
+            bench/Wh2FrozenTrace.cpp
+            bench/Wh2FrozenTrace.h
+            bench/Wh2NativeCodec.cpp
+            bench/Wh2NativeCodec.h
+            bench/Wh2NativePanel.cpp
+            bench/Wh2NativePanel.h
+            bench/Wh2SystematicEmissionScreen.cpp)
+        target_link_libraries(wirehair_wh2_systematic_emission_screen PRIVATE
+            wirehair_v2_timing_policy)
+        target_compile_definitions(
+            wirehair_wh2_systematic_emission_screen PRIVATE
+            "WIREHAIR_WH2_SOURCE_GIT_COMMIT=\"${WIREHAIR_WH2_SOURCE_GIT_COMMIT}\"")
+        wirehair_apply_project_options(
+            wirehair_wh2_systematic_emission_screen)
+        add_test(
+            NAME wirehair_wh2_systematic_emission_screen_selftest
+            COMMAND wirehair_wh2_systematic_emission_screen --selftest)
+        set_tests_properties(
+            wirehair_wh2_systematic_emission_screen_selftest PROPERTIES
+                TIMEOUT 30
+                LABELS "wh2;benchmark;contract;native;encoder;systematic")
+        add_test(
+            NAME wirehair_wh2_systematic_emission_analyzer_selftest
+            COMMAND ${Python3_EXECUTABLE}
+                ${PROJECT_SOURCE_DIR}/bench/Wh2SystematicEmissionScreen.py
+                --selftest)
+        set_tests_properties(
+            wirehair_wh2_systematic_emission_analyzer_selftest PROPERTIES
+                TIMEOUT 30
+                LABELS "wh2;benchmark;contract;native;encoder;systematic")
         add_executable(wirehair_wh2_contract_worker
             bench/Wh2ContractWorker.cpp
             bench/Wh2FrozenTrace.cpp
@@ -854,6 +885,7 @@ if(BUILD_TESTS)
                     "-DTIMING_POLICY=$<TARGET_FILE:wirehair_v2_timing_policy>"
                     "-DCONTRACT_WORKER=$<TARGET_FILE:wirehair_wh2_contract_worker>"
                     "-DPHASE_TIMING=$<TARGET_FILE:wirehair_wh2_phase_attribution_test>"
+                    "-DSYSTEMATIC_EMISSION=$<TARGET_FILE:wirehair_wh2_systematic_emission_screen>"
                     -P ${PROJECT_SOURCE_DIR}/cmake/Wh2TimingPolicySymbolAudit.cmake)
             set_tests_properties(
                 wirehair_wh2_timing_policy_symbol_audit

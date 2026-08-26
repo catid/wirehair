@@ -2,7 +2,8 @@ if(NOT DEFINED NM OR NM STREQUAL "")
     message(FATAL_ERROR "timing-policy symbol audit requires CMAKE_NM")
 endif()
 
-foreach(_artifact_var IN ITEMS TIMING_POLICY CONTRACT_WORKER PHASE_TIMING)
+foreach(_artifact_var IN ITEMS
+        TIMING_POLICY CONTRACT_WORKER PHASE_TIMING SYSTEMATIC_EMISSION)
     if(NOT DEFINED ${_artifact_var} OR
        NOT EXISTS "${${_artifact_var}}")
         message(FATAL_ERROR
@@ -61,7 +62,8 @@ set(_forbidden_symbols
     "PackedBinaryResidualUseCount"
     "ResumeSystemFingerprintChecks")
 
-foreach(_artifact_var IN ITEMS TIMING_POLICY CONTRACT_WORKER PHASE_TIMING)
+foreach(_artifact_var IN ITEMS
+        TIMING_POLICY CONTRACT_WORKER PHASE_TIMING SYSTEMATIC_EMISSION)
     foreach(_forbidden IN LISTS _forbidden_symbols)
         string(FIND "${${_artifact_var}_SYMBOLS}" "${_forbidden}"
             _forbidden_offset)
@@ -98,7 +100,8 @@ if(DEFINED SYSTEM_NAME AND SYSTEM_NAME STREQUAL "Linux")
         # Slim LTO archives contain compiler IR rather than native symbol-table
         # rows.  Audit both final consumers instead: the output linker merges
         # .text.* sections, but three distinct out-of-line bodies must remain.
-        set(_layout_artifacts CONTRACT_WORKER PHASE_TIMING)
+        set(_layout_artifacts
+            CONTRACT_WORKER PHASE_TIMING SYSTEMATIC_EMISSION)
         set(_require_input_section FALSE)
     endif()
     foreach(_artifact_var IN LISTS _layout_artifacts)

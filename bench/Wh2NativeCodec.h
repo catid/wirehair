@@ -42,6 +42,25 @@ enum class NativeWh2BaseKind : uint32_t
     CanonicalCertifiedStructure
 };
 
+/**
+    Benchmark-only systematic packet emission policy for native WH2 arms.
+
+    EquationEvaluation preserves the existing evaluator path.  The direct
+    mode is valid only for WH2: NativeArm already owns the exact K*B source,
+    so IDs below K may be emitted from that retained storage after the full
+    precode solve has completed.  Repair IDs always use the equation
+    evaluator.  This policy is not a public encoder lifetime/API contract.
+*/
+enum class NativeSystematicEmission : uint32_t
+{
+    Invalid = 0,
+    EquationEvaluation = 1,
+    RetainedSourceDirect = 2
+};
+
+const char* NativeSystematicEmissionName(
+    NativeSystematicEmission emission);
+
 typedef bool (*Wh2EquationTransform)(
     uint32_t block_count,
     uint32_t block_bytes,
@@ -61,6 +80,10 @@ struct NativeArmSpec
         construction-attempt axis and requires zero.
     */
     uint32_t ConstructionAttempt = 0u;
+
+    /** WH2-only benchmark policy; Wirehair1 requires EquationEvaluation. */
+    NativeSystematicEmission SystematicEmission =
+        NativeSystematicEmission::Invalid;
 
     /**
         Pure-GF(256) message-precode options.  Certified arms require the
@@ -156,6 +179,17 @@ public:
     uint32_t BlockCount() const;
     uint32_t BlockBytes() const;
     uint32_t ConstructionAttempt() const;
+    NativeSystematicEmission SystematicEmission() const;
+    bool UsesRetainedSourceFor(uint32_t block_id) const;
+
+    /**
+        Exact untimed solved-state comparison for the benchmark policy axis.
+        Requires equal WH2 identity, system rows, packet runtime/configuration,
+        intermediate bytes, and every non-timing solve statistic.  The
+        SystematicEmission field and phase-duration counters are deliberately
+        excluded.
+    */
+    bool HasSameWh2SolvedState(const NativeArm& other) const;
 
     /** Encode one full-size packet into caller-owned storage. */
     WirehairResult EncodeInto(
@@ -169,6 +203,9 @@ public:
         std::vector<uint8_t>& packet_out) const;
 
 private:
+    /** Precondition: initialized WH2 arm; shared by hot path and receipts. */
+    bool UsesRetainedSourceForInitializedWh2(uint32_t block_id) const;
+
     WirehairResult InitializeOwnedSourceAfterGlobalInit(
         const NativeArmSpec& spec,
         uint32_t block_count,
@@ -253,6 +290,28 @@ struct TimedArmResult
     bool BytesVerified = false;
     /** Valid for a successful receive-to-success invocation only. */
     uint32_t DecodedOverhead = UINT32_MAX;
+    /**
+        Post-clock qualified count for the fixed successful IDs [0,K) roster.
+        Derived from the same pure branch predicate used by EncodeInto(), not
+        from mutable hot-path instrumentation.
+    */
+    uint64_t DirectSystematicPackets = 0u;
+};
+
+/**
+    Structured ownership receipt for NativeEncoderFixture's timed scope.
+
+    The pointed-to strings have static storage duration.  The receipt is
+    intentionally separate from the equation configuration: a timing screen
+    can hash the policy while independently proving both arms resolve the same
+    system and seeds.
+*/
+struct NativeEncoderStorageReceipt
+{
+    const char* SourceStorage = nullptr;
+    const char* SourceAcquisition = nullptr;
+    NativeSystematicEmission SystematicEmission =
+        NativeSystematicEmission::Invalid;
 };
 
 /**
@@ -348,6 +407,7 @@ public:
         const std::vector<uint8_t>& source);
 
     bool IsInitialized() const;
+    bool GetStorageReceipt(NativeEncoderStorageReceipt& receipt_out) const;
     TimedArmResult Run() const;
 
 private:

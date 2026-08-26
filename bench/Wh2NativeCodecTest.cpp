@@ -457,6 +457,234 @@ bool SamePrecodeParams(
         left.Seed == right.Seed;
 }
 
+bool SameResolvedConfiguration(
+    const wirehair_wh2_bench::ResolvedNativeWh2Configuration& left,
+    const wirehair_wh2_bench::ResolvedNativeWh2Configuration& right)
+{
+    return SamePrecodeParams(left.Params, right.Params) &&
+        left.PacketConfig.PeelSeed == right.PacketConfig.PeelSeed &&
+        left.PacketConfig.MixCount == right.PacketConfig.MixCount &&
+        left.PrecodeAttempt == right.PrecodeAttempt &&
+        left.PacketAttempt == right.PacketAttempt;
+}
+
+void CheckRetainedSourceDirectSystematicEmission()
+{
+    using wirehair_wh2_bench::NativeEncoderStorageReceipt;
+    using wirehair_wh2_bench::NativeSystematicEmission;
+    using wirehair_wh2_bench::ResolvedNativeWh2Configuration;
+
+    const uint32_t K = 32u;
+    const uint32_t block_bytes = 73u;
+    std::vector<uint8_t> source;
+    Check(wirehair_wh2_bench::MakeDeterministicSource(
+              K,
+              block_bytes,
+              UINT64_C(0x99cf27b056d81e43),
+              source),
+        "retained-source direct source generation failed");
+    const std::vector<uint8_t> source_snapshot(source);
+
+    NativeArmSpec equation = wirehair_wh2_bench::MakeCertifiedWh2Arm(0u);
+    NativeArmSpec direct = equation;
+    direct.SystematicEmission = NativeSystematicEmission::RetainedSourceDirect;
+    Check(std::strcmp(
+              wirehair_wh2_bench::NativeSystematicEmissionName(
+                  equation.SystematicEmission),
+              "equation-eval-v1") == 0 &&
+          std::strcmp(
+              wirehair_wh2_bench::NativeSystematicEmissionName(
+                  direct.SystematicEmission),
+              "retained-source-direct-v1") == 0 &&
+          wirehair_wh2_bench::NativeSystematicEmissionName(
+              NativeSystematicEmission::Invalid) == nullptr &&
+          wirehair_wh2_bench::NativeSystematicEmissionName(
+              static_cast<NativeSystematicEmission>(UINT32_MAX)) == nullptr,
+        "systematic emission policy names changed");
+
+    ResolvedNativeWh2Configuration equation_config;
+    ResolvedNativeWh2Configuration direct_config;
+    Check(wirehair_wh2_bench::ResolveNativeWh2Configuration(
+              equation, K, block_bytes, equation_config) &&
+          wirehair_wh2_bench::ResolveNativeWh2Configuration(
+              direct, K, block_bytes, direct_config) &&
+          SameResolvedConfiguration(equation_config, direct_config),
+        "systematic emission policy changed the resolved equations");
+
+    NativeArm equation_arm;
+    NativeArm direct_arm;
+    Check(equation_arm.Initialize(
+              equation, K, block_bytes, source) == Wirehair_Success &&
+          direct_arm.Initialize(
+              direct, K, block_bytes, source) == Wirehair_Success,
+        "retained-source direct arms failed exact construction");
+    Check(equation_arm.HasSameWh2SolvedState(direct_arm) &&
+          equation_arm.SystematicEmission() ==
+              NativeSystematicEmission::EquationEvaluation &&
+          direct_arm.SystematicEmission() ==
+              NativeSystematicEmission::RetainedSourceDirect &&
+          !equation_arm.UsesRetainedSourceFor(0u) &&
+          direct_arm.UsesRetainedSourceFor(0u) &&
+          direct_arm.UsesRetainedSourceFor(K - 1u) &&
+          !direct_arm.UsesRetainedSourceFor(K) &&
+          !direct_arm.UsesRetainedSourceFor(UINT32_MAX),
+        "retained-source direct initial receipt is wrong");
+    std::fill(source.begin(), source.end(), 0u);
+
+    std::vector<uint8_t> equation_packet(block_bytes, 0u);
+    std::vector<uint8_t> direct_packet(block_bytes, 0u);
+    for (uint32_t block_id = 0u; block_id < K; ++block_id)
+    {
+        Check(equation_arm.EncodeInto(
+                  block_id,
+                  equation_packet.data(),
+                  block_bytes) == Wirehair_Success &&
+              direct_arm.EncodeInto(
+                  block_id,
+                  direct_packet.data(),
+                  block_bytes) == Wirehair_Success &&
+              equation_packet == direct_packet &&
+              std::memcmp(
+                  direct_packet.data(),
+                  source_snapshot.data() + (size_t)block_id * block_bytes,
+                  block_bytes) == 0,
+            "retained-source direct systematic bytes differ");
+    }
+    const uint32_t repair_ids[] = {
+        K, K + 7u, 2u * K - 1u, UINT32_MAX
+    };
+    for (uint32_t block_id : repair_ids)
+    {
+        Check(equation_arm.EncodeInto(
+                  block_id,
+                  equation_packet.data(),
+                  block_bytes) == Wirehair_Success &&
+              direct_arm.EncodeInto(
+                  block_id,
+                  direct_packet.data(),
+                  block_bytes) == Wirehair_Success &&
+              equation_packet == direct_packet,
+            "retained-source direct repair path drifted");
+    }
+    NativeArmSpec invalid = direct;
+    invalid.SystematicEmission =
+        static_cast<NativeSystematicEmission>(UINT32_MAX);
+    Check(equation_arm.EncodeInto(
+              K + 7u,
+              equation_packet.data(),
+              block_bytes) == Wirehair_Success &&
+          direct_arm.Initialize(
+              invalid, K, block_bytes, source) == Wirehair_InvalidInput &&
+          direct_arm.IsInitialized() &&
+          direct_arm.SystematicEmission() ==
+              NativeSystematicEmission::RetainedSourceDirect &&
+          direct_arm.UsesRetainedSourceFor(0u) &&
+          !direct_arm.UsesRetainedSourceFor(K + 7u) &&
+          direct_arm.EncodeInto(
+              K + 7u,
+              direct_packet.data(),
+              block_bytes) == Wirehair_Success &&
+          direct_packet == equation_packet,
+        "invalid systematic policy was not transactionally rejected");
+    NativeArmSpec invalid_legacy = wirehair_wh2_bench::MakeWirehair1Arm();
+    invalid_legacy.SystematicEmission =
+        NativeSystematicEmission::RetainedSourceDirect;
+    NativeArm legacy;
+    Check(legacy.Initialize(
+              invalid_legacy, K, block_bytes, source) ==
+              Wirehair_InvalidInput,
+        "Wirehair1 accepted a no-op systematic emission policy");
+    NativeArmSpec default_spec;
+    NativeArm default_arm;
+    Check(default_spec.SystematicEmission ==
+              NativeSystematicEmission::Invalid &&
+          default_arm.Initialize(
+              default_spec, K, block_bytes, source_snapshot) ==
+              Wirehair_InvalidInput,
+        "default-constructed arm silently selected an emission policy");
+    NativeEncoderFixture legacy_fixture;
+    NativeEncoderStorageReceipt legacy_receipt;
+    legacy_receipt.SourceStorage = "stale";
+    legacy_receipt.SourceAcquisition = "stale";
+    legacy_receipt.SystematicEmission =
+        NativeSystematicEmission::RetainedSourceDirect;
+    Check(legacy_fixture.Initialize(
+              wirehair_wh2_bench::MakeWirehair1Arm(),
+              K,
+              block_bytes,
+              source_snapshot) == Wirehair_Success &&
+          !legacy_fixture.GetStorageReceipt(legacy_receipt) &&
+          legacy_receipt.SourceStorage == nullptr &&
+          legacy_receipt.SourceAcquisition == nullptr &&
+          legacy_receipt.SystematicEmission ==
+              NativeSystematicEmission::Invalid,
+        "Wirehair1 produced a misleading WH2 storage receipt");
+
+    NativeEncoderFixture equation_fixture;
+    NativeEncoderFixture direct_fixture;
+    std::vector<uint8_t> fixture_source(source_snapshot);
+    Check(equation_fixture.Initialize(
+              equation, K, block_bytes, fixture_source) == Wirehair_Success &&
+          direct_fixture.Initialize(
+              direct, K, block_bytes, fixture_source) == Wirehair_Success,
+        "retained-source timed fixtures failed initialization");
+    NativeEncoderStorageReceipt equation_receipt;
+    NativeEncoderStorageReceipt direct_receipt;
+    Check(equation_fixture.GetStorageReceipt(equation_receipt) &&
+          direct_fixture.GetStorageReceipt(direct_receipt) &&
+          std::strcmp(
+              equation_receipt.SourceStorage,
+              "native-arm-owned-kxb-v1") == 0 &&
+          std::strcmp(
+              direct_receipt.SourceStorage,
+              equation_receipt.SourceStorage) == 0 &&
+          std::strcmp(
+              equation_receipt.SourceAcquisition,
+              "fixture-copy-before-clock-move-v1") == 0 &&
+          std::strcmp(
+              direct_receipt.SourceAcquisition,
+              equation_receipt.SourceAcquisition) == 0 &&
+          equation_receipt.SystematicEmission ==
+              NativeSystematicEmission::EquationEvaluation &&
+          direct_receipt.SystematicEmission ==
+              NativeSystematicEmission::RetainedSourceDirect,
+        "retained-source timed storage receipt is wrong");
+    Check(direct_fixture.Initialize(
+              invalid, K, block_bytes, source_snapshot) ==
+              Wirehair_InvalidInput &&
+          direct_fixture.GetStorageReceipt(direct_receipt) &&
+          direct_receipt.SystematicEmission ==
+              NativeSystematicEmission::RetainedSourceDirect,
+        "invalid timed policy replaced a valid storage receipt");
+    std::fill(fixture_source.begin(), fixture_source.end(), 0x5au);
+    const wirehair_wh2_bench::TimedArmResult equation_timed =
+        equation_fixture.Run();
+    const wirehair_wh2_bench::TimedArmResult direct_timed =
+        direct_fixture.Run();
+    Check(equation_timed.Result == Wirehair_Success &&
+              equation_timed.BytesVerified &&
+              equation_timed.DirectSystematicPackets == 0u &&
+              direct_timed.Result == Wirehair_Success &&
+              direct_timed.BytesVerified &&
+              direct_timed.DirectSystematicPackets == K,
+        "retained-source timed invocation receipt is wrong");
+    NativeTimingControlProbe no_op_probe;
+    Check(no_op_probe.Initialize(direct, K, block_bytes) ==
+              Wirehair_InvalidInput,
+        "equation-only timing probe accepted a silent emission policy");
+    std::vector<uint32_t> fixture_ids(K + 4u, 0u);
+    for (uint32_t id = 0u; id < K + 4u; ++id) {
+        fixture_ids[id] = id;
+    }
+    NativeReceiveFixture no_op_receive;
+    NativeSolveFixture no_op_solve;
+    Check(no_op_receive.Initialize(direct_arm, fixture_ids, 4u) ==
+              Wirehair_InvalidInput &&
+          no_op_solve.Initialize(direct_arm, fixture_ids, 4u) ==
+              Wirehair_InvalidInput,
+        "equation-only timing fixture accepted a silent emission policy");
+}
+
 struct CanonicalBaseState
 {
     uint32_t ExpectedBlockCount = 0u;
@@ -1830,6 +2058,7 @@ int main()
     CheckDeterministicSource();
     CheckCertifiedMatchesPublicProfile();
     CheckSourceIndependentRankClassification();
+    CheckRetainedSourceDirectSystematicEmission();
     CheckCanonicalCertifiedBase();
     CheckArmsAndNestedRecovery();
     CheckTransactionalArmAndValidation();
