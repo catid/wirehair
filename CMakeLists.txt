@@ -856,6 +856,58 @@ if(BUILD_TESTS)
             wirehair_wh2_systematic_emission_analyzer_selftest PROPERTIES
                 TIMEOUT 30
                 LABELS "wh2;benchmark;contract;native;encoder;systematic")
+        add_executable(wirehair_wh2_broad_systematic_emission_screen
+            bench/Wh2BroadSystematicEmissionScreen.cpp
+            bench/Wh2FrozenTrace.cpp
+            bench/Wh2FrozenTrace.h
+            bench/Wh2NativeCodec.cpp
+            bench/Wh2NativeCodec.h
+            bench/Wh2NativePanel.cpp
+            bench/Wh2NativePanel.h)
+        target_link_libraries(
+            wirehair_wh2_broad_systematic_emission_screen PRIVATE
+            wirehair_v2_timing_policy)
+        target_compile_definitions(
+            wirehair_wh2_broad_systematic_emission_screen PRIVATE
+            "WIREHAIR_WH2_SOURCE_GIT_COMMIT=\"${WIREHAIR_WH2_SOURCE_GIT_COMMIT}\"")
+        wirehair_apply_project_options(
+            wirehair_wh2_broad_systematic_emission_screen)
+        add_test(
+            NAME wirehair_wh2_broad_systematic_emission_screen_selftest
+            COMMAND wirehair_wh2_broad_systematic_emission_screen --selftest)
+        set_tests_properties(
+            wirehair_wh2_broad_systematic_emission_screen_selftest PROPERTIES
+                TIMEOUT 120
+                LABELS
+                    "wh2;benchmark;contract;native;encoder;systematic;broad")
+        add_test(
+            NAME wirehair_wh2_broad_systematic_emission_analyzer_selftest
+            COMMAND ${Python3_EXECUTABLE} -I -B
+                ${PROJECT_SOURCE_DIR}/bench/Wh2BroadSystematicEmissionScreen.py
+                --selftest)
+        set_tests_properties(
+            wirehair_wh2_broad_systematic_emission_analyzer_selftest PROPERTIES
+                TIMEOUT 30
+                LABELS
+                    "wh2;benchmark;contract;native;encoder;systematic;broad")
+        if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND
+           NOT CMAKE_CROSSCOMPILING AND NOT CMAKE_NM)
+            message(FATAL_ERROR
+                "native Linux broad systematic-emission contract requires CMAKE_NM audits")
+        endif()
+        if(CMAKE_NM)
+            add_test(
+                NAME wirehair_wh2_broad_systematic_emission_symbol_audit
+                COMMAND ${CMAKE_COMMAND}
+                    "-DNM=${CMAKE_NM}"
+                    "-DBROAD_SYSTEMATIC_EMISSION=$<TARGET_FILE:wirehair_wh2_broad_systematic_emission_screen>"
+                    -P ${PROJECT_SOURCE_DIR}/cmake/Wh2BroadSystematicEmissionSymbolAudit.cmake)
+            set_tests_properties(
+                wirehair_wh2_broad_systematic_emission_symbol_audit PROPERTIES
+                    TIMEOUT 30
+                    LABELS
+                        "wh2;benchmark;contract;native;encoder;systematic;broad;symbols")
+        endif()
         add_executable(wirehair_wh2_contract_worker
             bench/Wh2ContractWorker.cpp
             bench/Wh2FrozenTrace.cpp
@@ -886,6 +938,7 @@ if(BUILD_TESTS)
                     "-DCONTRACT_WORKER=$<TARGET_FILE:wirehair_wh2_contract_worker>"
                     "-DPHASE_TIMING=$<TARGET_FILE:wirehair_wh2_phase_attribution_test>"
                     "-DSYSTEMATIC_EMISSION=$<TARGET_FILE:wirehair_wh2_systematic_emission_screen>"
+                    "-DBROAD_SYSTEMATIC_EMISSION=$<TARGET_FILE:wirehair_wh2_broad_systematic_emission_screen>"
                     -P ${PROJECT_SOURCE_DIR}/cmake/Wh2TimingPolicySymbolAudit.cmake)
             set_tests_properties(
                 wirehair_wh2_timing_policy_symbol_audit

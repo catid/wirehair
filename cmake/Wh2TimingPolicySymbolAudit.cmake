@@ -3,7 +3,8 @@ if(NOT DEFINED NM OR NM STREQUAL "")
 endif()
 
 foreach(_artifact_var IN ITEMS
-        TIMING_POLICY CONTRACT_WORKER PHASE_TIMING SYSTEMATIC_EMISSION)
+        TIMING_POLICY CONTRACT_WORKER PHASE_TIMING SYSTEMATIC_EMISSION
+        BROAD_SYSTEMATIC_EMISSION)
     if(NOT DEFINED ${_artifact_var} OR
        NOT EXISTS "${${_artifact_var}}")
         message(FATAL_ERROR
@@ -17,6 +18,24 @@ foreach(_artifact_var IN ITEMS
     if(NOT _nm_result EQUAL 0)
         message(FATAL_ERROR
             "nm failed for ${_artifact_var}: ${_nm_error}")
+    endif()
+    string(STRIP "${_symbols}" _symbols_stripped)
+    string(TOLOWER "${_symbols_stripped}" _symbols_lower)
+    if(_symbols_stripped STREQUAL "" OR _symbols_lower MATCHES "no symbols")
+        message(FATAL_ERROR
+            "nm returned no auditable symbols for ${_artifact_var}")
+    endif()
+    # Use string(COMPARE) so standalone script mode cannot apply CMP0054's
+    # legacy second dereference to the literal TIMING_POLICY variable name.
+    string(COMPARE EQUAL "${_artifact_var}" "TIMING_POLICY"
+        _is_timing_policy)
+    if(NOT _is_timing_policy)
+        string(REGEX MATCH "[ \t][Tt][ \t]+_?main([\r\n]|$)"
+            _main_symbol "${_symbols}")
+        if(_main_symbol STREQUAL "")
+            message(FATAL_ERROR
+                "${_artifact_var} lacks the positive main symbol")
+        endif()
     endif()
     set(${_artifact_var}_SYMBOLS "${_symbols}")
 endforeach()
@@ -34,6 +53,9 @@ set(_forbidden_symbols
     "DecoderAllocationFailureCountdown"
     "DecoderColdSystematicReuseEnabled"
     "ColdReceiveAllocationBytesForTesting"
+    "ColdSolveWideXorTestMode"
+    "ColdSolveWideXorObservationCount"
+    "LastColdSolveWideXorSelection"
     "DecoderIncrementalResumeEnabled"
     "DecoderReceiveCounters"
     "OddPacketPeelSeedXor"
@@ -52,6 +74,7 @@ set(_forbidden_symbols
     "SingleWordProjectionUseCount"
     "GeneralProjectionUseCount"
     "TinyPeriodicHeavyTransposeTestMode"
+    "TinyPeriodicHeavyUses"
     "TinyPeriodicHeavyTransposeUseCount"
     "TinyPeriodicHeavyLegacyUseCount"
     "TinyPeriodicHeavyTimingEnabled"
@@ -63,7 +86,8 @@ set(_forbidden_symbols
     "ResumeSystemFingerprintChecks")
 
 foreach(_artifact_var IN ITEMS
-        TIMING_POLICY CONTRACT_WORKER PHASE_TIMING SYSTEMATIC_EMISSION)
+        TIMING_POLICY CONTRACT_WORKER PHASE_TIMING SYSTEMATIC_EMISSION
+        BROAD_SYSTEMATIC_EMISSION)
     foreach(_forbidden IN LISTS _forbidden_symbols)
         string(FIND "${${_artifact_var}_SYMBOLS}" "${_forbidden}"
             _forbidden_offset)
@@ -98,10 +122,11 @@ if(DEFINED SYSTEM_NAME AND SYSTEM_NAME STREQUAL "Linux")
         set(_require_input_section TRUE)
     else()
         # Slim LTO archives contain compiler IR rather than native symbol-table
-        # rows.  Audit both final consumers instead: the output linker merges
+        # rows.  Audit all final consumers instead: the output linker merges
         # .text.* sections, but three distinct out-of-line bodies must remain.
         set(_layout_artifacts
-            CONTRACT_WORKER PHASE_TIMING SYSTEMATIC_EMISSION)
+            CONTRACT_WORKER PHASE_TIMING SYSTEMATIC_EMISSION
+            BROAD_SYSTEMATIC_EMISSION)
         set(_require_input_section FALSE)
     endif()
     foreach(_artifact_var IN LISTS _layout_artifacts)
