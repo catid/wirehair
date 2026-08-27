@@ -710,6 +710,271 @@ bool CheckMalformedProfiles(const uint8_t* golden)
     return true;
 }
 
+bool CheckEncoderSourceIndependence()
+{
+    enum : uint32_t {
+        BlockBytes = 16u,
+        BlockCount = 8u,
+        ProfileBytes = WIREHAIR_V2_PROFILE_SERIALIZED_BYTES,
+        ProbeCount = 6u
+    };
+    enum ConstructorRoute
+    {
+        DefaultSelector,
+        ExplicitSelector,
+        DescriptorConstructor,
+        ConstructorRouteCount
+    };
+    struct PacketCapture
+    {
+        uint32_t Id;
+        uint32_t DataBytes;
+        uint8_t Data[BlockBytes];
+    };
+
+    static const uint64_t MessageShapes[] = {
+        (uint64_t)(BlockCount - 1u) * BlockBytes + 1u,
+        (uint64_t)(BlockCount - 1u) * BlockBytes + BlockBytes - 1u,
+        (uint64_t)BlockCount * BlockBytes
+    };
+    // K + 7 and 2 K - 1 intentionally coincide for K=8.  Retain both
+    // semantic boundary probes so a future matrix cannot silently drop one.
+    static const uint32_t PacketIds[ProbeCount] = {
+        0u,
+        BlockCount - 1u,
+        BlockCount,
+        BlockCount + 7u,
+        2u * BlockCount - 1u,
+        UINT32_MAX
+    };
+    static const char* const RouteNames[ConstructorRouteCount] = {
+        "default selector",
+        "explicit selector",
+        "descriptor constructor"
+    };
+    static const uint8_t Guard = 0x5au;
+
+    for (uint64_t message_bytes : MessageShapes)
+    {
+        std::vector<uint8_t> original((size_t)message_bytes);
+        FillMessage(original);
+        uint8_t guarded_expected_descriptor[ProfileBytes + 2u];
+        std::memset(
+            guarded_expected_descriptor, Guard,
+            sizeof(guarded_expected_descriptor));
+        uint8_t* const expected_descriptor =
+            guarded_expected_descriptor + 1u;
+        uint32_t expected_descriptor_bytes = 0u;
+        PacketCapture expected_packets[ProbeCount] = {};
+        WirehairV2Codec reference = nullptr;
+        const WirehairV2Result reference_result =
+            wirehair_v2_encoder_create(
+                original.data(), message_bytes, BlockBytes,
+                expected_descriptor, ProfileBytes,
+                &expected_descriptor_bytes, &reference);
+        WirehairV2Profile parsed_reference = {};
+        if (reference_result != WirehairV2_Success || !reference ||
+            expected_descriptor_bytes != ProfileBytes ||
+            guarded_expected_descriptor[0] != Guard ||
+            guarded_expected_descriptor[
+                sizeof(guarded_expected_descriptor) - 1u] != Guard ||
+            wirehair_v2_profile_deserialize(
+                expected_descriptor, ProfileBytes, &parsed_reference) !=
+                    WirehairV2_Success ||
+            parsed_reference.profile_id != WIREHAIR_V2_PROFILE_CURRENT ||
+            parsed_reference.message_bytes != message_bytes ||
+            parsed_reference.block_bytes != BlockBytes)
+        {
+            std::fprintf(stderr,
+                "V2 source ownership reference constructor failed: "
+                "message_bytes=%llu result=%d\n",
+                (unsigned long long)message_bytes, (int)reference_result);
+            wirehair_v2_free(reference);
+            return false;
+        }
+
+        for (unsigned probe = 0u; probe < ProbeCount; ++probe)
+        {
+            const uint32_t id = PacketIds[probe];
+            const uint32_t expected_bytes = id == BlockCount - 1u ?
+                (uint32_t)(message_bytes -
+                    (uint64_t)(BlockCount - 1u) * BlockBytes) :
+                BlockBytes;
+            uint8_t guarded_packet[BlockBytes + 2u];
+            std::memset(guarded_packet, Guard, sizeof(guarded_packet));
+            uint32_t data_bytes = UINT32_C(0xa5a5a5a5);
+            const WirehairV2Result encode_result = wirehair_v2_encode(
+                reference, id, guarded_packet + 1u, BlockBytes,
+                &data_bytes);
+            bool bounds_ok =
+                guarded_packet[0] == Guard &&
+                guarded_packet[sizeof(guarded_packet) - 1u] == Guard;
+            for (uint32_t i = data_bytes;
+                 bounds_ok && i < BlockBytes;
+                 ++i)
+            {
+                bounds_ok = guarded_packet[1u + i] == Guard;
+            }
+            const bool systematic_ok = id >= BlockCount ||
+                std::memcmp(
+                    guarded_packet + 1u,
+                    original.data() + (size_t)id * BlockBytes,
+                    expected_bytes) == 0;
+            if (encode_result != WirehairV2_Success ||
+                data_bytes != expected_bytes || !bounds_ok ||
+                !systematic_ok)
+            {
+                std::fprintf(stderr,
+                    "V2 source ownership reference capture failed: "
+                    "message_bytes=%llu probe=%u id=%u result=%d "
+                    "bytes=%u expected=%u\n",
+                    (unsigned long long)message_bytes, probe, id,
+                    (int)encode_result, data_bytes, expected_bytes);
+                wirehair_v2_free(reference);
+                return false;
+            }
+            expected_packets[probe].Id = id;
+            expected_packets[probe].DataBytes = data_bytes;
+            std::memcpy(
+                expected_packets[probe].Data,
+                guarded_packet + 1u, data_bytes);
+        }
+        wirehair_v2_free(reference);
+
+        for (unsigned route = DefaultSelector;
+             route < ConstructorRouteCount;
+             ++route)
+        {
+            uint8_t guarded_descriptor[ProfileBytes + 2u];
+            std::memset(
+                guarded_descriptor, Guard, sizeof(guarded_descriptor));
+            uint8_t* const descriptor = guarded_descriptor + 1u;
+            if (route == DescriptorConstructor) {
+                std::memcpy(
+                    descriptor, expected_descriptor, ProfileBytes);
+            }
+            uint32_t descriptor_bytes = route == DescriptorConstructor ?
+                ProfileBytes : 0u;
+            WirehairV2Codec encoder = nullptr;
+
+            {
+                std::vector<uint8_t> source = original;
+                WirehairV2Result create_result = WirehairV2_Error;
+                switch ((ConstructorRoute)route)
+                {
+                case DefaultSelector:
+                    create_result = wirehair_v2_encoder_create(
+                        source.data(), message_bytes, BlockBytes,
+                        descriptor, ProfileBytes, &descriptor_bytes,
+                        &encoder);
+                    break;
+                case ExplicitSelector:
+                    create_result = wirehair_v2_encoder_create_profile_id(
+                        WIREHAIR_V2_PROFILE_CURRENT,
+                        source.data(), message_bytes, BlockBytes,
+                        descriptor, ProfileBytes, &descriptor_bytes,
+                        &encoder);
+                    break;
+                case DescriptorConstructor:
+                    create_result = wirehair_v2_encoder_create_profile(
+                        source.data(), descriptor, ProfileBytes, &encoder);
+                    break;
+                default:
+                    return false;
+                }
+
+                WirehairV2Profile parsed = {};
+                const bool descriptor_ok =
+                    guarded_descriptor[0] == Guard &&
+                    guarded_descriptor[sizeof(guarded_descriptor) - 1u] ==
+                        Guard &&
+                    descriptor_bytes == ProfileBytes &&
+                    wirehair_v2_profile_deserialize(
+                        descriptor, ProfileBytes, &parsed) ==
+                            WirehairV2_Success &&
+                    parsed.message_bytes == message_bytes &&
+                    parsed.block_bytes == BlockBytes;
+                if (create_result != WirehairV2_Success || !encoder ||
+                    !descriptor_ok ||
+                    std::memcmp(
+                        descriptor, expected_descriptor,
+                        ProfileBytes) != 0)
+                {
+                    std::fprintf(stderr,
+                        "V2 source ownership constructor failed: "
+                        "message_bytes=%llu route=%s result=%d\n",
+                        (unsigned long long)message_bytes,
+                        RouteNames[route], (int)create_result);
+                    wirehair_v2_free(encoder);
+                    return false;
+                }
+
+                // Every byte is guaranteed to differ before the caller-owned
+                // allocation is released at the end of this scope.
+                volatile uint8_t* const poison = source.data();
+                for (size_t i = 0; i < source.size(); ++i) {
+                    poison[i] = (uint8_t)(original[i] ^ 0xffu);
+                }
+            }
+
+            for (unsigned probe = 0u; probe < ProbeCount; ++probe)
+            {
+                uint8_t guarded_packet[BlockBytes + 2u];
+                std::memset(guarded_packet, Guard, sizeof(guarded_packet));
+                uint32_t data_bytes = UINT32_C(0xa5a5a5a5);
+                const WirehairV2Result encode_result = wirehair_v2_encode(
+                    encoder, expected_packets[probe].Id,
+                    guarded_packet + 1u, BlockBytes, &data_bytes);
+                bool bounds_ok =
+                    guarded_packet[0] == Guard &&
+                    guarded_packet[sizeof(guarded_packet) - 1u] == Guard;
+                for (uint32_t i = data_bytes;
+                     bounds_ok && i < BlockBytes;
+                     ++i)
+                {
+                    bounds_ok = guarded_packet[1u + i] == Guard;
+                }
+                if (encode_result != WirehairV2_Success ||
+                    data_bytes != expected_packets[probe].DataBytes ||
+                    !bounds_ok ||
+                    std::memcmp(
+                        guarded_packet + 1u, expected_packets[probe].Data,
+                        data_bytes) != 0)
+                {
+                    std::fprintf(stderr,
+                        "V2 source ownership replay failed: "
+                        "message_bytes=%llu route=%s probe=%u id=%u "
+                        "result=%d bytes=%u expected=%u\n",
+                        (unsigned long long)message_bytes,
+                        RouteNames[route], probe,
+                        expected_packets[probe].Id,
+                        (int)encode_result, data_bytes,
+                        expected_packets[probe].DataBytes);
+                    wirehair_v2_free(encoder);
+                    return false;
+                }
+            }
+            const bool descriptor_unchanged =
+                guarded_descriptor[0] == Guard &&
+                guarded_descriptor[sizeof(guarded_descriptor) - 1u] ==
+                    Guard &&
+                std::memcmp(
+                    descriptor, expected_descriptor, ProfileBytes) == 0;
+            wirehair_v2_free(encoder);
+            if (!descriptor_unchanged)
+            {
+                std::fprintf(stderr,
+                    "V2 source ownership descriptor changed: "
+                    "message_bytes=%llu route=%s\n",
+                    (unsigned long long)message_bytes,
+                    RouteNames[route]);
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 bool CheckCppApi(
     const std::vector<uint8_t>& message,
     const uint8_t* golden_profile)
@@ -737,6 +1002,76 @@ bool CheckCppApi(
         return false;
     }
 
+    enum : uint32_t { BlockBytes = 16u };
+    uint8_t preserved_packet[BlockBytes] = {};
+    uint32_t preserved_bytes = 0u;
+    if (!Check(moved.Encode(
+            UINT32_MAX, preserved_packet, sizeof(preserved_packet),
+            preserved_bytes) == WirehairV2_Success &&
+            preserved_bytes == sizeof(preserved_packet),
+            "C++ encoder packet captured before failed replacements"))
+    {
+        return false;
+    }
+    const auto replacement_failure_preserved = [
+        &moved, &preserved_packet](const char* what)
+    {
+        uint8_t guarded[BlockBytes + 2u];
+        std::memset(guarded, 0x5a, sizeof(guarded));
+        uint32_t bytes = UINT32_C(0xa5a5a5a5);
+        const WirehairV2Result result = moved.Encode(
+            UINT32_MAX, guarded + 1u, BlockBytes, bytes);
+        return Check(result == WirehairV2_Success &&
+                bytes == BlockBytes && guarded[0] == 0x5au &&
+                guarded[sizeof(guarded) - 1u] == 0x5au &&
+                std::memcmp(
+                    guarded + 1u, preserved_packet, BlockBytes) == 0,
+            what);
+    };
+
+    wirehair::v2::SerializedProfile failed_output;
+    std::memset(failed_output.data(), 0xa5, failed_output.size());
+    uint8_t failed_output_before[WIREHAIR_V2_PROFILE_SERIALIZED_BYTES];
+    std::memcpy(
+        failed_output_before, failed_output.data(), failed_output.size());
+    if (!Check(moved.Create(
+            message.data(), message.size(), 0u, failed_output) ==
+                WirehairV2_InvalidDimensions &&
+            std::memcmp(
+                failed_output.data(), failed_output_before,
+                failed_output.size()) == 0,
+            "C++ default Create replacement failure") ||
+        !replacement_failure_preserved(
+            "C++ default Create failure preserves encoder"))
+    {
+        return false;
+    }
+
+    std::memset(failed_output.data(), 0xa5, failed_output.size());
+    if (!Check(moved.Create(
+            UINT64_MAX, message.data(), message.size(), BlockBytes,
+            failed_output) == WirehairV2_UnsupportedProfile &&
+            std::memcmp(
+                failed_output.data(), failed_output_before,
+                failed_output.size()) == 0,
+            "C++ explicit-profile Create replacement failure") ||
+        !replacement_failure_preserved(
+            "C++ explicit-profile Create failure preserves encoder"))
+    {
+        return false;
+    }
+
+    wirehair::v2::SerializedProfile malformed_profile = profile;
+    malformed_profile.data()[malformed_profile.size() - 1u] = 1u;
+    if (!Check(moved.Create(message.data(), malformed_profile) ==
+            WirehairV2_ReservedNonzero,
+            "C++ descriptor Create replacement failure") ||
+        !replacement_failure_preserved(
+            "C++ descriptor Create failure preserves encoder"))
+    {
+        return false;
+    }
+
     wirehair::v2::Decoder decoder;
     if (!Check(decoder.Create(profile) == WirehairV2_Success && decoder,
             "C++ decoder create"))
@@ -758,14 +1093,83 @@ bool CheckCppApi(
     }
     std::vector<uint8_t> recovered(message.size(), 0u);
     uint64_t recovered_bytes = 0u;
-    return Check(result == WirehairV2_Success,
-            "C++ repair-only decode") &&
-        Check(decoder.Recover(
+    if (!Check(result == WirehairV2_Success,
+            "C++ repair-only decode")) {
+        return false;
+    }
+    if (!Check(decoder.Recover(
             recovered.data(), recovered.size(), recovered_bytes) ==
                 WirehairV2_Success,
-            "C++ recover") &&
-        Check(recovered_bytes == message.size() && recovered == message,
-            "C++ recovered bytes");
+            "C++ recover") ||
+        !Check(recovered_bytes == message.size() && recovered == message,
+            "C++ recovered bytes"))
+    {
+        return false;
+    }
+
+    std::vector<uint8_t> replacement_message = message;
+    for (size_t i = 0; i < replacement_message.size(); ++i) {
+        replacement_message[i] ^= (uint8_t)(0x5bu + i * 13u);
+    }
+    wirehair::v2::SerializedProfile replacement_profile;
+    wirehair::v2::Encoder replacement;
+    if (!Check(replacement.Create(
+            replacement_message.data(), replacement_message.size(),
+            BlockBytes, replacement_profile) == WirehairV2_Success &&
+            replacement,
+            "C++ move-assignment source creation"))
+    {
+        return false;
+    }
+    uint8_t replacement_packet[BlockBytes] = {};
+    uint32_t replacement_bytes = 0u;
+    if (!Check(replacement.Encode(
+            0u, replacement_packet, sizeof(replacement_packet),
+            replacement_bytes) == WirehairV2_Success &&
+            replacement_bytes == sizeof(replacement_packet) &&
+            std::memcmp(
+                replacement_packet, replacement_message.data(),
+                sizeof(replacement_packet)) == 0 &&
+            std::memcmp(
+                replacement_packet, message.data(),
+                sizeof(replacement_packet)) != 0,
+            "C++ move-assignment source packet"))
+    {
+        return false;
+    }
+
+    moved = std::move(replacement);
+    uint8_t assigned_guarded[BlockBytes + 2u];
+    std::memset(assigned_guarded, 0x5a, sizeof(assigned_guarded));
+    uint32_t assigned_bytes = 0u;
+    if (!Check(moved && !replacement,
+            "C++ encoder move-assignment ownership") ||
+        !Check(moved.Encode(
+            0u, assigned_guarded + 1u, BlockBytes, assigned_bytes) ==
+                WirehairV2_Success && assigned_bytes == BlockBytes &&
+            assigned_guarded[0] == 0x5au &&
+            assigned_guarded[sizeof(assigned_guarded) - 1u] == 0x5au &&
+            std::memcmp(
+                assigned_guarded + 1u, replacement_packet,
+                BlockBytes) == 0,
+            "C++ encoder move-assignment transfers packet ownership"))
+    {
+        return false;
+    }
+
+    uint8_t invalidated_output[BlockBytes + 2u];
+    std::memset(invalidated_output, 0xa5, sizeof(invalidated_output));
+    uint8_t invalidated_before[sizeof(invalidated_output)];
+    std::memcpy(
+        invalidated_before, invalidated_output, sizeof(invalidated_before));
+    uint32_t invalidated_bytes = UINT32_C(0xa5a5a5a5);
+    return Check(replacement.Encode(
+            0u, invalidated_output + 1u, BlockBytes, invalidated_bytes) ==
+                WirehairV2_InvalidInput && invalidated_bytes == 0u &&
+            std::memcmp(
+                invalidated_output, invalidated_before,
+                sizeof(invalidated_output)) == 0,
+            "C++ move-assignment invalidates source handle");
 }
 
 bool CheckDescriptorOnlyDecoder(
@@ -1131,7 +1535,8 @@ int main()
         return 1;
     }
 
-    if (!CheckSelectingConstructorOverlapGuards(message) ||
+    if (!CheckEncoderSourceIndependence() ||
+        !CheckSelectingConstructorOverlapGuards(message) ||
         !CheckStagedDescriptorMessageAliases(message, ExpectedProfile) ||
         !CheckDescriptorConstructorOverlapGuards(message, serialized) ||
         !Check(wirehair_v2_encoder_create_profile(
