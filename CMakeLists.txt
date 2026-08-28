@@ -52,8 +52,17 @@ option(WIREHAIR_ENABLE_SCHEDULED_TESTS
     "Register resource-bounded scheduled large-message profiles" OFF)
 option(WIREHAIR_ENABLE_LIBFUZZER
     "Build V2 fuzz entry points with Clang libFuzzer main/coverage" OFF)
+option(WIREHAIR_ENABLE_TRI_BMQ4_SCHUR_FALSIFIER
+    "Build the one-cell tri-bmq4-schur-v0 structural falsifier" OFF)
 option(WIREHAIR_STRICT_WARNINGS
     "Treat compiler warnings as errors for Wirehair targets" OFF)
+
+if(WIREHAIR_ENABLE_TRI_BMQ4_SCHUR_FALSIFIER AND
+   (NOT BUILD_TESTS OR NOT BUILD_CODEC_V2))
+    message(FATAL_ERROR
+        "tri-bmq4-schur-v0 falsifier requires BUILD_TESTS and BUILD_CODEC_V2")
+endif()
+
 set(WH_LTO "OFF" CACHE STRING "Link-time optimization mode: OFF, ON, AUTO, or THIN")
 set_property(CACHE WH_LTO PROPERTY STRINGS OFF ON AUTO THIN)
 set(WH_PGO_MODE "OFF" CACHE STRING "Profile-guided optimization mode: OFF, GENERATE, or USE")
@@ -757,6 +766,27 @@ install(FILES
 
 if(BUILD_TESTS)
     find_package(Python3 3.8 COMPONENTS Interpreter REQUIRED)
+    if(WIREHAIR_ENABLE_TRI_BMQ4_SCHUR_FALSIFIER)
+        add_executable(wirehair_wh2_tri_bmq4_schur_falsifier
+            bench/Wh2FrozenTrace.cpp
+            bench/Wh2FrozenTrace.h
+            bench/Wh2TriBmq4SchurFalsifier.cpp)
+        target_link_libraries(
+            wirehair_wh2_tri_bmq4_schur_falsifier PRIVATE
+            wirehair_v2_policy)
+        target_compile_definitions(
+            wirehair_wh2_tri_bmq4_schur_falsifier PRIVATE
+            "WIREHAIR_WH2_SOURCE_GIT_COMMIT=\"${WIREHAIR_WH2_SOURCE_GIT_COMMIT}\"")
+        wirehair_apply_project_options(
+            wirehair_wh2_tri_bmq4_schur_falsifier)
+        add_test(
+            NAME wirehair_wh2_tri_bmq4_schur_falsifier_selftest
+            COMMAND wirehair_wh2_tri_bmq4_schur_falsifier --selftest)
+        set_tests_properties(
+            wirehair_wh2_tri_bmq4_schur_falsifier_selftest PROPERTIES
+                TIMEOUT 60
+                LABELS "wh2;experimental;structure;falsifier")
+    endif()
     add_executable(wirehair_wh2_frozen_trace_test
         bench/Wh2FrozenTrace.cpp
         bench/Wh2FrozenTrace.h
