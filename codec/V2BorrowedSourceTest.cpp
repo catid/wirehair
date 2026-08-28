@@ -1168,7 +1168,7 @@ bool CheckReadOnlyInputOverlaps(
                 storage.Tail[i] = static_cast<uint8_t>(i * 73u + 19u);
             }
             const uint8_t* const message =
-                reinterpret_cast<const uint8_t*>(&storage.Options) +
+                reinterpret_cast<const uint8_t*>(&storage) +
                 (partial ? sizeof(storage.Options) / 2u : 0u);
             std::vector<uint8_t> expected(
                 message, message + BlockCount * BlockBytes);
