@@ -977,6 +977,27 @@ if(BUILD_TESTS)
                     TIMEOUT 30
                     LABELS
                         "wh2;benchmark;contract;native;encoder;systematic;complement")
+            add_test(
+                NAME wirehair_wh2_direct_systematic_complement_launcher_selftest
+                COMMAND ${Python3_EXECUTABLE} -I -B
+                    ${PROJECT_SOURCE_DIR}/bench/test_wh2_direct_systematic_complement_launch.py)
+            set_tests_properties(
+                wirehair_wh2_direct_systematic_complement_launcher_selftest
+                PROPERTIES
+                    TIMEOUT 30
+                    LABELS
+                        "wh2;benchmark;contract;native;encoder;systematic;complement;launcher")
+            add_test(
+                NAME wirehair_expo_thermal_sampler_test
+                COMMAND ${CMAKE_COMMAND} -E env
+                    PYTHON=${Python3_EXECUTABLE}
+                    bash
+                    ${PROJECT_SOURCE_DIR}/bench/test_wirehair_expo_thermal_sampler.sh)
+            set_tests_properties(wirehair_expo_thermal_sampler_test
+                PROPERTIES
+                    LABELS
+                        "wh2;benchmark;contract;complement;v2;research;thermal;plausibility;transactional"
+                    TIMEOUT 30)
         endif()
         if(CMAKE_NM)
             add_test(

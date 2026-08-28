@@ -12,6 +12,7 @@ import math
 import os
 from pathlib import Path
 import re
+import select
 import selectors
 import signal
 import stat
@@ -69,33 +70,46 @@ MAX_STDERR_BYTES = 1024 * 1024
 MAX_FINAL_ARTIFACT_BYTES = MAX_STDOUT_BYTES + 1
 MAX_BINARY_BYTES = 64 * 1024 * 1024
 MAX_SAMPLER_CSV_BYTES = 8 * 1024 * 1024
+MAX_SAMPLER_VALIDATION_BYTES = 4 * 1024 * 1024
+MAX_SAMPLER_RECEIPT_BYTES = 1024 * 1024
 MAX_THERMAL_WINDOW_BYTES = 2 * 1024 * 1024
 MAX_SOURCE_FILE_BYTES = 1024 * 1024
 MAX_PROC_VECTOR_BYTES = 64 * 1024
+MAX_PREFLIGHT_RECEIPT_BYTES = 4 * 1024 * 1024
+SAMPLER_HEARTBEAT_MAX_GAP_NS = 5_000_000_000
 MAX_FAILURE_TEXT_CHARS = 64 * 1024
 MAX_FAILED_GATES = 64
 MAX_PUBLICATION_FAILURES = 64
 EXPECTED_TARGET_CPU = 120
 EXPECTED_CONTROLLER_CPU = 121
 EXPECTED_SAMPLER_CPU = 122
+EXPECTED_CAMPAIGN_UID = 1000
+EXPECTED_CAMPAIGN_GID = 1000
+EXPECTED_SAMPLER_I2C_GID = 113
 EXPECTED_TARGET_CORE = (0, 56)
 EXPECTED_TARGET_THREADS = (56, 120)
 EXPECTED_CONTROLLER_CORE = (0, 57)
 EXPECTED_SAMPLER_CORE = (0, 58)
 SIBLING_NON_IDLE_TICK_CAP = 5
 THERMAL_MAX_MILLIC = 85000
-HEALTH_SCHEMA = "wirehair.wh2.direct-systematic-complement-health.v2"
+HEALTH_SCHEMA = "wirehair.wh2.direct-systematic-complement-health.v3"
 HEALTH_LOADER_SCHEMA = (
     "wirehair.wh2.direct-systematic-complement-health-source-loader.v2"
 )
 CONTROLLER_SCHEMA = "wirehair.wh2.direct-systematic-complement-controller.v2"
 CONTROLLER_PROVENANCE_SCHEMA = (
-    "wirehair.wh2.direct-systematic-complement-controller-provenance.v2"
+    "wirehair.wh2.direct-systematic-complement-controller-provenance.v3"
 )
-CLAIM_SCHEMA = "wirehair.wh2.direct-systematic-complement-claim.v2"
+CLAIM_SCHEMA = "wirehair.wh2.direct-systematic-complement-claim.v3"
 COMPLETE_SCHEMA = "wirehair.wh2.direct-systematic-complement-complete.v2"
 VERIFY_RESULT_SCHEMA = (
     "wirehair.wh2.direct-systematic-complement-retained-verification.v2"
+)
+PREFLIGHT_SEAL_SCHEMA = (
+    "wirehair.wh2.direct-systematic-complement-preflight-seal.v1"
+)
+PREFLIGHT_CONTROLLER_SCHEMA = (
+    "wirehair.wh2.direct-systematic-complement-preflight-controller.v1"
 )
 FIXED_OUTPUT_DIR = Path(
     "/var/tmp/wh2-retained-direct-systematic-complement-v2-r0"
@@ -107,8 +121,31 @@ SEALED_LAUNCH_ENVIRONMENT = {
     "PATH": "/usr/bin:/bin", "TZ": "UTC",
 }
 SAMPLER_SCHEMA = (
-    "wirehair.wh2.direct-systematic-complement-sampler-attestation.v2"
+    "wirehair.wh2.direct-systematic-complement-sampler-attestation.v3"
 )
+SAMPLER_TERMINAL_SCHEMA = (
+    "wirehair.wh2.direct-systematic-complement-sampler-terminal.v1"
+)
+PROCESS_SECURITY_SCHEMA = (
+    "wirehair.wh2.direct-systematic-complement-process-security.v1"
+)
+THERMAL_VALIDATION_STREAM_SCHEMA = "wirehair.wh2.thermal_validation_stream.v1"
+THERMAL_VALIDATION_SAMPLE_SCHEMA = "wirehair.wh2.thermal_validation_sample.v1"
+THERMAL_SAMPLER_SCHEMA = "wirehair.wh2.thermal_sampler.v2"
+EXPECTED_SAMPLER_PYTHON = "/usr/bin/python3"
+EXPECTED_SAMPLER_PYTHON_FLAGS = ("-I", "-S", "-B")
+EXPECTED_SAMPLER_INTERVAL_TEXT = "1.0"
+EXPECTED_SAMPLER_DIMM_ATTEMPTS_TEXT = "5"
+EXPECTED_SAMPLER_DIMM_RETRY_DELAY_TEXT = "0.01"
+THERMAL_SAMPLER_THRESHOLDS = {
+    "dimm_safety_c_inclusive": 90.0,
+    "hot_confirm_samples": 3,
+    "max_dimm_jump_c": 12.0,
+    "max_dimm_rate_c_per_s": 6.0,
+    "max_plausible_dimm_c_exclusive": 130.0,
+    "min_plausible_dimm_c_exclusive": 0.0,
+    "telemetry_fault_abort_samples": 8,
+}
 CPU_TICK_RECEIPT_KEYS = {
     "cpu", "non_idle_ticks", "read_monotonic_ns", "tick_fields",
 }
@@ -233,8 +270,10 @@ EXPECTED_CELL_RECEIPTS: Mapping[Tuple[int, int], Mapping[str, str]] = {
     },
 }
 
+SAMPLER_SOURCE_PATH = "bench/wirehair_expo_thermal_sampler.py"
 SOURCE_PATHS = (
     "CMakeLists.txt",
+    "bench/Wh2DirectSystematicComplementLaunch.py",
     "bench/Wh2DirectSystematicComplementScreen.cpp",
     "bench/Wh2DirectSystematicComplementScreen.py",
     "bench/Wh2FrozenTrace.cpp",
@@ -247,6 +286,7 @@ SOURCE_PATHS = (
     "bench/wh2_benchmark_contract_v4.json",
     "bench/wh2_native_short_screen.py",
     "bench/wh2_run_native_short_screen.py",
+    SAMPLER_SOURCE_PATH,
     "cmake/Wh2DirectSystematicComplementSymbolAudit.cmake",
     "cmake/Wh2TimingPolicySymbolAudit.cmake",
 )
@@ -261,21 +301,39 @@ FINAL_OUTPUT_NAMES = (
     "controller.json", "COMPLETE",
 )
 HEALTH_COLLECTION_DEADLINE_SECONDS = 115.0
+SAMPLER_STALE_RECOVERY_WORK_SECONDS = 1.0
+SAMPLER_HEALTH_FINALIZE_RESERVE_SECONDS = 0.5
 FINAL_COMMIT_START_DEADLINE_SECONDS = 117.0
 RUN_ONCE_OPTION_ORDER = (
     "--binary", "--build-dir", "--cpu", "--controller-cpu",
     "--sampler-pid", "--sampler-cpu", "--sampler-script", "--sampler-csv",
+    "--sampler-pid-file", "--sampler-validation-jsonl", "--sampler-receipt",
     "--expected-source-commit", "--expected-binary-sha256",
     "--expected-binary-uid", "--expected-build-manifest-sha256",
     "--expected-controller-sha256", "--expected-controller-uid",
+    "--expected-controller-gid",
     "--expected-git-sha256", "--expected-python-sha256",
     "--expected-sampler-process-start-ticks",
     "--expected-sampler-script-sha256",
     "--expected-sampler-csv-device", "--expected-sampler-csv-inode",
+    "--expected-sampler-pid-file-device",
+    "--expected-sampler-pid-file-inode",
+    "--expected-sampler-validation-device",
+    "--expected-sampler-validation-inode",
+    "--expected-sampler-receipt-device",
+    "--expected-sampler-receipt-inode",
     "--expected-sampler-cmdline-sha256", "--expected-sampler-environ-sha256",
     "--expected-sampler-executable-sha256", "--expected-sampler-uid",
+    "--expected-sampler-gid", "--expected-sampler-i2c-gid",
     "--expected-source-manifest-sha256",
 )
+PREFLIGHT_SEAL_OPTION_ORDER = (
+    "--binary", "--build-dir", "--sampler-pid", "--sampler-script",
+    "--sampler-csv", "--sampler-pid-file", "--sampler-validation-jsonl",
+    "--sampler-receipt", "--expected-source-commit",
+)
+PREFLIGHT_SEAL_DEADLINE_SECONDS = 30.0
+PREFLIGHT_SIDE_EFFECT_GUARD = False
 
 
 class ValidationError(RuntimeError):
@@ -284,6 +342,11 @@ class ValidationError(RuntimeError):
 
 def fail(message: str) -> None:
     raise ValidationError(message)
+
+
+def require_preflight_side_effects_allowed(where: str) -> None:
+    if PREFLIGHT_SIDE_EFFECT_GUARD:
+        fail("preflight side-effect tripwire: " + where)
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -954,7 +1017,9 @@ def read_sealed_source(
             or info.st_nlink != 1
             or info.st_size < 0
             or info.st_size > MAX_SOURCE_FILE_BYTES
-            or stat.S_IMODE(info.st_mode) & 0o022
+            or stat.S_IMODE(info.st_mode) != 0o444
+            or info.st_uid != EXPECTED_CAMPAIGN_UID
+            or info.st_gid != EXPECTED_CAMPAIGN_GID
             or not same_file_receipt(info, named)
         ):
             fail(f"sealed source file policy differs: {relative}")
@@ -1001,6 +1066,29 @@ def source_manifest(
         })
         preimage.extend(f"{digest}  {relative}\n".encode("ascii"))
     return {"entries": entries, "sha256": sha256_bytes(bytes(preimage))}
+
+
+def validate_sampler_source_authority(
+    args: argparse.Namespace, manifest: Mapping[str, Any], source_root: Path,
+) -> Mapping[str, Any]:
+    validate_source_manifest_receipt(manifest, "sampler source manifest")
+    expected_path = source_root / SAMPLER_SOURCE_PATH
+    matches = [
+        entry for entry in manifest["entries"]
+        if entry["path"] == SAMPLER_SOURCE_PATH
+    ]
+    if len(matches) != 1:
+        fail("sampler source manifest entry differs")
+    entry = matches[0]
+    if (
+        args.sampler_script != expected_path
+        or args.expected_sampler_script_sha256 != entry["sha256"]
+        or entry["stat"]["mode"] != 0o444
+        or entry["stat"]["uid"] != args.expected_sampler_uid
+        or entry["stat"]["gid"] != args.expected_sampler_gid
+    ):
+        fail("sampler run authority differs from its sealed source entry")
+    return entry
 
 
 @dataclass(frozen=True)
@@ -1292,12 +1380,14 @@ class CaptureResult:
     stderr: bytes = b""
     timed_out: bool = False
     output_overflow: bool = False
+    sampler_event: str = "none"
     error: str = "none"
 
 
 def bounded_capture(
     process: subprocess.Popen, deadline: float,
     signal_guard: Optional[SignalGuard] = None,
+    sampler_monitor_handles: Optional[Mapping[str, Any]] = None,
     *, stdout_limit: int = MAX_STDOUT_BYTES,
     stderr_limit: int = MAX_STDERR_BYTES,
     kill_grace_seconds: float = 5.0,
@@ -1334,8 +1424,27 @@ def bounded_capture(
         for stream, name in streams:
             os.set_blocking(stream.fileno(), False)
             selector.register(stream, selectors.EVENT_READ, name)
-        while selector.get_map():
+        # A child can close both capture pipes and remain alive.  Keep the
+        # deadline, signal, and sampler interlocks active until both the
+        # streams are drained and the child has actually exited.
+        while selector.get_map() or process.poll() is None:
             now = time.monotonic()
+            if (
+                sampler_monitor_handles is not None
+                and result.sampler_event == "none"
+            ):
+                sampler_event = poll_sampler_supervision(
+                    sampler_monitor_handles
+                )
+                if sampler_event != "none":
+                    result.sampler_event = sampler_event
+                    if killed_at is None:
+                        error = terminate_process_group(process)
+                        if error is not None:
+                            errors.append(
+                                "sampler-event process-group kill: " + error
+                            )
+                        killed_at = now
             if (
                 signal_guard is not None
                 and signal_guard.first_signal is not None
@@ -1358,7 +1467,12 @@ def bounded_capture(
                 killed_at + kill_grace_seconds
                 if killed_at is not None else deadline
             )
-            events = selector.select(max(0.0, min(0.25, wait_until - now)))
+            wait_seconds = max(0.0, min(0.05, wait_until - now))
+            if selector.get_map():
+                events = selector.select(wait_seconds)
+            else:
+                time.sleep(wait_seconds)
+                events = ()
             for key, _ in events:
                 stream = key.fileobj
                 name = key.data
@@ -1471,21 +1585,28 @@ HEALTH_KEYS = {
     "controller_core", "controller_cpu", "controller_initial_affinity",
     "controller_singleton_affinity_end", "edac_policy", "evidence_status",
     "receipt_sha256", "violations",
-    "sampler", "sampler_core", "sampler_cpu", "sampler_receipt_sha256",
+    "sampler", "sampler_admission", "sampler_admission_receipt_sha256",
+    "sampler_core", "sampler_cpu", "sampler_receipt_sha256",
+    "sampler_terminal", "sampler_terminal_receipt_sha256",
     "schema", "sibling_non_idle_tick_cap", "sibling_tick_policy",
     "sibling_ticks", "target_core", "target_cpu", "target_threads",
     "thermal", "thermal_max_millic", "terminal_status",
 }
 SAMPLER_RECEIPT_KEYS = {
-    "cmdline_sha256", "cpu", "csv_device", "csv_inode", "csv_path",
-    "csv_stat",
+    "cmdline_argv", "cmdline_sha256", "cpu", "csv_device", "csv_inode", "csv_path",
+    "csv_bytes", "csv_sha256", "csv_stat",
+    "evidence_parent",
     "environ_sha256", "environment", "environment_sha256",
     "executable_device", "executable_inode", "executable_path",
-    "executable_sha256", "executable_stat", "pid", "process_start_ticks", "process_uid",
+    "executable_sha256", "executable_stat", "pid", "pid_file",
+    "process_affinity", "process_gid", "process_security",
+    "process_start_ticks", "process_uid",
+    "receipt_file",
     "schema", "script_device", "script_inode", "script_path",
     "script_sha256", "script_stat", "terminal_status", "window_end_monotonic_ns",
-    "window_start_monotonic_ns",
+    "window_start_monotonic_ns", "validation_header_ascii", "validation_jsonl",
 }
+SAMPLER_PARENT_KEYS = {"path", "stat"}
 HEALTH_LOADER_KEYS = {
     "dont_write_bytecode", "isolated", "modules", "optimize",
     "receipt_sha256", "schema",
@@ -1514,6 +1635,10 @@ THERMAL_RECEIPT_KEYS = {
     "sample_count", "script_path", "script_sha256", "terminal_status",
     "valid_sample_count", "window_csv_ascii", "window_csv_bytes",
     "window_csv_sha256",
+    "validation_attempt_errors_total", "validation_device",
+    "validation_failures", "validation_inode", "validation_jsonl_ascii",
+    "validation_jsonl_bytes", "validation_jsonl_sha256", "validation_path",
+    "validation_sample_count",
     "window_end_monotonic_ns", "window_start_monotonic_ns",
 }
 STATISTICS_KEYS = {
@@ -1657,7 +1782,9 @@ def validate_source_manifest_receipt(manifest: Any, where: str) -> None:
             entry["stat"]["size"] != entry["bytes"]
             or entry["stat"]["size"] > MAX_SOURCE_FILE_BYTES
             or entry["stat"]["nlink"] != 1
-            or entry["stat"]["mode"] & 0o022
+            or entry["stat"]["mode"] != 0o444
+            or entry["stat"]["uid"] != EXPECTED_CAMPAIGN_UID
+            or entry["stat"]["gid"] != EXPECTED_CAMPAIGN_GID
         ):
             fail(f"{entry_where} source stat policy differs")
         preimage.extend(f"{digest}  {expected_path}\n".encode("ascii"))
@@ -2028,20 +2155,111 @@ def validate_sampler_receipt(sampler: Any) -> None:
         exact_int(sampler[field], 0 if field.endswith("device") else 1,
                   MAX_UINT64, f"sampler {field}")
     exact_int(sampler["process_uid"], 0, MAX_UINT32, "sampler process UID")
+    exact_int(sampler["process_gid"], 0, MAX_UINT32, "sampler process GID")
+    if exact_int_list(
+        sampler["process_affinity"], "sampler process affinity",
+        length=1, sorted_unique=True,
+    ) != [EXPECTED_SAMPLER_CPU]:
+        fail("sampler process affinity differs")
+    process_security = sampler["process_security"]
+    if type(process_security) is not dict or type(process_security.get("groups")) is not list:
+        fail("sampler process security is not an object")
+    validate_process_security(
+        process_security, sampler["process_uid"], sampler["process_gid"],
+        process_security["groups"], "sampler process security",
+    )
     for name in ("csv_stat", "executable_stat", "script_stat"):
         validate_stat_receipt(sampler[name], "sampler " + name)
+    if type(sampler["evidence_parent"]) is not dict:
+        fail("sampler evidence parent is not an object")
+    exact_keys(sampler["evidence_parent"], SAMPLER_PARENT_KEYS, "sampler evidence parent")
+    exact_absolute_path(
+        sampler["evidence_parent"]["path"], "sampler evidence parent path"
+    )
+    validate_stat_receipt(
+        sampler["evidence_parent"]["stat"], "sampler evidence parent stat"
+    )
+    if (
+        sampler["evidence_parent"]["stat"]["mode"] != 0o700
+        or sampler["evidence_parent"]["stat"]["uid"] != sampler["process_uid"]
+        or sampler["evidence_parent"]["stat"]["gid"] != sampler["process_gid"]
+    ):
+        fail("sampler evidence parent mode/owner differs")
+    for name, mode, maximum in (
+        ("pid_file", 0o444, 64),
+        ("validation_jsonl", 0o444, MAX_SAMPLER_VALIDATION_BYTES),
+        ("receipt_file", 0o444, MAX_SAMPLER_RECEIPT_BYTES),
+    ):
+        artifact = sampler[name]
+        if type(artifact) is not dict or type(artifact.get("path")) is not str:
+            fail("sampler " + name + " is not an artifact object")
+        validate_sampler_artifact_receipt(
+            artifact, Path(artifact["path"]), mode,
+            sampler["process_uid"], sampler["process_gid"], maximum,
+            "sampler " + name,
+        )
+    if (
+        sampler["pid_file"]["bytes"] != len(str(sampler["pid"])) + 1
+        or sampler["pid_file"]["sha256"]
+        != sha256_bytes((str(sampler["pid"]) + "\n").encode("ascii"))
+        or sampler["receipt_file"]["bytes"] != 0
+        or sampler["receipt_file"]["sha256"] != sha256_bytes(b"")
+    ):
+        fail("sampler live PID/receipt artifact state differs")
+    cmdline_argv = sampler["cmdline_argv"]
+    if (
+        type(cmdline_argv) is not list or not cmdline_argv
+        or len(cmdline_argv) > 64
+        or any(type(item) is not str or not item or len(item) > 4096
+               for item in cmdline_argv)
+    ):
+        fail("sampler command-line argv differs")
+    if sha256_bytes(
+        b"".join(os.fsencode(item) + b"\0" for item in cmdline_argv)
+    ) != sampler["cmdline_sha256"]:
+        fail("sampler command-line argv/hash binding differs")
+    validation_header_ascii = sampler["validation_header_ascii"]
+    if type(validation_header_ascii) is not str:
+        fail("sampler validation header is not ASCII text")
+    try:
+        validation_header_raw = validation_header_ascii.encode("ascii")
+    except UnicodeEncodeError:
+        fail("sampler validation header is not ASCII")
+    validation_header = parse_canonical_json_line(
+        validation_header_raw, "sampler validation header"
+    )
+    if (
+        set(validation_header) != {
+            "expected_output_owner_uid", "raw_columns",
+            "sampler_source_expected_sha256", "sampling", "schema", "thresholds",
+        }
+        or validation_header.get("schema") != THERMAL_VALIDATION_STREAM_SCHEMA
+        or validation_header.get("raw_columns") != list(THERMAL_HEADER)
+        or validation_header.get("expected_output_owner_uid")
+        != sampler["process_uid"]
+        or validation_header.get("sampler_source_expected_sha256")
+        != sampler["script_sha256"]
+        or validation_header.get("sampling") != {
+            "dimm_attempts": 5, "dimm_retry_delay_s": 0.01,
+            "interval_s": 1.0,
+        }
+        or validation_header.get("thresholds") != THERMAL_SAMPLER_THRESHOLDS
+    ):
+        fail("sampler validation header contract differs")
     if (
         sampler["csv_stat"]["device"] != sampler["csv_device"]
         or sampler["csv_stat"]["inode"] != sampler["csv_inode"]
         or sampler["csv_stat"]["mode"] != 0o600
         or sampler["csv_stat"]["nlink"] != 1
         or sampler["csv_stat"]["uid"] != sampler["process_uid"]
+        or sampler["csv_stat"]["gid"] != sampler["process_gid"]
         or not 1 <= sampler["csv_stat"]["size"] <= MAX_SAMPLER_CSV_BYTES
         or sampler["script_stat"]["device"] != sampler["script_device"]
         or sampler["script_stat"]["inode"] != sampler["script_inode"]
         or sampler["script_stat"]["mode"] != 0o444
         or sampler["script_stat"]["nlink"] != 1
         or sampler["script_stat"]["uid"] != sampler["process_uid"]
+        or sampler["script_stat"]["gid"] != sampler["process_gid"]
         or sampler["script_stat"]["size"] > MAX_SOURCE_FILE_BYTES
         or sampler["executable_stat"]["device"]
         != sampler["executable_device"]
@@ -2063,11 +2281,25 @@ def validate_sampler_receipt(sampler: Any) -> None:
     )
     for field in ("script_path", "csv_path", "executable_path"):
         exact_absolute_path(sampler[field], f"sampler {field}")
+    artifact_paths = [
+        sampler["csv_path"], sampler["pid_file"]["path"],
+        sampler["validation_jsonl"]["path"], sampler["receipt_file"]["path"],
+    ]
+    if (
+        len(set(artifact_paths)) != 4
+        or any(str(Path(path).parent) != sampler["evidence_parent"]["path"]
+               for path in artifact_paths)
+    ):
+        fail("sampler evidence path/parent roster differs")
     for field in (
         "script_sha256", "cmdline_sha256", "executable_sha256",
-        "environ_sha256", "environment_sha256",
+        "environ_sha256", "environment_sha256", "csv_sha256",
     ):
         lower_hash(sampler[field], f"sampler {field}")
+    exact_int(
+        sampler["csv_bytes"], 1, sampler["csv_stat"]["size"],
+        "sampler CSV complete-prefix bytes",
+    )
     if (
         not canonical_equal(sampler["environment"], SEALED_LAUNCH_ENVIRONMENT)
         or sampler["environment_sha256"]
@@ -2083,9 +2315,26 @@ def validate_sampler_growth_binding(
     validate_sampler_receipt(current)
     bound_outer = dict(bound)
     current_outer = dict(current)
+    bound_start = bound_outer.pop("window_start_monotonic_ns")
+    bound_end = bound_outer.pop("window_end_monotonic_ns")
+    current_start = current_outer.pop("window_start_monotonic_ns")
+    current_end = current_outer.pop("window_end_monotonic_ns")
+    bound_outer.pop("csv_sha256")
+    current_outer.pop("csv_sha256")
+    bound_prefix_size = bound_outer.pop("csv_bytes")
+    current_prefix_size = current_outer.pop("csv_bytes")
     bound_csv = dict(bound_outer.pop("csv_stat"))
     current_csv = dict(current_outer.pop("csv_stat"))
-    if not canonical_equal(bound_outer, current_outer):
+    bound_validation = dict(bound_outer.pop("validation_jsonl"))
+    current_validation = dict(current_outer.pop("validation_jsonl"))
+    if (
+        current_start > current_end
+        or not (
+            bound_start == 0 and bound_end == 0
+            or bound_start == current_start and bound_end == current_end
+        )
+        or not canonical_equal(bound_outer, current_outer)
+    ):
         fail(f"{where} immutable sampler attestation changed")
     bound_size = bound_csv.pop("size")
     current_size = current_csv.pop("size")
@@ -2095,13 +2344,35 @@ def validate_sampler_growth_binding(
         not canonical_equal(bound_csv, current_csv)
         or current_size < bound_size
         or current_mtime < bound_mtime
+        or current_prefix_size < bound_prefix_size
+        or current_prefix_size > current_size
     ):
         fail(f"{where} sampler CSV identity regressed or changed")
+    bound_validation_stat = dict(bound_validation.pop("stat"))
+    current_validation_stat = dict(current_validation.pop("stat"))
+    bound_validation_bytes = bound_validation.pop("bytes")
+    current_validation_bytes = current_validation.pop("bytes")
+    bound_validation.pop("sha256")
+    current_validation.pop("sha256")
+    bound_validation_size = bound_validation_stat.pop("size")
+    current_validation_size = current_validation_stat.pop("size")
+    bound_validation_mtime = bound_validation_stat.pop("mtime_ns")
+    current_validation_mtime = current_validation_stat.pop("mtime_ns")
+    if (
+        not canonical_equal(bound_validation, current_validation)
+        or not canonical_equal(bound_validation_stat, current_validation_stat)
+        or current_validation_size < bound_validation_size
+        or current_validation_mtime < bound_validation_mtime
+        or bound_validation_bytes != bound_validation_size
+        or current_validation_bytes != current_validation_size
+    ):
+        fail(f"{where} sampler validation stream identity regressed or changed")
 
 
 def validate_thermal_receipt(
     thermal: Any, sampler: Mapping[str, Any],
     child_start: Optional[int], child_reap: Optional[int],
+    *, allow_child_shortfall: bool = False,
 ) -> None:
     if type(thermal) is not dict:
         fail("health thermal receipt is not an object")
@@ -2116,6 +2387,9 @@ def validate_thermal_receipt(
         ("valid_sample_count", 0), ("invalid_sample_count", 0),
         ("window_csv_bytes", 1), ("window_start_monotonic_ns", 0),
         ("window_end_monotonic_ns", 0),
+        ("validation_attempt_errors_total", 0),
+        ("validation_device", 0), ("validation_inode", 1),
+        ("validation_jsonl_bytes", 1), ("validation_sample_count", 1),
     ):
         exact_int(thermal[name], lower, MAX_UINT64, f"thermal {name}")
     if (
@@ -2130,6 +2404,9 @@ def validate_thermal_receipt(
         if thermal[name] is not None:
             exact_int(thermal[name], 0, MAX_UINT64, f"thermal {name}")
     validate_bounded_messages(thermal["parse_failures"], "thermal parse failures")
+    validate_bounded_messages(
+        thermal["validation_failures"], "thermal validation failures"
+    )
     exact_string(thermal["terminal_status"], "complete", "thermal status")
     exact_absolute_path(thermal["script_path"], "thermal script path")
     exact_absolute_path(thermal["csv_path"], "thermal CSV path")
@@ -2148,6 +2425,24 @@ def validate_thermal_receipt(
         or sha256_bytes(window_bytes) != digest
     ):
         fail("thermal raw window binding differs")
+    validation_ascii = thermal["validation_jsonl_ascii"]
+    if type(validation_ascii) is not str:
+        fail("thermal validation window is not text")
+    try:
+        validation_bytes = validation_ascii.encode("ascii")
+    except UnicodeEncodeError:
+        fail("thermal validation window is not ASCII")
+    if (
+        len(validation_bytes) != thermal["validation_jsonl_bytes"]
+        or len(validation_bytes) > MAX_SAMPLER_VALIDATION_BYTES
+        or sha256_bytes(validation_bytes)
+        != lower_hash(
+            thermal["validation_jsonl_sha256"],
+            "thermal validation window SHA-256",
+        )
+    ):
+        fail("thermal validation window binding differs")
+    exact_absolute_path(thermal["validation_path"], "thermal validation path")
     physical = window_bytes.splitlines(keepends=True)
     if not physical or tuple(
         parse_csv_physical_line(physical[0], "thermal receipt header")
@@ -2164,6 +2459,24 @@ def validate_thermal_receipt(
     ):
         if not canonical_equal(thermal[name], recomputed[name]):
             fail(f"thermal raw-window recomputation differs at {name}")
+    validation_recomputed = summarize_validation_window_bytes(
+        validation_bytes, window_bytes, sampler
+    )
+    for name, expected_name in (
+        ("validation_attempt_errors_total", "attempt_errors_total"),
+        ("validation_failures", "failures"),
+        ("validation_sample_count", "sample_count"),
+    ):
+        if not canonical_equal(thermal[name], validation_recomputed[expected_name]):
+            fail(f"thermal validation-window recomputation differs at {name}")
+    validation_artifact = sampler["validation_jsonl"]
+    if (
+        thermal["validation_path"] != validation_artifact["path"]
+        or thermal["validation_device"] != validation_artifact["stat"]["device"]
+        or thermal["validation_inode"] != validation_artifact["stat"]["inode"]
+        or thermal["validation_sample_count"] != thermal["sample_count"]
+    ):
+        fail("thermal validation/sampler identity differs")
     for name in (
         "pid", "cpu", "process_start_ticks", "script_path", "script_sha256",
         "csv_path", "csv_device", "csv_inode", "window_start_monotonic_ns",
@@ -2174,10 +2487,16 @@ def validate_thermal_receipt(
     if (child_start is None) != (child_reap is None):
         fail("thermal child interval is incomplete")
     if child_start is not None and child_reap is not None:
-        if not (
+        covers_child = bool(
             thermal["window_start_monotonic_ns"] <= child_start
             <= child_reap <= thermal["window_end_monotonic_ns"]
-        ):
+        )
+        authentic_shortfall = bool(
+            allow_child_shortfall
+            and thermal["window_start_monotonic_ns"] <= child_start
+            and thermal["window_end_monotonic_ns"] < child_reap
+        )
+        if not covers_child and not authentic_shortfall:
             fail("thermal window does not cover the complete child interval")
 
 
@@ -2372,7 +2691,24 @@ def validate_health_receipt(
     elif run_cap_marker in violations:
         fail("missing run sibling receipt has a false cap violation")
 
+    sampler_admission = health["sampler_admission"]
+    if sampler_admission:
+        validate_sampler_receipt(sampler_admission)
+        if (
+            sampler_admission["window_start_monotonic_ns"] != 0
+            or sampler_admission["window_end_monotonic_ns"] != 0
+        ):
+            fail("health sampler admission window differs")
+        admission_digest = lower_hash(
+            health["sampler_admission_receipt_sha256"],
+            "sampler admission receipt SHA-256",
+        )
+        if sha256_bytes(canonical_bytes(sampler_admission)) != admission_digest:
+            fail("sampler admission receipt binding differs")
+    elif health["sampler_admission_receipt_sha256"] is not None:
+        fail("partial health has an unbound sampler admission digest")
     sampler = health["sampler"]
+    sampler_terminal = health["sampler_terminal"]
     thermal = health["thermal"]
     if sampler:
         validate_sampler_receipt(sampler)
@@ -2393,12 +2729,55 @@ def validate_health_receipt(
         )
         if sha256_bytes(canonical_bytes(sampler)) != digest:
             fail("sampler receipt binding differs")
+        if not sampler_admission:
+            fail("final sampler receipt lacks its admission receipt")
+        validate_sampler_growth_binding(
+            sampler_admission, sampler, "health sampler admission/final"
+        )
     elif health["sampler_receipt_sha256"] is not None:
         fail("partial health has an unbound sampler digest")
+    if sampler_terminal:
+        if sampler or thermal or not sampler_admission:
+            fail("terminal sampler evidence overlaps live sampler evidence")
+        validate_sampler_terminal_receipt(
+            sampler_terminal, sampler_admission, child_start, child_reap
+        )
+        terminal_digest = lower_hash(
+            health["sampler_terminal_receipt_sha256"],
+            "sampler terminal receipt SHA-256",
+        )
+        if sha256_bytes(canonical_bytes(sampler_terminal)) != terminal_digest:
+            fail("sampler terminal receipt binding differs")
+        execution_finish = binary.get("execution_finished_monotonic_ns")
+        if (
+            execution_finish is not None
+            and sampler_terminal["process_exit_observed_monotonic_ns"]
+            > execution_finish
+        ):
+            fail("sampler terminal exit observation follows execution finish")
+        if not any(message.startswith("sampler endpoint:") for message in collection):
+            fail("terminal sampler evidence lacks its endpoint diagnostic")
+    elif health["sampler_terminal_receipt_sha256"] is not None:
+        fail("partial health has an unbound sampler terminal digest")
     if thermal:
         if not sampler:
             fail("thermal receipt lacks sampler identity")
-        validate_thermal_receipt(thermal, sampler, child_start, child_reap)
+        child_shortfall_markers = {
+            (
+                "sampler endpoint: sampler-monitor-invalid:"
+                "validation-heartbeat-stale"
+            ),
+            (
+                "sampler endpoint: sampler-monitor-invalid:"
+                "coverage-recovery-cutoff"
+            ),
+        }
+        validate_thermal_receipt(
+            thermal, sampler, child_start, child_reap,
+            allow_child_shortfall=bool(
+                child_shortfall_markers.intersection(collection)
+            ),
+        )
     thermal_collection_markers = sum(
         message.startswith("thermal collection:") for message in collection
     )
@@ -2422,7 +2801,8 @@ def validate_health_receipt(
         fail("health policy/violation roster differs")
     complete = bool(
         not collection and child_start is not None and child_reap is not None
-        and admission and len(siblings) == 1 and sampler and thermal
+        and admission and len(siblings) == 1 and sampler_admission
+        and sampler and not sampler_terminal and thermal
         and all(health[name] for name, _ in topology_fields)
         and initial_affinity and end_affinity
     )
@@ -2444,6 +2824,7 @@ def validate_health_receipt(
             or thermal["sample_count"] < 2
             or thermal["invalid_sample_count"] != 0
             or thermal["parse_failures"]
+            or thermal["validation_failures"]
             or thermal["cpu_tctl_max_millic"] is None
             or thermal["cpu_tctl_max_millic"] > THERMAL_MAX_MILLIC
             or thermal["dimm_max_millic"] is None
@@ -2665,6 +3046,7 @@ class OutputBundle:
         source_root: Path,
         signal_guard: Optional[SignalGuard] = None,
     ) -> "OutputBundle":
+        require_preflight_side_effects_allowed("output reservation")
         if (
             not output_dir.is_absolute()
             or output_dir.name in ("", ".", "..")
@@ -3951,9 +4333,13 @@ def empty_health_receipt(args: argparse.Namespace) -> Dict[str, Any]:
         "evidence_status": "partial",
         "receipt_sha256": None,
         "sampler": {},
+        "sampler_admission": {},
+        "sampler_admission_receipt_sha256": None,
         "sampler_core": [],
         "sampler_cpu": EXPECTED_SAMPLER_CPU,
         "sampler_receipt_sha256": None,
+        "sampler_terminal": {},
+        "sampler_terminal_receipt_sha256": None,
         "schema": HEALTH_SCHEMA,
         "sibling_non_idle_tick_cap": SIBLING_NON_IDLE_TICK_CAP,
         "sibling_tick_policy": (
@@ -3984,7 +4370,9 @@ def finalize_health_receipt(
         and receipt["child_reap_monotonic_ns"] is not None
         and bool(receipt["admission_sibling_ticks"])
         and len(receipt["sibling_ticks"]) == 1
+        and bool(receipt["sampler_admission"])
         and bool(receipt["sampler"])
+        and not receipt["sampler_terminal"]
         and bool(receipt["thermal"])
         and bool(receipt["target_core"])
         and bool(receipt["controller_core"])
@@ -4029,6 +4417,1538 @@ def sampler_snapshot(path: Path) -> Tuple[bytes, os.stat_result]:
         return complete, info
     finally:
         os.close(fd)
+
+
+def stable_regular_snapshot(
+    path: Path, max_bytes: int, where: str, *, attempts: int = 4,
+) -> Tuple[bytes, os.stat_result]:
+    exact_int(max_bytes, 0, MAX_FINAL_ARTIFACT_BYTES, where + " size bound")
+    exact_int(attempts, 1, 8, where + " snapshot attempts")
+    last_error = "changed during bounded snapshot"
+    for _ in range(attempts):
+        fd = os.open(str(path), nonblocking_read_flags(where))
+        try:
+            before = os.fstat(fd)
+            if (
+                not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                or before.st_size < 0 or before.st_size > max_bytes
+            ):
+                fail(f"{where} regular-file policy differs")
+            data = bytearray()
+            offset = 0
+            while offset < before.st_size:
+                block = os.pread(
+                    fd, min(1024 * 1024, before.st_size - offset), offset
+                )
+                if not block:
+                    fail(f"{where} snapshot is short")
+                data.extend(block)
+                offset += len(block)
+            after = os.fstat(fd)
+            named = os.stat(str(path), follow_symlinks=False)
+            if same_file_receipt(before, after) and same_file_receipt(after, named):
+                return bytes(data), after
+            last_error = "changed during bounded snapshot"
+        except FileNotFoundError:
+            last_error = "disappeared during bounded snapshot"
+        finally:
+            os.close(fd)
+    fail(f"{where} {last_error}")
+
+
+def sampler_artifact_receipt(
+    path: Path, max_bytes: int, expected_mode: int, expected_uid: int,
+    expected_gid: int, where: str,
+) -> Tuple[Dict[str, Any], bytes, os.stat_result]:
+    data, info = stable_regular_snapshot(path, max_bytes, where)
+    if (
+        stat.S_IMODE(info.st_mode) != expected_mode
+        or info.st_uid != expected_uid or info.st_gid != expected_gid
+        or info.st_nlink != 1
+    ):
+        fail(f"{where} mode/owner/link policy differs")
+    return {
+        "bytes": len(data), "path": str(path),
+        "sha256": sha256_bytes(data), "stat": stat_receipt(info),
+    }, data, info
+
+
+SAMPLER_ARTIFACT_KEYS = {"bytes", "path", "sha256", "stat"}
+
+
+def validate_sampler_artifact_receipt(
+    value: Any, expected_path: Path, expected_mode: int,
+    expected_uid: int, expected_gid: int, max_bytes: int, where: str,
+) -> None:
+    if type(value) is not dict:
+        fail(f"{where} is not an object")
+    exact_keys(value, SAMPLER_ARTIFACT_KEYS, where)
+    exact_string(value["path"], str(expected_path), where + ".path")
+    exact_int(value["bytes"], 0, max_bytes, where + ".bytes")
+    lower_hash(value["sha256"], where + ".sha256")
+    validate_stat_receipt(value["stat"], where + ".stat")
+    if (
+        value["stat"]["size"] != value["bytes"]
+        or value["stat"]["mode"] != expected_mode
+        or value["stat"]["uid"] != expected_uid
+        or value["stat"]["gid"] != expected_gid
+        or value["stat"]["nlink"] != 1
+    ):
+        fail(f"{where} stat/content policy differs")
+
+
+def parse_canonical_json_line(raw: bytes, where: str) -> Dict[str, Any]:
+    if not raw.endswith(b"\n") or b"\r" in raw or raw.count(b"\n") != 1:
+        fail(f"{where} is not one LF-terminated line")
+    try:
+        value = json.loads(
+            raw[:-1].decode("ascii"), object_pairs_hook=unique_object,
+            parse_constant=reject_constant,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        fail(f"{where} is not canonical ASCII JSON: {exc}")
+    if type(value) is not dict or canonical_bytes(value) + b"\n" != raw:
+        fail(f"{where} canonical JSON encoding differs")
+    return value
+
+
+def expected_validation_header(args: argparse.Namespace) -> Dict[str, Any]:
+    return {
+        "expected_output_owner_uid": args.expected_sampler_uid,
+        "raw_columns": list(THERMAL_HEADER),
+        "sampler_source_expected_sha256": args.expected_sampler_script_sha256,
+        "sampling": {
+            "dimm_attempts": int(EXPECTED_SAMPLER_DIMM_ATTEMPTS_TEXT),
+            "dimm_retry_delay_s": float(EXPECTED_SAMPLER_DIMM_RETRY_DELAY_TEXT),
+            "interval_s": float(EXPECTED_SAMPLER_INTERVAL_TEXT),
+        },
+        "schema": THERMAL_VALIDATION_STREAM_SCHEMA,
+        "thresholds": dict(THERMAL_SAMPLER_THRESHOLDS),
+    }
+
+
+def validate_validation_stream_header(
+    data: bytes, args: argparse.Namespace, where: str,
+) -> None:
+    if not data or b"\n" not in data:
+        fail(f"{where} has no complete header")
+    header_raw = data[:data.find(b"\n") + 1]
+    header = parse_canonical_json_line(header_raw, where + " header")
+    if not canonical_equal(header, expected_validation_header(args)):
+        fail(f"{where} header authority differs")
+
+
+VALIDATION_SAMPLE_KEYS = {
+    "consecutive_fault_rows", "decision", "edac_ce_delta", "edac_ue_delta",
+    "fault_count", "hot_sensors", "monotonic_s", "read_error_count",
+    "sample_index", "schema", "sensors",
+}
+VALIDATION_SENSOR_KEYS = {
+    "attempt_errors", "hot", "hot_streak", "jump_c", "rate_c_per_s",
+    "raw_c", "reason", "valid",
+}
+VALIDATION_DIMM_FIELDS = tuple(THERMAL_HEADER[5:13])
+
+
+def parse_validation_sample(value: Any, where: str) -> Dict[str, Any]:
+    if type(value) is not dict:
+        fail(f"{where} is not an object")
+    exact_keys(value, VALIDATION_SAMPLE_KEYS, where)
+    exact_string(value["schema"], THERMAL_VALIDATION_SAMPLE_SCHEMA, where + ".schema")
+    for name in (
+        "consecutive_fault_rows", "edac_ce_delta", "edac_ue_delta",
+        "fault_count", "read_error_count", "sample_index",
+    ):
+        exact_int(value[name], 0, MAX_UINT64, where + "." + name)
+    if value["decision"] not in (
+        "continue", "thermal_abort", "telemetry_abort", "edac_abort",
+    ):
+        fail(f"{where} decision differs")
+    monotonic_s = value["monotonic_s"]
+    if type(monotonic_s) not in (int, float) or not math.isfinite(monotonic_s) or monotonic_s < 0:
+        fail(f"{where} monotonic timestamp differs")
+    hot_sensors = value["hot_sensors"]
+    if (
+        type(hot_sensors) is not list
+        or any(type(item) is not str or item not in VALIDATION_DIMM_FIELDS
+               for item in hot_sensors)
+        or hot_sensors != sorted(set(hot_sensors))
+    ):
+        fail(f"{where} hot sensor roster differs")
+    sensors = value["sensors"]
+    if type(sensors) is not dict or set(sensors) != set(VALIDATION_DIMM_FIELDS):
+        fail(f"{where} sensor roster differs")
+    for name in VALIDATION_DIMM_FIELDS:
+        sensor = sensors[name]
+        sensor_where = where + ".sensors." + name
+        if type(sensor) is not dict:
+            fail(f"{sensor_where} is not an object")
+        exact_keys(sensor, VALIDATION_SENSOR_KEYS, sensor_where)
+        exact_int(sensor["attempt_errors"], 0, MAX_UINT64, sensor_where + ".attempt_errors")
+        exact_int(sensor["hot_streak"], 0, MAX_UINT64, sensor_where + ".hot_streak")
+        if type(sensor["hot"]) is not bool or type(sensor["valid"]) is not bool:
+            fail(f"{sensor_where} boolean fields differ")
+        if type(sensor["reason"]) is not str or not sensor["reason"] or len(sensor["reason"]) > 128:
+            fail(f"{sensor_where} reason differs")
+        for scalar_name in ("jump_c", "rate_c_per_s", "raw_c"):
+            scalar = sensor[scalar_name]
+            if scalar is not None and (
+                type(scalar) not in (int, float) or not math.isfinite(scalar)
+            ):
+                fail(f"{sensor_where}.{scalar_name} differs")
+    return value
+
+
+def validate_live_sampler_stream_pair(
+    raw_csv: bytes, validation_jsonl: bytes,
+    args: argparse.Namespace, where: str,
+) -> bool:
+    """Validate one live raw/validation snapshot; report whether it settled.
+
+    The sampler deliberately flushes each raw row before its matching
+    validation record.  A raw-ahead snapshot is therefore retryable, but a
+    complete terminal validation decision is never retryable or ignorable.
+    """
+    raw_lines = raw_csv.splitlines(keepends=True)
+    if (
+        not raw_csv.endswith(b"\n") or len(raw_lines) < 1
+        or tuple(parse_csv_physical_line(raw_lines[0], where + " raw header"))
+        != THERMAL_HEADER
+    ):
+        fail(f"{where} raw stream framing differs")
+    complete_end = validation_jsonl.rfind(b"\n") + 1
+    validation_complete = validation_jsonl[:complete_end]
+    validation_partial = validation_jsonl[complete_end:]
+    validate_validation_stream_header(
+        validation_complete, args, where + " validation stream"
+    )
+    validation_lines = validation_complete.splitlines(keepends=True)
+    previous_monotonic_ns: Optional[int] = None
+    previous_csv_timestamp_ns: Optional[int] = None
+    for index, raw in enumerate(validation_lines[1:]):
+        sample = parse_validation_sample(
+            parse_canonical_json_line(
+                raw, f"{where} validation record {index}"
+            ),
+            f"{where} validation record {index}",
+        )
+        if sample["sample_index"] != index:
+            fail(f"{where} validation sample indices differ")
+        monotonic_ns = exact_int(
+            int(round(float(sample["monotonic_s"]) * 1_000_000_000.0)),
+            0, MAX_INT63, f"{where} validation timestamp",
+        )
+        csv_timestamp_ns = exact_int(
+            int(round(
+                float(f"{float(sample['monotonic_s']):.6f}")
+                * 1_000_000_000.0
+            )),
+            0, MAX_INT63, f"{where} validation CSV timestamp",
+        )
+        if (
+            previous_monotonic_ns is not None
+            and monotonic_ns <= previous_monotonic_ns
+            or previous_csv_timestamp_ns is not None
+            and csv_timestamp_ns <= previous_csv_timestamp_ns
+        ):
+            fail(f"{where} validation timestamps are not strictly increasing")
+        previous_monotonic_ns = monotonic_ns
+        previous_csv_timestamp_ns = csv_timestamp_ns
+        if sample["decision"] != "continue":
+            fail(
+                f"{where} live validation contains terminal decision "
+                + sample["decision"]
+            )
+    if validation_partial:
+        return False
+    raw_sample_count = len(raw_lines) - 1
+    validation_sample_count = len(validation_lines) - 1
+    if validation_sample_count > raw_sample_count:
+        fail(f"{where} validation stream advanced ahead of raw evidence")
+    if raw_sample_count != validation_sample_count:
+        return False
+    expected_header = canonical_bytes(expected_validation_header(args)) + b"\n"
+    replay_terminal_validation(
+        raw_csv, validation_jsonl,
+        {"validation_header_ascii": expected_header.decode("ascii")},
+    )
+    return True
+
+
+def validate_stale_sampler_stream_prefix(
+    raw_csv: bytes, validation_jsonl: bytes,
+    args: argparse.Namespace, where: str, observed_monotonic_ns: int,
+) -> Dict[str, Any]:
+    """Validate the maximal producer-authentic paired prefix of a stall."""
+    exact_int(
+        observed_monotonic_ns, 0, MAX_INT63,
+        where + " snapshot observation",
+    )
+    try:
+        raw_csv.decode("ascii")
+        validation_jsonl.decode("ascii")
+    except UnicodeDecodeError:
+        fail(f"{where} stream suffix is not ASCII")
+    stream_parts = split_terminal_streams(
+        raw_csv, validation_jsonl, allow_unpaired=True
+    )
+    suffix_shape = stream_parts["suffix_shape"]
+    if (
+        suffix_shape[2]
+        and not stream_parts["validation_partial"].startswith(b"{")
+        or suffix_shape[1]
+        and (
+            not stream_parts["raw_suffix"]
+            or b"\r" in stream_parts["raw_suffix"]
+            or b"\n" in stream_parts["raw_suffix"]
+        )
+    ):
+        fail(f"{where} partial stream suffix framing differs")
+    if not validate_live_sampler_stream_pair(
+        stream_parts["paired_raw"], stream_parts["validation_complete"],
+        args, where + " paired prefix",
+    ):
+        fail(f"{where} paired prefix did not settle")
+    expected_header = canonical_bytes(expected_validation_header(args)) + b"\n"
+    _, final_decision = replay_terminal_validation(
+        stream_parts["paired_raw"], stream_parts["validation_complete"],
+        {"validation_header_ascii": expected_header.decode("ascii")},
+    )
+    validation_lines = stream_parts["validation_complete"].splitlines(
+        keepends=True
+    )
+    last_monotonic_ns: Optional[int] = None
+    last_csv_timestamp_ns: Optional[int] = None
+    for index, raw in enumerate(validation_lines[1:]):
+        sample = parse_validation_sample(
+            parse_canonical_json_line(
+                raw, f"{where} validation record {index}"
+            ),
+            f"{where} validation record {index}",
+        )
+        if sample["decision"] != "continue":
+            fail(
+                f"{where} live validation contains terminal decision "
+                + sample["decision"]
+            )
+        last_monotonic_ns = exact_int(
+            int(round(float(sample["monotonic_s"]) * 1_000_000_000.0)),
+            0, MAX_INT63, f"{where} validation timestamp",
+        )
+        last_csv_timestamp_ns = exact_int(
+            int(round(
+                float(f"{float(sample['monotonic_s']):.6f}")
+                * 1_000_000_000.0
+            )),
+            0, MAX_INT63, f"{where} validation CSV timestamp",
+        )
+    if (
+        final_decision != "continue"
+        or last_monotonic_ns is None
+        or last_csv_timestamp_ns is None
+    ):
+        fail(f"{where} paired prefix lacks a continuing heartbeat")
+    if stream_parts["suffix_shape"][0] == 1:
+        unpaired_row = parse_csv_physical_line(
+            stream_parts["raw_suffix"], where + " unpaired raw row"
+        )
+        if len(unpaired_row) != len(THERMAL_HEADER):
+            fail(f"{where} unpaired raw row width differs")
+        unpaired_value = finite_scalar(
+            unpaired_row[1], where + " unpaired raw timestamp"
+        )
+        if f"{unpaired_value:.6f}" != unpaired_row[1]:
+            fail(f"{where} unpaired raw timestamp is not canonical")
+        unpaired_ns = exact_int(
+            int(round(unpaired_value * 1_000_000_000.0)),
+            0, MAX_INT63, where + " unpaired raw timestamp",
+        )
+        if not (
+            last_csv_timestamp_ns < unpaired_ns <= observed_monotonic_ns
+        ):
+            fail(f"{where} unpaired raw chronology differs")
+    stream_parts["last_monotonic_ns"] = last_monotonic_ns
+    stream_parts["last_csv_timestamp_ns"] = last_csv_timestamp_ns
+    return stream_parts
+
+
+def settle_live_sampler_streams(
+    args: argparse.Namespace, health_api: Any,
+    deadline: Optional[float], where: str, *, require_fresh: bool = True,
+    allow_stale_suffixes: bool = False,
+) -> Dict[str, Any]:
+    """Return a stable, fully paired, all-continue live sampler snapshot."""
+    settle_deadline = min(
+        deadline if deadline is not None else time.monotonic() + 1.0,
+        time.monotonic() + 1.0,
+    )
+
+    def read_once() -> Dict[str, Any]:
+        pid_file, pid_data, pid_info = sampler_artifact_receipt(
+            args.sampler_pid_file, 64, 0o444,
+            args.expected_sampler_uid, args.expected_sampler_gid,
+            where + " PID file",
+        )
+        receipt_file, receipt_data, receipt_info = sampler_artifact_receipt(
+            args.sampler_receipt, MAX_SAMPLER_RECEIPT_BYTES, 0o444,
+            args.expected_sampler_uid, args.expected_sampler_gid,
+            where + " terminal receipt reservation",
+        )
+        validation_jsonl, validation_data, validation_info = (
+            sampler_artifact_receipt(
+                args.sampler_validation_jsonl,
+                MAX_SAMPLER_VALIDATION_BYTES, 0o444,
+                args.expected_sampler_uid, args.expected_sampler_gid,
+                where + " validation JSONL",
+            )
+        )
+        # Read validation before raw.  Since the producer flushes raw first,
+        # a raw-ahead result can be an honest in-flight sample; validation
+        # ahead of this later raw snapshot cannot be producer-authentic.
+        csv_full_data, csv_info = stable_regular_snapshot(
+            args.sampler_csv, MAX_SAMPLER_CSV_BYTES, where + " raw CSV"
+        )
+        complete_end = csv_full_data.rfind(b"\n") + 1
+        if complete_end == 0:
+            fail(f"{where} raw CSV has no complete physical line")
+        csv_data = csv_full_data[:complete_end]
+        if pid_data != (str(args.sampler_pid) + "\n").encode("ascii"):
+            fail(f"{where} PID file content differs")
+        if receipt_data:
+            fail(f"{where} terminal intent is already published")
+        for info, expected_device, expected_inode, label in (
+            (
+                pid_info, args.expected_sampler_pid_file_device,
+                args.expected_sampler_pid_file_inode, "PID file",
+            ),
+            (
+                validation_info, args.expected_sampler_validation_device,
+                args.expected_sampler_validation_inode, "validation JSONL",
+            ),
+            (
+                receipt_info, args.expected_sampler_receipt_device,
+                args.expected_sampler_receipt_inode, "terminal receipt",
+            ),
+            (
+                csv_info, args.expected_sampler_csv_device,
+                args.expected_sampler_csv_inode, "raw CSV",
+            ),
+        ):
+            if info.st_dev != expected_device or info.st_ino != expected_inode:
+                fail(f"{where} {label} identity differs")
+        if (
+            stat.S_IMODE(csv_info.st_mode) != 0o600
+            or csv_info.st_uid != args.expected_sampler_uid
+            or csv_info.st_gid != args.expected_sampler_gid
+            or csv_info.st_nlink != 1
+        ):
+            fail(f"{where} raw CSV mode/owner/link policy differs")
+        return {
+            "csv_data": csv_data,
+            "csv_full_data": csv_full_data,
+            "csv_info": csv_info,
+            "pid_file": pid_file,
+            "receipt_file": receipt_file,
+            "validation_data": validation_data,
+            "validation_info": validation_info,
+            "validation_jsonl": validation_jsonl,
+            "snapshot_observed_monotonic_ns": time.monotonic_ns(),
+        }
+
+    def classify(snapshot: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+        paired = validate_live_sampler_stream_pair(
+            snapshot["csv_data"], snapshot["validation_data"], args, where
+        )
+        raw_complete = (
+            len(snapshot["csv_data"]) == len(snapshot["csv_full_data"])
+        )
+        if paired and raw_complete:
+            return validate_stale_sampler_stream_prefix(
+                snapshot["csv_full_data"], snapshot["validation_data"],
+                args, where, snapshot["snapshot_observed_monotonic_ns"],
+            )
+        if not allow_stale_suffixes:
+            return None
+        return validate_stale_sampler_stream_prefix(
+            snapshot["csv_full_data"], snapshot["validation_data"],
+            args, where, snapshot["snapshot_observed_monotonic_ns"],
+        )
+
+    while True:
+        if time.monotonic() >= settle_deadline:
+            fail(f"{where} did not reach a paired live-stream fixed point")
+        health_api._verify_live_sampler_process(
+            args.sampler_pid, EXPECTED_SAMPLER_CPU,
+            args.expected_sampler_process_start_ticks,
+            args.sampler_script, args.sampler_csv,
+        )
+        if (
+            process_start_ticks(args.sampler_pid)
+            != args.expected_sampler_process_start_ticks
+        ):
+            fail(f"{where} process start identity differs")
+        first = read_once()
+        first_shape = classify(first)
+        if first_shape is None:
+            time.sleep(min(
+                0.05, max(0.0, settle_deadline - time.monotonic())
+            ))
+            continue
+        security = read_process_security(args.sampler_pid, where + " security")
+        validate_process_security(
+            security, args.expected_sampler_uid, args.expected_sampler_gid,
+            [args.expected_sampler_i2c_gid], where + " security",
+        )
+        if sorted(os.sched_getaffinity(args.sampler_pid)) != [EXPECTED_SAMPLER_CPU]:
+            fail(f"{where} process affinity differs")
+        second = read_once()
+        second_shape = classify(second)
+        if (
+            second_shape is None
+            or first["csv_full_data"] != second["csv_full_data"]
+            or stat_receipt(first["csv_info"])
+            != stat_receipt(second["csv_info"])
+            or not canonical_equal(first["pid_file"], second["pid_file"])
+            or not canonical_equal(
+                first["validation_jsonl"], second["validation_jsonl"]
+            )
+            or not canonical_equal(
+                first["receipt_file"], second["receipt_file"]
+            )
+        ):
+            time.sleep(min(
+                0.05, max(0.0, settle_deadline - time.monotonic())
+            ))
+            continue
+        health_api._verify_live_sampler_process(
+            args.sampler_pid, EXPECTED_SAMPLER_CPU,
+            args.expected_sampler_process_start_ticks,
+            args.sampler_script, args.sampler_csv,
+        )
+        if (
+            process_start_ticks(args.sampler_pid)
+            != args.expected_sampler_process_start_ticks
+        ):
+            fail(f"{where} process identity changed at the fixed point")
+        third_validation, third_validation_data, _ = (
+            sampler_artifact_receipt(
+                args.sampler_validation_jsonl,
+                MAX_SAMPLER_VALIDATION_BYTES, 0o444,
+                args.expected_sampler_uid, args.expected_sampler_gid,
+                where + " confirming validation JSONL",
+            )
+        )
+        if (
+            third_validation_data != second["validation_data"]
+            or not canonical_equal(
+                third_validation, second["validation_jsonl"]
+            )
+        ):
+            time.sleep(min(
+                0.05, max(0.0, settle_deadline - time.monotonic())
+            ))
+            continue
+        health_api._verify_live_sampler_process(
+            args.sampler_pid, EXPECTED_SAMPLER_CPU,
+            args.expected_sampler_process_start_ticks,
+            args.sampler_script, args.sampler_csv,
+        )
+        if (
+            process_start_ticks(args.sampler_pid)
+            != args.expected_sampler_process_start_ticks
+        ):
+            fail(f"{where} process identity changed after confirmation")
+        final_receipt, final_receipt_data, final_receipt_info = (
+            sampler_artifact_receipt(
+                args.sampler_receipt, MAX_SAMPLER_RECEIPT_BYTES, 0o444,
+                args.expected_sampler_uid, args.expected_sampler_gid,
+                where + " final terminal receipt reservation",
+            )
+        )
+        if (
+            final_receipt_data
+            or final_receipt_info.st_dev
+            != args.expected_sampler_receipt_device
+            or final_receipt_info.st_ino
+            != args.expected_sampler_receipt_inode
+            or not canonical_equal(second["receipt_file"], final_receipt)
+        ):
+            fail(f"{where} terminal intent appeared at the fixed point")
+        last_monotonic_ns = second_shape["last_monotonic_ns"]
+        if require_fresh and (
+            time.monotonic_ns()
+            > last_monotonic_ns + SAMPLER_HEARTBEAT_MAX_GAP_NS
+        ):
+            fail(f"{where} validation heartbeat is stale")
+        second["paired_end_monotonic_ns"] = second_shape[
+            "last_csv_timestamp_ns"
+        ]
+        second["paired_raw"] = second_shape["paired_raw"]
+        second["validation_complete"] = second_shape["validation_complete"]
+        return second
+
+
+def select_validation_window(
+    validation_data: bytes, raw_window: bytes, where: str,
+) -> bytes:
+    validation_lines = validation_data.splitlines(keepends=True)
+    raw_lines = raw_window.splitlines(keepends=True)
+    if len(validation_lines) < 2 or len(raw_lines) < 2:
+        fail(f"{where} has insufficient records")
+    header = parse_canonical_json_line(validation_lines[0], where + " header")
+    if header.get("schema") != THERMAL_VALIDATION_STREAM_SCHEMA:
+        fail(f"{where} header schema differs")
+    by_timestamp: Dict[str, bytes] = {}
+    previous_index: Optional[int] = None
+    for index, raw in enumerate(validation_lines[1:], start=1):
+        sample = parse_validation_sample(
+            parse_canonical_json_line(raw, f"{where} record {index}"),
+            f"{where} record {index}",
+        )
+        if previous_index is not None and sample["sample_index"] != previous_index + 1:
+            fail(f"{where} sample indices are not contiguous")
+        previous_index = sample["sample_index"]
+        timestamp_text = f"{float(sample['monotonic_s']):.6f}"
+        if timestamp_text in by_timestamp:
+            fail(f"{where} has duplicate formatted timestamps")
+        by_timestamp[timestamp_text] = raw
+    selected = [validation_lines[0]]
+    for index, raw in enumerate(raw_lines[1:], start=2):
+        row = parse_csv_physical_line(raw, f"{where} raw row {index}")
+        if len(row) != len(THERMAL_HEADER) or row[1] not in by_timestamp:
+            fail(f"{where} lacks a validation record for raw row {index}")
+        selected.append(by_timestamp[row[1]])
+    return b"".join(selected)
+
+
+def summarize_validation_window_bytes(
+    validation_window: bytes, raw_window: bytes,
+    sampler: Mapping[str, Any],
+) -> Dict[str, Any]:
+    validation_lines = validation_window.splitlines(keepends=True)
+    raw_lines = raw_window.splitlines(keepends=True)
+    if len(validation_lines) != len(raw_lines) or len(validation_lines) < 2:
+        fail("thermal validation/raw window row count differs")
+    header = parse_canonical_json_line(
+        validation_lines[0], "thermal validation header"
+    )
+    expected_header = {
+        "expected_output_owner_uid": sampler["process_uid"],
+        "raw_columns": list(THERMAL_HEADER),
+        "sampler_source_expected_sha256": sampler["script_sha256"],
+        "sampling": {
+            "dimm_attempts": 5, "dimm_retry_delay_s": 0.01,
+            "interval_s": 1.0,
+        },
+        "schema": THERMAL_VALIDATION_STREAM_SCHEMA,
+        "thresholds": THERMAL_SAMPLER_THRESHOLDS,
+    }
+    if not canonical_equal(header, expected_header):
+        fail("thermal validation header differs from sampler authority")
+    failures: List[str] = []
+    previous_sample_index: Optional[int] = None
+    previous_valid: Dict[str, Tuple[float, float]] = {}
+    attempt_errors_total = 0
+    for offset, (validation_raw, csv_raw) in enumerate(
+        zip(validation_lines[1:], raw_lines[1:]), start=0
+    ):
+        where = f"thermal validation record {offset}"
+        sample = parse_validation_sample(
+            parse_canonical_json_line(validation_raw, where), where
+        )
+        if previous_sample_index is not None and sample["sample_index"] != previous_sample_index + 1:
+            fail("thermal validation sample indices are not contiguous")
+        previous_sample_index = sample["sample_index"]
+        row = parse_csv_physical_line(csv_raw, f"thermal validation raw row {offset}")
+        if len(row) != len(THERMAL_HEADER):
+            fail("thermal validation raw row width differs")
+        sample_time = float(sample["monotonic_s"])
+        if f"{sample_time:.6f}" != row[1]:
+            fail("thermal validation/raw timestamp differs")
+        if canonical_counter(row[13], where + " raw DIMM errors") != sample["read_error_count"]:
+            fail("thermal validation/raw DIMM error count differs")
+        if canonical_counter(row[17], where + " raw EDAC CE") < sample["edac_ce_delta"]:
+            fail("thermal validation EDAC CE delta exceeds raw count")
+        if canonical_counter(row[18], where + " raw EDAC UE") < sample["edac_ue_delta"]:
+            fail("thermal validation EDAC UE delta exceeds raw count")
+        computed_faults = 0
+        computed_reads = 0
+        computed_hot: List[str] = []
+        for sensor_index, name in enumerate(VALIDATION_DIMM_FIELDS, start=5):
+            sensor = sample["sensors"][name]
+            attempt_errors_total += sensor["attempt_errors"]
+            raw_text = row[sensor_index]
+            raw_value = None if raw_text == "" else finite_scalar(
+                raw_text, where + " raw " + name
+            )
+            if not canonical_equal(sensor["raw_c"], raw_value):
+                fail("thermal validation/raw DIMM value differs")
+            if raw_value is None:
+                computed_faults += 1
+                computed_reads += 1
+                if (
+                    sensor["valid"] or sensor["reason"] != "read_error"
+                    or sensor["hot"] or sensor["hot_streak"] != 0
+                    or sensor["jump_c"] is not None or sensor["rate_c_per_s"] is not None
+                ):
+                    fail("thermal validation read-error state differs")
+                continue
+            hot = raw_value >= THERMAL_SAMPLER_THRESHOLDS["dimm_safety_c_inclusive"]
+            if sensor["hot"] != hot:
+                fail("thermal validation hot classification differs")
+            if hot and sensor["hot_streak"] >= THERMAL_SAMPLER_THRESHOLDS["hot_confirm_samples"]:
+                computed_hot.append(name)
+            if sensor["valid"]:
+                if sensor["reason"] != "ok":
+                    fail("thermal validation valid sensor reason differs")
+                if name in previous_valid:
+                    previous_value, previous_time = previous_valid[name]
+                    elapsed = sample_time - previous_time
+                    if elapsed <= 0:
+                        fail("thermal validation sensor time is not increasing")
+                    jump = abs(raw_value - previous_value)
+                    rate = jump / elapsed
+                    if (
+                        not canonical_equal(sensor["jump_c"], jump)
+                        or not canonical_equal(sensor["rate_c_per_s"], rate)
+                    ):
+                        fail("thermal validation jump/rate replay differs")
+                previous_valid[name] = (raw_value, sample_time)
+            else:
+                computed_faults += 1
+        if sample["fault_count"] != computed_faults or sample["read_error_count"] != computed_reads:
+            fail("thermal validation fault/read accounting differs")
+        if sample["hot_sensors"] != computed_hot:
+            fail("thermal validation confirmed-hot roster differs")
+        if (
+            sample["decision"] != "continue" or sample["fault_count"] != 0
+            or sample["read_error_count"] != 0 or sample["hot_sensors"]
+            or sample["edac_ce_delta"] != 0 or sample["edac_ue_delta"] != 0
+            or any(
+                not sensor["valid"] or sensor["reason"] != "ok"
+                for sensor in sample["sensors"].values()
+            )
+        ):
+            append_unique_failure(
+                failures, f"thermal validation record {offset} is not clean"
+            )
+    return {
+        "attempt_errors_total": attempt_errors_total,
+        "failures": failures,
+        "sample_count": len(validation_lines) - 1,
+    }
+
+
+SAMPLER_BINDING_KEYS = {
+    "device", "gid", "inode", "mode", "nlink", "sha256", "size", "uid",
+}
+SAMPLER_DESTINATION_KEYS = {
+    "basename", "expected_owner_uid", "parent", "path",
+}
+SAMPLER_DESTINATION_PARENT_KEYS = {"binding", "path"}
+SAMPLER_PARENT_BINDING_KEYS = {
+    "device", "gid", "inode", "mode", "nlink", "uid",
+}
+SAMPLER_TERMINAL_KEYS = {
+    "admission_receipt_sha256", "coverage", "pid_file_held_binding",
+    "process_exit_observation", "process_exit_observed_monotonic_ns",
+    "producer_receipt_ascii", "producer_receipt_binding", "raw_csv_ascii",
+    "raw_csv_binding", "schema", "terminal_status", "validation_jsonl_ascii",
+    "validation_jsonl_binding", "stream_suffixes", "window_csv_ascii",
+    "window_validation_jsonl_ascii",
+}
+SAMPLER_TERMINAL_STREAM_SUFFIX_KEYS = {
+    "paired_sample_count", "raw_unpaired_suffix_bytes",
+    "raw_unpaired_suffix_sha256", "validation_complete_prefix_bytes",
+    "validation_complete_prefix_sha256", "validation_partial_suffix_bytes",
+    "validation_partial_suffix_sha256",
+}
+SAMPLER_TERMINAL_COVERAGE_KEYS = {
+    "child_reap_monotonic_ns", "child_start_monotonic_ns",
+    "coverage_shortfall_ns", "covers_child_interval",
+    "window_end_monotonic_ns", "window_start_monotonic_ns",
+}
+SAMPLER_PRODUCER_RECEIPT_KEYS = {
+    "argv", "cpu_tctl_max_c", "edac_ce_paths", "edac_ue_paths", "errors",
+    "exit_code", "finished_monotonic_ns", "finished_utc",
+    "expected_output_owner_uid", "outcome", "pid", "pid_file", "raw_csv",
+    "raw_samples_preserved", "receipt_file", "sampler_source", "sampling",
+    "schema", "self_sha256_excluding_field", "signal",
+    "started_monotonic_ns", "started_utc", "summary", "thresholds",
+    "validation_jsonl",
+}
+
+
+def validate_sampler_binding(value: Any, where: str) -> Dict[str, Any]:
+    if type(value) is not dict:
+        fail(f"{where} is not an object")
+    exact_keys(value, SAMPLER_BINDING_KEYS, where)
+    for name, lower in (
+        ("device", 0), ("gid", 0), ("inode", 1), ("mode", 0),
+        ("nlink", 0), ("size", 0), ("uid", 0),
+    ):
+        exact_int(value[name], lower, MAX_UINT64, where + "." + name)
+    lower_hash(value["sha256"], where + ".sha256")
+    return value
+
+
+def binding_from_snapshot(data: bytes, info: os.stat_result) -> Dict[str, Any]:
+    return {
+        "device": info.st_dev, "gid": info.st_gid, "inode": info.st_ino,
+        "mode": stat.S_IMODE(info.st_mode), "nlink": info.st_nlink,
+        "sha256": sha256_bytes(data), "size": len(data), "uid": info.st_uid,
+    }
+
+
+def validate_sampler_destination(
+    value: Any, expected_path: str, expected_uid: Optional[int],
+    expected_parent: Optional[Mapping[str, Any]], where: str,
+) -> None:
+    if type(value) is not dict:
+        fail(f"{where} is not an object")
+    exact_keys(value, SAMPLER_DESTINATION_KEYS, where)
+    exact_string(value["path"], expected_path, where + ".path")
+    exact_string(value["basename"], Path(expected_path).name, where + ".basename")
+    if value["expected_owner_uid"] != expected_uid:
+        fail(f"{where} expected owner differs")
+    parent = value["parent"]
+    if type(parent) is not dict:
+        fail(f"{where}.parent is not an object")
+    exact_keys(parent, SAMPLER_DESTINATION_PARENT_KEYS, where + ".parent")
+    exact_string(parent["path"], str(Path(expected_path).parent), where + ".parent.path")
+    binding = parent["binding"]
+    if type(binding) is not dict:
+        fail(f"{where}.parent.binding is not an object")
+    exact_keys(binding, SAMPLER_PARENT_BINDING_KEYS, where + ".parent.binding")
+    for name in SAMPLER_PARENT_BINDING_KEYS:
+        exact_int(binding[name], 0, MAX_UINT64, where + ".parent.binding." + name)
+    if expected_parent is not None:
+        stat_value = expected_parent["stat"]
+        expected_binding = {
+            name: stat_value[name] for name in SAMPLER_PARENT_BINDING_KEYS
+        }
+        if not canonical_equal(binding, expected_binding):
+            fail(f"{where} parent binding differs from admission")
+
+
+def split_terminal_streams(
+    raw_csv: bytes, validation_jsonl: bytes, *, allow_unpaired: bool,
+) -> Dict[str, Any]:
+    raw_complete_end = raw_csv.rfind(b"\n") + 1
+    raw_complete = raw_csv[:raw_complete_end]
+    raw_partial = raw_csv[raw_complete_end:]
+    raw_lines = raw_complete.splitlines(keepends=True)
+    if (
+        len(raw_lines) < 2
+        or tuple(parse_csv_physical_line(raw_lines[0], "terminal raw header"))
+        != THERMAL_HEADER
+    ):
+        fail("terminal raw stream framing differs")
+    complete_end = validation_jsonl.rfind(b"\n") + 1
+    validation_complete = validation_jsonl[:complete_end]
+    validation_partial = validation_jsonl[complete_end:]
+    validation_lines = validation_complete.splitlines(keepends=True)
+    if not validation_lines:
+        fail("terminal validation stream lacks its complete header")
+    paired_count = len(validation_lines) - 1
+    raw_count = len(raw_lines) - 1
+    raw_delta = raw_count - paired_count
+    suffix_shape = (
+        raw_delta, bool(raw_partial), bool(validation_partial)
+    )
+    allowed_unpaired_shapes = {
+        (0, False, False),
+        (1, False, False),
+        (1, False, True),
+        (0, True, False),
+    }
+    if (
+        not allow_unpaired and suffix_shape != (0, False, False)
+        or allow_unpaired and suffix_shape not in allowed_unpaired_shapes
+    ):
+        fail("terminal raw/validation paired-row shape differs")
+    paired_raw = b"".join(raw_lines[:paired_count + 1])
+    raw_suffix = raw_csv[len(paired_raw):]
+    return {
+        "paired_raw": paired_raw,
+        "raw_complete": raw_complete,
+        "raw_suffix": raw_suffix,
+        "suffix_shape": suffix_shape,
+        "suffix_receipt": {
+            "paired_sample_count": paired_count,
+            "raw_unpaired_suffix_bytes": len(raw_suffix),
+            "raw_unpaired_suffix_sha256": sha256_bytes(raw_suffix),
+            "validation_complete_prefix_bytes": len(validation_complete),
+            "validation_complete_prefix_sha256": sha256_bytes(
+                validation_complete
+            ),
+            "validation_partial_suffix_bytes": len(validation_partial),
+            "validation_partial_suffix_sha256": sha256_bytes(
+                validation_partial
+            ),
+        },
+        "validation_complete": validation_complete,
+        "validation_partial": validation_partial,
+    }
+
+
+def replay_terminal_validation(
+    raw_csv: bytes, validation_jsonl: bytes,
+    sampler_admission: Mapping[str, Any],
+) -> Tuple[Dict[str, Any], str]:
+    raw_lines = raw_csv.splitlines(keepends=True)
+    validation_lines = validation_jsonl.splitlines(keepends=True)
+    if (
+        len(raw_lines) < 2 or len(validation_lines) != len(raw_lines)
+        or tuple(parse_csv_physical_line(raw_lines[0], "terminal raw header"))
+        != THERMAL_HEADER
+    ):
+        fail("terminal raw/validation row roster differs")
+    header = parse_canonical_json_line(
+        validation_lines[0], "terminal validation header"
+    )
+    expected_header_raw = sampler_admission["validation_header_ascii"].encode("ascii")
+    if canonical_bytes(header) + b"\n" != expected_header_raw:
+        fail("terminal validation header differs from admission")
+    sensor_totals: Dict[str, Dict[str, Any]] = {
+        name: {
+            "attempt_errors": 0, "invalid_samples": 0, "max_hot_streak": 0,
+            "max_raw_c": None, "max_valid_c": None, "raw_samples": 0,
+            "read_error_samples": 0, "valid_samples": 0,
+        }
+        for name in VALIDATION_DIMM_FIELDS
+    }
+    ce_baseline: Optional[int] = None
+    ue_baseline: Optional[int] = None
+    last_ce = 0
+    last_ue = 0
+    max_consecutive = 0
+    cpu_values: List[float] = []
+    last_sample: Optional[Dict[str, Any]] = None
+    for index, (raw_line, validation_line) in enumerate(
+        zip(raw_lines[1:], validation_lines[1:])
+    ):
+        row = parse_csv_physical_line(raw_line, f"terminal raw row {index}")
+        if len(row) != len(THERMAL_HEADER):
+            fail("terminal raw row width differs")
+        sample = parse_validation_sample(
+            parse_canonical_json_line(
+                validation_line, f"terminal validation record {index}"
+            ),
+            f"terminal validation record {index}",
+        )
+        if sample["sample_index"] != index:
+            fail("terminal validation sample indices differ")
+        if f"{float(sample['monotonic_s']):.6f}" != row[1]:
+            fail("terminal validation/raw timestamp differs")
+        cpu_values.append(finite_scalar(row[4], f"terminal CPU row {index}"))
+        raw_ce = canonical_counter(row[17], f"terminal EDAC CE row {index}")
+        raw_ue = canonical_counter(row[18], f"terminal EDAC UE row {index}")
+        current_ce_baseline = raw_ce - sample["edac_ce_delta"]
+        current_ue_baseline = raw_ue - sample["edac_ue_delta"]
+        if current_ce_baseline < 0 or current_ue_baseline < 0:
+            fail("terminal validation EDAC baseline is negative")
+        if ce_baseline is None:
+            ce_baseline = current_ce_baseline
+            ue_baseline = current_ue_baseline
+        elif ce_baseline != current_ce_baseline or ue_baseline != current_ue_baseline:
+            fail("terminal validation EDAC baseline changed")
+        last_ce = raw_ce
+        last_ue = raw_ue
+        raw_read_errors = canonical_counter(
+            row[13], f"terminal DIMM errors row {index}"
+        )
+        if raw_read_errors != sample["read_error_count"]:
+            fail("terminal raw/validation read-error count differs")
+        for sensor_offset, name in enumerate(VALIDATION_DIMM_FIELDS, start=5):
+            sensor = sample["sensors"][name]
+            totals = sensor_totals[name]
+            raw_value = None if row[sensor_offset] == "" else finite_scalar(
+                row[sensor_offset], f"terminal {name} row {index}"
+            )
+            if not canonical_equal(raw_value, sensor["raw_c"]):
+                fail("terminal raw/validation DIMM value differs")
+            totals["attempt_errors"] += sensor["attempt_errors"]
+            totals["max_hot_streak"] = max(
+                totals["max_hot_streak"], sensor["hot_streak"]
+            )
+            if raw_value is None:
+                totals["read_error_samples"] += 1
+            else:
+                totals["raw_samples"] += 1
+                totals["max_raw_c"] = (
+                    raw_value if totals["max_raw_c"] is None
+                    else max(totals["max_raw_c"], raw_value)
+                )
+            if sensor["valid"]:
+                totals["valid_samples"] += 1
+                totals["max_valid_c"] = (
+                    raw_value if totals["max_valid_c"] is None
+                    else max(totals["max_valid_c"], raw_value)
+                )
+            elif sensor["reason"] != "read_error":
+                totals["invalid_samples"] += 1
+        max_consecutive = max(max_consecutive, sample["consecutive_fault_rows"])
+        last_sample = sample
+    if last_sample is None or ce_baseline is None or ue_baseline is None:
+        fail("terminal validation has no samples")
+    summary = {
+        "consecutive_fault_rows": last_sample["consecutive_fault_rows"],
+        "decision": last_sample["decision"],
+        "dimm_attempt_errors_total": sum(
+            value["attempt_errors"] for value in sensor_totals.values()
+        ),
+        "dimm_invalid_samples_total": sum(
+            value["invalid_samples"] for value in sensor_totals.values()
+        ),
+        "dimm_read_error_samples_total": sum(
+            value["read_error_samples"] for value in sensor_totals.values()
+        ),
+        "edac_ce_baseline": ce_baseline,
+        "edac_ce_delta": last_ce - ce_baseline,
+        "edac_ce_last": last_ce,
+        "edac_ue_baseline": ue_baseline,
+        "edac_ue_delta": last_ue - ue_baseline,
+        "edac_ue_last": last_ue,
+        "max_consecutive_fault_rows": max_consecutive,
+        "sample_count": len(raw_lines) - 1,
+        "sensors": sensor_totals,
+    }
+    return summary, last_sample["decision"]
+
+
+def validate_sampler_producer_receipt(
+    receipt: Any, receipt_ascii: bytes, sampler_admission: Mapping[str, Any],
+    raw_csv: bytes, raw_binding: Mapping[str, Any],
+    validation_jsonl: bytes, validation_binding: Mapping[str, Any],
+    producer_receipt_binding: Mapping[str, Any],
+    pid_file_held_binding: Mapping[str, Any],
+) -> Tuple[str, Dict[str, Any]]:
+    if type(receipt) is not dict:
+        fail("sampler producer receipt is not an object")
+    exact_keys(receipt, SAMPLER_PRODUCER_RECEIPT_KEYS, "sampler producer receipt")
+    exact_string(receipt["schema"], THERMAL_SAMPLER_SCHEMA, "sampler producer schema")
+    self_hash = lower_hash(
+        receipt["self_sha256_excluding_field"], "sampler producer self-hash"
+    )
+    preimage = dict(receipt)
+    del preimage["self_sha256_excluding_field"]
+    if sha256_bytes(canonical_bytes(preimage) + b"\n") != self_hash:
+        fail("sampler producer receipt self-hash differs")
+    if canonical_bytes(receipt) + b"\n" != receipt_ascii:
+        fail("sampler producer receipt canonical bytes differ")
+    if receipt["argv"] != sampler_admission["cmdline_argv"][5:]:
+        fail("sampler producer receipt argv differs from admission")
+    if (
+        receipt["expected_output_owner_uid"] != sampler_admission["process_uid"]
+        or receipt["pid"] != sampler_admission["pid"]
+        or receipt["sampling"] != {
+            "dimm_attempts": 5, "dimm_retry_delay_s": 0.01,
+            "interval_s": 1.0,
+        }
+        or receipt["thresholds"] != THERMAL_SAMPLER_THRESHOLDS
+    ):
+        fail("sampler producer run authority differs")
+    outcome = receipt["outcome"]
+    outcome_laws = {
+        "stopped": (0, ("SIGINT", "SIGTERM"), False),
+        "thermal_abort": (3, (None, "SIGINT", "SIGTERM"), False),
+        "telemetry_abort": (4, (None, "SIGINT", "SIGTERM"), False),
+        "sampler_error": (5, (None, "SIGINT", "SIGTERM"), True),
+        "edac_abort": (6, (None, "SIGINT", "SIGTERM"), False),
+    }
+    if outcome not in outcome_laws:
+        fail("sampler producer outcome differs")
+    expected_exit, expected_signal, require_errors = outcome_laws[outcome]
+    errors = receipt["errors"]
+    if (
+        receipt["exit_code"] != expected_exit
+        or (
+            receipt["signal"] not in expected_signal
+            if type(expected_signal) is tuple
+            else receipt["signal"] != expected_signal
+        )
+        or type(errors) is not list or len(errors) > MAX_PUBLICATION_FAILURES
+        or any(
+            type(item) is not dict or set(item) != {"message", "phase", "type"}
+            or any(type(item[key]) is not str or not item[key] or len(item[key]) > 4000
+                   for key in ("message", "phase", "type"))
+            for item in errors
+        )
+        or bool(errors) != require_errors
+    ):
+        fail("sampler producer outcome/exit/error binding differs")
+    started_monotonic_ns = exact_int(
+        receipt["started_monotonic_ns"], 0, MAX_INT63,
+        "sampler producer started_monotonic_ns",
+    )
+    if (
+        type(receipt["started_utc"]) is not str
+        or not receipt["started_utc"]
+        or len(receipt["started_utc"]) > 64
+    ):
+        fail("sampler producer start UTC timestamp differs")
+    timestamp_errors = [
+        item for item in errors
+        if item["phase"] == "build_terminal_timestamps"
+    ]
+    finish_missing = (
+        receipt["finished_monotonic_ns"] is None
+        and receipt["finished_utc"] is None
+    )
+    if finish_missing:
+        if outcome != "sampler_error" or len(timestamp_errors) != 1:
+            fail("sampler producer missing finish timestamps are unlicensed")
+    else:
+        if (
+            receipt["finished_monotonic_ns"] is None
+            or receipt["finished_utc"] is None
+            or timestamp_errors
+        ):
+            fail("sampler producer finish timestamp pair differs")
+        finished_monotonic_ns = exact_int(
+            receipt["finished_monotonic_ns"], 0, MAX_INT63,
+            "sampler producer finished_monotonic_ns",
+        )
+        if finished_monotonic_ns < started_monotonic_ns:
+            fail("sampler producer timestamps are reversed")
+        if (
+            type(receipt["finished_utc"]) is not str
+            or not receipt["finished_utc"]
+            or len(receipt["finished_utc"]) > 64
+        ):
+            fail("sampler producer finish UTC timestamp differs")
+    for name in ("edac_ce_paths", "edac_ue_paths"):
+        paths = receipt[name]
+        if (
+            type(paths) is not list or not paths
+            or any(type(path) is not str or not Path(path).is_absolute()
+                   for path in paths)
+            or paths != sorted(set(paths))
+        ):
+            fail("sampler producer EDAC path roster differs")
+
+    parent = sampler_admission["evidence_parent"]
+    artifact_specs = (
+        ("raw_csv", sampler_admission["csv_path"], raw_binding),
+        (
+            "validation_jsonl", sampler_admission["validation_jsonl"]["path"],
+            validation_binding,
+        ),
+    )
+    producer_artifact_bindings: Dict[str, Optional[Dict[str, Any]]] = {}
+    for name, expected_path, actual_binding in artifact_specs:
+        value = receipt[name]
+        if type(value) is not dict or set(value) != {"binding", "destination", "path"}:
+            fail("sampler producer " + name + " shape differs")
+        exact_string(value["path"], expected_path, "sampler producer " + name + " path")
+        seal_error = any(item["phase"] == "seal_" + name for item in errors)
+        binding_value = value["binding"]
+        if binding_value is None:
+            if outcome != "sampler_error" or not seal_error:
+                fail("sampler producer " + name + " binding is absent")
+            binding = None
+        else:
+            binding = validate_sampler_binding(
+                binding_value, "sampler producer " + name + " binding"
+            )
+            if seal_error or not canonical_equal(binding, actual_binding):
+                fail("sampler producer " + name + " binding differs")
+        producer_artifact_bindings[name] = binding
+        validate_sampler_destination(
+            value["destination"], expected_path, sampler_admission["process_uid"],
+            parent, "sampler producer " + name + " destination",
+        )
+    raw_samples_preserved = receipt["raw_samples_preserved"]
+    if (
+        type(raw_samples_preserved) is not bool
+        or raw_samples_preserved
+        != (producer_artifact_bindings["raw_csv"] is not None)
+    ):
+        fail("sampler producer raw preservation flag differs")
+    if (
+        raw_binding["sha256"] != sha256_bytes(raw_csv)
+        or raw_binding["size"] != len(raw_csv)
+        or validation_binding["sha256"] != sha256_bytes(validation_jsonl)
+        or validation_binding["size"] != len(validation_jsonl)
+    ):
+        fail("sampler terminal embedded artifact binding differs")
+    admission_raw_stat = sampler_admission["csv_stat"]
+    admission_validation = sampler_admission["validation_jsonl"]
+    admission_validation_stat = admission_validation["stat"]
+    if (
+        raw_binding["mode"] != 0o444
+        or raw_binding["nlink"] != 1
+        or any(
+            raw_binding[name] != admission_raw_stat[name]
+            for name in ("device", "gid", "inode", "uid")
+        )
+        or raw_binding["size"] < sampler_admission["csv_bytes"]
+        or sha256_bytes(raw_csv[:sampler_admission["csv_bytes"]])
+        != sampler_admission["csv_sha256"]
+        or validation_binding["mode"] != 0o444
+        or validation_binding["nlink"] != 1
+        or any(
+            validation_binding[name] != admission_validation_stat[name]
+            for name in ("device", "gid", "inode", "uid")
+        )
+        or validation_binding["size"] < admission_validation["bytes"]
+        or sha256_bytes(validation_jsonl[:admission_validation["bytes"]])
+        != admission_validation["sha256"]
+    ):
+        fail("sampler terminal artifacts differ from admission inodes/prefixes")
+
+    pid_value = receipt["pid_file"]
+    if type(pid_value) is not dict or set(pid_value) != {
+        "binding", "destination", "path", "removed",
+    }:
+        fail("sampler producer PID receipt shape differs")
+    exact_string(
+        pid_value["path"], sampler_admission["pid_file"]["path"],
+        "sampler producer PID path",
+    )
+    pid_binding = validate_sampler_binding(
+        pid_value["binding"], "sampler producer PID binding"
+    )
+    admission_pid = sampler_admission["pid_file"]
+    expected_pid_binding = {
+        "device": admission_pid["stat"]["device"],
+        "gid": admission_pid["stat"]["gid"],
+        "inode": admission_pid["stat"]["inode"],
+        "mode": admission_pid["stat"]["mode"],
+        "nlink": admission_pid["stat"]["nlink"],
+        "sha256": admission_pid["sha256"],
+        "size": admission_pid["bytes"],
+        "uid": admission_pid["stat"]["uid"],
+    }
+    removed = pid_value["removed"]
+    unlink_error = any(
+        item["phase"] == "unlink_pid_file" for item in errors
+    )
+    if (
+        type(removed) is not bool
+        or (
+            not removed
+            and (outcome != "sampler_error" or not unlink_error)
+        )
+        or not canonical_equal(pid_binding, expected_pid_binding)
+        or pid_file_held_binding["device"] != pid_binding["device"]
+        or pid_file_held_binding["inode"] != pid_binding["inode"]
+        or pid_file_held_binding["nlink"] != 0
+        or any(
+            pid_file_held_binding[name] != pid_binding[name]
+            for name in ("gid", "mode", "sha256", "size", "uid")
+        )
+    ):
+        fail("sampler producer PID unlink/held binding differs")
+    validate_sampler_destination(
+        pid_value["destination"], admission_pid["path"],
+        sampler_admission["process_uid"], parent,
+        "sampler producer PID destination",
+    )
+
+    receipt_file = receipt["receipt_file"]
+    if type(receipt_file) is not dict or set(receipt_file) != {
+        "destination", "path", "reservation_binding",
+    }:
+        fail("sampler producer receipt-file shape differs")
+    exact_string(
+        receipt_file["path"], sampler_admission["receipt_file"]["path"],
+        "sampler producer receipt-file path",
+    )
+    reservation = validate_sampler_binding(
+        receipt_file["reservation_binding"],
+        "sampler producer receipt reservation",
+    )
+    admission_receipt_file = sampler_admission["receipt_file"]
+    expected_reservation = {
+        "device": admission_receipt_file["stat"]["device"],
+        "gid": admission_receipt_file["stat"]["gid"],
+        "inode": admission_receipt_file["stat"]["inode"],
+        "mode": admission_receipt_file["stat"]["mode"],
+        "nlink": admission_receipt_file["stat"]["nlink"],
+        "sha256": admission_receipt_file["sha256"],
+        "size": admission_receipt_file["bytes"],
+        "uid": admission_receipt_file["stat"]["uid"],
+    }
+    if (
+        not canonical_equal(reservation, expected_reservation)
+        or producer_receipt_binding["device"] != reservation["device"]
+        or producer_receipt_binding["inode"] != reservation["inode"]
+        or producer_receipt_binding["mode"] != 0o444
+        or producer_receipt_binding["nlink"] != 1
+        or producer_receipt_binding["uid"] != sampler_admission["process_uid"]
+        or producer_receipt_binding["gid"] != sampler_admission["process_gid"]
+        or producer_receipt_binding["sha256"] != sha256_bytes(receipt_ascii)
+        or producer_receipt_binding["size"] != len(receipt_ascii)
+    ):
+        fail("sampler producer receipt reservation/final binding differs")
+    validate_sampler_destination(
+        receipt_file["destination"], admission_receipt_file["path"],
+        sampler_admission["process_uid"], parent,
+        "sampler producer receipt destination",
+    )
+
+    source = receipt["sampler_source"]
+    if type(source) is not dict or set(source) != {
+        "binding", "binding_finished", "destination", "expected_sha256",
+        "path", "sha256",
+    }:
+        fail("sampler producer source receipt shape differs")
+    source_binding = validate_sampler_binding(
+        source["binding"], "sampler producer source binding"
+    )
+    source_finished = validate_sampler_binding(
+        source["binding_finished"], "sampler producer source final binding"
+    )
+    admission_script = sampler_admission["script_stat"]
+    if (
+        source["path"] != sampler_admission["script_path"]
+        or source["expected_sha256"] != sampler_admission["script_sha256"]
+        or source["sha256"] != sampler_admission["script_sha256"]
+        or not canonical_equal(source_binding, source_finished)
+        or source_binding["sha256"] != sampler_admission["script_sha256"]
+        or any(
+            source_binding[name] != admission_script[name]
+            for name in ("device", "gid", "inode", "mode", "nlink", "size", "uid")
+        )
+    ):
+        fail("sampler producer source binding differs from admission")
+    validate_sampler_destination(
+        source["destination"], sampler_admission["script_path"], None, None,
+        "sampler producer source destination",
+    )
+
+    stream_parts = split_terminal_streams(
+        raw_csv, validation_jsonl, allow_unpaired=outcome == "sampler_error"
+    )
+    summary, final_decision = replay_terminal_validation(
+        stream_parts["paired_raw"], stream_parts["validation_complete"],
+        sampler_admission,
+    )
+    suffix_shape = stream_parts["suffix_shape"]
+    if final_decision != "continue" and suffix_shape != (0, False, False):
+        fail("sampler terminal evidence follows a terminal validation decision")
+    if suffix_shape[0] == 1:
+        unpaired_row = parse_csv_physical_line(
+            stream_parts["raw_suffix"],
+            "sampler terminal unpaired raw row",
+        )
+        if len(unpaired_row) != len(THERMAL_HEADER):
+            fail("sampler terminal unpaired raw row width differs")
+        unpaired_ns = exact_int(
+            int(round(
+                finite_scalar(
+                    unpaired_row[1],
+                    "sampler terminal unpaired raw timestamp",
+                ) * 1_000_000_000.0
+            )),
+            0, MAX_INT63, "sampler terminal unpaired raw timestamp",
+        )
+        _, paired_timestamps = sampler_rows(stream_parts["paired_raw"])
+        paired_end_ns = max(paired_timestamps.values())
+        if (
+            unpaired_ns <= paired_end_ns
+            or receipt["finished_monotonic_ns"] is not None
+            and unpaired_ns > receipt["finished_monotonic_ns"]
+        ):
+            fail("sampler terminal unpaired raw chronology differs")
+        stream_parts["unpaired_raw_monotonic_ns"] = unpaired_ns
+    else:
+        stream_parts["unpaired_raw_monotonic_ns"] = None
+    if outcome != "sampler_error" and not canonical_equal(
+        receipt["summary"], summary
+    ):
+        fail("sampler producer summary does not replay")
+    if outcome == "sampler_error" and receipt["summary"] is not None and type(
+        receipt["summary"]
+    ) is not dict:
+        fail("sampler-error producer summary shape differs")
+    raw_lines = stream_parts["raw_complete"].splitlines(keepends=True)
+    observed_complete_cpu_max = max(
+        finite_scalar(
+            parse_csv_physical_line(raw, "terminal CPU maximum row")[4],
+            "terminal CPU maximum",
+        )
+        for raw in raw_lines[1:]
+    )
+    if outcome == "sampler_error":
+        reported_cpu_max = receipt["cpu_tctl_max_c"]
+        if (
+            type(reported_cpu_max) not in (int, float)
+            or not math.isfinite(reported_cpu_max)
+            or reported_cpu_max < observed_complete_cpu_max
+        ):
+            fail("sampler-error producer CPU maximum contradicts retained rows")
+    elif not canonical_equal(
+        receipt["cpu_tctl_max_c"], observed_complete_cpu_max
+    ):
+        fail("sampler producer CPU maximum does not replay")
+    expected_final_decision = "continue" if outcome == "stopped" else outcome
+    if outcome != "sampler_error" and final_decision != expected_final_decision:
+        fail("sampler producer final validation decision differs from outcome")
+    return outcome, stream_parts
+
+
+def validate_sampler_terminal_receipt(
+    terminal: Any, sampler_admission: Mapping[str, Any],
+    child_start: Optional[int], child_reap: Optional[int],
+) -> None:
+    if type(terminal) is not dict:
+        fail("sampler terminal evidence is not an object")
+    exact_keys(terminal, SAMPLER_TERMINAL_KEYS, "sampler terminal evidence")
+    exact_string(
+        terminal["schema"], SAMPLER_TERMINAL_SCHEMA,
+        "sampler terminal evidence schema",
+    )
+    exact_string(
+        terminal["terminal_status"], "invalid",
+        "sampler terminal evidence status",
+    )
+    exact_string(
+        terminal["process_exit_observation"],
+        "linux-pidfd-readable-nonchild-v1",
+        "sampler terminal process-exit observation",
+    )
+    exit_observed = exact_int(
+        terminal["process_exit_observed_monotonic_ns"], 0, MAX_INT63,
+        "sampler terminal process-exit timestamp",
+    )
+    admission_digest = lower_hash(
+        terminal["admission_receipt_sha256"],
+        "sampler terminal admission digest",
+    )
+    if admission_digest != sha256_bytes(canonical_bytes(sampler_admission)):
+        fail("sampler terminal admission binding differs")
+    ascii_fields = (
+        ("producer_receipt_ascii", MAX_SAMPLER_RECEIPT_BYTES),
+        ("raw_csv_ascii", MAX_SAMPLER_CSV_BYTES),
+        ("validation_jsonl_ascii", MAX_SAMPLER_VALIDATION_BYTES),
+        ("window_csv_ascii", MAX_THERMAL_WINDOW_BYTES),
+        ("window_validation_jsonl_ascii", MAX_SAMPLER_VALIDATION_BYTES),
+    )
+    decoded: Dict[str, bytes] = {}
+    for name, maximum in ascii_fields:
+        value = terminal[name]
+        if type(value) is not str:
+            fail("sampler terminal " + name + " is not text")
+        try:
+            raw = value.encode("ascii")
+        except UnicodeEncodeError:
+            fail("sampler terminal " + name + " is not ASCII")
+        if not raw or len(raw) > maximum:
+            fail("sampler terminal " + name + " exceeds its evidence bound")
+        decoded[name] = raw
+    producer_receipt = parse_canonical_json_line(
+        decoded["producer_receipt_ascii"], "sampler terminal producer receipt"
+    )
+    producer_binding = validate_sampler_binding(
+        terminal["producer_receipt_binding"], "sampler terminal receipt binding"
+    )
+    raw_binding = validate_sampler_binding(
+        terminal["raw_csv_binding"], "sampler terminal raw binding"
+    )
+    validation_binding = validate_sampler_binding(
+        terminal["validation_jsonl_binding"],
+        "sampler terminal validation binding",
+    )
+    pid_binding = validate_sampler_binding(
+        terminal["pid_file_held_binding"], "sampler terminal held PID binding"
+    )
+    _, stream_parts = validate_sampler_producer_receipt(
+        producer_receipt, decoded["producer_receipt_ascii"], sampler_admission,
+        decoded["raw_csv_ascii"], raw_binding,
+        decoded["validation_jsonl_ascii"], validation_binding,
+        producer_binding, pid_binding,
+    )
+    suffixes = terminal["stream_suffixes"]
+    if type(suffixes) is not dict:
+        fail("sampler terminal stream-suffix receipt is not an object")
+    exact_keys(
+        suffixes, SAMPLER_TERMINAL_STREAM_SUFFIX_KEYS,
+        "sampler terminal stream-suffix receipt",
+    )
+    for name in (
+        "paired_sample_count", "raw_unpaired_suffix_bytes",
+        "validation_complete_prefix_bytes", "validation_partial_suffix_bytes",
+    ):
+        exact_int(
+            suffixes[name], 0, MAX_SAMPLER_VALIDATION_BYTES,
+            "sampler terminal stream-suffix " + name,
+        )
+    for name in (
+        "raw_unpaired_suffix_sha256", "validation_complete_prefix_sha256",
+        "validation_partial_suffix_sha256",
+    ):
+        lower_hash(suffixes[name], "sampler terminal stream-suffix " + name)
+    if not canonical_equal(suffixes, stream_parts["suffix_receipt"]):
+        fail("sampler terminal stream-suffix receipt does not replay")
+    coverage = terminal["coverage"]
+    if type(coverage) is not dict:
+        fail("sampler terminal coverage is not an object")
+    exact_keys(coverage, SAMPLER_TERMINAL_COVERAGE_KEYS, "sampler terminal coverage")
+    start = exact_int(
+        coverage["window_start_monotonic_ns"], 0, MAX_INT63,
+        "sampler terminal window start",
+    )
+    end = exact_int(
+        coverage["window_end_monotonic_ns"], start, MAX_INT63,
+        "sampler terminal window end",
+    )
+    producer_finish = producer_receipt["finished_monotonic_ns"]
+    if producer_finish is None:
+        chronology_valid = (
+            producer_receipt["started_monotonic_ns"]
+            <= start <= end <= exit_observed
+        )
+    else:
+        chronology_valid = (
+            producer_receipt["started_monotonic_ns"] <= start <= end
+            <= producer_finish <= exit_observed
+        )
+    if (
+        not chronology_valid
+        or (
+            stream_parts["unpaired_raw_monotonic_ns"] is not None
+            and stream_parts["unpaired_raw_monotonic_ns"] > exit_observed
+        )
+    ):
+        fail("sampler terminal producer/window/exit chronology differs")
+    if (
+        coverage["child_start_monotonic_ns"] != child_start
+        or coverage["child_reap_monotonic_ns"] != child_reap
+        or type(coverage["covers_child_interval"]) is not bool
+    ):
+        fail("sampler terminal child interval binding differs")
+    expected_covers = bool(
+        child_start is not None and child_reap is not None
+        and start <= child_start <= child_reap <= end
+    )
+    expected_shortfall = (
+        None if child_reap is None else max(0, child_reap - end)
+    )
+    if (
+        coverage["covers_child_interval"] != expected_covers
+        or coverage["coverage_shortfall_ns"] != expected_shortfall
+    ):
+        fail("sampler terminal coverage computation differs")
+    paired_raw = stream_parts["paired_raw"]
+    physical, timestamps = sampler_rows(paired_raw)
+    start_lines = [index for index, value in timestamps.items() if value == start]
+    end_lines = [index for index, value in timestamps.items() if value == end]
+    if len(start_lines) != 1 or len(end_lines) != 1 or start_lines[0] > end_lines[0]:
+        fail("sampler terminal window endpoints differ")
+    expected_window = physical[0] + b"".join(
+        physical[start_lines[0]:end_lines[0] + 1]
+    )
+    if decoded["window_csv_ascii"] != expected_window:
+        fail("sampler terminal retained CSV window differs")
+    expected_validation_window = select_validation_window(
+        stream_parts["validation_complete"], expected_window,
+        "sampler terminal validation selection",
+    )
+    if decoded["window_validation_jsonl_ascii"] != expected_validation_window:
+        fail("sampler terminal retained validation window differs")
 
 
 def parse_csv_physical_line(raw: bytes, where: str) -> List[str]:
@@ -4093,6 +6013,60 @@ def wait_for_sampler_timestamp(
         time.sleep(0.05)
 
 
+def wait_for_sampler_timestamp_supervised(
+    path: Path, deadline: float, handles: Mapping[str, Any],
+    *, at_or_after: int,
+) -> Tuple[Optional[int], str]:
+    while True:
+        event = poll_sampler_supervision(handles)
+        if event != "none":
+            return None, event
+        data, _ = sampler_snapshot(path)
+        _, timestamps = sampler_rows(data)
+        matches = sorted(
+            value for value in timestamps.values() if value >= at_or_after
+        )
+        event = poll_sampler_supervision(handles)
+        if event != "none":
+            return None, event
+        if matches:
+            return matches[0], "none"
+        if time.monotonic() >= deadline:
+            fail("sampler did not append a supervised endpoint before deadline")
+        time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+
+
+def wait_for_sampler_validation_timestamp_supervised(
+    handles: Mapping[str, Any], timestamp_ns: int, deadline: float,
+) -> str:
+    exact_int(
+        timestamp_ns, 0, MAX_INT63,
+        "sampler admission validation timestamp",
+    )
+    while True:
+        event = poll_sampler_supervision(handles)
+        if event != "none":
+            return event
+        observed = handles.get("validation_csv_timestamp_ns", [])
+        if timestamp_ns in observed:
+            # A terminal latch or later terminal validation record must win
+            # over a just-observed continue record before admission returns.
+            event = poll_sampler_supervision(handles)
+            if event != "none":
+                return event
+            if timestamp_ns not in handles.get(
+                "validation_csv_timestamp_ns", []
+            ):
+                fail("sampler validation state changed during admission")
+            return "none"
+        last_timestamp = handles.get("validation_last_csv_timestamp_ns")
+        if last_timestamp is not None and last_timestamp > timestamp_ns:
+            fail("sampler validation skipped the admission CSV endpoint")
+        if time.monotonic() >= deadline:
+            fail("sampler did not validate the admission CSV endpoint")
+        time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+
+
 def process_start_ticks(pid: int) -> int:
     data = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
     close = data.rfind(")")
@@ -4120,6 +6094,115 @@ def read_bounded_proc_vector(path: Path, where: str) -> bytes:
         os.close(fd)
 
 
+PROCESS_SECURITY_KEYS = {
+    "cap_ambient", "cap_bounding", "cap_effective", "cap_inheritable",
+    "cap_permitted", "gids", "groups", "no_new_privs", "schema", "uids",
+}
+
+
+def parse_process_security(data: bytes, where: str) -> Dict[str, Any]:
+    try:
+        text = data.decode("ascii")
+    except UnicodeDecodeError:
+        fail(f"{where} is not ASCII")
+    wanted = {
+        "Uid": "uids", "Gid": "gids", "Groups": "groups",
+        "CapInh": "cap_inheritable", "CapPrm": "cap_permitted",
+        "CapEff": "cap_effective", "CapBnd": "cap_bounding",
+        "CapAmb": "cap_ambient", "NoNewPrivs": "no_new_privs",
+    }
+    observed: Dict[str, str] = {}
+    for raw_line in text.splitlines():
+        if ":" not in raw_line:
+            continue
+        raw_name, raw_value = raw_line.split(":", 1)
+        if raw_name not in wanted:
+            continue
+        name = wanted[raw_name]
+        if name in observed:
+            fail(f"{where} contains duplicate {raw_name}")
+        observed[name] = raw_value.strip()
+    if set(observed) != set(wanted.values()):
+        fail(f"{where} security field roster differs")
+
+    def decimal_vector(raw: str, count: Optional[int], name: str) -> List[int]:
+        fields = raw.split() if raw else []
+        if count is not None and len(fields) != count:
+            fail(f"{where} {name} field count differs")
+        values: List[int] = []
+        for field in fields:
+            if (
+                not field.isascii() or not field.isdecimal()
+                or (len(field) > 1 and field.startswith("0"))
+            ):
+                fail(f"{where} {name} is not canonical decimal")
+            values.append(exact_int(int(field), 0, MAX_UINT32, f"{where} {name}"))
+        return values
+
+    uids = decimal_vector(observed["uids"], 4, "Uid")
+    gids = decimal_vector(observed["gids"], 4, "Gid")
+    groups = decimal_vector(observed["groups"], None, "Groups")
+    if groups != sorted(set(groups)):
+        fail(f"{where} supplementary group roster is not sorted and unique")
+    capabilities: Dict[str, str] = {}
+    for name in (
+        "cap_inheritable", "cap_permitted", "cap_effective",
+        "cap_bounding", "cap_ambient",
+    ):
+        value = observed[name]
+        if re.fullmatch(r"[0-9a-f]{16}", value) is None:
+            fail(f"{where} {name} is not canonical 64-bit lowercase hex")
+        capabilities[name] = value
+    nnp_text = observed["no_new_privs"]
+    if nnp_text not in ("0", "1"):
+        fail(f"{where} NoNewPrivs differs")
+    return {
+        **capabilities,
+        "gids": gids,
+        "groups": groups,
+        "no_new_privs": int(nnp_text),
+        "schema": PROCESS_SECURITY_SCHEMA,
+        "uids": uids,
+    }
+
+
+def validate_process_security(
+    value: Any, expected_uid: int, expected_gid: int,
+    expected_groups: Sequence[int], where: str,
+) -> None:
+    if type(value) is not dict:
+        fail(f"{where} is not an object")
+    exact_keys(value, PROCESS_SECURITY_KEYS, where)
+    exact_string(value["schema"], PROCESS_SECURITY_SCHEMA, where + ".schema")
+    exact_int(expected_uid, 0, MAX_UINT32, where + " expected UID")
+    exact_int(expected_gid, 0, MAX_UINT32, where + " expected GID")
+    groups = exact_int_list(
+        list(expected_groups), where + " expected groups", sorted_unique=True,
+    )
+    if (
+        value["uids"] != [expected_uid] * 4
+        or value["gids"] != [expected_gid] * 4
+        or value["groups"] != groups
+        or value["no_new_privs"] != 1
+        or any(
+            value[name] != "0000000000000000"
+            for name in (
+                "cap_inheritable", "cap_permitted", "cap_effective",
+                "cap_bounding", "cap_ambient",
+            )
+        )
+    ):
+        fail(f"{where} credentials/capabilities differ from authorization")
+
+
+def read_process_security(pid: int, where: str) -> Dict[str, Any]:
+    exact_int(pid, 1, MAX_INT63, where + " PID")
+    return parse_process_security(
+        read_bounded_proc_vector(Path(f"/proc/{pid}/status"), where + " status"),
+        where,
+    )
+
+
 def parse_sealed_environment(data: bytes, where: str) -> Dict[str, str]:
     if not data or not data.endswith(b"\0"):
         fail(f"{where} is not terminal-NUL framed")
@@ -4142,6 +6225,42 @@ def parse_sealed_environment(data: bytes, where: str) -> Dict[str, str]:
     if not canonical_equal(environment, SEALED_LAUNCH_ENVIRONMENT):
         fail(f"{where} exact environment differs")
     return environment
+
+
+def expected_sampler_argv(args: argparse.Namespace) -> List[str]:
+    return [
+        EXPECTED_SAMPLER_PYTHON,
+        *EXPECTED_SAMPLER_PYTHON_FLAGS,
+        str(args.sampler_script),
+        "--csv", str(args.sampler_csv),
+        "--pid-file", str(args.sampler_pid_file),
+        "--validation-jsonl", str(args.sampler_validation_jsonl),
+        "--receipt", str(args.sampler_receipt),
+        "--expected-source-sha256", args.expected_sampler_script_sha256,
+        "--expected-output-owner-uid", str(args.expected_sampler_uid),
+        "--interval", EXPECTED_SAMPLER_INTERVAL_TEXT,
+        "--dimm-attempts", EXPECTED_SAMPLER_DIMM_ATTEMPTS_TEXT,
+        "--dimm-retry-delay", EXPECTED_SAMPLER_DIMM_RETRY_DELAY_TEXT,
+    ]
+
+
+def expected_sampler_cmdline_bytes(args: argparse.Namespace) -> bytes:
+    return b"".join(os.fsencode(value) + b"\0" for value in expected_sampler_argv(args))
+
+
+def validate_sampler_cmdline(
+    data: bytes, args: argparse.Namespace, where: str,
+) -> List[str]:
+    if not data or not data.endswith(b"\0") or b"\0\0" in data:
+        fail(f"{where} is not an exact terminal-NUL argv vector")
+    expected = expected_sampler_cmdline_bytes(args)
+    if data != expected:
+        fail(f"{where} differs from the frozen ordered sampler launch")
+    exact_string(
+        sha256_bytes(data), args.expected_sampler_cmdline_sha256,
+        where + " SHA-256",
+    )
+    return expected_sampler_argv(args)
 
 
 def hash_regular_path(
@@ -4174,16 +6293,39 @@ def hash_regular_path(
 def make_sampler_attestation(
     args: argparse.Namespace, start_ns: int, end_ns: int,
     health_modules: SealedHealthModules, deadline: Optional[float] = None,
+    *, allow_stale_evidence: bool = False,
+    stale_stream_capture: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     if deadline is not None and time.monotonic() >= deadline:
         fail("sampler attestation reached its global deadline")
     health_api = health_modules.native
+    evidence_paths = (
+        args.sampler_csv, args.sampler_pid_file,
+        args.sampler_validation_jsonl, args.sampler_receipt,
+    )
     for path, where in (
         (args.sampler_script, "sampler script"),
         (args.sampler_csv, "sampler CSV"),
+        (args.sampler_pid_file, "sampler PID file"),
+        (args.sampler_validation_jsonl, "sampler validation JSONL"),
+        (args.sampler_receipt, "sampler terminal receipt"),
     ):
         if path.resolve(strict=True) != path:
             fail(f"{where} path is not canonical")
+    evidence_parent = args.sampler_csv.parent
+    if (
+        any(path.parent != evidence_parent for path in evidence_paths)
+        or len(set(evidence_paths)) != len(evidence_paths)
+    ):
+        fail("sampler evidence files do not share one distinct canonical parent")
+    parent_before = os.stat(str(evidence_parent), follow_symlinks=False)
+    if (
+        not stat.S_ISDIR(parent_before.st_mode)
+        or stat.S_IMODE(parent_before.st_mode) != 0o700
+        or parent_before.st_uid != args.expected_sampler_uid
+        or parent_before.st_gid != args.expected_sampler_gid
+    ):
+        fail("sampler evidence parent mode/owner differs")
     health_api._verify_live_sampler_process(
         args.sampler_pid, EXPECTED_SAMPLER_CPU,
         args.expected_sampler_process_start_ticks,
@@ -4194,6 +6336,14 @@ def make_sampler_attestation(
         actual_start_ticks, args.expected_sampler_process_start_ticks,
         args.expected_sampler_process_start_ticks, "sampler process start ticks",
     )
+    security_before = read_process_security(args.sampler_pid, "sampler pre-attestation")
+    validate_process_security(
+        security_before, args.expected_sampler_uid, args.expected_sampler_gid,
+        [args.expected_sampler_i2c_gid], "sampler pre-attestation security",
+    )
+    affinity_before = sorted(os.sched_getaffinity(args.sampler_pid))
+    if affinity_before != [EXPECTED_SAMPLER_CPU]:
+        fail("sampler pre-attestation affinity differs")
     script_hash, script_info = hash_regular_path(
         args.sampler_script, "sampler script",
         max_size=MAX_SOURCE_FILE_BYTES, deadline=deadline,
@@ -4203,11 +6353,35 @@ def make_sampler_attestation(
         "sampler script SHA-256",
     )
     csv_data, csv_info = sampler_snapshot(args.sampler_csv)
+    pid_file, pid_data, pid_info = sampler_artifact_receipt(
+        args.sampler_pid_file, 64, 0o444, args.expected_sampler_uid,
+        args.expected_sampler_gid, "sampler PID file",
+    )
+    validation_jsonl, validation_data, validation_info = sampler_artifact_receipt(
+        args.sampler_validation_jsonl, MAX_SAMPLER_VALIDATION_BYTES, 0o444,
+        args.expected_sampler_uid, args.expected_sampler_gid,
+        "sampler validation JSONL",
+    )
+    receipt_file, receipt_data, receipt_info = sampler_artifact_receipt(
+        args.sampler_receipt, MAX_SAMPLER_RECEIPT_BYTES, 0o444,
+        args.expected_sampler_uid, args.expected_sampler_gid,
+        "sampler terminal receipt reservation",
+    )
+    if pid_data != (str(args.sampler_pid) + "\n").encode("ascii"):
+        fail("sampler PID file content differs")
+    if receipt_data:
+        fail("live sampler terminal receipt reservation is not empty")
+    validate_validation_stream_header(
+        validation_data, args, "sampler validation JSONL"
+    )
+    validation_header_raw = validation_data[:validation_data.find(b"\n") + 1]
     if (
         stat.S_IMODE(script_info.st_mode) != 0o444
         or script_info.st_uid != args.expected_sampler_uid
+        or script_info.st_gid != args.expected_sampler_gid
         or stat.S_IMODE(csv_info.st_mode) != 0o600
         or csv_info.st_uid != args.expected_sampler_uid
+        or csv_info.st_gid != args.expected_sampler_gid
     ):
         fail("sampler script/CSV mode or owner differs")
     exact_int(
@@ -4218,13 +6392,26 @@ def make_sampler_attestation(
         csv_info.st_ino, args.expected_sampler_csv_inode,
         args.expected_sampler_csv_inode, "sampler CSV inode",
     )
+    for info, expected_device, expected_inode, where in (
+        (
+            pid_info, args.expected_sampler_pid_file_device,
+            args.expected_sampler_pid_file_inode, "sampler PID file",
+        ),
+        (
+            validation_info, args.expected_sampler_validation_device,
+            args.expected_sampler_validation_inode, "sampler validation JSONL",
+        ),
+        (
+            receipt_info, args.expected_sampler_receipt_device,
+            args.expected_sampler_receipt_inode, "sampler terminal receipt",
+        ),
+    ):
+        exact_int(info.st_dev, expected_device, expected_device, where + " device")
+        exact_int(info.st_ino, expected_inode, expected_inode, where + " inode")
     cmdline = read_bounded_proc_vector(
         Path(f"/proc/{args.sampler_pid}/cmdline"), "sampler command line"
     )
-    exact_string(
-        sha256_bytes(cmdline), args.expected_sampler_cmdline_sha256,
-        "sampler command-line SHA-256",
-    )
+    cmdline_argv = validate_sampler_cmdline(cmdline, args, "sampler command line")
     environ = read_bounded_proc_vector(
         Path(f"/proc/{args.sampler_pid}/environ"), "sampler environment"
     )
@@ -4275,19 +6462,58 @@ def make_sampler_attestation(
         proc_info.st_uid, args.expected_sampler_uid,
         args.expected_sampler_uid, "sampler process UID",
     )
-    if process_start_ticks(args.sampler_pid) != actual_start_ticks:
+    exact_int(
+        proc_info.st_gid, args.expected_sampler_gid,
+        args.expected_sampler_gid, "sampler process GID",
+    )
+    security_after = read_process_security(args.sampler_pid, "sampler post-attestation")
+    validate_process_security(
+        security_after, args.expected_sampler_uid, args.expected_sampler_gid,
+        [args.expected_sampler_i2c_gid], "sampler post-attestation security",
+    )
+    affinity_after = sorted(os.sched_getaffinity(args.sampler_pid))
+    parent_after = os.stat(str(evidence_parent), follow_symlinks=False)
+    if (
+        process_start_ticks(args.sampler_pid) != actual_start_ticks
+        or not canonical_equal(security_before, security_after)
+        or affinity_after != affinity_before
+        or not same_file_receipt(parent_before, parent_after)
+    ):
         fail("sampler process identity changed during attestation")
+    settled_streams = settle_live_sampler_streams(
+        args, health_api, deadline, "sampler final live streams",
+        require_fresh=not allow_stale_evidence,
+        allow_stale_suffixes=allow_stale_evidence,
+    )
+    csv_data = (
+        settled_streams["paired_raw"]
+        if allow_stale_evidence else settled_streams["csv_data"]
+    )
+    csv_info = settled_streams["csv_info"]
+    pid_file = settled_streams["pid_file"]
+    receipt_file = settled_streams["receipt_file"]
+    validation_data = settled_streams["validation_data"]
+    validation_jsonl = settled_streams["validation_jsonl"]
+    validation_header_raw = validation_data[:validation_data.find(b"\n") + 1]
     if deadline is not None and time.monotonic() >= deadline:
         fail("sampler attestation reached its global deadline")
+    if allow_stale_evidence:
+        end_ns = settled_streams["paired_end_monotonic_ns"]
     if start_ns > end_ns or not csv_data:
         fail("sampler attestation window differs")
-    return {
+    attestation = {
+        "cmdline_argv": cmdline_argv,
         "cmdline_sha256": args.expected_sampler_cmdline_sha256,
         "cpu": EXPECTED_SAMPLER_CPU,
+        "csv_bytes": len(csv_data),
         "csv_device": csv_info.st_dev,
         "csv_inode": csv_info.st_ino,
         "csv_path": str(args.sampler_csv),
+        "csv_sha256": sha256_bytes(csv_data),
         "csv_stat": stat_receipt(csv_info),
+        "evidence_parent": {
+            "path": str(evidence_parent), "stat": stat_receipt(parent_after),
+        },
         "environ_sha256": sha256_bytes(environ),
         "environment": environment,
         "environment_sha256": sha256_bytes(canonical_bytes(environment)),
@@ -4297,8 +6523,13 @@ def make_sampler_attestation(
         "executable_sha256": executable_hash,
         "executable_stat": stat_receipt(executable_info),
         "pid": args.sampler_pid,
+        "pid_file": pid_file,
+        "process_affinity": affinity_after,
+        "process_gid": proc_info.st_gid,
+        "process_security": security_after,
         "process_start_ticks": actual_start_ticks,
         "process_uid": proc_info.st_uid,
+        "receipt_file": receipt_file,
         "schema": SAMPLER_SCHEMA,
         "script_device": script_info.st_dev,
         "script_inode": script_info.st_ino,
@@ -4308,7 +6539,511 @@ def make_sampler_attestation(
         "terminal_status": "ok",
         "window_end_monotonic_ns": end_ns,
         "window_start_monotonic_ns": start_ns,
+        "validation_header_ascii": validation_header_raw.decode("ascii"),
+        "validation_jsonl": validation_jsonl,
     }
+    if stale_stream_capture is not None:
+        if not allow_stale_evidence:
+            fail("sampler stream capture requires stale evidence mode")
+        stale_stream_capture.clear()
+        stale_stream_capture.update({
+            "csv_full_data": settled_streams["csv_full_data"],
+            "csv_info": settled_streams["csv_info"],
+            "snapshot_observed_monotonic_ns": settled_streams[
+                "snapshot_observed_monotonic_ns"
+            ],
+            "validation_data": settled_streams["validation_data"],
+            "validation_info": settled_streams["validation_info"],
+        })
+    return attestation
+
+
+def sampler_admission_stat(
+    sampler: Mapping[str, Any], name: str,
+) -> Mapping[str, Any]:
+    if name == "raw_csv":
+        return sampler["csv_stat"]
+    return sampler[name]["stat"]
+
+
+def consume_sampler_validation_bytes(
+    handles: Mapping[str, Any], appended: bytes, where: str,
+) -> str:
+    buffer = handles.get("validation_buffer", b"") + appended
+    lines = buffer.splitlines(keepends=True)
+    tail = b""
+    if lines and not lines[-1].endswith(b"\n"):
+        tail = lines.pop()
+    previous_index = handles.get("validation_sample_index")
+    previous_monotonic_ns = handles.get("validation_last_monotonic_ns")
+    observed_monotonic_ns = list(
+        handles.get("validation_monotonic_ns", [])
+    )
+    previous_csv_timestamp_ns = handles.get(
+        "validation_last_csv_timestamp_ns"
+    )
+    observed_csv_timestamp_ns = list(
+        handles.get("validation_csv_timestamp_ns", [])
+    )
+    for offset, raw in enumerate(lines):
+        sample = parse_validation_sample(
+            parse_canonical_json_line(raw, f"{where} record {offset}"),
+            f"{where} record {offset}",
+        )
+        if (
+            previous_index is not None
+            and sample["sample_index"] != previous_index + 1
+        ):
+            fail(where + " sample indices are not contiguous")
+        sample_monotonic_ns = exact_int(
+            int(round(float(sample["monotonic_s"]) * 1_000_000_000.0)),
+            0, MAX_INT63, where + " sample monotonic timestamp",
+        )
+        sample_csv_timestamp_ns = exact_int(
+            int(round(
+                float(f"{float(sample['monotonic_s']):.6f}")
+                * 1_000_000_000.0
+            )),
+            0, MAX_INT63, where + " sample CSV timestamp",
+        )
+        if (
+            previous_monotonic_ns is not None
+            and sample_monotonic_ns <= previous_monotonic_ns
+        ):
+            fail(where + " sample timestamps are not strictly increasing")
+        if (
+            previous_csv_timestamp_ns is not None
+            and sample_csv_timestamp_ns <= previous_csv_timestamp_ns
+        ):
+            fail(where + " CSV timestamps are not strictly increasing")
+        previous_index = sample["sample_index"]
+        previous_monotonic_ns = sample_monotonic_ns
+        previous_csv_timestamp_ns = sample_csv_timestamp_ns
+        observed_monotonic_ns.append(sample_monotonic_ns)
+        observed_csv_timestamp_ns.append(sample_csv_timestamp_ns)
+        if sample["decision"] != "continue":
+            if type(handles) is dict:
+                handles["validation_buffer"] = tail
+                handles["validation_last_monotonic_ns"] = previous_monotonic_ns
+                handles["validation_monotonic_ns"] = observed_monotonic_ns
+                handles["validation_last_csv_timestamp_ns"] = (
+                    previous_csv_timestamp_ns
+                )
+                handles["validation_csv_timestamp_ns"] = (
+                    observed_csv_timestamp_ns
+                )
+                handles["validation_sample_index"] = previous_index
+            return "sampler-terminal-decision:" + sample["decision"]
+    if type(handles) is dict:
+        handles["validation_buffer"] = tail
+        handles["validation_last_monotonic_ns"] = previous_monotonic_ns
+        handles["validation_monotonic_ns"] = observed_monotonic_ns
+        handles["validation_last_csv_timestamp_ns"] = (
+            previous_csv_timestamp_ns
+        )
+        handles["validation_csv_timestamp_ns"] = observed_csv_timestamp_ns
+        handles["validation_sample_index"] = previous_index
+    return "none"
+
+
+def open_sampler_admission_handles(
+    args: argparse.Namespace, sampler: Mapping[str, Any],
+) -> Dict[str, Any]:
+    if not hasattr(os, "pidfd_open"):
+        fail("sampler supervision requires Linux pidfd_open")
+    parent_fd = -1
+    pidfd = -1
+    file_fds: Dict[str, int] = {}
+    try:
+        flags = (
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        )
+        parent_fd = os.open(sampler["evidence_parent"]["path"], flags)
+        parent_info = os.fstat(parent_fd)
+        if stat_receipt(parent_info) != sampler["evidence_parent"]["stat"]:
+            fail("sampler held evidence parent differs from admission")
+        path_roster = {
+            "raw_csv": args.sampler_csv,
+            "pid_file": args.sampler_pid_file,
+            "validation_jsonl": args.sampler_validation_jsonl,
+            "receipt_file": args.sampler_receipt,
+        }
+        read_flags = nonblocking_read_flags("sampler held evidence")
+        for name, path in path_roster.items():
+            fd = os.open(path.name, read_flags, dir_fd=parent_fd)
+            file_fds[name] = fd
+            info = os.fstat(fd)
+            expected = sampler_admission_stat(sampler, name)
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_dev != expected["device"]
+                or info.st_ino != expected["inode"]
+                or info.st_uid != expected["uid"]
+                or info.st_gid != expected["gid"]
+                or stat.S_IMODE(info.st_mode) != expected["mode"]
+                or info.st_nlink != 1
+                or name not in ("raw_csv", "validation_jsonl")
+                and stat_receipt(info) != expected
+                or name in ("raw_csv", "validation_jsonl")
+                and (info.st_size < expected["size"] or info.st_mtime_ns < expected["mtime_ns"])
+            ):
+                fail("sampler held " + name + " differs from admission")
+        raw_prefix = os.pread(
+            file_fds["raw_csv"], sampler["csv_bytes"], 0
+        )
+        if (
+            len(raw_prefix) != sampler["csv_bytes"]
+            or sha256_bytes(raw_prefix) != sampler["csv_sha256"]
+            or not raw_prefix.endswith(b"\n")
+        ):
+            fail("sampler held raw CSV admission prefix differs")
+        validation_info = os.fstat(file_fds["validation_jsonl"])
+        validation_prefix = os.pread(
+            file_fds["validation_jsonl"], validation_info.st_size, 0
+        )
+        if len(validation_prefix) != validation_info.st_size:
+            fail("sampler held validation prefix is incomplete")
+        admission_validation = sampler["validation_jsonl"]
+        admission_size = admission_validation["bytes"]
+        if (
+            validation_info.st_size < admission_size
+            or sha256_bytes(validation_prefix[:admission_size])
+            != admission_validation["sha256"]
+            or not validation_prefix[:admission_size].endswith(b"\n")
+        ):
+            fail("sampler held validation admission prefix differs")
+        validate_validation_stream_header(
+            validation_prefix[:admission_size], args,
+            "sampler held validation prefix",
+        )
+        header_size = len(sampler["validation_header_ascii"].encode("ascii"))
+        handles: Dict[str, Any] = {
+            "file_fds": file_fds,
+            "parent_fd": parent_fd,
+            "pidfd": -1,
+            "pidfd_exit_observed_ns": None,
+            "receipt_admission_stat": dict(
+                sampler["receipt_file"]["stat"]
+            ),
+            "validation_buffer": b"",
+            "validation_csv_timestamp_ns": [],
+            "validation_last_csv_timestamp_ns": None,
+            "validation_last_monotonic_ns": None,
+            "validation_monotonic_ns": [],
+            "validation_offset": validation_info.st_size,
+            "validation_sample_index": None,
+        }
+        initial_event = consume_sampler_validation_bytes(
+            handles, validation_prefix[header_size:],
+            "sampler held validation admission",
+        )
+        if initial_event != "none":
+            fail("sampler terminal decision preceded worker admission")
+        start_before = process_start_ticks(args.sampler_pid)
+        security_before = read_process_security(
+            args.sampler_pid, "sampler pidfd before"
+        )
+        pidfd = os.pidfd_open(args.sampler_pid, 0)
+        start_after = process_start_ticks(args.sampler_pid)
+        security_after = read_process_security(
+            args.sampler_pid, "sampler pidfd after"
+        )
+        if (
+            start_before != args.expected_sampler_process_start_ticks
+            or start_after != start_before
+            or not canonical_equal(security_before, security_after)
+            or select.select([pidfd], [], [], 0.0)[0]
+        ):
+            fail("sampler identity/liveness changed while acquiring pidfd")
+        validate_process_security(
+            security_after, args.expected_sampler_uid,
+            args.expected_sampler_gid, [args.expected_sampler_i2c_gid],
+            "sampler pidfd security",
+        )
+        handles["pidfd"] = pidfd
+        return handles
+    except BaseException:
+        for fd in file_fds.values():
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if pidfd >= 0:
+            os.close(pidfd)
+        if parent_fd >= 0:
+            os.close(parent_fd)
+        raise
+
+
+def close_sampler_admission_handles(handles: Optional[Mapping[str, Any]]) -> None:
+    if not handles or handles.get("closed"):
+        return
+    errors: List[BaseException] = []
+    for fd in list(handles.get("file_fds", {}).values()):
+        try:
+            os.close(fd)
+        except BaseException as exc:
+            errors.append(exc)
+    for name in ("pidfd", "parent_fd"):
+        fd = handles.get(name, -1)
+        if type(fd) is int and fd >= 0:
+            try:
+                os.close(fd)
+            except BaseException as exc:
+                errors.append(exc)
+    if type(handles) is dict:
+        handles["closed"] = True
+        handles["file_fds"] = {}
+        handles["pidfd"] = -1
+        handles["parent_fd"] = -1
+    if errors:
+        fail("sampler admission descriptor close failed: " + exception_text(errors[0]))
+
+
+def poll_sampler_supervision(handles: Mapping[str, Any]) -> str:
+    if not handles or handles.get("closed"):
+        return "sampler-monitor-invalid:admission-handles-closed"
+    receipt_info = os.fstat(handles["file_fds"]["receipt_file"])
+    receipt_admission = handles["receipt_admission_stat"]
+    if (
+        not stat.S_ISREG(receipt_info.st_mode)
+        or receipt_info.st_dev != receipt_admission["device"]
+        or receipt_info.st_ino != receipt_admission["inode"]
+        or receipt_info.st_uid != receipt_admission["uid"]
+        or receipt_info.st_gid != receipt_admission["gid"]
+        or stat.S_IMODE(receipt_info.st_mode) != 0o444
+        or receipt_info.st_nlink != 1
+        or receipt_info.st_size < 0
+        or receipt_info.st_size > MAX_SAMPLER_RECEIPT_BYTES
+    ):
+        return "sampler-monitor-invalid:receipt-file-policy"
+    if receipt_info.st_size > 0:
+        return "sampler-terminal-intent"
+    pidfd = handles["pidfd"]
+    if select.select([pidfd], [], [], 0.0)[0]:
+        if type(handles) is dict and handles.get("pidfd_exit_observed_ns") is None:
+            handles["pidfd_exit_observed_ns"] = time.monotonic_ns()
+        return "sampler-process-exited"
+    fd = handles["file_fds"]["validation_jsonl"]
+    info = os.fstat(fd)
+    if (
+        not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+        or stat.S_IMODE(info.st_mode) != 0o444
+        or info.st_size < handles["validation_offset"]
+        or info.st_size > MAX_SAMPLER_VALIDATION_BYTES
+    ):
+        return "sampler-monitor-invalid:validation-file-policy"
+    offset = handles["validation_offset"]
+    appended = bytearray()
+    while offset < info.st_size:
+        block = os.pread(fd, min(65536, info.st_size - offset), offset)
+        if not block:
+            return "sampler-monitor-invalid:validation-short-read"
+        appended.extend(block)
+        offset += len(block)
+    if type(handles) is dict:
+        handles["validation_offset"] = offset
+    try:
+        event = consume_sampler_validation_bytes(
+            handles, bytes(appended), "live sampler validation event"
+        )
+    except BaseException as exc:
+        return "sampler-monitor-invalid:" + exception_text(exc)
+    if event != "none":
+        return event
+    last_monotonic_ns = handles.get("validation_last_monotonic_ns")
+    if type(last_monotonic_ns) is not int:
+        return "sampler-monitor-invalid:validation-heartbeat-absent"
+    if (
+        time.monotonic_ns()
+        > last_monotonic_ns + SAMPLER_HEARTBEAT_MAX_GAP_NS
+    ):
+        return "sampler-monitor-invalid:validation-heartbeat-stale"
+    return "none"
+
+
+def held_sampler_snapshot(
+    fd: int, max_bytes: int, where: str, *, allowed_nlinks: Sequence[int] = (1,),
+) -> Tuple[bytes, os.stat_result]:
+    before = os.fstat(fd)
+    if (
+        not stat.S_ISREG(before.st_mode) or before.st_nlink not in allowed_nlinks
+        or before.st_size < 0 or before.st_size > max_bytes
+    ):
+        fail(where + " held-file policy differs")
+    data = bytearray()
+    offset = 0
+    while offset < before.st_size:
+        block = os.pread(fd, min(1024 * 1024, before.st_size - offset), offset)
+        if not block:
+            fail(where + " held snapshot is short")
+        data.extend(block)
+        offset += len(block)
+    after = os.fstat(fd)
+    if not same_file_receipt(before, after):
+        fail(where + " changed during held snapshot")
+    return bytes(data), after
+
+
+def collect_sampler_terminal_evidence(
+    args: argparse.Namespace, sampler_admission: Mapping[str, Any],
+    handles: Mapping[str, Any], start_ns: int,
+    child_start_ns: Optional[int], child_reap_ns: Optional[int],
+    deadline: float,
+) -> Dict[str, Any]:
+    exact_int(start_ns, 0, MAX_INT63, "sampler terminal start endpoint")
+    if not handles or handles.get("closed"):
+        fail("sampler terminal evidence lacks held admission descriptors")
+    pidfd = handles["pidfd"]
+    while not select.select([pidfd], [], [], 0.0)[0]:
+        monitor = poll_sampler_supervision(handles)
+        if monitor.startswith("sampler-monitor-invalid:"):
+            fail("sampler terminal monitor failed: " + monitor)
+        if time.monotonic() >= deadline:
+            fail("sampler terminal process did not exit before deadline")
+        select.select([pidfd], [], [], min(0.05, deadline - time.monotonic()))
+    exit_observed_ns = handles.get("pidfd_exit_observed_ns")
+    if exit_observed_ns is None:
+        exit_observed_ns = time.monotonic_ns()
+        if type(handles) is dict:
+            handles["pidfd_exit_observed_ns"] = exit_observed_ns
+
+    file_fds = handles["file_fds"]
+    raw_csv, raw_info = held_sampler_snapshot(
+        file_fds["raw_csv"], MAX_SAMPLER_CSV_BYTES,
+        "sampler terminal raw CSV",
+    )
+    validation_jsonl, validation_info = held_sampler_snapshot(
+        file_fds["validation_jsonl"], MAX_SAMPLER_VALIDATION_BYTES,
+        "sampler terminal validation JSONL",
+    )
+    producer_receipt_ascii, receipt_info = held_sampler_snapshot(
+        file_fds["receipt_file"], MAX_SAMPLER_RECEIPT_BYTES,
+        "sampler terminal producer receipt",
+    )
+    pid_data, pid_info = held_sampler_snapshot(
+        file_fds["pid_file"], 64, "sampler terminal held PID file",
+        allowed_nlinks=(0,),
+    )
+    if (
+        not producer_receipt_ascii.endswith(b"\n")
+        or pid_data != (str(args.sampler_pid) + "\n").encode("ascii")
+        or stat.S_IMODE(raw_info.st_mode) != 0o444
+        or stat.S_IMODE(validation_info.st_mode) != 0o444
+        or stat.S_IMODE(receipt_info.st_mode) != 0o444
+        or stat.S_IMODE(pid_info.st_mode) != 0o444
+        or any(
+            info.st_uid != args.expected_sampler_uid
+            or info.st_gid != args.expected_sampler_gid
+            for info in (raw_info, validation_info, receipt_info, pid_info)
+        )
+    ):
+        fail("sampler terminal held artifact mode/owner/content differs")
+
+    parent_fd = handles["parent_fd"]
+    parent_info = os.fstat(parent_fd)
+    admission_parent = sampler_admission["evidence_parent"]["stat"]
+    if (
+        not stat.S_ISDIR(parent_info.st_mode)
+        or parent_info.st_dev != admission_parent["device"]
+        or parent_info.st_ino != admission_parent["inode"]
+        or parent_info.st_uid != admission_parent["uid"]
+        or parent_info.st_gid != admission_parent["gid"]
+        or stat.S_IMODE(parent_info.st_mode) != 0o700
+    ):
+        fail("sampler terminal held evidence parent differs")
+    expected_named = {
+        args.sampler_csv.name: raw_info,
+        args.sampler_validation_jsonl.name: validation_info,
+        args.sampler_receipt.name: receipt_info,
+    }
+    observed_names: Dict[str, os.stat_result] = {}
+    with os.scandir(parent_fd) as entries:
+        for entry in entries:
+            if entry.name in observed_names or entry.name not in expected_named:
+                fail("sampler terminal evidence parent roster differs")
+            if not entry.is_file(follow_symlinks=False):
+                fail("sampler terminal evidence contains a non-regular name")
+            observed_names[entry.name] = entry.stat(follow_symlinks=False)
+    if set(observed_names) != set(expected_named):
+        fail("sampler terminal evidence parent roster differs")
+    for name, expected_info in expected_named.items():
+        if not same_file_receipt(observed_names[name], expected_info):
+            fail("sampler terminal named artifact differs from held inode")
+    try:
+        os.stat(args.sampler_pid_file.name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        pass
+    else:
+        fail("sampler terminal PID pathname still exists")
+
+    producer_receipt_preview = parse_canonical_json_line(
+        producer_receipt_ascii, "sampler terminal producer receipt preview"
+    )
+    stream_parts = split_terminal_streams(
+        raw_csv, validation_jsonl,
+        allow_unpaired=producer_receipt_preview.get("outcome") == "sampler_error",
+    )
+    physical, timestamps = sampler_rows(stream_parts["paired_raw"])
+    start_lines = [index for index, value in timestamps.items() if value == start_ns]
+    if len(start_lines) != 1:
+        fail("sampler terminal start endpoint is not unique")
+    end_ns = max(timestamps.values()) if timestamps else None
+    if end_ns is None or end_ns < start_ns:
+        fail("sampler terminal lacks an end endpoint")
+    end_lines = [index for index, value in timestamps.items() if value == end_ns]
+    if len(end_lines) != 1 or end_lines[0] < start_lines[0]:
+        fail("sampler terminal end endpoint is not unique")
+    window_csv = physical[0] + b"".join(
+        physical[start_lines[0]:end_lines[0] + 1]
+    )
+    window_validation = select_validation_window(
+        stream_parts["validation_complete"], window_csv,
+        "sampler terminal retained window",
+    )
+    covers = bool(
+        child_start_ns is not None and child_reap_ns is not None
+        and start_ns <= child_start_ns <= child_reap_ns <= end_ns
+    )
+    terminal = {
+        "admission_receipt_sha256": sha256_bytes(
+            canonical_bytes(sampler_admission)
+        ),
+        "coverage": {
+            "child_reap_monotonic_ns": child_reap_ns,
+            "child_start_monotonic_ns": child_start_ns,
+            "coverage_shortfall_ns": (
+                None if child_reap_ns is None
+                else max(0, child_reap_ns - end_ns)
+            ),
+            "covers_child_interval": covers,
+            "window_end_monotonic_ns": end_ns,
+            "window_start_monotonic_ns": start_ns,
+        },
+        "pid_file_held_binding": binding_from_snapshot(pid_data, pid_info),
+        "process_exit_observation": "linux-pidfd-readable-nonchild-v1",
+        "process_exit_observed_monotonic_ns": exit_observed_ns,
+        "producer_receipt_ascii": producer_receipt_ascii.decode("ascii"),
+        "producer_receipt_binding": binding_from_snapshot(
+            producer_receipt_ascii, receipt_info
+        ),
+        "raw_csv_ascii": raw_csv.decode("ascii"),
+        "raw_csv_binding": binding_from_snapshot(raw_csv, raw_info),
+        "schema": SAMPLER_TERMINAL_SCHEMA,
+        "stream_suffixes": stream_parts["suffix_receipt"],
+        "terminal_status": "invalid",
+        "validation_jsonl_ascii": validation_jsonl.decode("ascii"),
+        "validation_jsonl_binding": binding_from_snapshot(
+            validation_jsonl, validation_info
+        ),
+        "window_csv_ascii": window_csv.decode("ascii"),
+        "window_validation_jsonl_ascii": window_validation.decode("ascii"),
+    }
+    validate_sampler_terminal_receipt(
+        terminal, sampler_admission, child_start_ns, child_reap_ns
+    )
+    return terminal
 
 
 def canonical_counter(text: str, where: str) -> int:
@@ -4360,7 +7095,8 @@ def summarize_thermal_window_bytes(
             if not start_ns <= mono_ns <= end_ns:
                 fail(f"{label} timestamp is outside the window")
             if prior_ns is not None and (
-                mono_ns <= prior_ns or mono_ns - prior_ns > 5_000_000_000
+                mono_ns <= prior_ns
+                or mono_ns - prior_ns > SAMPLER_HEARTBEAT_MAX_GAP_NS
             ):
                 fail(f"{label} timestamp order/gap differs")
             prior_ns = mono_ns
@@ -4448,6 +7184,8 @@ def thermal_policy_violation_messages(
     violations: List[str] = []
     for message in thermal["parse_failures"]:
         append_unique_failure(violations, "thermal parse: " + message)
+    for message in thermal["validation_failures"]:
+        append_unique_failure(violations, "thermal validation: " + message)
     if (
         thermal["cpu_tctl_max_millic"] is None
         or thermal["cpu_tctl_max_millic"] > THERMAL_MAX_MILLIC
@@ -4483,12 +7221,30 @@ def thermal_policy_violation_messages(
 
 def tolerant_thermal_window(
     args: argparse.Namespace, sampler: Mapping[str, Any], start_ns: int,
-    end_ns: int,
+    end_ns: int, *, allow_stale_suffixes: bool = False,
+    deadline: Optional[float] = None,
+    stale_stream_capture: Optional[Mapping[str, Any]] = None,
 ) -> Tuple[Dict[str, Any], List[str], List[str]]:
     collection: List[str] = []
     violations: List[str] = []
     try:
-        data, info = sampler_snapshot(args.sampler_csv)
+        if deadline is not None and time.monotonic() >= deadline:
+            fail("thermal collection reached its recovery deadline")
+        if allow_stale_suffixes:
+            if not stale_stream_capture:
+                fail("stale thermal evidence lacks its cutoff snapshot")
+            raw_data = stale_stream_capture["csv_full_data"]
+            info = stale_stream_capture["csv_info"]
+            if stat_receipt(info) != sampler["csv_stat"]:
+                fail("stale thermal raw CSV differs from attestation")
+            complete_end = raw_data.rfind(b"\n") + 1
+            if complete_end == 0:
+                fail("stale thermal raw CSV has no complete line")
+            data = raw_data[:complete_end]
+        else:
+            data, info = sampler_snapshot(args.sampler_csv)
+        if deadline is not None and time.monotonic() >= deadline:
+            fail("thermal raw snapshot reached its recovery deadline")
         if (
             info.st_dev != sampler["csv_device"]
             or info.st_ino != sampler["csv_inode"]
@@ -4510,7 +7266,61 @@ def tolerant_thermal_window(
             window_ascii = window_bytes.decode("ascii")
         except UnicodeDecodeError:
             fail("thermal window is not ASCII")
+        if allow_stale_suffixes:
+            validation_data = stale_stream_capture["validation_data"]
+            validation_info = stale_stream_capture["validation_info"]
+        else:
+            validation_data, validation_info = stable_regular_snapshot(
+                args.sampler_validation_jsonl, MAX_SAMPLER_VALIDATION_BYTES,
+                "thermal validation JSONL",
+            )
+        if deadline is not None and time.monotonic() >= deadline:
+            fail("thermal validation snapshot reached its recovery deadline")
+        validation_artifact = sampler["validation_jsonl"]
+        if (
+            validation_info.st_dev != validation_artifact["stat"]["device"]
+            or validation_info.st_ino != validation_artifact["stat"]["inode"]
+            or validation_info.st_uid != sampler["process_uid"]
+            or validation_info.st_gid != sampler["process_gid"]
+            or validation_info.st_nlink != 1
+            or stat.S_IMODE(validation_info.st_mode) != 0o444
+        ):
+            fail("thermal validation JSONL identity changed after attestation")
+        if allow_stale_suffixes:
+            if (
+                len(validation_data) != validation_artifact["bytes"]
+                or sha256_bytes(validation_data)
+                != validation_artifact["sha256"]
+                or stat_receipt(validation_info)
+                != validation_artifact["stat"]
+            ):
+                fail("stale thermal validation differs from attestation")
+            stale_parts = validate_stale_sampler_stream_prefix(
+                raw_data, validation_data, args,
+                "stale thermal stream prefix",
+                stale_stream_capture["snapshot_observed_monotonic_ns"],
+            )
+            if (
+                sampler["csv_bytes"] != len(stale_parts["paired_raw"])
+                or sampler["csv_sha256"]
+                != sha256_bytes(stale_parts["paired_raw"])
+                or stale_parts["last_csv_timestamp_ns"] != end_ns
+            ):
+                fail("stale thermal paired prefix differs from attestation")
+            validation_data = stale_parts["validation_complete"]
+        validation_window = select_validation_window(
+            validation_data, window_bytes, "thermal validation JSONL"
+        )
+        try:
+            validation_ascii = validation_window.decode("ascii")
+        except UnicodeDecodeError:
+            fail("thermal validation window is not ASCII")
         summary = summarize_thermal_window_bytes(window_bytes, start_ns, end_ns)
+        validation_summary = summarize_validation_window_bytes(
+            validation_window, window_bytes, sampler
+        )
+        if deadline is not None and time.monotonic() >= deadline:
+            fail("thermal replay reached its recovery deadline")
         parse_failures = summary["parse_failures"]
         sample_count = summary["sample_count"]
         valid_count = summary["valid_sample_count"]
@@ -4539,6 +7349,17 @@ def tolerant_thermal_window(
             "script_sha256": sampler["script_sha256"],
             "terminal_status": "complete",
             "valid_sample_count": valid_count,
+            "validation_attempt_errors_total": validation_summary[
+                "attempt_errors_total"
+            ],
+            "validation_device": validation_info.st_dev,
+            "validation_failures": validation_summary["failures"],
+            "validation_inode": validation_info.st_ino,
+            "validation_jsonl_ascii": validation_ascii,
+            "validation_jsonl_bytes": len(validation_window),
+            "validation_jsonl_sha256": sha256_bytes(validation_window),
+            "validation_path": str(args.sampler_validation_jsonl),
+            "validation_sample_count": validation_summary["sample_count"],
             "window_csv_ascii": window_ascii,
             "window_csv_bytes": len(window_bytes),
             "window_csv_sha256": sha256_bytes(window_bytes),
@@ -4584,6 +7405,7 @@ def unbounded_sibling_tick_receipt(
 def prepare_health(
     args: argparse.Namespace, target_cpu: int, deadline: float,
     health_modules: SealedHealthModules,
+    sampler_admission: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     receipt = empty_health_receipt(args)
     collection: List[str] = []
@@ -4641,6 +7463,22 @@ def prepare_health(
         )
         if process_start_ticks(args.sampler_pid) != args.expected_sampler_process_start_ticks:
             fail("sampler process start identity differs at admission")
+        admission_receipt = dict(
+            sampler_admission
+            if sampler_admission is not None
+            else make_sampler_attestation(
+                args, 0, 0, health_modules, deadline
+            )
+        )
+        validate_sampler_receipt(admission_receipt)
+        receipt["sampler_admission"] = admission_receipt
+        receipt["sampler_admission_receipt_sha256"] = sha256_bytes(
+            canonical_bytes(admission_receipt)
+        )
+        state["sampler_admission"] = admission_receipt
+        state["sampler_handles"] = open_sampler_admission_handles(
+            args, admission_receipt
+        )
         initial_data, initial_info = sampler_snapshot(args.sampler_csv)
         exact_int(
             initial_info.st_dev, args.expected_sampler_csv_device,
@@ -4655,10 +7493,20 @@ def prepare_health(
             fail("sampler CSV has no timestamped baseline")
         admission_start = read_cpu_tick_receipt(56)
         admission_start_ns = admission_start["read_monotonic_ns"]
+        admission_sample_deadline = min(deadline, time.monotonic() + 6.0)
         sample_start_ns = wait_for_sampler_timestamp(
-            args.sampler_csv, min(deadline, time.monotonic() + 6.0),
+            args.sampler_csv, admission_sample_deadline,
             greater_than=max(initial_timestamps.values()),
         )
+        admission_monitor = wait_for_sampler_validation_timestamp_supervised(
+            state["sampler_handles"], sample_start_ns,
+            admission_sample_deadline,
+        )
+        if admission_monitor != "none":
+            fail(
+                "sampler terminal state preceded claim: "
+                + admission_monitor
+            )
         admission_end = read_cpu_tick_receipt(56)
         admission_end_ns = admission_end["read_monotonic_ns"]
         admission = unbounded_sibling_tick_receipt(
@@ -4672,6 +7520,12 @@ def prepare_health(
         state["ready"] = not collection and not violations
     except BaseException as exc:
         append_unique_failure(collection, "health admission: " + exception_text(exc))
+        try:
+            close_sampler_admission_handles(state.get("sampler_handles"))
+        except BaseException as close_exc:
+            append_unique_failure(
+                collection, "health admission close: " + exception_text(close_exc)
+            )
     finalize_health_receipt(receipt, collection, violations)
     return state
 
@@ -4711,42 +7565,184 @@ def finish_health(
 
     start_ns = state.get("sample_start_ns")
     endpoint_target = child_reap_ns if child_reap_ns is not None else time.monotonic_ns()
-    if type(start_ns) is int:
-        try:
-            sample_end_ns = wait_for_sampler_timestamp(
-                args.sampler_csv, min(deadline, time.monotonic() + 6.0),
-                at_or_after=max(endpoint_target, start_ns + 1),
-            )
-            sampler = make_sampler_attestation(
-                args, start_ns, sample_end_ns, health_modules, deadline
-            )
-            sampler_digest = sha256_bytes(canonical_bytes(sampler))
-            thermal, thermal_collection, thermal_violations = (
-                tolerant_thermal_window(
-                    args, sampler, start_ns, sample_end_ns
+    sampler_handles = state.get("sampler_handles")
+    supervision_event = state.get("sampler_supervision_event", "none")
+
+    def retain_terminal_event(event: str) -> None:
+        append_unique_failure(collection, "sampler endpoint: " + event)
+        if event in {
+            "sampler-monitor-invalid:validation-heartbeat-stale",
+            "sampler-monitor-invalid:coverage-recovery-cutoff",
+        }:
+            # The worker has already been killed by supervision.  Preserve
+            # the complete paired prefix from the still-bound live sampler,
+            # but do not wait for terminal artifacts from a process that may
+            # remain stuck indefinitely.
+            try:
+                stale_stream_capture: Dict[str, Any] = {}
+                recovery_deadline = min(
+                    time.monotonic()
+                    + SAMPLER_STALE_RECOVERY_WORK_SECONDS,
+                    deadline - SAMPLER_HEALTH_FINALIZE_RESERVE_SECONDS,
                 )
+                if time.monotonic() >= recovery_deadline:
+                    fail("sampler stale recovery lacks its reserved margin")
+                sampler = make_sampler_attestation(
+                    args, start_ns, start_ns, health_modules,
+                    recovery_deadline,
+                    allow_stale_evidence=True,
+                    stale_stream_capture=stale_stream_capture,
+                )
+                stale_end_ns = sampler["window_end_monotonic_ns"]
+                thermal, thermal_collection, thermal_violations = (
+                    tolerant_thermal_window(
+                        args, sampler, start_ns, stale_end_ns,
+                        allow_stale_suffixes=True,
+                        deadline=recovery_deadline,
+                        stale_stream_capture=stale_stream_capture,
+                    )
+                )
+                if time.monotonic() >= recovery_deadline:
+                    fail("sampler stale recovery reached its strict deadline")
+                next_collection = list(collection)
+                for message in thermal_collection:
+                    append_unique_failure(next_collection, message)
+                next_violations = list(violations)
+                for message in thermal_violations:
+                    append_unique_failure(next_violations, message)
+                receipt["sampler"] = sampler
+                receipt["sampler_receipt_sha256"] = sha256_bytes(
+                    canonical_bytes(sampler)
+                )
+                receipt["sampler_terminal"] = {}
+                receipt["sampler_terminal_receipt_sha256"] = None
+                receipt["thermal"] = thermal
+                collection[:] = next_collection
+                violations[:] = next_violations
+            except BaseException as exc:
+                append_unique_failure(
+                    collection,
+                    "sampler stale evidence: " + exception_text(exc),
+                )
+            return
+        try:
+            terminal = collect_sampler_terminal_evidence(
+                args, receipt["sampler_admission"], sampler_handles,
+                start_ns, child_start_ns, child_reap_ns, deadline,
             )
-            next_collection = list(collection)
-            for message in thermal_collection:
-                append_unique_failure(next_collection, message)
-            next_violations = list(violations)
-            for message in thermal_violations:
-                append_unique_failure(next_violations, message)
-            next_receipt = dict(receipt)
-            next_receipt["sampler"] = sampler
-            next_receipt["sampler_receipt_sha256"] = sampler_digest
-            next_receipt["thermal"] = thermal
-            receipt, collection, violations = (
-                next_receipt, next_collection, next_violations
+            receipt["sampler"] = {}
+            receipt["sampler_receipt_sha256"] = None
+            receipt["sampler_terminal"] = terminal
+            receipt["sampler_terminal_receipt_sha256"] = sha256_bytes(
+                canonical_bytes(terminal)
             )
+            receipt["thermal"] = {}
         except BaseException as exc:
-            append_unique_failure(collection, "sampler endpoint: " + exception_text(exc))
+            append_unique_failure(
+                collection,
+                "sampler terminal evidence: " + exception_text(exc),
+            )
+
+    if type(start_ns) is int:
+        if sampler_handles and supervision_event == "none":
+            supervision_event = poll_sampler_supervision(sampler_handles)
+        if supervision_event != "none":
+            retain_terminal_event(supervision_event)
+        else:
+            coverage_recovery_cutoff = deadline - (
+                SAMPLER_STALE_RECOVERY_WORK_SECONDS
+                + SAMPLER_HEALTH_FINALIZE_RESERVE_SECONDS
+            )
+            if time.monotonic() >= coverage_recovery_cutoff:
+                retain_terminal_event(
+                    "sampler-monitor-invalid:coverage-recovery-cutoff"
+                )
+                supervision_event = (
+                    "sampler-monitor-invalid:coverage-recovery-cutoff"
+                )
+        if supervision_event == "none":
+            try:
+                endpoint_deadline = min(
+                    coverage_recovery_cutoff, time.monotonic() + 6.0
+                )
+                sample_end_ns, wait_event = wait_for_sampler_timestamp_supervised(
+                    args.sampler_csv,
+                    endpoint_deadline,
+                    sampler_handles,
+                    at_or_after=max(endpoint_target, start_ns + 1),
+                )
+                if wait_event != "none":
+                    retain_terminal_event(wait_event)
+                elif sample_end_ns is None:
+                    fail("supervised sampler endpoint lacks a result")
+                else:
+                    validation_event = (
+                        wait_for_sampler_validation_timestamp_supervised(
+                            sampler_handles, sample_end_ns,
+                            endpoint_deadline,
+                        )
+                    )
+                    if validation_event != "none":
+                        retain_terminal_event(validation_event)
+                    else:
+                        sampler = make_sampler_attestation(
+                            args, start_ns, sample_end_ns,
+                            health_modules, coverage_recovery_cutoff,
+                        )
+                        sampler_digest = sha256_bytes(canonical_bytes(sampler))
+                        thermal, thermal_collection, thermal_violations = (
+                            tolerant_thermal_window(
+                                args, sampler, start_ns, sample_end_ns,
+                                deadline=coverage_recovery_cutoff,
+                            )
+                        )
+                        if time.monotonic() >= coverage_recovery_cutoff:
+                            fail(
+                                "sampler endpoint collection reached its "
+                                "recovery cutoff"
+                            )
+                        next_collection = list(collection)
+                        for message in thermal_collection:
+                            append_unique_failure(next_collection, message)
+                        next_violations = list(violations)
+                        for message in thermal_violations:
+                            append_unique_failure(next_violations, message)
+                        next_receipt = dict(receipt)
+                        next_receipt["sampler"] = sampler
+                        next_receipt["sampler_receipt_sha256"] = sampler_digest
+                        next_receipt["thermal"] = thermal
+                        receipt, collection, violations = (
+                            next_receipt, next_collection, next_violations
+                        )
+            except BaseException as exc:
+                terminal_event = (
+                    poll_sampler_supervision(sampler_handles)
+                    if sampler_handles else "none"
+                )
+                if terminal_event != "none":
+                    retain_terminal_event(terminal_event)
+                elif time.monotonic() >= coverage_recovery_cutoff:
+                    retain_terminal_event(
+                        "sampler-monitor-invalid:coverage-recovery-cutoff"
+                    )
+                else:
+                    append_unique_failure(
+                        collection,
+                        "sampler endpoint: " + exception_text(exc),
+                    )
     else:
         append_unique_failure(collection, "sampler start endpoint unavailable")
     if time.monotonic() >= deadline:
         append_unique_failure(
             collection,
             "health collection reached the strict 115-second deadline",
+        )
+    try:
+        close_sampler_admission_handles(sampler_handles)
+    except BaseException as exc:
+        append_unique_failure(
+            collection,
+            "health terminal collection: " + exception_text(exc),
         )
     finalized = finalize_health_receipt(receipt, collection, violations)
     errors = ["health collection: " + item for item in collection]
@@ -4828,6 +7824,7 @@ def run_binary(
     prepared_health_state: Optional[Dict[str, Any]] = None,
     signal_guard: Optional[SignalGuard] = None,
 ) -> ExecutionResult:
+    require_preflight_side_effects_allowed("worker launch")
     if (controller_started is None) != (controller_started_ns is None):
         fail("controller float/integer start origins must be supplied together")
     if controller_started is None and controller_started_ns is None:
@@ -4878,6 +7875,10 @@ def run_binary(
                 health_args.expected_binary_uid
                 if health_args is not None else os.getuid()
             )
+            or path_before.st_gid != (
+                health_args.expected_controller_gid
+                if health_args is not None else os.getgid()
+            )
         ):
             fail("screen binary must be a regular single-link file")
         if stat.S_IMODE(path_before.st_mode) != 0o555:
@@ -4912,6 +7913,17 @@ def run_binary(
             fail("controller reached the worker deadline before launch")
         if health_args is not None:
             health_state["sibling_start"] = read_cpu_tick_receipt(56)
+            prelaunch_sampler_event = poll_sampler_supervision(
+                health_state["sampler_handles"]
+            )
+            if prelaunch_sampler_event != "none":
+                health_state["sampler_supervision_event"] = (
+                    prelaunch_sampler_event
+                )
+                fail(
+                    "sampler terminal state preceded worker launch: "
+                    + prelaunch_sampler_event
+                )
         child_start_ns = time.monotonic_ns()
         process = subprocess.Popen(
             [fd_path, "--run", "--cpu", str(cpu)], executable=fd_path,
@@ -4931,13 +7943,17 @@ def run_binary(
         )
         if result.binary["child_affinity_after_spawn"] != [EXPECTED_TARGET_CPU]:
             fail("worker did not inherit exact singleton CPU120 affinity")
-        capture = bounded_capture(process, child_deadline, signal_guard)
+        capture = bounded_capture(
+            process, child_deadline, signal_guard,
+            sampler_monitor_handles=health_state.get("sampler_handles"),
+        )
         capture_started = True
         result.raw = capture.stdout
         result.stderr = capture.stderr
         result.binary["timed_out"] = capture.timed_out
         result.binary["output_overflow"] = capture.output_overflow
         result.binary["capture_error"] = capture.error
+        health_state["sampler_supervision_event"] = capture.sampler_event
         result.returncode = process.returncode
         child_reap_ns: Optional[int] = (
             time.monotonic_ns() if process.returncode is not None else None
@@ -4950,6 +7966,10 @@ def run_binary(
             )
         if capture.error != "none":
             result.errors.append(capture.error)
+        if capture.sampler_event != "none":
+            result.errors.append(
+                "sampler supervision: " + capture.sampler_event
+            )
     except BaseException as exc:
         result.errors.append(f"execution: {exception_text(exc)}")
     finally:
@@ -5031,6 +8051,25 @@ def run_binary(
                         partial_health, collection,
                         partial_health.get("violations", []),
                     )
+            try:
+                close_sampler_admission_handles(
+                    health_state.get("sampler_handles")
+                )
+            except BaseException as exc:
+                close_error = exception_text(exc)
+                result.errors.append("health descriptor close: " + close_error)
+                partial_health = dict(result.health)
+                collection = list(
+                    partial_health.get("collection_failures", [])
+                )
+                append_unique_failure(
+                    collection,
+                    "health terminal collection: " + close_error,
+                )
+                result.health = finalize_health_receipt(
+                    partial_health, collection,
+                    partial_health.get("violations", []),
+                )
         if fd >= 0:
             try:
                 fd_after = os.fstat(fd)
@@ -5267,8 +8306,15 @@ def build_manifest(
             path, "build provenance " + relative,
             max_size=64 * 1024 * 1024, deadline=deadline,
         )
-        if stat.S_IMODE(info.st_mode) != 0o444:
-            fail(f"sealed build provenance {relative} must have mode 0444")
+        if (
+            stat.S_IMODE(info.st_mode) != 0o444
+            or info.st_uid != EXPECTED_CAMPAIGN_UID
+            or info.st_gid != EXPECTED_CAMPAIGN_GID
+        ):
+            fail(
+                f"sealed build provenance {relative} must be "
+                "UID/GID 1000 mode 0444"
+            )
         entries.append({
             "bytes": info.st_size,
             "device": info.st_dev,
@@ -5293,6 +8339,14 @@ def build_manifest(
 def controller_provenance(
     args: argparse.Namespace, deadline: Optional[float] = None,
 ) -> Dict[str, Any]:
+    process_start_before = process_start_ticks(os.getpid())
+    process_security_before = read_process_security(
+        os.getpid(), "controller provenance before"
+    )
+    validate_process_security(
+        process_security_before, args.expected_controller_uid,
+        args.expected_controller_gid, [], "controller provenance before",
+    )
     script_path = Path(__file__).resolve(strict=True)
     source_root = script_path.parents[1]
     expected_script = source_root / "bench/Wh2DirectSystematicComplementScreen.py"
@@ -5309,6 +8363,7 @@ def controller_provenance(
     if (
         stat.S_IMODE(script_info.st_mode) != 0o444
         or script_info.st_uid != args.expected_controller_uid
+        or script_info.st_gid != args.expected_controller_gid
     ):
         fail("controller script mode/owner seal differs")
     declared_python = Path(sys.executable)
@@ -5363,6 +8418,17 @@ def controller_provenance(
         or git_info.st_nlink != 1
     ):
         fail("Git executable provenance differs")
+    process_security_after = read_process_security(
+        os.getpid(), "controller provenance after"
+    )
+    process_info = os.stat(f"/proc/{os.getpid()}", follow_symlinks=False)
+    if (
+        process_start_ticks(os.getpid()) != process_start_before
+        or not canonical_equal(process_security_before, process_security_after)
+        or process_info.st_uid != args.expected_controller_uid
+        or process_info.st_gid != args.expected_controller_gid
+    ):
+        fail("controller process identity changed during provenance collection")
     argv_bytes = b"".join(os.fsencode(value) + b"\0" for value in sys.argv)
     value: Dict[str, Any] = {
         "argv": list(sys.argv),
@@ -5376,7 +8442,10 @@ def controller_provenance(
         "isolated": bool(sys.flags.isolated),
         "optimize": sys.flags.optimize,
         "pid": os.getpid(),
-        "process_start_ticks": process_start_ticks(os.getpid()),
+        "process_gid": process_info.st_gid,
+        "process_security": process_security_after,
+        "process_start_ticks": process_start_before,
+        "process_uid": process_info.st_uid,
         "python_declared_path": str(declared_python),
         "python_path": str(python_path),
         "python_sha256": python_hash,
@@ -5399,6 +8468,157 @@ def controller_provenance(
     return value
 
 
+PREFLIGHT_CONTROLLER_IMAGE_KEYS = {
+    "git_path", "git_sha256", "git_stat", "python_declared_path",
+    "python_path", "python_sha256", "python_stat", "script_path",
+    "script_sha256", "script_stat",
+}
+PREFLIGHT_CONTROLLER_KEYS = {
+    "argv", "argv_sha256", "controller_cpu", "dont_write_bytecode",
+    "environment", "image", "isolated", "optimize", "pid", "process_gid",
+    "process_security", "process_start_ticks", "process_uid",
+    "receipt_sha256", "schema", "singleton_affinity",
+}
+
+
+def preflight_controller_receipt(
+    run_args: argparse.Namespace, deadline: Optional[float] = None,
+) -> Dict[str, Any]:
+    observed = controller_provenance(run_args, deadline)
+    image = {
+        name: observed[name] for name in PREFLIGHT_CONTROLLER_IMAGE_KEYS
+    }
+    value: Dict[str, Any] = {
+        "argv": observed["argv"],
+        "argv_sha256": observed["argv_sha256"],
+        "controller_cpu": observed["controller_cpu"],
+        "dont_write_bytecode": observed["dont_write_bytecode"],
+        "environment": observed["environment"],
+        "image": image,
+        "isolated": observed["isolated"],
+        "optimize": observed["optimize"],
+        "pid": observed["pid"],
+        "process_gid": observed["process_gid"],
+        "process_security": observed["process_security"],
+        "process_start_ticks": observed["process_start_ticks"],
+        "process_uid": observed["process_uid"],
+        "receipt_sha256": None,
+        "schema": PREFLIGHT_CONTROLLER_SCHEMA,
+        "singleton_affinity": observed["singleton_affinity"],
+    }
+    value["receipt_sha256"] = sha256_bytes(canonical_bytes(value))
+    validate_preflight_controller_receipt(value, "preflight controller")
+    return value
+
+
+def validate_preflight_controller_receipt(value: Any, where: str) -> None:
+    if type(value) is not dict:
+        fail(f"{where} is not an object")
+    exact_keys(value, PREFLIGHT_CONTROLLER_KEYS, where)
+    exact_string(value["schema"], PREFLIGHT_CONTROLLER_SCHEMA, where + ".schema")
+    exact_int(
+        value["controller_cpu"], EXPECTED_CONTROLLER_CPU,
+        EXPECTED_CONTROLLER_CPU, where + ".controller_cpu",
+    )
+    exact_int(value["pid"], 1, MAX_INT63, where + ".pid")
+    exact_int(
+        value["process_uid"], EXPECTED_CAMPAIGN_UID,
+        EXPECTED_CAMPAIGN_UID, where + ".process_uid",
+    )
+    exact_int(
+        value["process_gid"], EXPECTED_CAMPAIGN_GID,
+        EXPECTED_CAMPAIGN_GID, where + ".process_gid",
+    )
+    exact_int(
+        value["process_start_ticks"], 1, MAX_UINT64,
+        where + ".process_start_ticks",
+    )
+    validate_process_security(
+        value["process_security"], EXPECTED_CAMPAIGN_UID,
+        EXPECTED_CAMPAIGN_GID, [], where + ".process_security",
+    )
+    exact_int(value["optimize"], 0, 0, where + ".optimize")
+    affinity = exact_int_list(
+        value["singleton_affinity"], where + ".singleton_affinity",
+        length=1, sorted_unique=True,
+    )
+    if (
+        value["isolated"] is not True
+        or value["dont_write_bytecode"] is not True
+        or affinity != [EXPECTED_CONTROLLER_CPU]
+        or not canonical_equal(value["environment"], SEALED_LAUNCH_ENVIRONMENT)
+    ):
+        fail(f"{where} interpreter/environment/affinity policy differs")
+    argv = value["argv"]
+    if (
+        type(argv) is not list
+        or len(argv) != 2 + 2 * len(PREFLIGHT_SEAL_OPTION_ORDER)
+        or argv[0] != str(Path(__file__).resolve(strict=True))
+        or argv[1] != "--preflight-seal"
+        or any(
+            type(item) is not str or not item or len(item) > 4096
+            or "\0" in item or not item.isascii()
+            for item in argv
+        )
+        or any(
+            argv[2 + 2 * index] != option
+            for index, option in enumerate(PREFLIGHT_SEAL_OPTION_ORDER)
+        )
+    ):
+        fail(f"{where} argv differs")
+    argv_digest = sha256_bytes(
+        b"".join(os.fsencode(item) + b"\0" for item in argv)
+    )
+    if argv_digest != lower_hash(value["argv_sha256"], where + ".argv_sha256"):
+        fail(f"{where} argv hash differs")
+    image = value["image"]
+    if type(image) is not dict:
+        fail(f"{where}.image is not an object")
+    exact_keys(image, PREFLIGHT_CONTROLLER_IMAGE_KEYS, where + ".image")
+    for name in ("git_path", "python_declared_path", "python_path", "script_path"):
+        exact_absolute_path(image[name], f"{where}.image.{name}")
+    exact_string(image["git_path"], str(GIT_EXECUTABLE), where + ".image.git_path")
+    exact_string(
+        image["python_declared_path"], EXPECTED_SAMPLER_PYTHON,
+        where + ".image.python_declared_path",
+    )
+    exact_string(
+        image["python_path"],
+        str(Path(EXPECTED_SAMPLER_PYTHON).resolve(strict=True)),
+        where + ".image.python_path",
+    )
+    exact_string(
+        image["script_path"], str(Path(__file__).resolve(strict=True)),
+        where + ".image.script_path",
+    )
+    for name in ("git_sha256", "python_sha256", "script_sha256"):
+        lower_hash(image[name], f"{where}.image.{name}")
+    for name in ("git_stat", "python_stat", "script_stat"):
+        validate_stat_receipt(image[name], f"{where}.image.{name}")
+    if (
+        image["git_stat"]["mode"] != 0o755
+        or image["git_stat"]["uid"] != 0
+        or image["git_stat"]["gid"] != 0
+        or image["git_stat"]["nlink"] != 1
+        or not 1 <= image["git_stat"]["size"] <= MAX_BINARY_BYTES
+        or image["python_stat"]["mode"] != 0o755
+        or image["python_stat"]["uid"] != 0
+        or image["python_stat"]["gid"] != 0
+        or not 1 <= image["python_stat"]["size"] <= MAX_BINARY_BYTES
+        or image["script_stat"]["mode"] != 0o444
+        or image["script_stat"]["uid"] != EXPECTED_CAMPAIGN_UID
+        or image["script_stat"]["gid"] != EXPECTED_CAMPAIGN_GID
+        or image["script_stat"]["nlink"] != 1
+        or not 1 <= image["script_stat"]["size"] <= MAX_SOURCE_FILE_BYTES
+    ):
+        fail(f"{where} image policy differs")
+    digest = lower_hash(value["receipt_sha256"], where + ".receipt_sha256")
+    preimage = dict(value)
+    preimage["receipt_sha256"] = None
+    if sha256_bytes(canonical_bytes(preimage)) != digest:
+        fail(f"{where} self-hash differs")
+
+
 @dataclass
 class ClaimReservation:
     fd: int
@@ -5413,7 +8633,10 @@ class ClaimReservation:
         cls, args: argparse.Namespace, controller: Mapping[str, Any],
         controller_started_ns: int,
     ) -> "ClaimReservation":
-        require_authorized_process_uid(args.expected_controller_uid)
+        require_preflight_side_effects_allowed("claim reservation")
+        require_authorized_process_identity(
+            args.expected_controller_uid, args.expected_controller_gid
+        )
         parent = FIXED_CLAIM_PATH.parent
         if parent != Path("/var/tmp") or not parent.is_dir():
             fail("fixed claim parent differs")
@@ -5452,6 +8675,7 @@ class ClaimReservation:
                 "controller_receipt_sha256": controller["receipt_sha256"],
                 "controller_started_monotonic_ns": controller_started_ns,
                 "git_sha256": args.expected_git_sha256,
+                "gid": os.getgid(),
                 "output_path": str(FIXED_OUTPUT_DIR),
                 "parent_device": parent_identity[0],
                 "parent_inode": parent_identity[1],
@@ -5477,6 +8701,7 @@ class ClaimReservation:
                 or stat.S_IMODE(info.st_mode) != 0o400
                 or info.st_nlink != 1
                 or info.st_uid != document["uid"]
+                or info.st_gid != document["gid"]
             ):
                 fail("fixed claim identity/mode differs")
             return cls(
@@ -5534,6 +8759,7 @@ class ClaimReservation:
             or (info.st_dev, info.st_ino, info.st_nlink) != self.identity
             or stat.S_IMODE(info.st_mode) != 0o400
             or info.st_uid != self.document["uid"]
+            or info.st_gid != self.document["gid"]
             or info.st_size != len(self.raw)
             or file_sha256_fd(self.fd, info.st_size) != sha256_bytes(self.raw)
         ):
@@ -5586,8 +8812,8 @@ BUILD_ENTRY_KEYS = ARTIFACT_RECEIPT_KEYS | {"path"}
 CONTROLLER_PROVENANCE_KEYS = {
     "argv", "argv_sha256", "controller_cpu", "dont_write_bytecode",
     "environment", "git_path", "git_sha256", "git_stat", "isolated",
-    "optimize", "pid",
-    "process_start_ticks",
+    "optimize", "pid", "process_gid", "process_security",
+    "process_start_ticks", "process_uid",
     "python_declared_path", "python_path", "python_sha256", "python_stat",
     "receipt_sha256", "schema", "script_path", "script_sha256",
     "script_stat", "singleton_affinity",
@@ -5631,7 +8857,11 @@ def validate_build_manifest(value: Any, where: str) -> None:
             {name: entry[name] for name in ARTIFACT_RECEIPT_KEYS},
             entry_where + ".artifact", mode=0o444,
         )
-        if entry["bytes"] > 64 * 1024 * 1024:
+        if (
+            entry["bytes"] > 64 * 1024 * 1024
+            or entry["uid"] != EXPECTED_CAMPAIGN_UID
+            or entry["gid"] != EXPECTED_CAMPAIGN_GID
+        ):
             fail(f"{entry_where} exceeds the build provenance size bound")
     digest = lower_hash(value["sha256"], where + ".sha256")
     preimage = dict(value)
@@ -5652,6 +8882,12 @@ def validate_controller_provenance(value: Any, where: str) -> None:
         EXPECTED_CONTROLLER_CPU, where + ".controller_cpu",
     )
     exact_int(value["pid"], 1, MAX_INT63, where + ".pid")
+    exact_int(value["process_uid"], 0, MAX_UINT32, where + ".process_uid")
+    exact_int(value["process_gid"], 0, MAX_UINT32, where + ".process_gid")
+    validate_process_security(
+        value["process_security"], value["process_uid"], value["process_gid"],
+        [], where + ".process_security",
+    )
     exact_int(
         value["process_start_ticks"], 1, MAX_UINT64,
         where + ".process_start_ticks",
@@ -5670,8 +8906,10 @@ def validate_controller_provenance(value: Any, where: str) -> None:
     ):
         fail(f"{where} interpreter/affinity policy differs")
     argv = value["argv"]
+    expected_run_argv_length = 2 + 2 * len(RUN_ONCE_OPTION_ORDER)
     if (
-        type(argv) is not list or not argv or len(argv) > 64
+        type(argv) is not list or len(argv) != expected_run_argv_length
+        or argv[1] != "--run-once"
         or any(type(item) is not str or len(item) > 4096 for item in argv)
     ):
         fail(f"{where} argv differs")
@@ -5762,7 +9000,7 @@ def parse_claim_document(data: bytes) -> Dict[str, Any]:
     exact_keys(value, {
         "binary_sha256", "build_manifest_sha256", "campaign",
         "controller_receipt_sha256", "controller_started_monotonic_ns",
-        "git_sha256", "output_path", "parent_device", "parent_inode",
+        "gid", "git_sha256", "output_path", "parent_device", "parent_inode",
         "pid", "process_start_ticks", "schema", "source_commit",
         "source_manifest_sha256", "uid",
     }, "claim document")
@@ -5782,6 +9020,7 @@ def parse_claim_document(data: bytes) -> Dict[str, Any]:
         fail("claim source commit differs")
     for name, lower, upper in (
         ("controller_started_monotonic_ns", 0, MAX_INT63),
+        ("gid", 0, MAX_UINT32),
         ("parent_device", 0, MAX_UINT64),
         ("parent_inode", 1, MAX_UINT64),
         ("pid", 1, MAX_INT63),
@@ -5804,6 +9043,7 @@ def validate_claim_runtime_binding(
         or receipt["parent"]["device"] != document["parent_device"]
         or receipt["parent"]["inode"] != document["parent_inode"]
         or receipt["stat"]["uid"] != document["uid"]
+        or receipt["stat"]["gid"] != document["gid"]
     ):
         fail("claim document/runtime provenance binding differs")
 
@@ -6132,6 +9372,27 @@ def parse_complete_document(data: bytes) -> Dict[str, Any]:
     return value
 
 
+def health_thermal_artifact_bytes(health: Mapping[str, Any]) -> bytes:
+    thermal = health.get("thermal", {})
+    terminal = health.get("sampler_terminal", {})
+    if thermal and terminal:
+        fail("health cannot bind both live and terminal thermal artifacts")
+    text = (
+        thermal.get("window_csv_ascii") if thermal
+        else terminal.get("window_csv_ascii") if terminal
+        else ""
+    )
+    if type(text) is not str:
+        fail("health thermal artifact is not text")
+    try:
+        data = text.encode("ascii")
+    except UnicodeEncodeError:
+        fail("health thermal artifact is not ASCII")
+    if len(data) > MAX_THERMAL_WINDOW_BYTES:
+        fail("health thermal artifact exceeds its bound")
+    return data
+
+
 def validate_controller_bundle_binding(
     controller: Mapping[str, Any], summary: Mapping[str, Any],
     summary_bytes: bytes, claim_receipt: Mapping[str, Any],
@@ -6151,6 +9412,8 @@ def validate_controller_bundle_binding(
         "run sibling ticks: ",
         "thermal collection: ",
         "sampler endpoint: ",
+        "sampler stale evidence: ",
+        "sampler terminal evidence: ",
         "health terminal collection: ",
     )
     for message in claimed_collection:
@@ -6180,10 +9443,7 @@ def validate_controller_bundle_binding(
             or module["sha256"] != source_entry["sha256"]
         ):
             fail("claimed bundle health loader/source binding differs")
-    thermal_bytes = (
-        thermal_receipt["window_csv_ascii"].encode("ascii")
-        if thermal_receipt else b""
-    )
+    thermal_bytes = health_thermal_artifact_bytes(summary["health"])
     artifacts = controller["artifacts"]
     execution_start = binary.get("execution_started_monotonic_ns")
     execution_finish = binary.get("execution_finished_monotonic_ns")
@@ -6362,6 +9622,7 @@ def collect_final_attestations(
         if (
             binary_hash != args.expected_binary_sha256
             or binary_info.st_uid != args.expected_binary_uid
+            or binary_info.st_gid != args.expected_controller_gid
             or binary_info.st_nlink != 1
             or stat.S_IMODE(binary_info.st_mode) != 0o555
             or not canonical_equal(
@@ -6831,6 +10092,7 @@ def final_publish(
             "campaign": CAMPAIGN,
             "controller_receipt_sha256": controller_before["receipt_sha256"],
             "controller_started_monotonic_ns": controller_started_ns,
+            "gid": os.getgid(),
             "git_sha256": args.expected_git_sha256,
             "output_path": str(FIXED_OUTPUT_DIR),
             "parent_device": claim.parent_identity[0],
@@ -6867,12 +10129,7 @@ def final_publish(
             "raw.jsonl", "stderr.txt", "summary.json", "thermal.csv",
             "controller.json",
         ))
-        thermal_ascii = execution.health.get("thermal", {}).get(
-            "window_csv_ascii", ""
-        )
-        if type(thermal_ascii) is not str:
-            fail("health thermal window is not text")
-        thermal_bytes = thermal_ascii.encode("ascii")
+        thermal_bytes = health_thermal_artifact_bytes(execution.health)
         OutputBundle._write_exact(held["thermal.csv"], thermal_bytes)
         base_summary = parse_summary_bytes(base_summary_bytes)
         bundle._validate_summary_cross(base_summary_bytes)
@@ -7211,6 +10468,7 @@ def preflight_binary(
     if (
         digest != args.expected_binary_sha256
         or info.st_uid != args.expected_binary_uid
+        or info.st_gid != args.expected_controller_gid
         or info.st_nlink != 1
         or stat.S_IMODE(info.st_mode) != 0o555
     ):
@@ -7218,7 +10476,918 @@ def preflight_binary(
     return {"sha256": digest, "stat": stat_receipt(info)}
 
 
+PREFLIGHT_BINARY_KEYS = {"path", "sha256", "stat"}
+
+
+def observe_preflight_binary(
+    path: Path, deadline: Optional[float] = None,
+) -> Dict[str, Any]:
+    if path.resolve(strict=True) != path:
+        fail("preflight screen binary path is not canonical")
+    digest, info = hash_regular_path(
+        path, "preflight screen binary", max_size=MAX_BINARY_BYTES,
+        deadline=deadline,
+    )
+    if (
+        not 1 <= info.st_size <= MAX_BINARY_BYTES
+        or info.st_uid != EXPECTED_CAMPAIGN_UID
+        or info.st_gid != EXPECTED_CAMPAIGN_GID
+        or info.st_nlink != 1
+        or stat.S_IMODE(info.st_mode) != 0o555
+    ):
+        fail("preflight screen binary seal differs")
+    return {
+        "path": str(path), "sha256": digest, "stat": stat_receipt(info),
+    }
+
+
+def validate_preflight_binary_observation(value: Any, where: str) -> None:
+    if type(value) is not dict:
+        fail(f"{where} is not an object")
+    exact_keys(value, PREFLIGHT_BINARY_KEYS, where)
+    exact_absolute_path(value["path"], where + ".path")
+    lower_hash(value["sha256"], where + ".sha256")
+    validate_stat_receipt(value["stat"], where + ".stat")
+    if (
+        value["stat"]["mode"] != 0o555
+        or value["stat"]["uid"] != EXPECTED_CAMPAIGN_UID
+        or value["stat"]["gid"] != EXPECTED_CAMPAIGN_GID
+        or value["stat"]["nlink"] != 1
+        or not 1 <= value["stat"]["size"] <= MAX_BINARY_BYTES
+    ):
+        fail(f"{where} binary policy differs")
+
+
+def build_run_authority_argv(
+    values: Mapping[str, str], controller_pid: int,
+) -> List[str]:
+    if type(values) is not dict:
+        fail("preflight run authority values are not an object")
+    exact_keys(values, RUN_ONCE_OPTION_ORDER, "preflight run authority values")
+    controller_path = str(Path(__file__).resolve(strict=True))
+    argv = [controller_path, "--run-once"]
+    for option in RUN_ONCE_OPTION_ORDER:
+        value = values[option]
+        if type(value) is not str or not value or len(value) > 4096 or "\0" in value:
+            fail(f"preflight run authority value differs: {option}")
+        try:
+            value.encode("ascii")
+        except UnicodeEncodeError:
+            fail(f"preflight run authority value is not ASCII: {option}")
+        argv.extend((option, value))
+    if len(argv) != 2 + 2 * len(RUN_ONCE_OPTION_ORDER):
+        fail("preflight run authority argv length differs")
+    parse_recorded_run_argv(argv, controller_pid)
+    return argv
+
+
+def run_argv_sha256(argv: Sequence[str]) -> str:
+    if (
+        type(argv) is not list
+        or len(argv) != 2 + 2 * len(RUN_ONCE_OPTION_ORDER)
+        or argv[0] != str(Path(__file__).resolve(strict=True))
+        or argv[1] != "--run-once"
+        or any(
+            type(item) is not str or not item or len(item) > 4096
+            or "\0" in item or not item.isascii()
+            for item in argv
+        )
+        or any(
+            argv[2 + 2 * index] != option
+            for index, option in enumerate(RUN_ONCE_OPTION_ORDER)
+        )
+    ):
+        fail("run authority argv is not a string array")
+    return sha256_bytes(
+        b"".join(os.fsencode(item) + b"\0" for item in argv)
+    )
+
+
+def manifest_entry(manifest: Mapping[str, Any], relative: str) -> Mapping[str, Any]:
+    matches = [
+        entry for entry in manifest["entries"] if entry["path"] == relative
+    ]
+    if len(matches) != 1:
+        fail(f"source manifest entry differs: {relative}")
+    return matches[0]
+
+
+def observe_preflight_python(deadline: Optional[float]) -> Dict[str, Any]:
+    declared = Path(sys.executable)
+    if not declared.is_absolute():
+        fail("preflight Python executable path is not absolute")
+    path = declared.resolve(strict=True)
+    digest, info = hash_regular_path(
+        path, "preflight Python executable", single_link=False,
+        max_size=MAX_BINARY_BYTES, deadline=deadline,
+    )
+    if (
+        not 1 <= info.st_size <= MAX_BINARY_BYTES
+        or stat.S_IMODE(info.st_mode) != 0o755
+        or info.st_uid != 0 or info.st_gid != 0
+    ):
+        fail("preflight Python executable policy differs")
+    return {
+        "declared_path": str(declared), "path": str(path),
+        "sha256": digest, "stat": stat_receipt(info),
+    }
+
+
+def bootstrap_sampler_run_authority(
+    args: argparse.Namespace, deadline: Optional[float],
+) -> Dict[str, Any]:
+    start_before = process_start_ticks(args.sampler_pid)
+    security_before = read_process_security(
+        args.sampler_pid, "preflight sampler bootstrap before"
+    )
+    validate_process_security(
+        security_before, EXPECTED_CAMPAIGN_UID, EXPECTED_CAMPAIGN_GID,
+        [EXPECTED_SAMPLER_I2C_GID], "preflight sampler bootstrap before",
+    )
+    affinity_before = sorted(os.sched_getaffinity(args.sampler_pid))
+    if affinity_before != [EXPECTED_SAMPLER_CPU]:
+        fail("preflight sampler bootstrap affinity differs")
+    artifact_infos: Dict[str, os.stat_result] = {}
+    for name, path in (
+        ("csv", args.sampler_csv),
+        ("pid_file", args.sampler_pid_file),
+        ("validation", args.sampler_validation_jsonl),
+        ("receipt", args.sampler_receipt),
+    ):
+        if path.resolve(strict=True) != path:
+            fail(f"preflight sampler {name} path is not canonical")
+        artifact_infos[name] = os.stat(str(path), follow_symlinks=False)
+    cmdline = read_bounded_proc_vector(
+        Path(f"/proc/{args.sampler_pid}/cmdline"),
+        "preflight sampler bootstrap command line",
+    )
+    environ = read_bounded_proc_vector(
+        Path(f"/proc/{args.sampler_pid}/environ"),
+        "preflight sampler bootstrap environment",
+    )
+    parse_sealed_environment(environ, "preflight sampler bootstrap environment")
+    executable = Path(f"/proc/{args.sampler_pid}/exe").resolve(strict=True)
+    executable_sha256, executable_info = hash_regular_path(
+        executable, "preflight sampler bootstrap executable",
+        single_link=False, max_size=MAX_BINARY_BYTES, deadline=deadline,
+    )
+    if (
+        not 1 <= executable_info.st_size <= MAX_BINARY_BYTES
+        or stat.S_IMODE(executable_info.st_mode) != 0o755
+        or executable_info.st_uid != 0 or executable_info.st_gid != 0
+    ):
+        fail("preflight sampler bootstrap executable policy differs")
+    start_after = process_start_ticks(args.sampler_pid)
+    security_after = read_process_security(
+        args.sampler_pid, "preflight sampler bootstrap after"
+    )
+    affinity_after = sorted(os.sched_getaffinity(args.sampler_pid))
+    if (
+        start_before != start_after
+        or not canonical_equal(security_before, security_after)
+        or affinity_after != affinity_before
+    ):
+        fail("preflight sampler bootstrap identity changed")
+    return {
+        "cmdline_sha256": sha256_bytes(cmdline),
+        "csv_device": artifact_infos["csv"].st_dev,
+        "csv_inode": artifact_infos["csv"].st_ino,
+        "environ_sha256": sha256_bytes(environ),
+        "executable_sha256": executable_sha256,
+        "pid_file_device": artifact_infos["pid_file"].st_dev,
+        "pid_file_inode": artifact_infos["pid_file"].st_ino,
+        "process_start_ticks": start_after,
+        "receipt_device": artifact_infos["receipt"].st_dev,
+        "receipt_inode": artifact_infos["receipt"].st_ino,
+        "validation_device": artifact_infos["validation"].st_dev,
+        "validation_inode": artifact_infos["validation"].st_ino,
+    }
+
+
+def preflight_run_values(
+    preflight_args: argparse.Namespace, source: Mapping[str, Any],
+    git: Mapping[str, Any], build: Mapping[str, Any],
+    binary: Mapping[str, Any], python: Mapping[str, Any],
+    sampler: Mapping[str, Any],
+) -> Dict[str, str]:
+    controller_entry = manifest_entry(
+        source, "bench/Wh2DirectSystematicComplementScreen.py"
+    )
+    sampler_entry = manifest_entry(source, SAMPLER_SOURCE_PATH)
+    if "pid_file" in sampler:
+        sampler_values = {
+            "cmdline_sha256": sampler["cmdline_sha256"],
+            "csv_device": sampler["csv_device"],
+            "csv_inode": sampler["csv_inode"],
+            "environ_sha256": sampler["environ_sha256"],
+            "executable_sha256": sampler["executable_sha256"],
+            "pid_file_device": sampler["pid_file"]["stat"]["device"],
+            "pid_file_inode": sampler["pid_file"]["stat"]["inode"],
+            "process_start_ticks": sampler["process_start_ticks"],
+            "receipt_device": sampler["receipt_file"]["stat"]["device"],
+            "receipt_inode": sampler["receipt_file"]["stat"]["inode"],
+            "validation_device": sampler["validation_jsonl"]["stat"]["device"],
+            "validation_inode": sampler["validation_jsonl"]["stat"]["inode"],
+        }
+    else:
+        sampler_values = dict(sampler)
+    values = {
+        "--binary": binary["path"],
+        "--build-dir": build["root"],
+        "--cpu": str(EXPECTED_TARGET_CPU),
+        "--controller-cpu": str(EXPECTED_CONTROLLER_CPU),
+        "--sampler-pid": str(preflight_args.sampler_pid),
+        "--sampler-cpu": str(EXPECTED_SAMPLER_CPU),
+        "--sampler-script": str(preflight_args.sampler_script),
+        "--sampler-csv": str(preflight_args.sampler_csv),
+        "--sampler-pid-file": str(preflight_args.sampler_pid_file),
+        "--sampler-validation-jsonl": str(
+            preflight_args.sampler_validation_jsonl
+        ),
+        "--sampler-receipt": str(preflight_args.sampler_receipt),
+        "--expected-source-commit": preflight_args.expected_source_commit,
+        "--expected-binary-sha256": binary["sha256"],
+        "--expected-binary-uid": str(EXPECTED_CAMPAIGN_UID),
+        "--expected-build-manifest-sha256": build["sha256"],
+        "--expected-controller-sha256": controller_entry["sha256"],
+        "--expected-controller-uid": str(EXPECTED_CAMPAIGN_UID),
+        "--expected-controller-gid": str(EXPECTED_CAMPAIGN_GID),
+        "--expected-git-sha256": git["executable"]["sha256"],
+        "--expected-python-sha256": python["sha256"],
+        "--expected-sampler-process-start-ticks": str(
+            sampler_values["process_start_ticks"]
+        ),
+        "--expected-sampler-script-sha256": sampler_entry["sha256"],
+        "--expected-sampler-csv-device": str(sampler_values["csv_device"]),
+        "--expected-sampler-csv-inode": str(sampler_values["csv_inode"]),
+        "--expected-sampler-pid-file-device": str(
+            sampler_values["pid_file_device"]
+        ),
+        "--expected-sampler-pid-file-inode": str(
+            sampler_values["pid_file_inode"]
+        ),
+        "--expected-sampler-validation-device": str(
+            sampler_values["validation_device"]
+        ),
+        "--expected-sampler-validation-inode": str(
+            sampler_values["validation_inode"]
+        ),
+        "--expected-sampler-receipt-device": str(
+            sampler_values["receipt_device"]
+        ),
+        "--expected-sampler-receipt-inode": str(
+            sampler_values["receipt_inode"]
+        ),
+        "--expected-sampler-cmdline-sha256": sampler_values["cmdline_sha256"],
+        "--expected-sampler-environ-sha256": sampler_values["environ_sha256"],
+        "--expected-sampler-executable-sha256": sampler_values[
+            "executable_sha256"
+        ],
+        "--expected-sampler-uid": str(EXPECTED_CAMPAIGN_UID),
+        "--expected-sampler-gid": str(EXPECTED_CAMPAIGN_GID),
+        "--expected-sampler-i2c-gid": str(EXPECTED_SAMPLER_I2C_GID),
+        "--expected-source-manifest-sha256": source["sha256"],
+    }
+    exact_keys(values, RUN_ONCE_OPTION_ORDER, "preflight run values")
+    return values
+
+
+def validate_preflight_sampler_run_binding(
+    run: argparse.Namespace, sampler: Mapping[str, Any],
+    source_entry: Mapping[str, Any], controller_image: Mapping[str, Any],
+    where: str,
+) -> None:
+    """Cross-bind one live sampler receipt to the future run authority."""
+    validate_sampler_receipt(sampler)
+    if (
+        sampler["pid"] != run.sampler_pid
+        or sampler["cpu"] != run.sampler_cpu
+        or sampler["process_start_ticks"]
+        != run.expected_sampler_process_start_ticks
+        or sampler["process_uid"] != run.expected_sampler_uid
+        or sampler["process_gid"] != run.expected_sampler_gid
+        or sampler["script_path"] != str(run.sampler_script)
+        or sampler["script_sha256"]
+        != run.expected_sampler_script_sha256
+        or sampler["script_sha256"] != source_entry["sha256"]
+        or not canonical_equal(sampler["script_stat"], source_entry["stat"])
+        or sampler["csv_path"] != str(run.sampler_csv)
+        or sampler["csv_device"] != run.expected_sampler_csv_device
+        or sampler["csv_inode"] != run.expected_sampler_csv_inode
+        or sampler["pid_file"]["path"] != str(run.sampler_pid_file)
+        or sampler["pid_file"]["stat"]["device"]
+        != run.expected_sampler_pid_file_device
+        or sampler["pid_file"]["stat"]["inode"]
+        != run.expected_sampler_pid_file_inode
+        or sampler["validation_jsonl"]["path"]
+        != str(run.sampler_validation_jsonl)
+        or sampler["validation_jsonl"]["stat"]["device"]
+        != run.expected_sampler_validation_device
+        or sampler["validation_jsonl"]["stat"]["inode"]
+        != run.expected_sampler_validation_inode
+        or sampler["receipt_file"]["path"] != str(run.sampler_receipt)
+        or sampler["receipt_file"]["stat"]["device"]
+        != run.expected_sampler_receipt_device
+        or sampler["receipt_file"]["stat"]["inode"]
+        != run.expected_sampler_receipt_inode
+        or sampler["cmdline_argv"] != expected_sampler_argv(run)
+        or sampler["cmdline_sha256"]
+        != sha256_bytes(expected_sampler_cmdline_bytes(run))
+        or sampler["cmdline_sha256"]
+        != run.expected_sampler_cmdline_sha256
+        or sampler["environ_sha256"]
+        != run.expected_sampler_environ_sha256
+        or sampler["executable_path"] != controller_image["python_path"]
+        or sampler["executable_sha256"]
+        != run.expected_sampler_executable_sha256
+        or sampler["executable_sha256"]
+        != controller_image["python_sha256"]
+        or not canonical_equal(
+            sampler["executable_stat"], controller_image["python_stat"]
+        )
+    ):
+        fail(where + " differs from the future run authority")
+    validate_process_security(
+        sampler["process_security"], run.expected_sampler_uid,
+        run.expected_sampler_gid, [run.expected_sampler_i2c_gid],
+        where + " process security",
+    )
+
+
+PREFLIGHT_SAMPLER_PREFIX_KEYS = {
+    "final_pid_file_stat", "final_raw_stat", "final_receipt_stat",
+    "final_validation_stat", "monitor_event", "pid_file_sha256",
+    "raw_after_bytes", "raw_after_sha256", "raw_before_bytes",
+    "raw_before_sha256", "receipt_bytes", "sampler_after_sha256",
+    "sampler_before_sha256", "validation_after_bytes",
+    "validation_after_sha256", "validation_before_bytes",
+    "validation_before_sha256",
+}
+
+
+def preflight_sampler_prefix_binding(
+    args: argparse.Namespace, before: Mapping[str, Any],
+    after: Mapping[str, Any], handles: Mapping[str, Any],
+) -> Dict[str, Any]:
+    validate_sampler_growth_binding(before, after, "preflight sampler A/B")
+    if not handles or handles.get("closed"):
+        fail("preflight sampler prefix proof lacks held descriptors")
+    fds = handles["file_fds"]
+
+    def exact_prefix(
+        fd: int, size: int, digest: str, where: str,
+    ) -> bytes:
+        data = os.pread(fd, size, 0)
+        if len(data) != size or sha256_bytes(data) != digest:
+            fail(where + " differs from its held prefix")
+        return data
+
+    raw_before = exact_prefix(
+        fds["raw_csv"], before["csv_bytes"], before["csv_sha256"],
+        "preflight sampler raw A",
+    )
+    raw_after = exact_prefix(
+        fds["raw_csv"], after["csv_bytes"], after["csv_sha256"],
+        "preflight sampler raw B",
+    )
+    validation_before = exact_prefix(
+        fds["validation_jsonl"], before["validation_jsonl"]["bytes"],
+        before["validation_jsonl"]["sha256"],
+        "preflight sampler validation A",
+    )
+    validation_after = exact_prefix(
+        fds["validation_jsonl"], after["validation_jsonl"]["bytes"],
+        after["validation_jsonl"]["sha256"],
+        "preflight sampler validation B",
+    )
+    if (
+        not raw_before.endswith(b"\n") or not raw_after.endswith(b"\n")
+        or not validation_before.endswith(b"\n")
+        or not validation_after.endswith(b"\n")
+        or not raw_after.startswith(raw_before)
+        or not validation_after.startswith(validation_before)
+    ):
+        fail("preflight sampler A/B stream prefix law differs")
+    final_infos = {
+        name: os.fstat(fds[name])
+        for name in ("raw_csv", "pid_file", "validation_jsonl", "receipt_file")
+    }
+    expected = {
+        "raw_csv": after["csv_stat"],
+        "pid_file": after["pid_file"]["stat"],
+        "validation_jsonl": after["validation_jsonl"]["stat"],
+        "receipt_file": after["receipt_file"]["stat"],
+    }
+    size_limits = {
+        "raw_csv": MAX_SAMPLER_CSV_BYTES,
+        "pid_file": 64,
+        "validation_jsonl": MAX_SAMPLER_VALIDATION_BYTES,
+        "receipt_file": MAX_SAMPLER_RECEIPT_BYTES,
+    }
+    for name, info in final_infos.items():
+        receipt = expected[name]
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_dev != receipt["device"]
+            or info.st_ino != receipt["inode"]
+            or info.st_uid != receipt["uid"]
+            or info.st_gid != receipt["gid"]
+            or stat.S_IMODE(info.st_mode) != receipt["mode"]
+            or info.st_nlink != 1
+            or info.st_size < receipt["size"]
+            or info.st_mtime_ns < receipt["mtime_ns"]
+            or info.st_size > size_limits[name]
+        ):
+            fail("preflight sampler held identity changed: " + name)
+    pid_info = final_infos["pid_file"]
+    pid_data = os.pread(fds["pid_file"], pid_info.st_size, 0)
+    receipt_info = final_infos["receipt_file"]
+    receipt_data = os.pread(fds["receipt_file"], receipt_info.st_size, 0)
+    if (
+        pid_data != (str(args.sampler_pid) + "\n").encode("ascii")
+        or receipt_data
+    ):
+        fail("preflight sampler PID/terminal reservation changed")
+    event = poll_sampler_supervision(handles)
+    if event != "none":
+        fail("preflight sampler supervision event: " + event)
+    value = {
+        "final_pid_file_stat": stat_receipt(pid_info),
+        "final_raw_stat": stat_receipt(final_infos["raw_csv"]),
+        "final_receipt_stat": stat_receipt(receipt_info),
+        "final_validation_stat": stat_receipt(final_infos["validation_jsonl"]),
+        "monitor_event": event,
+        "pid_file_sha256": sha256_bytes(pid_data),
+        "raw_after_bytes": len(raw_after),
+        "raw_after_sha256": sha256_bytes(raw_after),
+        "raw_before_bytes": len(raw_before),
+        "raw_before_sha256": sha256_bytes(raw_before),
+        "receipt_bytes": len(receipt_data),
+        "sampler_after_sha256": sha256_bytes(canonical_bytes(after)),
+        "sampler_before_sha256": sha256_bytes(canonical_bytes(before)),
+        "validation_after_bytes": len(validation_after),
+        "validation_after_sha256": sha256_bytes(validation_after),
+        "validation_before_bytes": len(validation_before),
+        "validation_before_sha256": sha256_bytes(validation_before),
+    }
+    validate_preflight_sampler_prefix_binding(value, before, after)
+    return value
+
+
+def validate_preflight_sampler_prefix_binding(
+    value: Any, before: Mapping[str, Any], after: Mapping[str, Any],
+) -> None:
+    if type(value) is not dict:
+        fail("preflight sampler prefix binding is not an object")
+    exact_keys(
+        value, PREFLIGHT_SAMPLER_PREFIX_KEYS,
+        "preflight sampler prefix binding",
+    )
+    validate_sampler_growth_binding(before, after, "preflight sampler A/B")
+    for name in (
+        "raw_before_sha256", "raw_after_sha256",
+        "validation_before_sha256", "validation_after_sha256",
+        "pid_file_sha256", "sampler_before_sha256", "sampler_after_sha256",
+    ):
+        lower_hash(value[name], "preflight sampler prefix " + name)
+    for name in (
+        "raw_before_bytes", "raw_after_bytes", "validation_before_bytes",
+        "validation_after_bytes", "receipt_bytes",
+    ):
+        exact_int(
+            value[name], 0, MAX_SAMPLER_CSV_BYTES + MAX_SAMPLER_VALIDATION_BYTES,
+            "preflight sampler prefix " + name,
+        )
+    if (
+        value["monitor_event"] != "none"
+        or value["receipt_bytes"] != 0
+        or value["raw_before_bytes"] != before["csv_bytes"]
+        or value["raw_before_sha256"] != before["csv_sha256"]
+        or value["raw_after_bytes"] != after["csv_bytes"]
+        or value["raw_after_sha256"] != after["csv_sha256"]
+        or value["validation_before_bytes"]
+        != before["validation_jsonl"]["bytes"]
+        or value["validation_before_sha256"]
+        != before["validation_jsonl"]["sha256"]
+        or value["validation_after_bytes"]
+        != after["validation_jsonl"]["bytes"]
+        or value["validation_after_sha256"]
+        != after["validation_jsonl"]["sha256"]
+        or value["sampler_before_sha256"]
+        != sha256_bytes(canonical_bytes(before))
+        or value["sampler_after_sha256"]
+        != sha256_bytes(canonical_bytes(after))
+    ):
+        fail("preflight sampler prefix digest binding differs")
+    for field, expected in (
+        ("final_raw_stat", after["csv_stat"]),
+        ("final_pid_file_stat", after["pid_file"]["stat"]),
+        ("final_validation_stat", after["validation_jsonl"]["stat"]),
+        ("final_receipt_stat", after["receipt_file"]["stat"]),
+    ):
+        validate_stat_receipt(value[field], "preflight sampler prefix " + field)
+        if (
+            value[field]["device"] != expected["device"]
+            or value[field]["inode"] != expected["inode"]
+            or value[field]["uid"] != expected["uid"]
+            or value[field]["gid"] != expected["gid"]
+            or value[field]["mode"] != expected["mode"]
+            or value[field]["nlink"] != 1
+            or value[field]["size"] < expected["size"]
+            or value[field]["mtime_ns"] < expected["mtime_ns"]
+        ):
+            fail("preflight sampler prefix final stat differs")
+    if (
+        value["final_raw_stat"]["size"] > MAX_SAMPLER_CSV_BYTES
+        or value["final_pid_file_stat"]["size"] > 64
+        or value["final_validation_stat"]["size"]
+        > MAX_SAMPLER_VALIDATION_BYTES
+        or value["final_receipt_stat"]["size"]
+        > MAX_SAMPLER_RECEIPT_BYTES
+    ):
+        fail("preflight sampler prefix final stat exceeds its bound")
+    if (
+        value["final_receipt_stat"]["size"] != 0
+        or value["final_pid_file_stat"]["size"]
+        != after["pid_file"]["bytes"]
+        or value["final_raw_stat"]["size"] < value["raw_after_bytes"]
+        or value["final_validation_stat"]["size"]
+        < value["validation_after_bytes"]
+    ):
+        fail("preflight sampler prefix final size binding differs")
+
+
+PREFLIGHT_SEAL_KEYS = {
+    "binary_after", "binary_before", "build_manifest_after",
+    "build_manifest_before", "expected_source_commit", "git_after",
+    "git_before", "health_module_loader", "preflight_controller_after",
+    "preflight_controller_before", "receipt_sha256", "run_argv",
+    "run_argv_sha256", "sampler_after", "sampler_before",
+    "sampler_prefix_binding", "schema", "source_manifest_after",
+    "source_manifest_before", "source_root",
+}
+
+
+def validate_preflight_seal_receipt(value: Any) -> None:
+    if type(value) is not dict:
+        fail("preflight seal receipt is not an object")
+    exact_keys(value, PREFLIGHT_SEAL_KEYS, "preflight seal receipt")
+    exact_string(value["schema"], PREFLIGHT_SEAL_SCHEMA, "preflight schema")
+    source_root = Path(__file__).resolve(strict=True).parents[1]
+    exact_string(value["source_root"], str(source_root), "preflight source root")
+    commit = value["expected_source_commit"]
+    if type(commit) is not str or LOWER40.fullmatch(commit) is None:
+        fail("preflight expected source commit differs")
+    source_before = value["source_manifest_before"]
+    source_after = value["source_manifest_after"]
+    validate_source_manifest_receipt(source_before, "preflight source before")
+    validate_source_manifest_receipt(source_after, "preflight source after")
+    if not canonical_equal(source_before, source_after):
+        fail("preflight source manifest changed")
+    git_before = value["git_before"]
+    git_after = value["git_after"]
+    validate_git_receipt(git_before, commit, "preflight Git before")
+    validate_git_receipt(git_after, commit, "preflight Git after")
+    if not canonical_equal(git_before, git_after):
+        fail("preflight Git receipt changed")
+    for source_entry, blob_entry in zip(
+        source_before["entries"], git_before["source_blob_oids"]
+    ):
+        if (
+            source_entry["path"] != blob_entry["path"]
+            or source_entry["git_blob_oid"] != blob_entry["head_oid"]
+            or source_entry["git_blob_oid"] != blob_entry["worktree_oid"]
+        ):
+            fail("preflight source bytes/HEAD blob binding differs")
+    build_before = value["build_manifest_before"]
+    build_after = value["build_manifest_after"]
+    validate_build_manifest(build_before, "preflight build before")
+    validate_build_manifest(build_after, "preflight build after")
+    if not canonical_equal(build_before, build_after):
+        fail("preflight build manifest changed")
+    binary_before = value["binary_before"]
+    binary_after = value["binary_after"]
+    validate_preflight_binary_observation(binary_before, "preflight binary before")
+    validate_preflight_binary_observation(binary_after, "preflight binary after")
+    if not canonical_equal(binary_before, binary_after):
+        fail("preflight binary changed")
+    controller_before = value["preflight_controller_before"]
+    controller_after = value["preflight_controller_after"]
+    validate_preflight_controller_receipt(
+        controller_before, "preflight controller before"
+    )
+    validate_preflight_controller_receipt(
+        controller_after, "preflight controller after"
+    )
+    if not canonical_equal(controller_before, controller_after):
+        fail("preflight controller process/image changed")
+    image = controller_after["image"]
+    preflight_args = parse_cli_tokens(
+        controller_after["argv"][1:], live_process=False
+    )
+    if commit != preflight_args.expected_source_commit:
+        fail("preflight receipt/input source commit binding differs")
+    controller_entry = manifest_entry(
+        source_after, "bench/Wh2DirectSystematicComplementScreen.py"
+    )
+    if (
+        controller_entry["sha256"] != image["script_sha256"]
+        or controller_entry["bytes"] != image["script_stat"]["size"]
+        or not canonical_equal(controller_entry["stat"], image["script_stat"])
+        or git_after["executable"]["sha256"] != image["git_sha256"]
+        or not canonical_equal(
+            git_after["executable"]["stat"], image["git_stat"]
+        )
+    ):
+        fail("preflight controller source/Git image binding differs")
+    loader = value["health_module_loader"]
+    validate_health_loader_receipt(loader)
+    source_by_path = {
+        entry["path"]: entry for entry in source_after["entries"]
+    }
+    for module in loader["modules"]:
+        source_entry = source_by_path[module["path"]]
+        if (
+            module["bytes"] != source_entry["bytes"]
+            or module["sha256"] != source_entry["sha256"]
+        ):
+            fail("preflight health loader/source binding differs")
+    sampler_before = value["sampler_before"]
+    sampler_after = value["sampler_after"]
+    validate_sampler_receipt(sampler_before)
+    validate_sampler_receipt(sampler_after)
+    validate_preflight_sampler_prefix_binding(
+        value["sampler_prefix_binding"], sampler_before, sampler_after
+    )
+    run_argv = value["run_argv"]
+    run_args = parse_recorded_run_argv(run_argv, controller_after["pid"])
+    digest = run_argv_sha256(run_argv)
+    if digest != lower_hash(value["run_argv_sha256"], "preflight run argv"):
+        fail("preflight run argv SHA-256 differs")
+    sampler_source_entry = validate_sampler_source_authority(
+        run_args, source_after, source_root
+    )
+    validate_preflight_sampler_run_binding(
+        run_args, sampler_before, sampler_source_entry, image,
+        "preflight sampler before",
+    )
+    validate_preflight_sampler_run_binding(
+        run_args, sampler_after, sampler_source_entry, image,
+        "preflight sampler after",
+    )
+    for name in (
+        "binary", "build_dir", "sampler_pid", "sampler_script", "sampler_csv",
+        "sampler_pid_file", "sampler_validation_jsonl", "sampler_receipt",
+        "expected_source_commit",
+    ):
+        if getattr(preflight_args, name) != getattr(run_args, name):
+            fail("preflight input/future run binding differs: " + name)
+    expected_values = preflight_run_values(
+        preflight_args, source_after, git_after, build_after, binary_after,
+        {"sha256": image["python_sha256"]}, sampler_after,
+    )
+    expected_argv = build_run_authority_argv(
+        expected_values, controller_after["pid"]
+    )
+    if not canonical_equal(run_argv, expected_argv):
+        fail("preflight run argv differs from final observations")
+    prefix = value["sampler_prefix_binding"]
+    if prefix["pid_file_sha256"] != sampler_after["pid_file"]["sha256"]:
+        fail("preflight sampler PID prefix binding differs")
+    receipt_digest = lower_hash(
+        value["receipt_sha256"], "preflight receipt SHA-256"
+    )
+    preimage = dict(value)
+    preimage["receipt_sha256"] = None
+    if sha256_bytes(canonical_bytes(preimage)) != receipt_digest:
+        fail("preflight receipt self-hash differs")
+
+
+def parse_preflight_seal_bytes(data: bytes) -> Dict[str, Any]:
+    if (
+        not data or len(data) > MAX_PREFLIGHT_RECEIPT_BYTES
+        or not data.endswith(b"\n") or data.count(b"\n") != 1
+        or b"\r" in data
+    ):
+        fail("preflight seal receipt framing differs")
+    try:
+        value = json.loads(
+            data[:-1].decode("ascii"), object_pairs_hook=unique_object,
+            parse_constant=reject_constant,
+        )
+        canonical = canonical_bytes(value) + b"\n"
+    except (
+        UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValueError,
+    ) as exc:
+        fail("preflight seal receipt is malformed: " + str(exc))
+    if canonical != data:
+        fail("preflight seal receipt is not canonical JSON")
+    validate_preflight_seal_receipt(value)
+    return value
+
+
+def _collect_preflight_seal(
+    args: argparse.Namespace, deadline: Optional[float] = None,
+) -> Dict[str, Any]:
+    if deadline is None:
+        deadline = time.monotonic() + PREFLIGHT_SEAL_DEADLINE_SECONDS
+    if not math.isfinite(deadline) or time.monotonic() >= deadline:
+        fail("preflight seal reached its global deadline")
+    launch_affinity = sorted(os.sched_getaffinity(0))
+    if launch_affinity != [
+        EXPECTED_TARGET_CPU, EXPECTED_CONTROLLER_CPU, EXPECTED_SAMPLER_CPU
+    ]:
+        fail("preflight launch affinity is not exact CPUs 120/121/122")
+    args.controller_initial_affinity = launch_affinity
+    os.sched_setaffinity(0, {EXPECTED_CONTROLLER_CPU})
+    if os.sched_getaffinity(0) != {EXPECTED_CONTROLLER_CPU}:
+        fail("preflight controller did not pin to singleton CPU121")
+    require_fixed_namespace_absent()
+    source_root = Path(__file__).resolve(strict=True).parents[1]
+    expected_sampler_script = source_root / SAMPLER_SOURCE_PATH
+    if args.sampler_script != expected_sampler_script:
+        fail("preflight sampler script is not its source-manifest path")
+    source_before = source_manifest(source_root, deadline)
+    git_sha256, git_info = hash_regular_path(
+        GIT_EXECUTABLE, "preflight Git bootstrap",
+        max_size=MAX_BINARY_BYTES, deadline=deadline,
+    )
+    if (
+        not 1 <= git_info.st_size <= MAX_BINARY_BYTES
+        or stat.S_IMODE(git_info.st_mode) != 0o755
+        or git_info.st_uid != 0 or git_info.st_gid != 0
+        or git_info.st_nlink != 1
+    ):
+        fail("preflight Git bootstrap policy differs")
+    git_before = git_receipt(
+        source_root, args.expected_source_commit, git_sha256, deadline
+    )
+    build_before = build_manifest(args.build_dir, deadline)
+    binary_before = observe_preflight_binary(Path(args.binary), deadline)
+    python_before = observe_preflight_python(deadline)
+    sampler_bootstrap = bootstrap_sampler_run_authority(args, deadline)
+    initial_values = preflight_run_values(
+        args, source_before, git_before, build_before, binary_before,
+        python_before, sampler_bootstrap,
+    )
+    initial_argv = build_run_authority_argv(initial_values, os.getpid())
+    run_args = parse_recorded_run_argv(initial_argv, os.getpid())
+    run_args.controller_initial_affinity = launch_affinity
+    validate_sampler_source_authority(run_args, source_before, source_root)
+    health_modules = load_sealed_health_modules(source_root, source_before)
+    controller_before = preflight_controller_receipt(run_args, deadline)
+    observed_binary = preflight_binary(run_args, deadline)
+    if (
+        observed_binary["sha256"] != binary_before["sha256"]
+        or not canonical_equal(observed_binary["stat"], binary_before["stat"])
+        or controller_before["image"]["python_sha256"]
+        != python_before["sha256"]
+    ):
+        fail("preflight bootstrap/static authority changed")
+    sampler_before = make_sampler_attestation(
+        run_args, 0, 0, health_modules, deadline
+    )
+    handles: Optional[Dict[str, Any]] = None
+    try:
+        handles = open_sampler_admission_handles(run_args, sampler_before)
+        sampler_after = make_sampler_attestation(
+            run_args, 0, 0, health_modules, deadline
+        )
+        binary_after = observe_preflight_binary(Path(args.binary), deadline)
+        controller_after = preflight_controller_receipt(run_args, deadline)
+        build_after = build_manifest(args.build_dir, deadline)
+        git_after = git_receipt(
+            source_root, args.expected_source_commit, git_sha256, deadline
+        )
+        source_after = source_manifest(source_root, deadline)
+        if (
+            not canonical_equal(source_before, source_after)
+            or not canonical_equal(git_before, git_after)
+            or not canonical_equal(build_before, build_after)
+            or not canonical_equal(binary_before, binary_after)
+            or not canonical_equal(controller_before, controller_after)
+        ):
+            fail("preflight static authority changed between passes")
+        sampler_prefix = preflight_sampler_prefix_binding(
+            run_args, sampler_before, sampler_after, handles
+        )
+        final_values = preflight_run_values(
+            args, source_after, git_after, build_after, binary_after,
+            {"sha256": controller_after["image"]["python_sha256"]},
+            sampler_after,
+        )
+        run_argv = build_run_authority_argv(
+            final_values, controller_after["pid"]
+        )
+        if not canonical_equal(run_argv, initial_argv):
+            fail("preflight run authority changed between passes")
+        if poll_sampler_supervision(handles) != "none":
+            fail("preflight sampler changed after its prefix proof")
+        require_fixed_namespace_absent()
+        value: Dict[str, Any] = {
+            "binary_after": binary_after,
+            "binary_before": binary_before,
+            "build_manifest_after": build_after,
+            "build_manifest_before": build_before,
+            "expected_source_commit": args.expected_source_commit,
+            "git_after": git_after,
+            "git_before": git_before,
+            "health_module_loader": health_modules.receipt,
+            "preflight_controller_after": controller_after,
+            "preflight_controller_before": controller_before,
+            "receipt_sha256": None,
+            "run_argv": run_argv,
+            "run_argv_sha256": run_argv_sha256(run_argv),
+            "sampler_after": sampler_after,
+            "sampler_before": sampler_before,
+            "sampler_prefix_binding": sampler_prefix,
+            "schema": PREFLIGHT_SEAL_SCHEMA,
+            "source_manifest_after": source_after,
+            "source_manifest_before": source_before,
+            "source_root": str(source_root),
+        }
+        value["receipt_sha256"] = sha256_bytes(canonical_bytes(value))
+        validate_preflight_seal_receipt(value)
+        if time.monotonic() >= deadline:
+            fail("preflight seal reached its global deadline")
+        if poll_sampler_supervision(handles) != "none":
+            fail("preflight sampler changed before receipt emission")
+        require_fixed_namespace_absent()
+        return value
+    finally:
+        close_sampler_admission_handles(handles)
+
+
+def collect_preflight_seal(
+    args: argparse.Namespace, deadline: Optional[float] = None,
+) -> Dict[str, Any]:
+    global PREFLIGHT_SIDE_EFFECT_GUARD
+    if PREFLIGHT_SIDE_EFFECT_GUARD:
+        fail("preflight seal collection is already active")
+    PREFLIGHT_SIDE_EFFECT_GUARD = True
+    try:
+        return _collect_preflight_seal(args, deadline)
+    finally:
+        PREFLIGHT_SIDE_EFFECT_GUARD = False
+
+
+def write_preflight_payload(fd: int, payload: bytes, deadline: float) -> None:
+    if (
+        type(fd) is not int or fd < 0 or type(payload) is not bytes
+        or not payload or len(payload) > MAX_PREFLIGHT_RECEIPT_BYTES
+        or not math.isfinite(deadline)
+    ):
+        fail("preflight seal output parameters differ")
+    try:
+        was_blocking = os.get_blocking(fd)
+    except OSError as exc:
+        fail("preflight seal output descriptor failed: " + str(exc))
+    try:
+        try:
+            os.set_blocking(fd, False)
+        except (OSError, ValueError) as exc:
+            fail("preflight seal output nonblocking setup failed: " + str(exc))
+        view = memoryview(payload)
+        while view:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                fail("preflight seal output reached its global deadline")
+            try:
+                _, writable, _ = select.select([], [fd], [], remaining)
+            except InterruptedError:
+                continue
+            except (OSError, ValueError) as exc:
+                fail("preflight seal output poll failed: " + str(exc))
+            if not writable:
+                fail("preflight seal output reached its global deadline")
+            try:
+                written = os.write(fd, view)
+            except (BlockingIOError, InterruptedError):
+                continue
+            except OSError as exc:
+                fail("preflight seal receipt write failed: " + str(exc))
+            if written <= 0:
+                fail("preflight seal receipt write was short")
+            view = view[written:]
+    finally:
+        try:
+            os.set_blocking(fd, was_blocking)
+        except (OSError, ValueError) as exc:
+            fail("preflight seal output blocking restore failed: " + str(exc))
+
+
+def emit_preflight_seal(args: argparse.Namespace) -> int:
+    deadline = time.monotonic() + PREFLIGHT_SEAL_DEADLINE_SECONDS
+    receipt = collect_preflight_seal(args, deadline)
+    payload = canonical_bytes(receipt) + b"\n"
+    if len(payload) > MAX_PREFLIGHT_RECEIPT_BYTES:
+        fail("preflight seal receipt exceeds its output bound")
+    write_preflight_payload(1, payload, deadline)
+    return 0
+
+
 def run_once(args: argparse.Namespace) -> int:
+    require_preflight_side_effects_allowed("run-once dispatch")
     controller_started_ns = time.monotonic_ns()
     controller_started = controller_started_ns / 1_000_000_000.0
     if not canonical_equal(dict(os.environ), SEALED_LAUNCH_ENVIRONMENT):
@@ -7227,7 +11396,9 @@ def run_once(args: argparse.Namespace) -> int:
     binary_path = Path(args.binary)
     guarded_signals = SignalGuard()
     with guarded_signals:
-        require_authorized_process_uid(args.expected_controller_uid)
+        require_authorized_process_identity(
+            args.expected_controller_uid, args.expected_controller_gid
+        )
         launch_affinity = sorted(os.sched_getaffinity(0))
         if (
             EXPECTED_TARGET_CPU not in launch_affinity
@@ -7249,6 +11420,7 @@ def run_once(args: argparse.Namespace) -> int:
         )
         if source_before["sha256"] != args.expected_source_manifest_sha256:
             fail("source manifest differs from the presealed value")
+        validate_sampler_source_authority(args, source_before, source_root)
         git_before = git_receipt(
             source_root, args.expected_source_commit,
             args.expected_git_sha256,
@@ -7277,13 +11449,13 @@ def run_once(args: argparse.Namespace) -> int:
         if build_before["sha256"] != args.expected_build_manifest_sha256:
             fail("build manifest differs from the presealed value")
         preflight_binary(args, controller_started + 9.0)
-        make_sampler_attestation(
+        sampler_admission = make_sampler_attestation(
             args, 0, 0, health_modules, controller_started + 9.0
         )
         health_state = prepare_health(
             args, EXPECTED_TARGET_CPU,
             controller_started + CONTROLLER_DEADLINE_SECONDS,
-            health_modules,
+            health_modules, sampler_admission,
         )
         if not health_state.get("ready"):
             failures = health_state.get("collection_failures", [])
@@ -7700,6 +11872,7 @@ def validate_recorded_run_authority(
     source = controller["source_manifest_before"]
     git = controller["git_before"]
     health_sampler = summary["health"].get("sampler", {})
+    sampler_admission = summary["health"].get("sampler_admission", {})
     child_pid = binary.get("child_pid")
     sampler_identity_collision = (
         bool(health_sampler) and child_pid == run.sampler_pid
@@ -7707,6 +11880,9 @@ def validate_recorded_run_authority(
     script_entry = source["entries"][SOURCE_PATHS.index(
         "bench/Wh2DirectSystematicComplementScreen.py"
     )]
+    sampler_source_entry = validate_sampler_source_authority(
+        run, source, Path(__file__).resolve(strict=True).parents[1]
+    )
     if (
         run.binary != binary["path"]
         or run.expected_binary_sha256 != binary["expected_sha256"]
@@ -7718,7 +11894,11 @@ def validate_recorded_run_authority(
         or run.expected_controller_sha256 != before["script_sha256"]
         or run.expected_controller_sha256 != script_entry["sha256"]
         or run.expected_controller_uid != claim_document["uid"]
+        or run.expected_controller_gid != claim_document["gid"]
         or run.expected_controller_uid != before["script_stat"]["uid"]
+        or run.expected_controller_gid != before["script_stat"]["gid"]
+        or run.expected_controller_uid != before["process_uid"]
+        or run.expected_controller_gid != before["process_gid"]
         or run.expected_git_sha256 != before["git_sha256"]
         or run.expected_git_sha256 != git["executable"]["sha256"]
         or run.expected_git_sha256 != claim_document["git_sha256"]
@@ -7737,6 +11917,11 @@ def validate_recorded_run_authority(
         or sampler_identity_collision
     ):
         fail("recorded run argv authority binding differs")
+    validate_process_security(
+        before["process_security"], run.expected_controller_uid,
+        run.expected_controller_gid, [],
+        "recorded controller process security authority",
+    )
     # The external owner seal authorizes the exact image checked before exec.
     # Invalid evidence may truthfully preserve a later chown/replacement in
     # either post-exec receipt.  Positive receipts already require both later
@@ -7744,12 +11929,16 @@ def validate_recorded_run_authority(
     stat_before = binary["stat_before"]
     if (
         binary["sha256_before"] is not None and stat_before
-        and stat_before["uid"] != run.expected_binary_uid
+        and (
+            stat_before["uid"] != run.expected_binary_uid
+            or stat_before["gid"] != run.expected_controller_gid
+        )
     ):
-        fail("recorded pre-exec binary UID authority binding differs")
+        fail("recorded pre-exec binary owner authority binding differs")
     samplers = [
-        health_sampler, controller["sampler_after"],
+        sampler_admission, health_sampler, controller["sampler_after"],
     ]
+    require_frozen_sampler_stat = controller["outcome"] in ("pass", "reject")
     for sampler in samplers:
         if not sampler:
             continue
@@ -7766,13 +11955,43 @@ def validate_recorded_run_authority(
             or sampler["csv_inode"] != run.expected_sampler_csv_inode
             or sampler["cmdline_sha256"]
             != run.expected_sampler_cmdline_sha256
+            or sampler["cmdline_argv"] != expected_sampler_argv(run)
+            or sampler["cmdline_sha256"]
+            != sha256_bytes(expected_sampler_cmdline_bytes(run))
             or sampler["environ_sha256"]
             != run.expected_sampler_environ_sha256
             or sampler["executable_sha256"]
             != run.expected_sampler_executable_sha256
             or sampler["process_uid"] != run.expected_sampler_uid
+            or sampler["process_gid"] != run.expected_sampler_gid
+            or sampler["pid_file"]["path"] != str(run.sampler_pid_file)
+            or sampler["pid_file"]["stat"]["device"]
+            != run.expected_sampler_pid_file_device
+            or sampler["pid_file"]["stat"]["inode"]
+            != run.expected_sampler_pid_file_inode
+            or sampler["validation_jsonl"]["path"]
+            != str(run.sampler_validation_jsonl)
+            or sampler["validation_jsonl"]["stat"]["device"]
+            != run.expected_sampler_validation_device
+            or sampler["validation_jsonl"]["stat"]["inode"]
+            != run.expected_sampler_validation_inode
+            or sampler["receipt_file"]["path"] != str(run.sampler_receipt)
+            or sampler["receipt_file"]["stat"]["device"]
+            != run.expected_sampler_receipt_device
+            or sampler["receipt_file"]["stat"]["inode"]
+            != run.expected_sampler_receipt_inode
+            or sampler["script_stat"]["size"]
+            != sampler_source_entry["bytes"]
+            or require_frozen_sampler_stat and not canonical_equal(
+                sampler["script_stat"], sampler_source_entry["stat"]
+            )
         ):
             fail("recorded sampler authority binding differs")
+        validate_process_security(
+            sampler["process_security"], run.expected_sampler_uid,
+            run.expected_sampler_gid, [run.expected_sampler_i2c_gid],
+            "recorded sampler process security authority",
+        )
     return run
 
 
@@ -7789,6 +12008,7 @@ def validate_retained_claim_controller_binding(
         or claim_document["pid"] != before["pid"]
         or claim_document["process_start_ticks"] != before["process_start_ticks"]
         or claim_document["uid"] != claim_receipt["stat"]["uid"]
+        or claim_document["gid"] != claim_receipt["stat"]["gid"]
         or claim_document["output_path"] != str(FIXED_OUTPUT_DIR)
         or claim_document["parent_device"]
         != claim_receipt["parent"]["device"]
@@ -7870,11 +12090,7 @@ def validate_retained_science(
     health = summary["health"]
     if not health:
         fail("retained claimed outcome lacks a health receipt")
-    thermal_receipt = health.get("thermal", {})
-    expected_thermal = (
-        thermal_receipt["window_csv_ascii"].encode("ascii")
-        if thermal_receipt else b""
-    )
+    expected_thermal = health_thermal_artifact_bytes(health)
     if thermal != expected_thermal:
         fail("retained thermal artifact differs from the health receipt")
     raw_config: Dict[str, Any] = {}
@@ -7943,7 +12159,7 @@ def validate_retained_output_binding(
     if not canonical_equal(actual_artifacts, controller["artifacts"]):
         fail("retained controller artifact receipts differ")
     owner_uid = claim_document["uid"]
-    owner_gid = claim_receipt["stat"]["gid"]
+    owner_gid = claim_document["gid"]
     if (
         directory_info.st_uid != owner_uid or directory_info.st_gid != owner_gid
         or any(
@@ -8413,50 +12629,19 @@ def synthetic_health_fixture() -> Tuple[Dict[str, Any], Dict[str, Any]]:
         "stat_before": dict(fake_stat),
         "timed_out": False,
     }
-    sampler = {
-        "cmdline_sha256": "b" * 64,
-        "cpu": EXPECTED_SAMPLER_CPU,
-        "csv_device": 3,
-        "csv_inode": 4,
-        "csv_path": "/tmp/synthetic-sampler.csv",
-        "csv_stat": {
-            "device": 3, "gid": 1000, "inode": 4, "mode": 0o600,
-            "mtime_ns": 5, "nlink": 1, "size": 456, "uid": 1000,
-        },
-        "environ_sha256": "e" * 64,
-        "environment": dict(SEALED_LAUNCH_ENVIRONMENT),
-        "environment_sha256": sha256_bytes(
-            canonical_bytes(SEALED_LAUNCH_ENVIRONMENT)
-        ),
-        "executable_device": 5,
-        "executable_inode": 6,
-        "executable_path": "/usr/bin/python3",
-        "executable_sha256": "c" * 64,
-        "executable_stat": {
-            "device": 5, "gid": 0, "inode": 6, "mode": 0o755,
-            "mtime_ns": 7, "nlink": 2, "size": 789, "uid": 0,
-        },
-        "pid": 124,
-        "process_start_ticks": 457,
-        "process_uid": 1000,
-        "schema": SAMPLER_SCHEMA,
-        "script_device": 7,
-        "script_inode": 8,
-        "script_path": "/tmp/synthetic-sampler.py",
-        "script_sha256": "d" * 64,
-        "script_stat": {
-            "device": 7, "gid": 1000, "inode": 8, "mode": 0o444,
-            "mtime_ns": 9, "nlink": 1, "size": 321, "uid": 1000,
-        },
-        "terminal_status": "ok",
-        "window_end_monotonic_ns": 2_000_000_000,
-        "window_start_monotonic_ns": 1_000_000_000,
-    }
+    evidence_parent = "/tmp/synthetic-sampler-evidence"
+    csv_path = evidence_parent + "/thermal.csv"
+    pid_path = evidence_parent + "/sampler.pid"
+    validation_path = evidence_parent + "/validation.jsonl"
+    receipt_path = evidence_parent + "/receipt.json"
+    script_path = str(
+        Path(__file__).resolve(strict=True).parents[1] / SAMPLER_SOURCE_PATH
+    )
     header = ",".join(THERMAL_HEADER) + "\n"
     rows = []
     for utc, monotonic_value in (
-        ("2026-01-01T00:00:01Z", "1.000000000"),
-        ("2026-01-01T00:00:02Z", "2.000000000"),
+        ("2026-01-01T00:00:01Z", "1.000000"),
+        ("2026-01-01T00:00:02Z", "2.000000"),
     ):
         row = [
             utc, monotonic_value, "50.0", "3000.0", "50.0",
@@ -8466,9 +12651,170 @@ def synthetic_health_fixture() -> Tuple[Dict[str, Any], Dict[str, Any]]:
         rows.append(",".join(row) + "\n")
     window_ascii = header + "".join(rows)
     window_bytes = window_ascii.encode("ascii")
+    admission_csv_bytes = (header + rows[0]).encode("ascii")
+    validation_header = {
+        "expected_output_owner_uid": EXPECTED_CAMPAIGN_UID,
+        "raw_columns": list(THERMAL_HEADER),
+        "sampler_source_expected_sha256": "d" * 64,
+        "sampling": {
+            "dimm_attempts": 5, "dimm_retry_delay_s": 0.01,
+            "interval_s": 1.0,
+        },
+        "schema": THERMAL_VALIDATION_STREAM_SCHEMA,
+        "thresholds": dict(THERMAL_SAMPLER_THRESHOLDS),
+    }
+    validation_header_raw = canonical_bytes(validation_header) + b"\n"
+
+    def validation_sample(index: int, timestamp: float) -> Dict[str, Any]:
+        has_previous = index > 0
+        return {
+            "consecutive_fault_rows": 0,
+            "decision": "continue",
+            "edac_ce_delta": 0,
+            "edac_ue_delta": 0,
+            "fault_count": 0,
+            "hot_sensors": [],
+            "monotonic_s": timestamp,
+            "read_error_count": 0,
+            "sample_index": index,
+            "schema": THERMAL_VALIDATION_SAMPLE_SCHEMA,
+            "sensors": {
+                name: {
+                    "attempt_errors": 0,
+                    "hot": False,
+                    "hot_streak": 0,
+                    "jump_c": 0.0 if has_previous else None,
+                    "rate_c_per_s": 0.0 if has_previous else None,
+                    "raw_c": 40.0,
+                    "reason": "ok",
+                    "valid": True,
+                }
+                for name in VALIDATION_DIMM_FIELDS
+            },
+        }
+
+    validation_records = [
+        canonical_bytes(validation_sample(index, timestamp)) + b"\n"
+        for index, timestamp in enumerate((1.0, 2.0))
+    ]
+    validation_bytes = validation_header_raw + b"".join(validation_records)
+    admission_validation_bytes = validation_header_raw + validation_records[0]
+
+    def synthetic_stat(
+        device: int, inode: int, mode: int, size: int,
+        mtime_ns: int, *, uid: int = 1000, gid: int = 1000,
+        nlink: int = 1,
+    ) -> Dict[str, int]:
+        return {
+            "device": device, "gid": gid, "inode": inode, "mode": mode,
+            "mtime_ns": mtime_ns, "nlink": nlink, "size": size, "uid": uid,
+        }
+
+    def artifact(
+        path: str, device: int, inode: int, mode: int, data: bytes,
+        mtime_ns: int,
+    ) -> Dict[str, Any]:
+        return {
+            "bytes": len(data), "path": path, "sha256": sha256_bytes(data),
+            "stat": synthetic_stat(
+                device, inode, mode, len(data), mtime_ns,
+            ),
+        }
+
+    process_security = {
+        "cap_ambient": "0000000000000000",
+        "cap_bounding": "0000000000000000",
+        "cap_effective": "0000000000000000",
+        "cap_inheritable": "0000000000000000",
+        "cap_permitted": "0000000000000000",
+        "gids": [EXPECTED_CAMPAIGN_GID] * 4,
+        "groups": [EXPECTED_SAMPLER_I2C_GID],
+        "no_new_privs": 1,
+        "schema": PROCESS_SECURITY_SCHEMA,
+        "uids": [EXPECTED_CAMPAIGN_UID] * 4,
+    }
+    cmdline_argv = [
+        EXPECTED_SAMPLER_PYTHON, *EXPECTED_SAMPLER_PYTHON_FLAGS, script_path,
+        "--csv", csv_path, "--pid-file", pid_path,
+        "--validation-jsonl", validation_path, "--receipt", receipt_path,
+        "--expected-source-sha256", "d" * 64,
+        "--expected-output-owner-uid", str(EXPECTED_CAMPAIGN_UID),
+        "--interval", EXPECTED_SAMPLER_INTERVAL_TEXT,
+        "--dimm-attempts", EXPECTED_SAMPLER_DIMM_ATTEMPTS_TEXT,
+        "--dimm-retry-delay", EXPECTED_SAMPLER_DIMM_RETRY_DELAY_TEXT,
+    ]
+    pid_bytes = b"124\n"
+    sampler = {
+        "cmdline_argv": cmdline_argv,
+        "cmdline_sha256": sha256_bytes(
+            b"".join(os.fsencode(item) + b"\0" for item in cmdline_argv)
+        ),
+        "cpu": EXPECTED_SAMPLER_CPU,
+        "csv_bytes": len(window_bytes),
+        "csv_device": 3,
+        "csv_inode": 4,
+        "csv_path": csv_path,
+        "csv_sha256": sha256_bytes(window_bytes),
+        "csv_stat": synthetic_stat(3, 4, 0o600, len(window_bytes), 6),
+        "environ_sha256": "e" * 64,
+        "environment": dict(SEALED_LAUNCH_ENVIRONMENT),
+        "environment_sha256": sha256_bytes(
+            canonical_bytes(SEALED_LAUNCH_ENVIRONMENT)
+        ),
+        "evidence_parent": {
+            "path": evidence_parent,
+            "stat": synthetic_stat(
+                3, 30, 0o700, 4096, 5, nlink=2,
+            ),
+        },
+        "executable_device": 22,
+        "executable_inode": 23,
+        "executable_path": "/usr/bin/python3.12",
+        "executable_sha256": "6" * 64,
+        "executable_stat": synthetic_stat(
+            22, 23, 0o755, 8192, 1, uid=0, gid=0, nlink=2,
+        ),
+        "pid": 124,
+        "pid_file": artifact(pid_path, 3, 31, 0o444, pid_bytes, 5),
+        "process_affinity": [EXPECTED_SAMPLER_CPU],
+        "process_gid": EXPECTED_CAMPAIGN_GID,
+        "process_security": process_security,
+        "process_start_ticks": 457,
+        "process_uid": EXPECTED_CAMPAIGN_UID,
+        "receipt_file": artifact(receipt_path, 3, 33, 0o444, b"", 5),
+        "schema": SAMPLER_SCHEMA,
+        "script_device": 7,
+        "script_inode": 8,
+        "script_path": script_path,
+        "script_sha256": "d" * 64,
+        "script_stat": synthetic_stat(7, 8, 0o444, 321, 9),
+        "terminal_status": "ok",
+        "validation_header_ascii": validation_header_raw.decode("ascii"),
+        "validation_jsonl": artifact(
+            validation_path, 3, 32, 0o444, validation_bytes, 6,
+        ),
+        "window_end_monotonic_ns": 2_000_000_000,
+        "window_start_monotonic_ns": 1_000_000_000,
+    }
+    sampler_admission = json.loads(canonical_bytes(sampler).decode("ascii"))
+    sampler_admission.update({
+        "csv_bytes": len(admission_csv_bytes),
+        "csv_sha256": sha256_bytes(admission_csv_bytes),
+        "window_end_monotonic_ns": 0,
+        "window_start_monotonic_ns": 0,
+    })
+    sampler_admission["csv_stat"].update({
+        "mtime_ns": 5, "size": len(admission_csv_bytes),
+    })
+    sampler_admission["validation_jsonl"] = artifact(
+        validation_path, 3, 32, 0o444, admission_validation_bytes, 5,
+    )
     thermal_summary = summarize_thermal_window_bytes(
         window_bytes, sampler["window_start_monotonic_ns"],
         sampler["window_end_monotonic_ns"],
+    )
+    validation_summary = summarize_validation_window_bytes(
+        validation_bytes, window_bytes, sampler,
     )
     thermal = {
         "cpu": EXPECTED_SAMPLER_CPU,
@@ -8480,6 +12826,17 @@ def synthetic_health_fixture() -> Tuple[Dict[str, Any], Dict[str, Any]]:
         "script_path": sampler["script_path"],
         "script_sha256": sampler["script_sha256"],
         "terminal_status": "complete",
+        "validation_attempt_errors_total": validation_summary[
+            "attempt_errors_total"
+        ],
+        "validation_device": sampler["validation_jsonl"]["stat"]["device"],
+        "validation_failures": validation_summary["failures"],
+        "validation_inode": sampler["validation_jsonl"]["stat"]["inode"],
+        "validation_jsonl_ascii": validation_bytes.decode("ascii"),
+        "validation_jsonl_bytes": len(validation_bytes),
+        "validation_jsonl_sha256": sha256_bytes(validation_bytes),
+        "validation_path": validation_path,
+        "validation_sample_count": validation_summary["sample_count"],
         "window_csv_ascii": window_ascii,
         "window_csv_bytes": len(window_bytes),
         "window_csv_sha256": sha256_bytes(window_bytes),
@@ -8522,9 +12879,15 @@ def synthetic_health_fixture() -> Tuple[Dict[str, Any], Dict[str, Any]]:
         "evidence_status": "complete",
         "receipt_sha256": None,
         "sampler": sampler,
+        "sampler_admission": sampler_admission,
+        "sampler_admission_receipt_sha256": sha256_bytes(
+            canonical_bytes(sampler_admission)
+        ),
         "sampler_core": list(EXPECTED_SAMPLER_CORE),
         "sampler_cpu": EXPECTED_SAMPLER_CPU,
         "sampler_receipt_sha256": sha256_bytes(canonical_bytes(sampler)),
+        "sampler_terminal": {},
+        "sampler_terminal_receipt_sha256": None,
         "schema": HEALTH_SCHEMA,
         "sibling_non_idle_tick_cap": SIBLING_NON_IDLE_TICK_CAP,
         "sibling_tick_policy": (
@@ -8542,6 +12905,207 @@ def synthetic_health_fixture() -> Tuple[Dict[str, Any], Dict[str, Any]]:
     return finalize_health_receipt(health, [], []), binary
 
 
+def synthetic_terminal_health_fixture(
+    health: Mapping[str, Any], binary: Mapping[str, Any],
+    *, terminal_signal: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Build a fully bound invalid EDAC-abort receipt for selftest coverage."""
+    terminal_health = json.loads(canonical_bytes(health).decode("ascii"))
+    admission = terminal_health["sampler_admission"]
+    raw_lines = terminal_health["thermal"][
+        "window_csv_ascii"
+    ].encode("ascii").splitlines(keepends=True)
+    validation_lines = terminal_health["thermal"][
+        "validation_jsonl_ascii"
+    ].encode("ascii").splitlines(keepends=True)
+    final_raw_row = parse_csv_physical_line(
+        raw_lines[-1], "synthetic terminal raw row"
+    )
+    final_raw_row[17] = "1"
+    raw_lines[-1] = (",".join(final_raw_row) + "\n").encode("ascii")
+    raw_csv = b"".join(raw_lines)
+    final_validation = parse_canonical_json_line(
+        validation_lines[-1], "synthetic terminal validation record"
+    )
+    final_validation["decision"] = "edac_abort"
+    final_validation["edac_ce_delta"] = 1
+    validation_lines[-1] = canonical_bytes(final_validation) + b"\n"
+    validation_jsonl = b"".join(validation_lines)
+    summary, final_decision = replay_terminal_validation(
+        raw_csv, validation_jsonl, admission
+    )
+    if final_decision != "edac_abort":
+        raise AssertionError("synthetic terminal decision did not replay")
+
+    def binding_from_artifact(
+        artifact: Mapping[str, Any], data: bytes, mode: int,
+        *, nlink: int = 1,
+    ) -> Dict[str, Any]:
+        info = artifact["stat"]
+        return {
+            "device": info["device"], "gid": info["gid"],
+            "inode": info["inode"], "mode": mode, "nlink": nlink,
+            "sha256": sha256_bytes(data), "size": len(data),
+            "uid": info["uid"],
+        }
+
+    parent_stat = admission["evidence_parent"]["stat"]
+    parent_binding = {
+        name: parent_stat[name] for name in SAMPLER_PARENT_BINDING_KEYS
+    }
+
+    def destination(path: str, *, source: bool = False) -> Dict[str, Any]:
+        return {
+            "basename": Path(path).name,
+            "expected_owner_uid": (
+                None if source else admission["process_uid"]
+            ),
+            "parent": {
+                "binding": (
+                    {
+                        "device": 7, "gid": admission["process_gid"],
+                        "inode": 70, "mode": 0o755, "nlink": 2,
+                        "uid": admission["process_uid"],
+                    }
+                    if source else dict(parent_binding)
+                ),
+                "path": str(Path(path).parent),
+            },
+            "path": path,
+        }
+
+    raw_binding = binding_from_artifact(
+        {"stat": admission["csv_stat"]}, raw_csv, 0o444
+    )
+    validation_binding = binding_from_artifact(
+        admission["validation_jsonl"], validation_jsonl, 0o444
+    )
+    pid_data = (str(admission["pid"]) + "\n").encode("ascii")
+    pid_binding = binding_from_artifact(
+        admission["pid_file"], pid_data, 0o444
+    )
+    pid_held_binding = dict(pid_binding)
+    pid_held_binding["nlink"] = 0
+    receipt_reservation_binding = binding_from_artifact(
+        admission["receipt_file"], b"", 0o444
+    )
+    script_stat = admission["script_stat"]
+    source_binding = {
+        "device": script_stat["device"], "gid": script_stat["gid"],
+        "inode": script_stat["inode"], "mode": script_stat["mode"],
+        "nlink": script_stat["nlink"],
+        "sha256": admission["script_sha256"],
+        "size": script_stat["size"], "uid": script_stat["uid"],
+    }
+    producer_receipt: Dict[str, Any] = {
+        "argv": admission["cmdline_argv"][5:],
+        "cpu_tctl_max_c": 50.0,
+        "edac_ce_paths": ["/sys/devices/system/edac/ce_count"],
+        "edac_ue_paths": ["/sys/devices/system/edac/ue_count"],
+        "errors": [],
+        "exit_code": 6,
+        "finished_monotonic_ns": 2_070_000_000,
+        "finished_utc": "2026-01-01T00:00:03Z",
+        "expected_output_owner_uid": admission["process_uid"],
+        "outcome": "edac_abort",
+        "pid": admission["pid"],
+        "pid_file": {
+            "binding": pid_binding,
+            "destination": destination(admission["pid_file"]["path"]),
+            "path": admission["pid_file"]["path"], "removed": True,
+        },
+        "raw_csv": {
+            "binding": raw_binding,
+            "destination": destination(admission["csv_path"]),
+            "path": admission["csv_path"],
+        },
+        "raw_samples_preserved": True,
+        "receipt_file": {
+            "destination": destination(admission["receipt_file"]["path"]),
+            "path": admission["receipt_file"]["path"],
+            "reservation_binding": receipt_reservation_binding,
+        },
+        "sampler_source": {
+            "binding": source_binding,
+            "binding_finished": dict(source_binding),
+            "destination": destination(admission["script_path"], source=True),
+            "expected_sha256": admission["script_sha256"],
+            "path": admission["script_path"],
+            "sha256": admission["script_sha256"],
+        },
+        "sampling": {
+            "dimm_attempts": 5, "dimm_retry_delay_s": 0.01,
+            "interval_s": 1.0,
+        },
+        "schema": THERMAL_SAMPLER_SCHEMA,
+        "signal": terminal_signal,
+        "started_monotonic_ns": 500_000_000,
+        "started_utc": "2026-01-01T00:00:00Z",
+        "summary": summary,
+        "thresholds": dict(THERMAL_SAMPLER_THRESHOLDS),
+        "validation_jsonl": {
+            "binding": validation_binding,
+            "destination": destination(
+                admission["validation_jsonl"]["path"]
+            ),
+            "path": admission["validation_jsonl"]["path"],
+        },
+    }
+    producer_receipt["self_sha256_excluding_field"] = sha256_bytes(
+        canonical_bytes(producer_receipt) + b"\n"
+    )
+    producer_receipt_ascii = canonical_bytes(producer_receipt) + b"\n"
+    producer_binding = binding_from_artifact(
+        admission["receipt_file"], producer_receipt_ascii, 0o444
+    )
+    stream_parts = split_terminal_streams(
+        raw_csv, validation_jsonl, allow_unpaired=False
+    )
+    child_start = binary["child_start_monotonic_ns"]
+    child_reap = binary["child_reap_monotonic_ns"]
+    terminal = {
+        "admission_receipt_sha256": sha256_bytes(canonical_bytes(admission)),
+        "coverage": {
+            "child_reap_monotonic_ns": child_reap,
+            "child_start_monotonic_ns": child_start,
+            "coverage_shortfall_ns": 0,
+            "covers_child_interval": True,
+            "window_end_monotonic_ns": 2_000_000_000,
+            "window_start_monotonic_ns": 1_000_000_000,
+        },
+        "pid_file_held_binding": pid_held_binding,
+        "process_exit_observation": "linux-pidfd-readable-nonchild-v1",
+        "process_exit_observed_monotonic_ns": 2_080_000_000,
+        "producer_receipt_ascii": producer_receipt_ascii.decode("ascii"),
+        "producer_receipt_binding": producer_binding,
+        "raw_csv_ascii": raw_csv.decode("ascii"),
+        "raw_csv_binding": raw_binding,
+        "schema": SAMPLER_TERMINAL_SCHEMA,
+        "stream_suffixes": stream_parts["suffix_receipt"],
+        "terminal_status": "invalid",
+        "validation_jsonl_ascii": validation_jsonl.decode("ascii"),
+        "validation_jsonl_binding": validation_binding,
+        "window_csv_ascii": raw_csv.decode("ascii"),
+        "window_validation_jsonl_ascii": validation_jsonl.decode("ascii"),
+    }
+    validate_sampler_terminal_receipt(
+        terminal, admission, child_start, child_reap
+    )
+    terminal_health["sampler"] = {}
+    terminal_health["sampler_receipt_sha256"] = None
+    terminal_health["sampler_terminal"] = terminal
+    terminal_health["sampler_terminal_receipt_sha256"] = sha256_bytes(
+        canonical_bytes(terminal)
+    )
+    terminal_health["thermal"] = {}
+    terminal_health = finalize_health_receipt(
+        terminal_health,
+        ["sampler endpoint: sampler-terminal-decision:edac_abort"], [],
+    )
+    validate_health_receipt(terminal_health, binary, require_complete=False)
+    return terminal_health
+
+
 def synthetic_final_bundle_fixture(
     health: Mapping[str, Any], binary: Mapping[str, Any], commit: str,
 ) -> Dict[str, Any]:
@@ -8554,6 +13118,7 @@ def synthetic_final_bundle_fixture(
             "mtime_ns": 1, "nlink": nlink, "size": size, "uid": uid,
         }
 
+    sampler_authority = health["sampler_admission"]
     git_sha = "9" * 64
     git_stat = receipt_stat(20, 21, 0o755, 4096, 0, 0)
     source_blob_oids = []
@@ -8585,14 +13150,18 @@ def synthetic_final_bundle_fixture(
     entries = []
     manifest_preimage = bytearray()
     for index, path in enumerate(SOURCE_PATHS):
-        digest = script_sha if path == script_relative else sha256_bytes(
-            ("synthetic-source:" + path).encode("ascii")
-        )
-        size = 321 if path == script_relative else index + 1
-        source_stat = (
-            script_stat if path == script_relative
-            else receipt_stat(24, 100 + index, 0o444, size)
-        )
+        if path == script_relative:
+            digest = script_sha
+            size = 321
+            source_stat = script_stat
+        elif path == SAMPLER_SOURCE_PATH:
+            digest = sampler_authority["script_sha256"]
+            size = sampler_authority["script_stat"]["size"]
+            source_stat = dict(sampler_authority["script_stat"])
+        else:
+            digest = sha256_bytes(("synthetic-source:" + path).encode("ascii"))
+            size = index + 1
+            source_stat = receipt_stat(24, 100 + index, 0o444, size)
         entries.append({
             "bytes": size,
             "git_blob_oid": source_blob_oids[index]["head_oid"],
@@ -8618,7 +13187,21 @@ def synthetic_final_bundle_fixture(
         "isolated": True,
         "optimize": 0,
         "pid": 111,
+        "process_gid": EXPECTED_CAMPAIGN_GID,
+        "process_security": {
+            "cap_ambient": "0000000000000000",
+            "cap_bounding": "0000000000000000",
+            "cap_effective": "0000000000000000",
+            "cap_inheritable": "0000000000000000",
+            "cap_permitted": "0000000000000000",
+            "gids": [EXPECTED_CAMPAIGN_GID] * 4,
+            "groups": [],
+            "no_new_privs": 1,
+            "schema": PROCESS_SECURITY_SCHEMA,
+            "uids": [EXPECTED_CAMPAIGN_UID] * 4,
+        },
         "process_start_ticks": 222,
+        "process_uid": EXPECTED_CAMPAIGN_UID,
         "python_declared_path": "/usr/bin/python3",
         "python_path": "/usr/bin/python3.12",
         "python_sha256": "6" * 64,
@@ -8651,19 +13234,31 @@ def synthetic_final_bundle_fixture(
     build["sha256"] = sha256_bytes(canonical_bytes(build))
     run_values = (
         binary["path"], build["root"], str(EXPECTED_TARGET_CPU),
-        str(EXPECTED_CONTROLLER_CPU), str(health["sampler"]["pid"]),
-        str(EXPECTED_SAMPLER_CPU), health["sampler"]["script_path"],
-        health["sampler"]["csv_path"], commit, binary["expected_sha256"],
+        str(EXPECTED_CONTROLLER_CPU), str(sampler_authority["pid"]),
+        str(EXPECTED_SAMPLER_CPU), sampler_authority["script_path"],
+        sampler_authority["csv_path"], sampler_authority["pid_file"]["path"],
+        sampler_authority["validation_jsonl"]["path"],
+        sampler_authority["receipt_file"]["path"],
+        commit, binary["expected_sha256"],
         str(binary["stat_before"]["uid"]), build["sha256"], script_sha,
-        str(script_stat["uid"]), git_sha, controller["python_sha256"],
-        str(health["sampler"]["process_start_ticks"]),
-        health["sampler"]["script_sha256"],
-        str(health["sampler"]["csv_device"]),
-        str(health["sampler"]["csv_inode"]),
-        health["sampler"]["cmdline_sha256"],
-        health["sampler"]["environ_sha256"],
-        health["sampler"]["executable_sha256"],
-        str(health["sampler"]["process_uid"]), source["sha256"],
+        str(script_stat["uid"]), str(script_stat["gid"]),
+        git_sha, controller["python_sha256"],
+        str(sampler_authority["process_start_ticks"]),
+        sampler_authority["script_sha256"],
+        str(sampler_authority["csv_device"]),
+        str(sampler_authority["csv_inode"]),
+        str(sampler_authority["pid_file"]["stat"]["device"]),
+        str(sampler_authority["pid_file"]["stat"]["inode"]),
+        str(sampler_authority["validation_jsonl"]["stat"]["device"]),
+        str(sampler_authority["validation_jsonl"]["stat"]["inode"]),
+        str(sampler_authority["receipt_file"]["stat"]["device"]),
+        str(sampler_authority["receipt_file"]["stat"]["inode"]),
+        sampler_authority["cmdline_sha256"],
+        sampler_authority["environ_sha256"],
+        sampler_authority["executable_sha256"],
+        str(sampler_authority["process_uid"]),
+        str(sampler_authority["process_gid"]),
+        str(EXPECTED_SAMPLER_I2C_GID), source["sha256"],
     )
     if len(run_values) != len(RUN_ONCE_OPTION_ORDER):
         raise AssertionError("synthetic run authority roster differs")
@@ -8681,6 +13276,7 @@ def synthetic_final_bundle_fixture(
         "campaign": CAMPAIGN,
         "controller_receipt_sha256": controller["receipt_sha256"],
         "controller_started_monotonic_ns": 1_000_000_000,
+        "gid": 1000,
         "git_sha256": git_sha,
         "output_path": str(FIXED_OUTPUT_DIR),
         "parent_device": 40,
@@ -8759,7 +13355,7 @@ def synthetic_final_bundle_fixture(
         "summary_preimage_sha256": None, "target_cpu": EXPECTED_TARGET_CPU,
     })
     summary_bytes = canonical_bytes(summary) + b"\n"
-    thermal_bytes = health["thermal"]["window_csv_ascii"].encode("ascii")
+    thermal_bytes = health_thermal_artifact_bytes(health)
     payloads = {
         "raw.jsonl": b"", "stderr.txt": b"",
         "summary.json": summary_bytes, "thermal.csv": thermal_bytes,
@@ -8814,6 +13410,102 @@ def synthetic_final_bundle_fixture(
         "run_argv_sha256": controller["argv_sha256"],
         "summary": summary, "summary_bytes": summary_bytes,
     }
+
+
+def synthetic_preflight_seal_fixture(
+    final_fixture: Mapping[str, Any], health: Mapping[str, Any], commit: str,
+) -> Dict[str, Any]:
+    source = final_fixture["source"]
+    git = final_fixture["git"]
+    build = final_fixture["build"]
+    binary = final_fixture["binary"]
+    run_controller = final_fixture["controller"]["controller_before"]
+    sampler = health["sampler_admission"]
+    preflight_values = (
+        binary["path"], build["root"], str(sampler["pid"]),
+        sampler["script_path"], sampler["csv_path"],
+        sampler["pid_file"]["path"], sampler["validation_jsonl"]["path"],
+        sampler["receipt_file"]["path"], commit,
+    )
+    preflight_argv = [
+        str(Path(__file__).resolve(strict=True)), "--preflight-seal",
+    ]
+    for option, item in zip(PREFLIGHT_SEAL_OPTION_ORDER, preflight_values):
+        preflight_argv.extend((option, item))
+    image = {
+        name: run_controller[name]
+        for name in PREFLIGHT_CONTROLLER_IMAGE_KEYS
+    }
+    preflight_controller: Dict[str, Any] = {
+        "argv": preflight_argv,
+        "argv_sha256": sha256_bytes(
+            b"".join(os.fsencode(item) + b"\0" for item in preflight_argv)
+        ),
+        "controller_cpu": EXPECTED_CONTROLLER_CPU,
+        "dont_write_bytecode": True,
+        "environment": dict(SEALED_LAUNCH_ENVIRONMENT),
+        "image": image,
+        "isolated": True,
+        "optimize": 0,
+        "pid": run_controller["pid"],
+        "process_gid": EXPECTED_CAMPAIGN_GID,
+        "process_security": run_controller["process_security"],
+        "process_start_ticks": run_controller["process_start_ticks"],
+        "process_uid": EXPECTED_CAMPAIGN_UID,
+        "receipt_sha256": None,
+        "schema": PREFLIGHT_CONTROLLER_SCHEMA,
+        "singleton_affinity": [EXPECTED_CONTROLLER_CPU],
+    }
+    preflight_controller["receipt_sha256"] = sha256_bytes(
+        canonical_bytes(preflight_controller)
+    )
+    binary_observation = {
+        "path": binary["path"], "sha256": binary["expected_sha256"],
+        "stat": binary["stat_before"],
+    }
+    prefix = {
+        "final_pid_file_stat": sampler["pid_file"]["stat"],
+        "final_raw_stat": sampler["csv_stat"],
+        "final_receipt_stat": sampler["receipt_file"]["stat"],
+        "final_validation_stat": sampler["validation_jsonl"]["stat"],
+        "monitor_event": "none",
+        "pid_file_sha256": sampler["pid_file"]["sha256"],
+        "raw_after_bytes": sampler["csv_bytes"],
+        "raw_after_sha256": sampler["csv_sha256"],
+        "raw_before_bytes": sampler["csv_bytes"],
+        "raw_before_sha256": sampler["csv_sha256"],
+        "receipt_bytes": 0,
+        "sampler_after_sha256": sha256_bytes(canonical_bytes(sampler)),
+        "sampler_before_sha256": sha256_bytes(canonical_bytes(sampler)),
+        "validation_after_bytes": sampler["validation_jsonl"]["bytes"],
+        "validation_after_sha256": sampler["validation_jsonl"]["sha256"],
+        "validation_before_bytes": sampler["validation_jsonl"]["bytes"],
+        "validation_before_sha256": sampler["validation_jsonl"]["sha256"],
+    }
+    value: Dict[str, Any] = {
+        "binary_after": binary_observation,
+        "binary_before": binary_observation,
+        "build_manifest_after": build,
+        "build_manifest_before": build,
+        "expected_source_commit": commit,
+        "git_after": git,
+        "git_before": git,
+        "health_module_loader": final_fixture["summary"]["health_module_loader"],
+        "preflight_controller_after": preflight_controller,
+        "preflight_controller_before": preflight_controller,
+        "receipt_sha256": None,
+        "run_argv": run_controller["argv"],
+        "run_argv_sha256": run_controller["argv_sha256"],
+        "sampler_after": sampler,
+        "sampler_before": sampler,
+        "sampler_prefix_binding": prefix,
+        "schema": PREFLIGHT_SEAL_SCHEMA,
+        "source_manifest_after": source,
+        "source_manifest_before": source,
+        "source_root": str(Path(__file__).resolve(strict=True).parents[1]),
+    }
+    value["receipt_sha256"] = sha256_bytes(canonical_bytes(value))
+    return value
 
 
 def selftest_v2() -> int:
@@ -8936,13 +13628,114 @@ def selftest_v2() -> int:
     health, binary = synthetic_health_fixture()
     validate_binary_receipt(binary, require_complete=True)
     validate_health_receipt(health, binary, require_complete=True)
+    stale_health = json.loads(canonical_bytes(health).decode("ascii"))
+    stale_sampler = stale_health["sampler"]
+    stale_sampler["window_end_monotonic_ns"] = (
+        stale_sampler["window_start_monotonic_ns"]
+    )
+    full_raw_lines = stale_health["thermal"][
+        "window_csv_ascii"
+    ].encode("ascii").splitlines(keepends=True)
+    full_validation_lines = stale_health["thermal"][
+        "validation_jsonl_ascii"
+    ].encode("ascii").splitlines(keepends=True)
+    stale_raw = b"".join(full_raw_lines[:2])
+    stale_validation = b"".join(full_validation_lines[:2])
+    stale_raw_full = stale_raw + full_raw_lines[2]
+    stale_validation_full = (
+        stale_validation
+        + full_validation_lines[2][:len(full_validation_lines[2]) // 2]
+    )
+    stale_sampler["csv_bytes"] = len(stale_raw)
+    stale_sampler["csv_sha256"] = sha256_bytes(stale_raw)
+    stale_sampler["csv_stat"]["size"] = len(stale_raw_full)
+    stale_sampler["validation_jsonl"]["bytes"] = len(
+        stale_validation_full
+    )
+    stale_sampler["validation_jsonl"]["sha256"] = sha256_bytes(
+        stale_validation_full
+    )
+    stale_sampler["validation_jsonl"]["stat"]["size"] = len(
+        stale_validation_full
+    )
+    stale_raw_summary = summarize_thermal_window_bytes(
+        stale_raw, stale_sampler["window_start_monotonic_ns"],
+        stale_sampler["window_end_monotonic_ns"],
+    )
+    stale_validation_summary = summarize_validation_window_bytes(
+        stale_validation, stale_raw, stale_sampler,
+    )
+    stale_thermal = stale_health["thermal"]
+    stale_thermal.update({
+        **stale_raw_summary,
+        "validation_attempt_errors_total": stale_validation_summary[
+            "attempt_errors_total"
+        ],
+        "validation_failures": stale_validation_summary["failures"],
+        "validation_jsonl_ascii": stale_validation.decode("ascii"),
+        "validation_jsonl_bytes": len(stale_validation),
+        "validation_jsonl_sha256": sha256_bytes(stale_validation),
+        "validation_sample_count": stale_validation_summary[
+            "sample_count"
+        ],
+        "window_csv_ascii": stale_raw.decode("ascii"),
+        "window_csv_bytes": len(stale_raw),
+        "window_csv_sha256": sha256_bytes(stale_raw),
+        "window_end_monotonic_ns": stale_sampler[
+            "window_end_monotonic_ns"
+        ],
+        "window_start_monotonic_ns": stale_sampler[
+            "window_start_monotonic_ns"
+        ],
+    })
+    stale_health["sampler_receipt_sha256"] = sha256_bytes(
+        canonical_bytes(stale_sampler)
+    )
+    stale_marker = (
+        "sampler endpoint: sampler-monitor-invalid:"
+        "validation-heartbeat-stale"
+    )
+    stale_health = finalize_health_receipt(
+        stale_health, [stale_marker],
+        thermal_policy_violation_messages(stale_thermal),
+    )
+    validate_health_receipt(stale_health, binary, require_complete=False)
+    coverage_cutoff_health = json.loads(
+        canonical_bytes(stale_health).decode("ascii")
+    )
+    coverage_cutoff_marker = (
+        "sampler endpoint: sampler-monitor-invalid:"
+        "coverage-recovery-cutoff"
+    )
+    coverage_cutoff_health = finalize_health_receipt(
+        coverage_cutoff_health, [coverage_cutoff_marker],
+        coverage_cutoff_health["violations"],
+    )
+    validate_health_receipt(
+        coverage_cutoff_health, binary, require_complete=False
+    )
+    stale_without_marker = json.loads(
+        canonical_bytes(stale_health).decode("ascii")
+    )
+    stale_without_marker = finalize_health_receipt(
+        stale_without_marker, [],
+        thermal_policy_violation_messages(stale_without_marker["thermal"]),
+    )
+    try:
+        validate_health_receipt(
+            stale_without_marker, binary, require_complete=False
+        )
+    except ValidationError:
+        pass
+    else:
+        raise AssertionError("unlicensed short thermal window was accepted")
     appended_sampler = json.loads(
         canonical_bytes(health["sampler"]).decode("ascii")
     )
     appended_sampler["csv_stat"]["size"] += 4096
     appended_sampler["csv_stat"]["mtime_ns"] += 1
     validate_sampler_growth_binding(
-        health["sampler"], appended_sampler, "synthetic append"
+        health["sampler_admission"], appended_sampler, "synthetic append"
     )
     changed_sampler_mode = json.loads(
         canonical_bytes(appended_sampler).decode("ascii")
@@ -8950,7 +13743,7 @@ def selftest_v2() -> int:
     changed_sampler_mode["csv_stat"]["mode"] = 0o644
     try:
         validate_sampler_growth_binding(
-            health["sampler"], changed_sampler_mode,
+            health["sampler_admission"], changed_sampler_mode,
             "synthetic mode mutation",
         )
     except ValidationError:
@@ -8961,12 +13754,12 @@ def selftest_v2() -> int:
     header = ",".join(THERMAL_HEADER) + "\n"
     bad_rows = []
     for utc, monotonic_value in (
-        ("2026-01-01T00:00:01Z", "1.000000000"),
-        ("2026-01-01T00:00:02Z", "2.000000000"),
+        ("2026-01-01T00:00:01Z", "1.000000"),
+        ("2026-01-01T00:00:02Z", "2.000000"),
     ):
         row = [
             utc, monotonic_value, "50.0", "3000.0", "-1.0",
-            *("40.0" for _ in range(8)), "1", "0.1", "0.1", "0.1",
+            *("40.0" for _ in range(8)), "0", "0.1", "0.1", "0.1",
             "1", "0",
         ]
         bad_rows.append(",".join(row) + "\n")
@@ -9335,6 +14128,19 @@ def selftest_v2() -> int:
             return
         raise AssertionError(f"{label} mutation was accepted")
 
+    def expect_exact_validation_error(
+        label: str, expected: str, operation: Any,
+    ) -> None:
+        try:
+            operation()
+        except ValidationError as exc:
+            if str(exc) == expected:
+                return
+            raise AssertionError(
+                f"{label} raised the wrong validation error: {exc}"
+            ) from exc
+        raise AssertionError(f"{label} mutation was accepted")
+
     for field, value in (
         ("timed_out", True),
         ("output_overflow", True),
@@ -9489,7 +14295,806 @@ def selftest_v2() -> int:
             ),
         )
 
+    terminal_health = synthetic_terminal_health_fixture(health, binary)
+    validate_health_receipt(
+        synthetic_terminal_health_fixture(
+            health, binary, terminal_signal="SIGTERM"
+        ),
+        binary, require_complete=False,
+    )
+
+    def rebind_synthetic_terminal_producer(
+        terminal: Dict[str, Any], mutate: Any,
+    ) -> None:
+        producer = parse_canonical_json_line(
+            terminal["producer_receipt_ascii"].encode("ascii"),
+            "synthetic rebound sampler receipt",
+        )
+        mutate(producer)
+        preimage = dict(producer)
+        del preimage["self_sha256_excluding_field"]
+        producer["self_sha256_excluding_field"] = sha256_bytes(
+            canonical_bytes(preimage) + b"\n"
+        )
+        producer_ascii = canonical_bytes(producer) + b"\n"
+        terminal["producer_receipt_ascii"] = producer_ascii.decode("ascii")
+        terminal["producer_receipt_binding"]["size"] = len(producer_ascii)
+        terminal["producer_receipt_binding"]["sha256"] = sha256_bytes(
+            producer_ascii
+        )
+
+    terminal_timestamp_failure_health = json.loads(
+        canonical_bytes(terminal_health).decode("ascii")
+    )
+    timestamp_failure_terminal = terminal_timestamp_failure_health[
+        "sampler_terminal"
+    ]
+
+    def make_terminal_timestamp_failure(producer: Dict[str, Any]) -> None:
+        producer["errors"] = [{
+            "message": "synthetic final timestamp failure",
+            "phase": "build_terminal_timestamps", "type": "OSError",
+        }]
+        producer["exit_code"] = 5
+        producer["finished_monotonic_ns"] = None
+        producer["finished_utc"] = None
+        producer["outcome"] = "sampler_error"
+
+    rebind_synthetic_terminal_producer(
+        timestamp_failure_terminal, make_terminal_timestamp_failure
+    )
+    terminal_timestamp_failure_health[
+        "sampler_terminal_receipt_sha256"
+    ] = sha256_bytes(canonical_bytes(timestamp_failure_terminal))
+    terminal_timestamp_failure_health = finalize_health_receipt(
+        terminal_timestamp_failure_health,
+        terminal_timestamp_failure_health["collection_failures"],
+        terminal_timestamp_failure_health["violations"],
+    )
+    validate_health_receipt(
+        terminal_timestamp_failure_health, binary, require_complete=False
+    )
+    timestamp_failure_without_phase = json.loads(
+        canonical_bytes(timestamp_failure_terminal).decode("ascii")
+    )
+
+    def replace_timestamp_failure_phase(producer: Dict[str, Any]) -> None:
+        producer["errors"][0]["phase"] = "sampling"
+
+    rebind_synthetic_terminal_producer(
+        timestamp_failure_without_phase, replace_timestamp_failure_phase
+    )
+    expect_validation_error(
+        "missing finish timestamps without exact producer error",
+        lambda: validate_sampler_terminal_receipt(
+            timestamp_failure_without_phase,
+            terminal_health["sampler_admission"],
+            binary["child_start_monotonic_ns"],
+            binary["child_reap_monotonic_ns"],
+        ),
+    )
+    timestamp_failure_half_pair = json.loads(
+        canonical_bytes(timestamp_failure_terminal).decode("ascii")
+    )
+    rebind_synthetic_terminal_producer(
+        timestamp_failure_half_pair,
+        lambda producer: producer.__setitem__(
+            "finished_utc", "2026-01-01T00:00:03Z"
+        ),
+    )
+    expect_validation_error(
+        "half-missing producer finish timestamp pair",
+        lambda: validate_sampler_terminal_receipt(
+            timestamp_failure_half_pair,
+            terminal_health["sampler_admission"],
+            binary["child_start_monotonic_ns"],
+            binary["child_reap_monotonic_ns"],
+        ),
+    )
+
+    sampler_error_suffix_health = json.loads(
+        canonical_bytes(terminal_health).decode("ascii")
+    )
+    suffix_terminal = sampler_error_suffix_health["sampler_terminal"]
+    paired_raw = health["thermal"]["window_csv_ascii"].encode("ascii")
+    paired_validation = health["thermal"][
+        "validation_jsonl_ascii"
+    ].encode("ascii")
+    unpaired_row = parse_csv_physical_line(
+        paired_raw.splitlines(keepends=True)[-1],
+        "synthetic sampler-error unpaired raw row",
+    )
+    unpaired_row[0] = "2026-01-01T00:00:02.060000Z"
+    unpaired_row[1] = "2.060000"
+    unpaired_raw_line = (",".join(unpaired_row) + "\n").encode("ascii")
+    next_validation = parse_canonical_json_line(
+        paired_validation.splitlines(keepends=True)[-1],
+        "synthetic sampler-error partial validation source",
+    )
+    next_validation["sample_index"] += 1
+    next_validation["monotonic_s"] = 2.06
+    sampler_error_summary, _ = replay_terminal_validation(
+        paired_raw + unpaired_raw_line,
+        paired_validation + canonical_bytes(next_validation) + b"\n",
+        terminal_health["sampler_admission"],
+    )
+    partial_validation = canonical_bytes(next_validation)
+    partial_validation = partial_validation[:len(partial_validation) // 2]
+    suffix_raw = paired_raw + unpaired_raw_line
+    suffix_validation = paired_validation + partial_validation
+    suffix_terminal["raw_csv_ascii"] = suffix_raw.decode("ascii")
+    suffix_terminal["raw_csv_binding"]["size"] = len(suffix_raw)
+    suffix_terminal["raw_csv_binding"]["sha256"] = sha256_bytes(suffix_raw)
+    suffix_terminal["validation_jsonl_ascii"] = suffix_validation.decode(
+        "ascii"
+    )
+    suffix_terminal["validation_jsonl_binding"]["size"] = len(
+        suffix_validation
+    )
+    suffix_terminal["validation_jsonl_binding"]["sha256"] = sha256_bytes(
+        suffix_validation
+    )
+    suffix_terminal["window_csv_ascii"] = paired_raw.decode("ascii")
+    suffix_terminal["window_validation_jsonl_ascii"] = (
+        paired_validation.decode("ascii")
+    )
+    suffix_terminal["stream_suffixes"] = split_terminal_streams(
+        suffix_raw, suffix_validation, allow_unpaired=True
+    )["suffix_receipt"]
+
+    def make_sampler_error_suffix(producer: Dict[str, Any]) -> None:
+        producer["errors"] = [{
+            "message": "synthetic validation write stalled",
+            "phase": "sampling", "type": "OSError",
+        }]
+        producer["exit_code"] = 5
+        producer["outcome"] = "sampler_error"
+        producer["summary"] = sampler_error_summary
+        producer["raw_csv"]["binding"] = dict(
+            suffix_terminal["raw_csv_binding"]
+        )
+        producer["validation_jsonl"]["binding"] = dict(
+            suffix_terminal["validation_jsonl_binding"]
+        )
+
+    rebind_synthetic_terminal_producer(
+        suffix_terminal, make_sampler_error_suffix
+    )
+    sampler_error_suffix_health["sampler_terminal_receipt_sha256"] = (
+        sha256_bytes(canonical_bytes(suffix_terminal))
+    )
+    sampler_error_suffix_health = finalize_health_receipt(
+        sampler_error_suffix_health,
+        ["sampler endpoint: sampler-terminal-intent"],
+        sampler_error_suffix_health["violations"],
+    )
+    validate_health_receipt(
+        sampler_error_suffix_health, binary, require_complete=False
+    )
+
+    validation_only_partial = json.loads(
+        canonical_bytes(suffix_terminal).decode("ascii")
+    )
+    validation_only_partial["raw_csv_ascii"] = paired_raw.decode("ascii")
+    validation_only_partial["raw_csv_binding"]["size"] = len(paired_raw)
+    validation_only_partial["raw_csv_binding"]["sha256"] = sha256_bytes(
+        paired_raw
+    )
+    validation_only_partial["stream_suffixes"][
+        "raw_unpaired_suffix_bytes"
+    ] = 0
+    validation_only_partial["stream_suffixes"][
+        "raw_unpaired_suffix_sha256"
+    ] = sha256_bytes(b"")
+
+    def bind_validation_only_partial(producer: Dict[str, Any]) -> None:
+        producer["raw_csv"]["binding"] = dict(
+            validation_only_partial["raw_csv_binding"]
+        )
+
+    rebind_synthetic_terminal_producer(
+        validation_only_partial, bind_validation_only_partial
+    )
+    expect_validation_error(
+        "sampler validation partial without preceding raw row",
+        lambda: validate_sampler_terminal_receipt(
+            validation_only_partial, terminal_health["sampler_admission"],
+            binary["child_start_monotonic_ns"],
+            binary["child_reap_monotonic_ns"],
+        ),
+    )
+
+    future_unpaired_raw = json.loads(
+        canonical_bytes(suffix_terminal).decode("ascii")
+    )
+    future_raw_lines = future_unpaired_raw["raw_csv_ascii"].encode(
+        "ascii"
+    ).splitlines(keepends=True)
+    future_row = parse_csv_physical_line(
+        future_raw_lines[-1], "synthetic future unpaired raw row"
+    )
+    future_row[1] = "9999.000000"
+    future_raw_lines[-1] = (",".join(future_row) + "\n").encode("ascii")
+    future_raw = b"".join(future_raw_lines)
+    future_unpaired_raw["raw_csv_ascii"] = future_raw.decode("ascii")
+    future_unpaired_raw["raw_csv_binding"]["size"] = len(future_raw)
+    future_unpaired_raw["raw_csv_binding"]["sha256"] = sha256_bytes(
+        future_raw
+    )
+    future_unpaired_raw["stream_suffixes"] = split_terminal_streams(
+        future_raw, suffix_validation, allow_unpaired=True
+    )["suffix_receipt"]
+
+    def bind_future_unpaired_raw(producer: Dict[str, Any]) -> None:
+        producer["raw_csv"]["binding"] = dict(
+            future_unpaired_raw["raw_csv_binding"]
+        )
+
+    rebind_synthetic_terminal_producer(
+        future_unpaired_raw, bind_future_unpaired_raw
+    )
+    expect_validation_error(
+        "sampler unpaired raw row after producer finish",
+        lambda: validate_sampler_terminal_receipt(
+            future_unpaired_raw, terminal_health["sampler_admission"],
+            binary["child_start_monotonic_ns"],
+            binary["child_reap_monotonic_ns"],
+        ),
+    )
+
+    pid_unlink_after_removal_health = json.loads(
+        canonical_bytes(terminal_health).decode("ascii")
+    )
+
+    def make_unlink_after_removal_error(producer: Dict[str, Any]) -> None:
+        producer["errors"] = [{
+            "message": "synthetic directory fsync after unlink failed",
+            "phase": "unlink_pid_file", "type": "OSError",
+        }]
+        producer["exit_code"] = 5
+        producer["outcome"] = "sampler_error"
+        producer["pid_file"]["removed"] = False
+
+    rebind_synthetic_terminal_producer(
+        pid_unlink_after_removal_health["sampler_terminal"],
+        make_unlink_after_removal_error,
+    )
+    pid_unlink_after_removal_health["sampler_terminal_receipt_sha256"] = (
+        sha256_bytes(
+            canonical_bytes(
+                pid_unlink_after_removal_health["sampler_terminal"]
+            )
+        )
+    )
+    pid_unlink_after_removal_health = finalize_health_receipt(
+        pid_unlink_after_removal_health,
+        pid_unlink_after_removal_health["collection_failures"],
+        pid_unlink_after_removal_health["violations"],
+    )
+    validate_health_receipt(
+        pid_unlink_after_removal_health, binary, require_complete=False
+    )
+    seal_recovery_healths: List[Tuple[str, Dict[str, Any]]] = []
+    for artifact_name, error_phase in (
+        ("raw_csv", "seal_raw_csv"),
+        ("validation_jsonl", "seal_validation_jsonl"),
+    ):
+        recovered_health = json.loads(
+            canonical_bytes(terminal_health).decode("ascii")
+        )
+
+        def make_recoverable_seal_error(
+            producer: Dict[str, Any], *, artifact_name: str = artifact_name,
+            error_phase: str = error_phase,
+        ) -> None:
+            producer["errors"] = [{
+                "message": "synthetic post-fchmod fsync failed",
+                "phase": error_phase, "type": "OSError",
+            }]
+            producer["exit_code"] = 5
+            producer["outcome"] = "sampler_error"
+            producer[artifact_name]["binding"] = None
+            if artifact_name == "raw_csv":
+                producer["raw_samples_preserved"] = False
+
+        rebind_synthetic_terminal_producer(
+            recovered_health["sampler_terminal"],
+            make_recoverable_seal_error,
+        )
+        recovered_health["sampler_terminal_receipt_sha256"] = sha256_bytes(
+            canonical_bytes(recovered_health["sampler_terminal"])
+        )
+        recovered_health = finalize_health_receipt(
+            recovered_health, recovered_health["collection_failures"],
+            recovered_health["violations"],
+        )
+        validate_health_receipt(
+            recovered_health, binary, require_complete=False
+        )
+        seal_recovery_healths.append((error_phase, recovered_health))
+
+    unlicensed_missing_binding = json.loads(
+        canonical_bytes(terminal_health["sampler_terminal"]).decode("ascii")
+    )
+
+    def make_unlicensed_missing_binding(producer: Dict[str, Any]) -> None:
+        producer["errors"] = [{
+            "message": "synthetic close failure",
+            "phase": "close_raw_csv", "type": "OSError",
+        }]
+        producer["exit_code"] = 5
+        producer["outcome"] = "sampler_error"
+        producer["raw_csv"]["binding"] = None
+        producer["raw_samples_preserved"] = False
+
+    rebind_synthetic_terminal_producer(
+        unlicensed_missing_binding, make_unlicensed_missing_binding
+    )
+    expect_validation_error(
+        "sampler missing raw binding without seal error",
+        lambda: validate_sampler_terminal_receipt(
+            unlicensed_missing_binding, terminal_health["sampler_admission"],
+            binary["child_start_monotonic_ns"],
+            binary["child_reap_monotonic_ns"],
+        ),
+    )
+    unlicensed_false_removed = json.loads(
+        canonical_bytes(terminal_health["sampler_terminal"]).decode("ascii")
+    )
+    rebind_synthetic_terminal_producer(
+        unlicensed_false_removed,
+        lambda producer: producer["pid_file"].__setitem__("removed", False),
+    )
+    expect_validation_error(
+        "sampler false PID removed flag without unlink error",
+        lambda: validate_sampler_terminal_receipt(
+            unlicensed_false_removed, terminal_health["sampler_admission"],
+            binary["child_start_monotonic_ns"],
+            binary["child_reap_monotonic_ns"],
+        ),
+    )
+    terminal_started_after_window = json.loads(
+        canonical_bytes(terminal_health["sampler_terminal"]).decode("ascii")
+    )
+    late_start_producer = parse_canonical_json_line(
+        terminal_started_after_window["producer_receipt_ascii"].encode(
+            "ascii"
+        ),
+        "synthetic late-start sampler receipt",
+    )
+    late_start_producer["started_monotonic_ns"] = (
+        terminal_started_after_window["coverage"][
+            "window_start_monotonic_ns"
+        ] + 1
+    )
+    late_start_preimage = dict(late_start_producer)
+    del late_start_preimage["self_sha256_excluding_field"]
+    late_start_producer["self_sha256_excluding_field"] = sha256_bytes(
+        canonical_bytes(late_start_preimage) + b"\n"
+    )
+    late_start_ascii = canonical_bytes(late_start_producer) + b"\n"
+    terminal_started_after_window["producer_receipt_ascii"] = (
+        late_start_ascii.decode("ascii")
+    )
+    terminal_started_after_window["producer_receipt_binding"]["size"] = (
+        len(late_start_ascii)
+    )
+    terminal_started_after_window["producer_receipt_binding"]["sha256"] = (
+        sha256_bytes(late_start_ascii)
+    )
+    expect_validation_error(
+        "sampler terminal producer start after retained window",
+        lambda: validate_sampler_terminal_receipt(
+            terminal_started_after_window,
+            terminal_health["sampler_admission"],
+            binary["child_start_monotonic_ns"],
+            binary["child_reap_monotonic_ns"],
+        ),
+    )
+    terminal_exit_before_finish = json.loads(
+        canonical_bytes(terminal_health["sampler_terminal"]).decode("ascii")
+    )
+    terminal_producer = parse_canonical_json_line(
+        terminal_exit_before_finish["producer_receipt_ascii"].encode(
+            "ascii"
+        ),
+        "synthetic early-exit sampler receipt",
+    )
+    terminal_exit_before_finish["process_exit_observed_monotonic_ns"] = (
+        terminal_producer["finished_monotonic_ns"] - 1
+    )
+    expect_validation_error(
+        "sampler terminal process exit before producer finish",
+        lambda: validate_sampler_terminal_receipt(
+            terminal_exit_before_finish,
+            terminal_health["sampler_admission"],
+            binary["child_start_monotonic_ns"],
+            binary["child_reap_monotonic_ns"],
+        ),
+    )
+    terminal_exit_after_execution = json.loads(
+        canonical_bytes(terminal_health).decode("ascii")
+    )
+    terminal_exit_after_execution["sampler_terminal"][
+        "process_exit_observed_monotonic_ns"
+    ] = binary["execution_finished_monotonic_ns"] + 1
+    terminal_exit_after_execution["sampler_terminal_receipt_sha256"] = (
+        sha256_bytes(
+            canonical_bytes(terminal_exit_after_execution["sampler_terminal"])
+        )
+    )
+    terminal_exit_after_execution = finalize_health_receipt(
+        terminal_exit_after_execution,
+        terminal_exit_after_execution["collection_failures"],
+        terminal_exit_after_execution["violations"],
+    )
+    expect_validation_error(
+        "sampler terminal exit after binary execution finish",
+        lambda: validate_health_receipt(
+            terminal_exit_after_execution, binary, require_complete=False
+        ),
+    )
+    stale_recovery_failure_health = json.loads(
+        canonical_bytes(health).decode("ascii")
+    )
+    stale_recovery_failure_health["sampler"] = {}
+    stale_recovery_failure_health["sampler_receipt_sha256"] = None
+    stale_recovery_failure_health["sampler_terminal"] = {}
+    stale_recovery_failure_health["sampler_terminal_receipt_sha256"] = None
+    stale_recovery_failure_health["thermal"] = {}
+    stale_recovery_failure_health = finalize_health_receipt(
+        stale_recovery_failure_health,
+        [
+            stale_marker,
+            "sampler stale evidence: injected fixed-point failure",
+        ],
+        [],
+    )
+    validate_health_receipt(
+        stale_recovery_failure_health, binary, require_complete=False
+    )
+
     final_fixture = synthetic_final_bundle_fixture(health, binary, commit)
+    preflight_fixture = synthetic_preflight_seal_fixture(
+        final_fixture, health, commit
+    )
+    validate_preflight_seal_receipt(preflight_fixture)
+    preflight_payload = canonical_bytes(preflight_fixture) + b"\n"
+    if not canonical_equal(
+        parse_preflight_seal_bytes(preflight_payload), preflight_fixture
+    ):
+        raise AssertionError("canonical preflight receipt parsing differs")
+    expect_validation_error(
+        "preflight noncanonical JSON",
+        lambda: parse_preflight_seal_bytes(b" " + preflight_payload),
+    )
+    duplicate_preflight_payload = preflight_payload.replace(
+        b'{"binary_after":', b'{"binary_after":{},"binary_after":', 1
+    )
+    expect_validation_error(
+        "preflight duplicate JSON key",
+        lambda: parse_preflight_seal_bytes(duplicate_preflight_payload),
+    )
+    preflight_tokens = preflight_fixture[
+        "preflight_controller_after"
+    ]["argv"][1:]
+    parsed_preflight = parse_cli_tokens(preflight_tokens, live_process=False)
+    if (
+        not parsed_preflight.preflight_seal
+        or parsed_preflight.expected_source_commit != commit
+        or parsed_preflight.sampler_pid != health["sampler_admission"]["pid"]
+    ):
+        raise AssertionError("preflight public argument parsing differs")
+    reconstructed_values = preflight_run_values(
+        parsed_preflight, final_fixture["source"], final_fixture["git"],
+        final_fixture["build"], preflight_fixture["binary_after"],
+        {
+            "sha256": preflight_fixture["preflight_controller_after"][
+                "image"
+            ]["python_sha256"]
+        },
+        preflight_fixture["sampler_after"],
+    )
+    reconstructed_argv = build_run_authority_argv(
+        reconstructed_values,
+        preflight_fixture["preflight_controller_after"]["pid"],
+    )
+    if (
+        reconstructed_argv != preflight_fixture["run_argv"]
+        or run_argv_sha256(reconstructed_argv)
+        != preflight_fixture["run_argv_sha256"]
+        or len(reconstructed_argv) != 76
+    ):
+        raise AssertionError("preflight future run authority differs")
+    for label, tokens in (
+        (
+            "preflight reordered locators",
+            preflight_tokens[:2] + preflight_tokens[4:6]
+            + preflight_tokens[2:4] + preflight_tokens[6:],
+        ),
+        (
+            "preflight equals-form locator",
+            ["--preflight-seal", "--binary=" + binary["path"]]
+            + preflight_tokens[3:],
+        ),
+        ("preflight missing locator", preflight_tokens[:-2]),
+        ("preflight extra locator", preflight_tokens + ["--cpu", "120"]),
+        (
+            "preflight noncanonical PID",
+            [
+                "+" + item if preflight_tokens[index - 1] == "--sampler-pid"
+                else item
+                for index, item in enumerate(preflight_tokens)
+            ],
+        ),
+    ):
+        expect_validation_error(
+            label,
+            lambda tokens=tokens: parse_cli_tokens(tokens, live_process=False),
+        )
+
+    mutated_preflight_run = json.loads(
+        canonical_bytes(preflight_fixture).decode("ascii")
+    )
+    binary_hash_value_index = (
+        2 + 2 * RUN_ONCE_OPTION_ORDER.index("--expected-binary-sha256") + 1
+    )
+    mutated_preflight_run["run_argv"][binary_hash_value_index] = "1" * 64
+    mutated_preflight_run["run_argv_sha256"] = run_argv_sha256(
+        mutated_preflight_run["run_argv"]
+    )
+    mutated_preflight_run["receipt_sha256"] = None
+    mutated_preflight_run["receipt_sha256"] = sha256_bytes(
+        canonical_bytes(mutated_preflight_run)
+    )
+    expect_exact_validation_error(
+        "preflight run/final observation mismatch",
+        "preflight run argv differs from final observations",
+        lambda: validate_preflight_seal_receipt(mutated_preflight_run),
+    )
+    surrogate_run_argv = list(reconstructed_argv)
+    surrogate_run_argv[3] = "/tmp/\ud800"
+    expect_exact_validation_error(
+        "preflight future argv surrogate",
+        "run authority argv is not a string array",
+        lambda: run_argv_sha256(surrogate_run_argv),
+    )
+    surrogate_preflight = json.loads(
+        canonical_bytes(preflight_fixture).decode("ascii")
+    )
+    for key in ("preflight_controller_before", "preflight_controller_after"):
+        surrogate_preflight[key]["argv"][3] = "/tmp/\ud800"
+    surrogate_payload = canonical_bytes(surrogate_preflight) + b"\n"
+    expect_validation_error(
+        "preflight receipt surrogate argv",
+        lambda: parse_preflight_seal_bytes(surrogate_payload),
+    )
+    deeply_nested_preflight = (
+        b"[" * 2000 + b"0" + b"]" * 2000 + b"\n"
+    )
+    expect_validation_error(
+        "preflight deeply nested JSON",
+        lambda: parse_preflight_seal_bytes(deeply_nested_preflight),
+    )
+    mutated_preflight_prefix = json.loads(
+        canonical_bytes(preflight_fixture).decode("ascii")
+    )
+    mutated_preflight_prefix["sampler_prefix_binding"][
+        "raw_after_sha256"
+    ] = "0" * 64
+    mutated_preflight_prefix["receipt_sha256"] = None
+    mutated_preflight_prefix["receipt_sha256"] = sha256_bytes(
+        canonical_bytes(mutated_preflight_prefix)
+    )
+    expect_validation_error(
+        "preflight held sampler prefix mutation",
+        lambda: validate_preflight_seal_receipt(mutated_preflight_prefix),
+    )
+    oversized_preflight_raw = json.loads(
+        canonical_bytes(preflight_fixture).decode("ascii")
+    )
+    oversized_preflight_raw["sampler_prefix_binding"]["final_raw_stat"][
+        "size"
+    ] = MAX_SAMPLER_CSV_BYTES + 1
+    oversized_preflight_raw["receipt_sha256"] = None
+    oversized_preflight_raw["receipt_sha256"] = sha256_bytes(
+        canonical_bytes(oversized_preflight_raw)
+    )
+    expect_validation_error(
+        "preflight oversized held raw stream",
+        lambda: validate_preflight_seal_receipt(oversized_preflight_raw),
+    )
+    regressed_preflight_raw_mtime = json.loads(
+        canonical_bytes(preflight_fixture).decode("ascii")
+    )
+    regressed_preflight_raw_mtime["sampler_prefix_binding"][
+        "final_raw_stat"
+    ]["mtime_ns"] = (
+        preflight_fixture["sampler_after"]["csv_stat"]["mtime_ns"] - 1
+    )
+    regressed_preflight_raw_mtime["receipt_sha256"] = None
+    regressed_preflight_raw_mtime["receipt_sha256"] = sha256_bytes(
+        canonical_bytes(regressed_preflight_raw_mtime)
+    )
+    expect_validation_error(
+        "preflight regressed held raw mtime",
+        lambda: validate_preflight_seal_receipt(regressed_preflight_raw_mtime),
+    )
+    for label, field, replacement in (
+        (
+            "preflight sampler CSV locator mismatch", "csv_path",
+            str(Path(health["sampler_admission"]["csv_path"]).with_name(
+                "other.csv"
+            )),
+        ),
+        (
+            "preflight sampler executable locator mismatch", "executable_path",
+            "/usr/bin/not-python",
+        ),
+    ):
+        mutated_sampler_binding = json.loads(
+            canonical_bytes(preflight_fixture).decode("ascii")
+        )
+        for sampler_name in ("sampler_before", "sampler_after"):
+            mutated_sampler_binding[sampler_name][field] = replacement
+        prefix_binding = mutated_sampler_binding["sampler_prefix_binding"]
+        prefix_binding["sampler_before_sha256"] = sha256_bytes(
+            canonical_bytes(mutated_sampler_binding["sampler_before"])
+        )
+        prefix_binding["sampler_after_sha256"] = sha256_bytes(
+            canonical_bytes(mutated_sampler_binding["sampler_after"])
+        )
+        mutated_sampler_binding["receipt_sha256"] = None
+        mutated_sampler_binding["receipt_sha256"] = sha256_bytes(
+            canonical_bytes(mutated_sampler_binding)
+        )
+        expect_validation_error(
+            label,
+            lambda value=mutated_sampler_binding:
+                validate_preflight_seal_receipt(value),
+        )
+    mutated_sampler_pid = json.loads(
+        canonical_bytes(preflight_fixture).decode("ascii")
+    )
+    replacement_pid = health["sampler_admission"]["pid"] + 1
+    replacement_pid_bytes = (str(replacement_pid) + "\n").encode("ascii")
+    for sampler_name in ("sampler_before", "sampler_after"):
+        sampler_value = mutated_sampler_pid[sampler_name]
+        sampler_value["pid"] = replacement_pid
+        sampler_value["pid_file"]["bytes"] = len(replacement_pid_bytes)
+        sampler_value["pid_file"]["sha256"] = sha256_bytes(
+            replacement_pid_bytes
+        )
+    pid_prefix = mutated_sampler_pid["sampler_prefix_binding"]
+    pid_prefix["pid_file_sha256"] = sha256_bytes(replacement_pid_bytes)
+    pid_prefix["sampler_before_sha256"] = sha256_bytes(
+        canonical_bytes(mutated_sampler_pid["sampler_before"])
+    )
+    pid_prefix["sampler_after_sha256"] = sha256_bytes(
+        canonical_bytes(mutated_sampler_pid["sampler_after"])
+    )
+    mutated_sampler_pid["receipt_sha256"] = None
+    mutated_sampler_pid["receipt_sha256"] = sha256_bytes(
+        canonical_bytes(mutated_sampler_pid)
+    )
+    expect_validation_error(
+        "preflight sampler PID mismatch",
+        lambda: validate_preflight_seal_receipt(mutated_sampler_pid),
+    )
+    mutated_preflight_input = json.loads(
+        canonical_bytes(preflight_fixture).decode("ascii")
+    )
+    for field in ("preflight_controller_before", "preflight_controller_after"):
+        controller_receipt = mutated_preflight_input[field]
+        controller_receipt["argv"][3] = "/tmp/different-worker"
+        controller_receipt["argv_sha256"] = sha256_bytes(
+            b"".join(
+                os.fsencode(item) + b"\0" for item in controller_receipt["argv"]
+            )
+        )
+        controller_receipt["receipt_sha256"] = None
+        controller_receipt["receipt_sha256"] = sha256_bytes(
+            canonical_bytes(controller_receipt)
+        )
+    mutated_preflight_input["receipt_sha256"] = None
+    mutated_preflight_input["receipt_sha256"] = sha256_bytes(
+        canonical_bytes(mutated_preflight_input)
+    )
+    expect_validation_error(
+        "preflight input/future run mismatch",
+        lambda: validate_preflight_seal_receipt(mutated_preflight_input),
+    )
+    mutated_preflight_commit = json.loads(
+        canonical_bytes(preflight_fixture).decode("ascii")
+    )
+    mutated_preflight_commit["expected_source_commit"] = "2" * 40
+    mutated_preflight_commit["git_before"]["head"] = "2" * 40
+    mutated_preflight_commit["git_after"]["head"] = "2" * 40
+    mutated_preflight_commit["receipt_sha256"] = None
+    mutated_preflight_commit["receipt_sha256"] = sha256_bytes(
+        canonical_bytes(mutated_preflight_commit)
+    )
+    expect_validation_error(
+        "preflight receipt/input commit mismatch",
+        lambda: validate_preflight_seal_receipt(mutated_preflight_commit),
+    )
+
+    original_preflight_collector = globals()["_collect_preflight_seal"]
+    try:
+        def injected_preflight_collector(
+            _args: argparse.Namespace, _deadline: Optional[float] = None,
+        ) -> Dict[str, Any]:
+            if not PREFLIGHT_SIDE_EFFECT_GUARD:
+                raise AssertionError("preflight side-effect guard was not active")
+            expect_exact_validation_error(
+                "preflight guarded run-once",
+                "preflight side-effect tripwire: run-once dispatch",
+                lambda: run_once(argparse.Namespace()),
+            )
+            expect_exact_validation_error(
+                "preflight guarded worker launch",
+                "preflight side-effect tripwire: worker launch",
+                lambda: run_binary(Path("/tmp/worker"), 120, "0" * 64),
+            )
+            expect_exact_validation_error(
+                "preflight guarded claim reservation",
+                "preflight side-effect tripwire: claim reservation",
+                lambda: ClaimReservation.reserve(
+                    argparse.Namespace(), {}, 0
+                ),
+            )
+            expect_exact_validation_error(
+                "preflight guarded output reservation",
+                "preflight side-effect tripwire: output reservation",
+                lambda: OutputBundle.reserve(
+                    Path("/tmp/output"), 120, "0" * 40, "0" * 64,
+                    "0" * 64, Path("/tmp"),
+                ),
+            )
+            return preflight_fixture
+
+        globals()["_collect_preflight_seal"] = injected_preflight_collector
+        guarded_receipt = collect_preflight_seal(argparse.Namespace())
+        if (
+            not canonical_equal(guarded_receipt, preflight_fixture)
+            or PREFLIGHT_SIDE_EFFECT_GUARD
+        ):
+            raise AssertionError("preflight side-effect guard lifecycle differs")
+    finally:
+        globals()["_collect_preflight_seal"] = original_preflight_collector
+        globals()["PREFLIGHT_SIDE_EFFECT_GUARD"] = False
+
+    output_read_fd, output_write_fd = os.pipe()
+    try:
+        output_payload = b'{"preflight":"bounded"}\n'
+        write_preflight_payload(
+            output_write_fd, output_payload, time.monotonic() + 1.0
+        )
+        if os.read(output_read_fd, len(output_payload) + 1) != output_payload:
+            raise AssertionError("preflight bounded output bytes differ")
+    finally:
+        os.close(output_read_fd)
+        os.close(output_write_fd)
+
+    full_read_fd, full_write_fd = os.pipe()
+    try:
+        os.set_blocking(full_write_fd, False)
+        while True:
+            try:
+                os.write(full_write_fd, b"x" * 65536)
+            except BlockingIOError:
+                break
+        expect_exact_validation_error(
+            "preflight blocked output deadline",
+            "preflight seal output reached its global deadline",
+            lambda: write_preflight_payload(
+                full_write_fd, b"x", time.monotonic() + 0.02
+            ),
+        )
+    finally:
+        os.close(full_read_fd)
+        os.close(full_write_fd)
+
     parsed_claim = parse_claim_document(final_fixture["claim_raw"])
     validate_claim_runtime_binding(
         parsed_claim, final_fixture["claim_receipt"],
@@ -9568,6 +15173,55 @@ def selftest_v2() -> int:
         != health["sampler"]["environ_sha256"]
     ):
         raise AssertionError("synthetic retained run authority differs")
+
+    def drift_sampler_source_stat(sampler: Dict[str, Any]) -> None:
+        sampler["script_inode"] += 1000
+        sampler["script_stat"]["inode"] = sampler["script_inode"]
+        sampler["script_stat"]["mtime_ns"] += 1
+
+    drifted_sampler_summary = json.loads(
+        canonical_bytes(parsed_summary).decode("ascii")
+    )
+    drift_sampler_source_stat(drifted_sampler_summary["health"]["sampler"])
+    validate_sampler_receipt(drifted_sampler_summary["health"]["sampler"])
+    drifted_sampler_controller = json.loads(
+        canonical_bytes(parsed_controller).decode("ascii")
+    )
+    drift_sampler_source_stat(drifted_sampler_controller["sampler_after"])
+    validate_sampler_receipt(drifted_sampler_controller["sampler_after"])
+    validate_recorded_run_authority(
+        final_fixture["run_argv_sha256"], drifted_sampler_controller,
+        drifted_sampler_summary, parsed_claim,
+    )
+    positive_drifted_sampler_controller = dict(drifted_sampler_controller)
+    positive_drifted_sampler_controller["outcome"] = "pass"
+    expect_validation_error(
+        "positive retained sampler source stat drift",
+        lambda: validate_recorded_run_authority(
+            final_fixture["run_argv_sha256"],
+            positive_drifted_sampler_controller, drifted_sampler_summary,
+            parsed_claim,
+        ),
+    )
+    for label, field, value in (
+        (
+            "sampler source path authority", "sampler_script",
+            Path("/tmp/different-sampler.py"),
+        ),
+        (
+            "sampler source hash authority", "expected_sampler_script_sha256",
+            "0" * 64,
+        ),
+    ):
+        mutated_run = argparse.Namespace(**vars(parsed_run))
+        setattr(mutated_run, field, value)
+        expect_validation_error(
+            label,
+            lambda mutated_run=mutated_run: validate_sampler_source_authority(
+                mutated_run, parsed_controller["source_manifest_before"],
+                Path(__file__).resolve(strict=True).parents[1],
+            ),
+        )
     expect_validation_error(
         "external run argv authority seal",
         lambda: validate_recorded_run_authority(
@@ -10202,6 +15856,63 @@ def selftest_v2() -> int:
         parsed_complete, parsed_controller,
         final_fixture["controller_bytes"], final_fixture["claim_receipt"],
     )
+
+    for label, evidence_health in (
+        ("terminal EDAC abort", terminal_health),
+        (
+            "terminal final timestamp acquisition failure",
+            terminal_timestamp_failure_health,
+        ),
+        (
+            "terminal PID unlink post-removal failure",
+            pid_unlink_after_removal_health,
+        ),
+        (
+            "terminal sampler-error partial validation",
+            sampler_error_suffix_health,
+        ),
+        *seal_recovery_healths,
+        ("stale raw-ahead partial-validation evidence", stale_health),
+        ("coverage-cutoff paired-prefix evidence", coverage_cutoff_health),
+        ("stale evidence recovery failure", stale_recovery_failure_health),
+    ):
+        evidence_fixture = synthetic_final_bundle_fixture(
+            evidence_health, binary, commit
+        )
+        evidence_claim = parse_claim_document(evidence_fixture["claim_raw"])
+        evidence_summary = parse_summary_bytes(
+            evidence_fixture["summary_bytes"]
+        )
+        evidence_controller = parse_controller_document(
+            evidence_fixture["controller_bytes"]
+        )
+        validate_recorded_run_authority(
+            evidence_fixture["run_argv_sha256"], evidence_controller,
+            evidence_summary, evidence_claim,
+        )
+        validate_controller_bundle_binding(
+            evidence_controller, evidence_summary,
+            evidence_fixture["summary_bytes"],
+            evidence_fixture["claim_receipt"], binary,
+        )
+        evidence_complete = parse_complete_document(
+            canonical_bytes(evidence_fixture["complete"]) + b"\n"
+        )
+        validate_complete_bundle_binding(
+            evidence_complete, evidence_controller,
+            evidence_fixture["controller_bytes"],
+            evidence_fixture["claim_receipt"],
+        )
+        validate_retained_claim_controller_binding(
+            evidence_claim, evidence_fixture["claim_receipt"],
+            evidence_controller, evidence_summary,
+        )
+        validate_retained_science(
+            b"", b"", health_thermal_artifact_bytes(evidence_health),
+            evidence_summary,
+        )
+        if evidence_controller["outcome"] != "invalid":
+            raise AssertionError(label + " did not remain invalid")
 
     mutated_claim = json.loads(canonical_bytes(parsed_claim).decode("ascii"))
     mutated_claim["binary_sha256"] = "0" * 64
@@ -10926,6 +16637,614 @@ def selftest_v2() -> int:
             "sampler timestamps escaped their exact int63 bound"
         )
 
+    live_pair_args = argparse.Namespace(
+        expected_sampler_script_sha256=health["sampler"]["script_sha256"],
+        expected_sampler_uid=health["sampler"]["process_uid"],
+    )
+    live_raw = health["thermal"]["window_csv_ascii"].encode("ascii")
+    live_validation = health["thermal"][
+        "validation_jsonl_ascii"
+    ].encode("ascii")
+    if not validate_live_sampler_stream_pair(
+        live_raw, live_validation, live_pair_args,
+        "synthetic settled live sampler",
+    ):
+        raise AssertionError("paired live sampler streams did not settle")
+    live_raw_lines = live_raw.splitlines(keepends=True)
+    appended_row = parse_csv_physical_line(
+        live_raw_lines[-1], "synthetic appended live raw row"
+    )
+    appended_row[0] = "2026-01-01T00:00:03Z"
+    appended_row[1] = "3.000000"
+    appended_raw_line = (",".join(appended_row) + "\n").encode("ascii")
+    raw_ahead = live_raw + appended_raw_line
+    if validate_live_sampler_stream_pair(
+        raw_ahead, live_validation, live_pair_args,
+        "synthetic raw-ahead live sampler",
+    ):
+        raise AssertionError("raw-ahead live sampler was treated as settled")
+    appended_validation = parse_canonical_json_line(
+        live_validation.splitlines(keepends=True)[-1],
+        "synthetic appended live validation",
+    )
+    appended_validation["sample_index"] = 2
+    appended_validation["monotonic_s"] = 3.0
+    paired_continue_validation = (
+        live_validation + canonical_bytes(appended_validation) + b"\n"
+    )
+    if not validate_live_sampler_stream_pair(
+        raw_ahead, paired_continue_validation, live_pair_args,
+        "synthetic delayed paired live sampler",
+    ):
+        raise AssertionError("delayed continue validation did not settle")
+    appended_validation["decision"] = "edac_abort"
+    terminal_live_validation = (
+        live_validation + canonical_bytes(appended_validation) + b"\n"
+    )
+    expect_validation_error(
+        "post-window live terminal validation",
+        lambda: validate_live_sampler_stream_pair(
+            raw_ahead, terminal_live_validation, live_pair_args,
+            "synthetic post-window terminal live sampler",
+        ),
+    )
+
+    with tempfile.TemporaryDirectory() as directory:
+        settle_root = Path(directory)
+        settle_raw = settle_root / "thermal.csv"
+        settle_pid = settle_root / "sampler.pid"
+        settle_validation = settle_root / "validation.jsonl"
+        settle_receipt = settle_root / "receipt.json"
+        settle_raw.write_bytes(raw_ahead)
+        settle_pid.write_bytes((str(os.getpid()) + "\n").encode("ascii"))
+        settle_validation_fd = os.open(
+            settle_validation,
+            os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
+            0o600,
+        )
+        settle_receipt_fd = os.open(
+            settle_receipt,
+            os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
+            0o600,
+        )
+        os.write(settle_validation_fd, live_validation)
+        os.fchmod(settle_validation_fd, 0o444)
+        os.fchmod(settle_receipt_fd, 0o444)
+        os.chmod(settle_raw, 0o600)
+        os.chmod(settle_pid, 0o444)
+        settle_paths = (
+            settle_raw, settle_pid, settle_validation, settle_receipt,
+        )
+        settle_infos = [
+            os.stat(path, follow_symlinks=False) for path in settle_paths
+        ]
+        settle_args = argparse.Namespace(
+            expected_sampler_csv_device=settle_infos[0].st_dev,
+            expected_sampler_csv_inode=settle_infos[0].st_ino,
+            expected_sampler_gid=os.getgid(),
+            expected_sampler_i2c_gid=EXPECTED_SAMPLER_I2C_GID,
+            expected_sampler_pid_file_device=settle_infos[1].st_dev,
+            expected_sampler_pid_file_inode=settle_infos[1].st_ino,
+            expected_sampler_process_start_ticks=process_start_ticks(
+                os.getpid()
+            ),
+            expected_sampler_receipt_device=settle_infos[3].st_dev,
+            expected_sampler_receipt_inode=settle_infos[3].st_ino,
+            expected_sampler_script_sha256=health["sampler"][
+                "script_sha256"
+            ],
+            expected_sampler_uid=os.getuid(),
+            expected_sampler_validation_device=settle_infos[2].st_dev,
+            expected_sampler_validation_inode=settle_infos[2].st_ino,
+            sampler_csv=settle_raw,
+            sampler_pid=os.getpid(),
+            sampler_pid_file=settle_pid,
+            sampler_receipt=settle_receipt,
+            sampler_script=Path(health["sampler"]["script_path"]),
+            sampler_validation_jsonl=settle_validation,
+        )
+
+        class SyntheticHealthApi:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.publish_final_intent = False
+
+            def _verify_live_sampler_process(self, *_args: Any) -> None:
+                self.calls += 1
+                if self.publish_final_intent and self.calls == 2:
+                    os.lseek(settle_receipt_fd, 0, os.SEEK_SET)
+                    os.write(settle_receipt_fd, b"!")
+                    os.fsync(settle_receipt_fd)
+
+        settle_health_api = SyntheticHealthApi()
+        original_read_process_security = globals()["read_process_security"]
+        original_sched_getaffinity = os.sched_getaffinity
+        original_monotonic_ns = time.monotonic_ns
+        original_sleep = time.sleep
+        delayed_validation_written = False
+        appended_validation_line = paired_continue_validation[
+            len(live_validation):
+        ]
+
+        def synthetic_process_security(
+            _pid: int, _where: str,
+        ) -> Dict[str, Any]:
+            security = dict(health["sampler"]["process_security"])
+            security["uids"] = [os.getuid()] * 4
+            security["gids"] = [os.getgid()] * 4
+            return security
+
+        def publish_delayed_validation(_seconds: float) -> None:
+            nonlocal delayed_validation_written
+            if not delayed_validation_written:
+                os.lseek(settle_validation_fd, 0, os.SEEK_END)
+                os.write(settle_validation_fd, appended_validation_line)
+                os.fsync(settle_validation_fd)
+                delayed_validation_written = True
+
+        try:
+            globals()["read_process_security"] = synthetic_process_security
+            os.sched_getaffinity = (  # type: ignore[assignment]
+                lambda _pid: {EXPECTED_SAMPLER_CPU}
+            )
+            time.monotonic_ns = (  # type: ignore[assignment]
+                lambda: 3_000_000_000 + SAMPLER_HEARTBEAT_MAX_GAP_NS
+            )
+            time.sleep = publish_delayed_validation  # type: ignore[assignment]
+            settled = settle_live_sampler_streams(
+                settle_args, settle_health_api, time.monotonic() + 1.0,
+                "synthetic delayed live streams",
+            )
+            if (
+                not delayed_validation_written
+                or settled["csv_data"] != raw_ahead
+                or settled["validation_data"] != paired_continue_validation
+            ):
+                raise AssertionError(
+                    "live stream settler did not wait for delayed validation"
+                )
+            settle_health_api.calls = 0
+            settle_health_api.publish_final_intent = True
+            expect_validation_error(
+                "terminal intent after paired stream snapshots",
+                lambda: settle_live_sampler_streams(
+                    settle_args, settle_health_api,
+                    time.monotonic() + 1.0,
+                    "synthetic final-intent live streams",
+                ),
+            )
+            os.lseek(settle_receipt_fd, 0, os.SEEK_SET)
+            os.ftruncate(settle_receipt_fd, 0)
+            os.fsync(settle_receipt_fd)
+            settle_health_api.calls = 0
+            settle_health_api.publish_final_intent = False
+            time.monotonic_ns = (  # type: ignore[assignment]
+                lambda: (
+                    3_000_000_000 + SAMPLER_HEARTBEAT_MAX_GAP_NS + 1
+                )
+            )
+            expect_validation_error(
+                "final live sampler stale heartbeat",
+                lambda: settle_live_sampler_streams(
+                    settle_args, settle_health_api,
+                    time.monotonic() + 1.0,
+                    "synthetic stale live streams",
+                ),
+            )
+            os.lseek(settle_validation_fd, 0, os.SEEK_SET)
+            os.ftruncate(settle_validation_fd, 0)
+            os.write(settle_validation_fd, live_validation)
+            os.fsync(settle_validation_fd)
+            stale_raw_ahead = settle_live_sampler_streams(
+                settle_args, settle_health_api, time.monotonic() + 1.0,
+                "synthetic stale raw-ahead streams", require_fresh=False,
+                allow_stale_suffixes=True,
+            )
+            if (
+                stale_raw_ahead["csv_full_data"] != raw_ahead
+                or stale_raw_ahead["validation_data"] != live_validation
+                or stale_raw_ahead["paired_end_monotonic_ns"]
+                != 2_000_000_000
+            ):
+                raise AssertionError(
+                    "stale raw-ahead sampler prefix was not preserved"
+                )
+            partial_validation = (
+                live_validation
+                + appended_validation_line[:len(appended_validation_line) // 2]
+            )
+            os.lseek(settle_validation_fd, 0, os.SEEK_SET)
+            os.ftruncate(settle_validation_fd, 0)
+            os.write(settle_validation_fd, partial_validation)
+            os.fsync(settle_validation_fd)
+            stale_validation_partial = settle_live_sampler_streams(
+                settle_args, settle_health_api, time.monotonic() + 1.0,
+                "synthetic stale partial-validation streams",
+                require_fresh=False, allow_stale_suffixes=True,
+            )
+            if (
+                stale_validation_partial["validation_data"]
+                != partial_validation
+                or stale_validation_partial["paired_end_monotonic_ns"]
+                != 2_000_000_000
+            ):
+                raise AssertionError(
+                    "stale partial validation suffix was not preserved"
+                )
+            cutoff_sampler = json.loads(
+                canonical_bytes(health["sampler"]).decode("ascii")
+            )
+            cutoff_sampler.update({
+                "csv_bytes": len(stale_validation_partial["paired_raw"]),
+                "csv_device": stale_validation_partial["csv_info"].st_dev,
+                "csv_inode": stale_validation_partial["csv_info"].st_ino,
+                "csv_path": str(settle_raw),
+                "csv_sha256": sha256_bytes(
+                    stale_validation_partial["paired_raw"]
+                ),
+                "csv_stat": stat_receipt(
+                    stale_validation_partial["csv_info"]
+                ),
+                "pid": os.getpid(),
+                "process_gid": os.getgid(),
+                "process_start_ticks": (
+                    settle_args.expected_sampler_process_start_ticks
+                ),
+                "process_uid": os.getuid(),
+                "validation_jsonl": stale_validation_partial[
+                    "validation_jsonl"
+                ],
+                "window_end_monotonic_ns": 2_000_000_000,
+                "window_start_monotonic_ns": 1_000_000_000,
+            })
+            cutoff_capture = {
+                "csv_full_data": stale_validation_partial["csv_full_data"],
+                "csv_info": stale_validation_partial["csv_info"],
+                "snapshot_observed_monotonic_ns": (
+                    stale_validation_partial[
+                        "snapshot_observed_monotonic_ns"
+                    ]
+                ),
+                "validation_data": stale_validation_partial[
+                    "validation_data"
+                ],
+                "validation_info": stale_validation_partial[
+                    "validation_info"
+                ],
+            }
+            with settle_raw.open("ab", buffering=0) as moving_raw:
+                moving_raw.write(appended_raw_line)
+                os.fsync(moving_raw.fileno())
+            os.lseek(settle_validation_fd, 0, os.SEEK_END)
+            os.write(settle_validation_fd, b"post-cutoff-growth")
+            os.fsync(settle_validation_fd)
+            cutoff_thermal, cutoff_collection, cutoff_violations = (
+                tolerant_thermal_window(
+                    settle_args, cutoff_sampler,
+                    cutoff_sampler["window_start_monotonic_ns"],
+                    cutoff_sampler["window_end_monotonic_ns"],
+                    allow_stale_suffixes=True,
+                    deadline=time.monotonic() + 1.0,
+                    stale_stream_capture=cutoff_capture,
+                )
+            )
+            if (
+                cutoff_collection or cutoff_violations
+                or cutoff_thermal["window_csv_ascii"]
+                != health["thermal"]["window_csv_ascii"]
+                or cutoff_thermal["validation_jsonl_ascii"]
+                != health["thermal"]["validation_jsonl_ascii"]
+            ):
+                raise AssertionError(
+                    "post-cutoff sampler growth discarded captured evidence"
+                )
+            expect_validation_error(
+                "validation partial without preceding raw row",
+                lambda: validate_stale_sampler_stream_prefix(
+                    live_raw, partial_validation, live_pair_args,
+                    "synthetic impossible validation-only partial",
+                    time.monotonic_ns(),
+                ),
+            )
+            partial_raw = live_raw + appended_raw_line[
+                :len(appended_raw_line) // 2
+            ]
+            settle_raw.write_bytes(partial_raw)
+            os.lseek(settle_validation_fd, 0, os.SEEK_SET)
+            os.ftruncate(settle_validation_fd, 0)
+            os.write(settle_validation_fd, live_validation)
+            os.fsync(settle_validation_fd)
+            stale_raw_partial = settle_live_sampler_streams(
+                settle_args, settle_health_api, time.monotonic() + 1.0,
+                "synthetic stale partial-raw streams", require_fresh=False,
+                allow_stale_suffixes=True,
+            )
+            if stale_raw_partial["csv_full_data"] != partial_raw:
+                raise AssertionError(
+                    "stale partial raw suffix was not preserved"
+                )
+        finally:
+            time.sleep = original_sleep  # type: ignore[assignment]
+            time.monotonic_ns = original_monotonic_ns  # type: ignore[assignment]
+            os.sched_getaffinity = original_sched_getaffinity  # type: ignore[assignment]
+            globals()["read_process_security"] = original_read_process_security
+            os.close(settle_receipt_fd)
+            os.close(settle_validation_fd)
+
+    validation_lines = health["thermal"][
+        "validation_jsonl_ascii"
+    ].encode("ascii").splitlines(keepends=True)
+    quantized_handles: Dict[str, Any] = {
+        "validation_buffer": b"",
+        "validation_csv_timestamp_ns": [],
+        "validation_last_csv_timestamp_ns": None,
+        "validation_last_monotonic_ns": None,
+        "validation_monotonic_ns": [],
+        "validation_sample_index": None,
+    }
+    quantized_first = parse_canonical_json_line(
+        validation_lines[1], "synthetic quantized validation first"
+    )
+    quantized_first["monotonic_s"] = 1.2345674
+    quantized_second = parse_canonical_json_line(
+        validation_lines[2], "synthetic quantized validation second"
+    )
+    quantized_second["monotonic_s"] = 2.0000006
+    if (
+        consume_sampler_validation_bytes(
+            quantized_handles,
+            canonical_bytes(quantized_first) + b"\n",
+            "synthetic quantized validation first",
+        ) != "none"
+        or consume_sampler_validation_bytes(
+            quantized_handles,
+            canonical_bytes(quantized_second) + b"\n",
+            "synthetic quantized validation second",
+        ) != "none"
+        or quantized_handles["validation_monotonic_ns"]
+        != [1_234_567_400, 2_000_000_600]
+        or quantized_handles["validation_csv_timestamp_ns"]
+        != [1_234_567_000, 2_000_001_000]
+    ):
+        raise AssertionError("sampler validation/CSV timestamp quantization differs")
+
+    original_poll_sampler_supervision = globals()["poll_sampler_supervision"]
+    try:
+        paired_target = 1_234_567_000
+        delayed_pair_handles: Dict[str, Any] = {
+            "validation_csv_timestamp_ns": [],
+            "validation_last_csv_timestamp_ns": None,
+        }
+        delayed_pair_polls = 0
+
+        def delayed_pair_poll(_handles: Mapping[str, Any]) -> str:
+            nonlocal delayed_pair_polls
+            delayed_pair_polls += 1
+            if delayed_pair_polls == 2:
+                delayed_pair_handles["validation_csv_timestamp_ns"] = [
+                    paired_target
+                ]
+                delayed_pair_handles["validation_last_csv_timestamp_ns"] = (
+                    paired_target
+                )
+            return "none"
+
+        globals()["poll_sampler_supervision"] = delayed_pair_poll
+        if (
+            wait_for_sampler_validation_timestamp_supervised(
+                delayed_pair_handles, paired_target, time.monotonic() + 1.0
+            ) != "none"
+            or delayed_pair_polls < 3
+        ):
+            raise AssertionError("raw admission endpoint bypassed validation pairing")
+
+        terminal_pair_handles: Dict[str, Any] = {
+            "validation_csv_timestamp_ns": [],
+            "validation_last_csv_timestamp_ns": None,
+        }
+
+        def terminal_pair_poll(_handles: Mapping[str, Any]) -> str:
+            terminal_pair_handles["validation_csv_timestamp_ns"] = [
+                paired_target
+            ]
+            terminal_pair_handles["validation_last_csv_timestamp_ns"] = (
+                paired_target
+            )
+            return "sampler-terminal-decision:thermal_abort"
+
+        globals()["poll_sampler_supervision"] = terminal_pair_poll
+        if wait_for_sampler_validation_timestamp_supervised(
+            terminal_pair_handles, paired_target, time.monotonic() + 1.0
+        ) != "sampler-terminal-decision:thermal_abort":
+            raise AssertionError("terminal validation decision lost to paired endpoint")
+
+        confirmed_pair_handles: Dict[str, Any] = {
+            "validation_csv_timestamp_ns": [paired_target],
+            "validation_last_csv_timestamp_ns": paired_target,
+        }
+        confirmation_polls = 0
+
+        def confirmation_poll(_handles: Mapping[str, Any]) -> str:
+            nonlocal confirmation_polls
+            confirmation_polls += 1
+            return (
+                "sampler-terminal-intent"
+                if confirmation_polls == 2 else "none"
+            )
+
+        globals()["poll_sampler_supervision"] = confirmation_poll
+        if wait_for_sampler_validation_timestamp_supervised(
+            confirmed_pair_handles, paired_target, time.monotonic() + 1.0
+        ) != "sampler-terminal-intent":
+            raise AssertionError("post-pair sampler intent did not win admission")
+
+        skipped_pair_handles: Dict[str, Any] = {
+            "validation_csv_timestamp_ns": [paired_target + 1000],
+            "validation_last_csv_timestamp_ns": paired_target + 1000,
+        }
+        globals()["poll_sampler_supervision"] = lambda _handles: "none"
+        expect_validation_error(
+            "skipped sampler validation endpoint",
+            lambda: wait_for_sampler_validation_timestamp_supervised(
+                skipped_pair_handles, paired_target, time.monotonic() + 1.0
+            ),
+        )
+        missing_pair_handles: Dict[str, Any] = {
+            "validation_csv_timestamp_ns": [],
+            "validation_last_csv_timestamp_ns": None,
+        }
+        expect_validation_error(
+            "sampler validation endpoint deadline",
+            lambda: wait_for_sampler_validation_timestamp_supervised(
+                missing_pair_handles, paired_target, time.monotonic()
+            ),
+        )
+    finally:
+        globals()["poll_sampler_supervision"] = original_poll_sampler_supervision
+
+    cutoff_receipt = json.loads(canonical_bytes(health).decode("ascii"))
+    cutoff_receipt.update({
+        "child_reap_monotonic_ns": None,
+        "child_start_monotonic_ns": None,
+        "controller_singleton_affinity_end": [],
+        "sampler": {},
+        "sampler_receipt_sha256": None,
+        "sampler_terminal": {},
+        "sampler_terminal_receipt_sha256": None,
+        "sibling_ticks": [],
+        "thermal": {},
+    })
+    cutoff_receipt = finalize_health_receipt(cutoff_receipt, [], [])
+    cutoff_state = {
+        "collection_failures": [],
+        "ready": True,
+        "receipt": cutoff_receipt,
+        "sample_start_ns": health["sampler"][
+            "window_start_monotonic_ns"
+        ],
+        "sampler_handles": {"synthetic": True},
+        "sampler_supervision_event": "none",
+        "sibling_start": health["sibling_ticks"][0]["start"],
+        "violations": [],
+    }
+    cutoff_args = argparse.Namespace()
+    cutoff_make_calls = 0
+    cutoff_thermal_calls = 0
+    cutoff_clock = 98.5
+    cutoff_deadline = 100.0
+    original_make_sampler_attestation = globals()["make_sampler_attestation"]
+    original_tolerant_thermal_window = globals()["tolerant_thermal_window"]
+    original_wait_sampler_timestamp = globals()[
+        "wait_for_sampler_timestamp_supervised"
+    ]
+    original_wait_sampler_validation = globals()[
+        "wait_for_sampler_validation_timestamp_supervised"
+    ]
+    original_cutoff_poll_sampler = globals()["poll_sampler_supervision"]
+    original_close_sampler_handles = globals()[
+        "close_sampler_admission_handles"
+    ]
+    original_read_tick = globals()["read_cpu_tick_receipt"]
+    original_sched_getaffinity = os.sched_getaffinity
+    original_monotonic = time.monotonic
+
+    def cutoff_make_sampler(
+        _args: argparse.Namespace, start_ns: int, end_ns: int,
+        _modules: Any, deadline: Optional[float] = None, *,
+        allow_stale_evidence: bool = False,
+        stale_stream_capture: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        nonlocal cutoff_make_calls
+        cutoff_make_calls += 1
+        if (
+            start_ns != health["sampler"]["window_start_monotonic_ns"]
+            or end_ns != start_ns or deadline != 99.5
+            or not allow_stale_evidence
+            or stale_stream_capture is None
+        ):
+            raise AssertionError("coverage cutoff stale-attestation call differs")
+        stale_stream_capture["cutoff-snapshot"] = True
+        return json.loads(canonical_bytes(health["sampler"]).decode("ascii"))
+
+    def cutoff_thermal_window(
+        _args: argparse.Namespace, sampler: Mapping[str, Any],
+        start_ns: int, end_ns: int, *,
+        allow_stale_suffixes: bool = False,
+        deadline: Optional[float] = None,
+        stale_stream_capture: Optional[Mapping[str, Any]] = None,
+    ) -> Tuple[Dict[str, Any], List[str], List[str]]:
+        nonlocal cutoff_thermal_calls
+        cutoff_thermal_calls += 1
+        if (
+            not canonical_equal(sampler, health["sampler"])
+            or start_ns != health["sampler"]["window_start_monotonic_ns"]
+            or end_ns != health["sampler"]["window_end_monotonic_ns"]
+            or not allow_stale_suffixes or deadline != 99.5
+            or stale_stream_capture != {"cutoff-snapshot": True}
+        ):
+            raise AssertionError("coverage cutoff thermal call differs")
+        return (
+            json.loads(canonical_bytes(health["thermal"]).decode("ascii")),
+            [], [],
+        )
+
+    def forbidden_cutoff_wait(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("coverage cutoff attempted an endpoint wait")
+
+    try:
+        globals()["make_sampler_attestation"] = cutoff_make_sampler
+        globals()["tolerant_thermal_window"] = cutoff_thermal_window
+        globals()["wait_for_sampler_timestamp_supervised"] = (
+            forbidden_cutoff_wait
+        )
+        globals()["wait_for_sampler_validation_timestamp_supervised"] = (
+            forbidden_cutoff_wait
+        )
+        globals()["poll_sampler_supervision"] = lambda _handles: "none"
+        globals()["close_sampler_admission_handles"] = lambda _handles: None
+        globals()["read_cpu_tick_receipt"] = (
+            lambda _cpu: health["sibling_ticks"][0]["end"]
+        )
+        os.sched_getaffinity = (  # type: ignore[assignment]
+            lambda _pid: {EXPECTED_CONTROLLER_CPU}
+        )
+        time.monotonic = lambda: cutoff_clock  # type: ignore[assignment]
+        cutoff_health, cutoff_errors = finish_health(
+            cutoff_args, EXPECTED_TARGET_CPU,
+            binary["child_start_monotonic_ns"],
+            binary["child_reap_monotonic_ns"],
+            cutoff_state, cutoff_deadline, object(),
+        )
+    finally:
+        time.monotonic = original_monotonic  # type: ignore[assignment]
+        os.sched_getaffinity = original_sched_getaffinity  # type: ignore[assignment]
+        globals()["read_cpu_tick_receipt"] = original_read_tick
+        globals()["close_sampler_admission_handles"] = (
+            original_close_sampler_handles
+        )
+        globals()["wait_for_sampler_validation_timestamp_supervised"] = (
+            original_wait_sampler_validation
+        )
+        globals()["wait_for_sampler_timestamp_supervised"] = (
+            original_wait_sampler_timestamp
+        )
+        globals()["poll_sampler_supervision"] = original_cutoff_poll_sampler
+        globals()["tolerant_thermal_window"] = original_tolerant_thermal_window
+        globals()["make_sampler_attestation"] = original_make_sampler_attestation
+    cutoff_marker = (
+        "sampler endpoint: sampler-monitor-invalid:"
+        "coverage-recovery-cutoff"
+    )
+    if (
+        cutoff_make_calls != 1 or cutoff_thermal_calls != 1
+        or cutoff_health["collection_failures"] != [cutoff_marker]
+        or cutoff_errors != ["health collection: " + cutoff_marker]
+        or not canonical_equal(cutoff_health["sampler"], health["sampler"])
+        or not canonical_equal(cutoff_health["thermal"], health["thermal"])
+    ):
+        raise AssertionError("coverage recovery cutoff branch differs")
+    validate_health_receipt(cutoff_health, binary, require_complete=False)
+
     with tempfile.TemporaryDirectory() as directory:
         replaced_csv = Path(directory) / "sampler.csv"
         replaced_csv.write_bytes(
@@ -10990,7 +17309,10 @@ def selftest_v2() -> int:
         fake_binary_bytes = b"synthetic worker image; never executed\n"
         fake_binary.write_bytes(fake_binary_bytes)
         os.chmod(fake_binary, 0o555)
-        health_args = argparse.Namespace(expected_binary_uid=os.getuid())
+        health_args = argparse.Namespace(
+            expected_binary_uid=os.getuid(),
+            expected_controller_gid=os.getgid(),
+        )
         origin_ns = time.monotonic_ns()
         prepared_receipt = empty_health_receipt(health_args)
         prepared_admission = json.loads(canonical_bytes(
@@ -11009,7 +17331,8 @@ def selftest_v2() -> int:
         prepared_receipt = finalize_health_receipt(prepared_receipt, [], [])
         prepared_state = {
             "collection_failures": [], "ready": True,
-            "receipt": prepared_receipt, "violations": [],
+            "receipt": prepared_receipt,
+            "sampler_handles": {"synthetic": True}, "violations": [],
         }
         observed_finish_intervals: List[
             Tuple[Optional[int], Optional[int]]
@@ -11018,6 +17341,9 @@ def selftest_v2() -> int:
         original_finish_health = globals()["finish_health"]
         original_read_tick = globals()["read_cpu_tick_receipt"]
         original_process_start_ticks = globals()["process_start_ticks"]
+        original_poll_sampler_supervision = globals()[
+            "poll_sampler_supervision"
+        ]
         original_terminate = globals()["terminate_process_group"]
 
         def injected_finish_health(
@@ -11063,6 +17389,7 @@ def selftest_v2() -> int:
         try:
             globals()["finish_health"] = injected_finish_health
             globals()["read_cpu_tick_receipt"] = injected_tick
+            globals()["poll_sampler_supervision"] = lambda _handles: "none"
             subprocess.Popen = injected_popen_failure  # type: ignore[assignment]
             launch_failure = run_binary(
                 fake_binary, EXPECTED_TARGET_CPU,
@@ -11332,6 +17659,9 @@ def selftest_v2() -> int:
             globals()["finish_health"] = original_finish_health
             globals()["read_cpu_tick_receipt"] = original_read_tick
             globals()["process_start_ticks"] = original_process_start_ticks
+            globals()["poll_sampler_supervision"] = (
+                original_poll_sampler_supervision
+            )
             globals()["terminate_process_group"] = original_terminate
 
     previous_receipts = EXPECTED_CELL_RECEIPTS
@@ -11887,6 +18217,116 @@ def selftest_v2() -> int:
     captured = bounded_capture(sleeper, time.monotonic() + 0.05)
     if not captured.timed_out or sleeper.returncode is None:
         raise AssertionError("bounded scratch timeout did not kill/reap")
+
+    with tempfile.TemporaryDirectory() as directory:
+        heartbeat_root = Path(directory)
+        heartbeat_receipt = heartbeat_root / "receipt.json"
+        heartbeat_validation = heartbeat_root / "validation.jsonl"
+        heartbeat_receipt.write_bytes(b"")
+        heartbeat_validation.write_bytes(b"")
+        os.chmod(heartbeat_receipt, 0o444)
+        os.chmod(heartbeat_validation, 0o444)
+        heartbeat_receipt_fd = os.open(
+            heartbeat_receipt, nonblocking_read_flags("heartbeat receipt")
+        )
+        heartbeat_validation_fd = os.open(
+            heartbeat_validation,
+            nonblocking_read_flags("heartbeat validation"),
+        )
+        heartbeat_pidfd_writer: Optional[int] = None
+        if hasattr(os, "pidfd_open"):
+            heartbeat_pidfd = os.pidfd_open(os.getpid(), 0)
+        else:
+            # Python 3.8 predates os.pidfd_open.  A quiet pipe read end has the
+            # same not-readable selector state needed by this scratch-only
+            # heartbeat-boundary test; authority modes still require a real
+            # Linux pidfd and fail closed in open_sampler_admission_handles.
+            heartbeat_pidfd, heartbeat_pidfd_writer = os.pipe()
+        heartbeat_base = 10_000_000_000
+        heartbeat_handles: Dict[str, Any] = {
+            "file_fds": {
+                "receipt_file": heartbeat_receipt_fd,
+                "validation_jsonl": heartbeat_validation_fd,
+            },
+            "pidfd": heartbeat_pidfd,
+            "pidfd_exit_observed_ns": None,
+            "receipt_admission_stat": stat_receipt(
+                os.fstat(heartbeat_receipt_fd)
+            ),
+            "validation_buffer": b"",
+            "validation_csv_timestamp_ns": [heartbeat_base],
+            "validation_last_csv_timestamp_ns": heartbeat_base,
+            "validation_last_monotonic_ns": heartbeat_base,
+            "validation_monotonic_ns": [heartbeat_base],
+            "validation_offset": 0,
+            "validation_sample_index": 0,
+        }
+        original_monotonic_ns = time.monotonic_ns
+        try:
+            time.monotonic_ns = (  # type: ignore[assignment]
+                lambda: heartbeat_base + SAMPLER_HEARTBEAT_MAX_GAP_NS
+            )
+            if poll_sampler_supervision(heartbeat_handles) != "none":
+                raise AssertionError("exact heartbeat boundary was rejected")
+            time.monotonic_ns = (  # type: ignore[assignment]
+                lambda: heartbeat_base + SAMPLER_HEARTBEAT_MAX_GAP_NS + 1
+            )
+            if poll_sampler_supervision(heartbeat_handles) != (
+                "sampler-monitor-invalid:validation-heartbeat-stale"
+            ):
+                raise AssertionError("stale sampler heartbeat was not detected")
+        finally:
+            time.monotonic_ns = original_monotonic_ns  # type: ignore[assignment]
+            os.close(heartbeat_pidfd)
+            if heartbeat_pidfd_writer is not None:
+                os.close(heartbeat_pidfd_writer)
+            os.close(heartbeat_validation_fd)
+            os.close(heartbeat_receipt_fd)
+
+    closed_pipe_process = subprocess.Popen(
+        [
+            sys.executable, "-I", "-B", "-c",
+            "import os,time;os.close(1);os.close(2);time.sleep(10)",
+        ],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, start_new_session=True,
+    )
+    original_poll_sampler_supervision = globals()["poll_sampler_supervision"]
+    try:
+        def closed_pipe_sampler_event(_handles: Mapping[str, Any]) -> str:
+            return (
+                "sampler-monitor-invalid:validation-heartbeat-stale"
+                if closed_pipe_process.stdout is not None
+                and closed_pipe_process.stderr is not None
+                and closed_pipe_process.stdout.closed
+                and closed_pipe_process.stderr.closed
+                else "none"
+            )
+
+        globals()["poll_sampler_supervision"] = closed_pipe_sampler_event
+        closed_pipe_capture = bounded_capture(
+            closed_pipe_process, time.monotonic() + 1.0,
+            sampler_monitor_handles={"synthetic": True},
+        )
+        if (
+            closed_pipe_capture.sampler_event
+            != "sampler-monitor-invalid:validation-heartbeat-stale"
+            or closed_pipe_capture.timed_out
+            or closed_pipe_process.returncode is None
+        ):
+            raise AssertionError(
+                "closed worker pipes disabled sampler supervision"
+            )
+    finally:
+        globals()["poll_sampler_supervision"] = (
+            original_poll_sampler_supervision
+        )
+        if closed_pipe_process.returncode is None:
+            terminate_process_group(closed_pipe_process)
+            try:
+                closed_pipe_process.wait(timeout=5.0)
+            except BaseException:
+                pass
     print("WH2 direct systematic complement analyzer selftest passed")
     return 0
 
@@ -11900,6 +18340,7 @@ def argument_parser() -> AuthorityArgumentParser:
     parser = AuthorityArgumentParser(allow_abbrev=False, add_help=False)
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--selftest", action="store_true")
+    mode.add_argument("--preflight-seal", action="store_true")
     mode.add_argument("--run-once", action="store_true")
     mode.add_argument("--verify-retained", action="store_true")
     parser.add_argument("--binary")
@@ -11910,22 +18351,34 @@ def argument_parser() -> AuthorityArgumentParser:
     parser.add_argument("--sampler-cpu", type=int)
     parser.add_argument("--sampler-script", type=Path)
     parser.add_argument("--sampler-csv", type=Path)
+    parser.add_argument("--sampler-pid-file", type=Path)
+    parser.add_argument("--sampler-validation-jsonl", type=Path)
+    parser.add_argument("--sampler-receipt", type=Path)
     parser.add_argument("--expected-source-commit")
     parser.add_argument("--expected-binary-sha256")
     parser.add_argument("--expected-binary-uid", type=int)
     parser.add_argument("--expected-build-manifest-sha256")
     parser.add_argument("--expected-controller-sha256")
     parser.add_argument("--expected-controller-uid", type=int)
+    parser.add_argument("--expected-controller-gid", type=int)
     parser.add_argument("--expected-git-sha256")
     parser.add_argument("--expected-python-sha256")
     parser.add_argument("--expected-sampler-process-start-ticks", type=int)
     parser.add_argument("--expected-sampler-script-sha256")
     parser.add_argument("--expected-sampler-csv-device", type=int)
     parser.add_argument("--expected-sampler-csv-inode", type=int)
+    parser.add_argument("--expected-sampler-pid-file-device", type=int)
+    parser.add_argument("--expected-sampler-pid-file-inode", type=int)
+    parser.add_argument("--expected-sampler-validation-device", type=int)
+    parser.add_argument("--expected-sampler-validation-inode", type=int)
+    parser.add_argument("--expected-sampler-receipt-device", type=int)
+    parser.add_argument("--expected-sampler-receipt-inode", type=int)
     parser.add_argument("--expected-sampler-cmdline-sha256")
     parser.add_argument("--expected-sampler-environ-sha256")
     parser.add_argument("--expected-sampler-executable-sha256")
     parser.add_argument("--expected-sampler-uid", type=int)
+    parser.add_argument("--expected-sampler-gid", type=int)
+    parser.add_argument("--expected-sampler-i2c-gid", type=int)
     parser.add_argument("--expected-source-manifest-sha256")
     parser.add_argument("--expected-run-argv-sha256")
     return parser
@@ -11934,6 +18387,14 @@ def argument_parser() -> AuthorityArgumentParser:
 def validate_cli_token_shape(argv: Sequence[str]) -> None:
     tokens = list(argv)
     if tokens == ["--selftest"]:
+        return
+    if (
+        len(tokens) == 1 + 2 * len(PREFLIGHT_SEAL_OPTION_ORDER)
+        and tokens[0] == "--preflight-seal"
+    ):
+        for index, expected in enumerate(PREFLIGHT_SEAL_OPTION_ORDER):
+            if tokens[1 + 2 * index] != expected:
+                fail("preflight-seal option roster/order differs")
         return
     if (
         len(tokens) == 3
@@ -11949,11 +18410,22 @@ def validate_cli_token_shape(argv: Sequence[str]) -> None:
     fail("argument vector does not match one exact public mode")
 
 
-def require_authorized_process_uid(expected_uid: int) -> None:
-    if not hasattr(os, "getresuid"):
-        fail("controller UID policy requires Linux getresuid")
+def require_authorized_process_identity(expected_uid: int, expected_gid: int) -> None:
+    if not hasattr(os, "getresuid") or not hasattr(os, "getresgid"):
+        fail("controller identity policy requires Linux getresuid/getresgid")
     if os.getresuid() != (expected_uid, expected_uid, expected_uid):
         fail("controller real/effective/saved UIDs differ from authorization")
+    if os.getresgid() != (expected_gid, expected_gid, expected_gid):
+        fail("controller real/effective/saved GIDs differ from authorization")
+    if os.getgroups() != []:
+        fail("controller supplementary group roster is not empty")
+    security = read_process_security(os.getpid(), "controller live identity")
+    validate_process_security(
+        security, expected_uid, expected_gid, [], "controller live identity"
+    )
+    proc_info = os.stat(f"/proc/{os.getpid()}", follow_symlinks=False)
+    if proc_info.st_uid != expected_uid or proc_info.st_gid != expected_gid:
+        fail("controller /proc directory ownership differs")
 
 
 def parse_cli_tokens(
@@ -11980,6 +18452,73 @@ def parse_cli_tokens(
         dict(os.environ), SEALED_LAUNCH_ENVIRONMENT
     ):
         parser.error("authority mode startup environment differs")
+    if args.preflight_seal:
+        source_root = Path(__file__).resolve(strict=True).parents[1]
+        token_values = {
+            argv[1 + 2 * index]: argv[2 + 2 * index]
+            for index in range(len(PREFLIGHT_SEAL_OPTION_ORDER))
+        }
+        paths = (
+            args.build_dir, args.sampler_script, args.sampler_csv,
+            args.sampler_pid_file, args.sampler_validation_jsonl,
+            args.sampler_receipt,
+        )
+        if (
+            not args.binary
+            or not Path(args.binary).is_absolute()
+            or os.path.normpath(args.binary) != args.binary
+            or args.sampler_pid is None
+            or not 1 <= args.sampler_pid <= MAX_INT63
+            or token_values["--sampler-pid"] != str(args.sampler_pid)
+            or (live_process and args.sampler_pid == os.getpid())
+            or type(args.expected_source_commit) is not str
+            or LOWER40.fullmatch(args.expected_source_commit) is None
+            or any(
+                path is None or not path.is_absolute()
+                or os.path.normpath(str(path)) != str(path)
+                for path in paths
+            )
+            or args.sampler_script != source_root / SAMPLER_SOURCE_PATH
+            or len({args.binary, *(str(path) for path in paths)})
+            != len(paths) + 1
+            or any(
+                value is not None
+                for value in (
+                    args.cpu, args.controller_cpu, args.sampler_cpu,
+                    args.expected_binary_sha256, args.expected_binary_uid,
+                    args.expected_build_manifest_sha256,
+                    args.expected_controller_sha256,
+                    args.expected_controller_uid, args.expected_controller_gid,
+                    args.expected_git_sha256, args.expected_python_sha256,
+                    args.expected_sampler_process_start_ticks,
+                    args.expected_sampler_script_sha256,
+                    args.expected_sampler_csv_device,
+                    args.expected_sampler_csv_inode,
+                    args.expected_sampler_pid_file_device,
+                    args.expected_sampler_pid_file_inode,
+                    args.expected_sampler_validation_device,
+                    args.expected_sampler_validation_inode,
+                    args.expected_sampler_receipt_device,
+                    args.expected_sampler_receipt_inode,
+                    args.expected_sampler_cmdline_sha256,
+                    args.expected_sampler_environ_sha256,
+                    args.expected_sampler_executable_sha256,
+                    args.expected_sampler_uid, args.expected_sampler_gid,
+                    args.expected_sampler_i2c_gid,
+                    args.expected_source_manifest_sha256,
+                    args.expected_run_argv_sha256,
+                )
+            )
+        ):
+            parser.error(
+                "--preflight-seal requires one canonical binary/build/sampler "
+                "locator roster and one lowercase source commit"
+            )
+        if live_process:
+            require_authorized_process_identity(
+                EXPECTED_CAMPAIGN_UID, EXPECTED_CAMPAIGN_GID
+            )
+        return args
     if args.verify_retained:
         if (
             type(args.expected_run_argv_sha256) is not str
@@ -11999,14 +18538,27 @@ def parse_cli_tokens(
         args.expected_sampler_executable_sha256,
         args.expected_source_manifest_sha256,
     )
-    paths = (args.build_dir, args.sampler_script, args.sampler_csv)
+    paths = (
+        args.build_dir, args.sampler_script, args.sampler_csv,
+        args.sampler_pid_file, args.sampler_validation_jsonl,
+        args.sampler_receipt,
+    )
     identities = (
         args.expected_binary_uid,
         args.expected_controller_uid,
+        args.expected_controller_gid,
         args.expected_sampler_process_start_ticks,
         args.expected_sampler_csv_device,
         args.expected_sampler_csv_inode,
+        args.expected_sampler_pid_file_device,
+        args.expected_sampler_pid_file_inode,
+        args.expected_sampler_validation_device,
+        args.expected_sampler_validation_inode,
+        args.expected_sampler_receipt_device,
+        args.expected_sampler_receipt_inode,
         args.expected_sampler_uid,
+        args.expected_sampler_gid,
+        args.expected_sampler_i2c_gid,
     )
     if (
         not args.binary
@@ -12017,6 +18569,12 @@ def parse_cli_tokens(
         or args.sampler_pid is None or args.sampler_pid <= 0
         or (live_process and args.sampler_pid == os.getpid())
         or args.sampler_cpu != EXPECTED_SAMPLER_CPU
+        or args.expected_binary_uid != EXPECTED_CAMPAIGN_UID
+        or args.expected_controller_uid != EXPECTED_CAMPAIGN_UID
+        or args.expected_controller_gid != EXPECTED_CAMPAIGN_GID
+        or args.expected_sampler_uid != EXPECTED_CAMPAIGN_UID
+        or args.expected_sampler_gid != EXPECTED_CAMPAIGN_GID
+        or args.expected_sampler_i2c_gid != EXPECTED_SAMPLER_I2C_GID
         or any(
             path is None or not path.is_absolute()
             or os.path.normpath(str(path)) != str(path)
@@ -12031,6 +18589,9 @@ def parse_cli_tokens(
         or any(type(value) is not int or value < 0 for value in identities)
         or args.expected_sampler_process_start_ticks == 0
         or args.expected_sampler_csv_inode == 0
+        or args.expected_sampler_pid_file_inode == 0
+        or args.expected_sampler_validation_inode == 0
+        or args.expected_sampler_receipt_inode == 0
         or args.expected_run_argv_sha256 is not None
     ):
         parser.error(
@@ -12040,7 +18601,9 @@ def parse_cli_tokens(
         )
     args.controller_initial_affinity = []
     if live_process:
-        require_authorized_process_uid(args.expected_controller_uid)
+        require_authorized_process_identity(
+            args.expected_controller_uid, args.expected_controller_gid
+        )
     return args
 
 
@@ -12066,6 +18629,8 @@ def main(argv: Sequence[str]) -> int:
     args = parse_args(argv)
     if args.selftest:
         return selftest_v2()
+    if args.preflight_seal:
+        return emit_preflight_seal(args)
     if args.verify_retained:
         return verify_retained(args.expected_run_argv_sha256)
     return run_once(args)
