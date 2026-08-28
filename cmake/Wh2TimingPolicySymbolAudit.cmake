@@ -4,7 +4,7 @@ endif()
 
 foreach(_artifact_var IN ITEMS
         TIMING_POLICY CONTRACT_WORKER PHASE_TIMING SYSTEMATIC_EMISSION
-        BROAD_SYSTEMATIC_EMISSION)
+        BROAD_SYSTEMATIC_EMISSION DIRECT_SYSTEMATIC_COMPLEMENT)
     if(NOT DEFINED ${_artifact_var} OR
        NOT EXISTS "${${_artifact_var}}")
         message(FATAL_ERROR
@@ -87,7 +87,7 @@ set(_forbidden_symbols
 
 foreach(_artifact_var IN ITEMS
         TIMING_POLICY CONTRACT_WORKER PHASE_TIMING SYSTEMATIC_EMISSION
-        BROAD_SYSTEMATIC_EMISSION)
+        BROAD_SYSTEMATIC_EMISSION DIRECT_SYSTEMATIC_COMPLEMENT)
     foreach(_forbidden IN LISTS _forbidden_symbols)
         string(FIND "${${_artifact_var}_SYMBOLS}" "${_forbidden}"
             _forbidden_offset)
@@ -126,7 +126,7 @@ if(DEFINED SYSTEM_NAME AND SYSTEM_NAME STREQUAL "Linux")
         # .text.* sections, but three distinct out-of-line bodies must remain.
         set(_layout_artifacts
             CONTRACT_WORKER PHASE_TIMING SYSTEMATIC_EMISSION
-            BROAD_SYSTEMATIC_EMISSION)
+            BROAD_SYSTEMATIC_EMISSION DIRECT_SYSTEMATIC_COMPLEMENT)
         set(_require_input_section FALSE)
     endif()
     foreach(_artifact_var IN LISTS _layout_artifacts)
