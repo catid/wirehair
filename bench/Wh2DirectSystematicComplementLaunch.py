@@ -4476,6 +4476,30 @@ class RealBackend:
             os.close(fd)
 
     @staticmethod
+    def _read_proc_bounded(path: Path, limit: int) -> bytes:
+        if type(limit) is not int or limit < 1:
+            fail("procfs bounded input limit differs")
+        fd = os.open(
+            str(path), os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                fail("procfs bounded input policy differs: " + str(path))
+            data = bytearray()
+            while len(data) <= limit:
+                block = os.read(fd, min(16384, limit + 1 - len(data)))
+                if not block:
+                    break
+                data.extend(block)
+            if len(data) > limit:
+                fail("procfs bounded input exceeds limit: " + str(path))
+            return bytes(data)
+        finally:
+            os.close(fd)
+
+    @staticmethod
     def _read_claim_if_ready() -> Optional[bytes]:
         fd = os.open(
             str(FIXED_CLAIM_PATH), os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK
@@ -4643,7 +4667,9 @@ class RealBackend:
             or stat.S_IMODE(lock_info.st_mode) != 0o600
         ):
             fail("campaign lock policy differs")
-        proc_cgroup = self._read_bounded(Path("/proc/self/cgroup"), 64 * 1024)
+        proc_cgroup = self._read_proc_bounded(
+            Path("/proc/self/cgroup"), 64 * 1024,
+        )
         relative = parse_proc_cgroup(proc_cgroup)
         require_cgroup2(CGROUP_ROOT)
         service = CGROUP_ROOT / relative.lstrip("/")
@@ -4863,7 +4889,9 @@ class RealBackend:
         pidfd = -1
         try:
             pidfd = os.pidfd_open(pid, 0)
-            start = proc_start_ticks(self._read_bounded(Path(f"/proc/{pid}/stat"), 64 * 1024))
+            start = proc_start_ticks(self._read_proc_bounded(
+                Path(f"/proc/{pid}/stat"), 64 * 1024,
+            ))
             CgroupTree.move_pid(cgroup, pid, cpus)
             if os.write(gate_w, b"R") != 1:
                 fail(role + " startup release was short")
@@ -5072,7 +5100,9 @@ class RealBackend:
         pidfd = -1
         try:
             pidfd = os.pidfd_open(pid, 0)
-            start = proc_start_ticks(self._read_bounded(Path(f"/proc/{pid}/stat"), 64 * 1024))
+            start = proc_start_ticks(self._read_proc_bounded(
+                Path(f"/proc/{pid}/stat"), 64 * 1024,
+            ))
             CgroupTree.move_pid(cgroup, pid, cpus)
             receipt_fd = -1
             command_fd = -1
@@ -5156,7 +5186,9 @@ class RealBackend:
         try:
             pidfd = os.pidfd_open(pid, 0)
             start = proc_start_ticks(
-                self._read_bounded(Path(f"/proc/{pid}/stat"), 64 * 1024)
+                self._read_proc_bounded(
+                    Path(f"/proc/{pid}/stat"), 64 * 1024,
+                )
             )
             CgroupTree.move_pid(
                 self.layout.supervisor, pid, (VERIFIER_CPU,)

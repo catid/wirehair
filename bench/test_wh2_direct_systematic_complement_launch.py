@@ -967,6 +967,22 @@ class ParserTests(unittest.TestCase):
                 b"123 (comm) " + b" ".join(fields) + b"\n\n"
             )
 
+    def test_procfs_zero_size_files_are_read_to_bounded_eof(self):
+        cgroup_path = Path("/proc/self/cgroup")
+        stat_path = Path("/proc/self/stat")
+        self.assertEqual(cgroup_path.stat().st_size, 0)
+        self.assertEqual(stat_path.stat().st_size, 0)
+        cgroup = subject.RealBackend._read_proc_bounded(
+            cgroup_path, 64 * 1024,
+        )
+        process_stat = subject.RealBackend._read_proc_bounded(
+            stat_path, 64 * 1024,
+        )
+        self.assertTrue(cgroup)
+        self.assertGreater(subject.proc_start_ticks(process_stat), 0)
+        with self.assertRaises(subject.LaunchError):
+            subject.RealBackend._read_proc_bounded(cgroup_path, 1)
+
 
 class ReceiptTests(unittest.TestCase):
     def test_i2c_point_in_time_holder_policy_is_exact(self):
