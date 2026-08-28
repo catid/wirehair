@@ -117,6 +117,33 @@ equations byte-for-byte. The corresponding C++
 selection. Unknown or retired IDs return `WirehairV2_UnsupportedProfile`
 without falling back to the current profile.
 
+The three additive `*_with_options()` encoder constructors accept an exact
+versioned `WirehairV2EncoderOptions` record. The default initializer selects
+`WirehairV2EncoderSource_Independent`, which has the same source-independent
+lifetime contract as the original constructors: after successful return the
+caller may change or release its message. A zero-initialized record selects no
+policy and is rejected, as are unknown policy values.
+
+`WirehairV2EncoderSource_BorrowedImmutable` is an explicit opt-in local storage
+policy. Construction still completes the same eager full solve before success,
+but the encoder then retains the caller's exact message range without owning or
+copying the complete message. The caller must keep that range readable,
+allocated, and byte-for-byte immutable from constructor entry throughout the
+call. Failure retains nothing and ends that obligation; after success it
+continues until successful `wirehair_v2_encoder_detach_input()` or encoder
+destruction. While attached, systematic packet IDs copy only their meaningful
+source bytes; repair IDs use the existing solved-intermediate evaluator and do
+not read the source. Detach is allocation-free and idempotent, and later
+systematic packets use equation evaluation while remaining byte-identical.
+Operations on one codec are externally serialized: encode, detach, free, and
+source mutation must not race, including with another codec operation.
+
+Source-storage policy is not serialized, does not change the profile ID or any
+descriptor byte, and is not visible to a decoder. Independent and borrowed
+encoders therefore use the same certified GF(256)-only equations, selected seed
+attempt, solved intermediate state, systematic bytes, and repair bytes. Unknown
+or retired equation profiles remain rejected for every storage policy.
+
 `wirehair_v2_encode()` reports `WirehairV2_BufferTooSmall` and the exact
 required packet size without modifying a short non-null output buffer.
 
@@ -132,7 +159,11 @@ need-more, bad seed, resource exhaustion, OOM, and unsupported platform.
 
 The installed C++ header `<wirehair/wirehair.hpp>` provides move-only RAII
 `wirehair::v2::Encoder` and `wirehair::v2::Decoder` wrappers plus a fixed-size
-`SerializedProfile`. It uses the same C ABI and byte contract.
+`SerializedProfile`. Its three explicit `Encoder::CreateBorrowed()` overloads
+retain no hidden source owner, and `Encoder::DetachInput()` releases the same
+native lifetime obligation. Failed replacement preserves the prior encoder and
+its borrow; moves transfer the handle and its obligation. The wrappers use the
+same C ABI and byte contract.
 
 ## Version migration
 

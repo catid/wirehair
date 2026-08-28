@@ -408,6 +408,17 @@ if (BUILD_TESTS)
         POSITION_INDEPENDENT_CODE ${WIREHAIR_STATIC_PIC})
     wirehair_apply_project_options(wirehair_test_support)
 
+    add_executable(v2_borrowed_facade_fault_test
+        test/V2BorrowedFacadeFaultTest.cpp)
+    wirehair_apply_project_options(v2_borrowed_facade_fault_test)
+    target_link_libraries(v2_borrowed_facade_fault_test
+        wirehair_test_support Threads::Threads)
+    add_test(NAME v2_borrowed_facade_fault_test
+        COMMAND v2_borrowed_facade_fault_test)
+    set_tests_properties(v2_borrowed_facade_fault_test PROPERTIES
+        LABELS "v2;borrowed-source;allocation;transactional"
+        TIMEOUT 120)
+
     add_executable(legacy_core_test test/LegacyCoreTest.cpp)
     wirehair_apply_project_options(legacy_core_test)
     target_link_libraries(legacy_core_test wirehair_test_support Threads::Threads)
@@ -630,6 +641,20 @@ if(WIREHAIR_PRIMARY_VARIANT STREQUAL "SHARED")
         wirehair_configure_library(wirehair_internal_support STATIC)
         set(WIREHAIR_INTERNAL_LIBRARY wirehair_internal_support)
     endif()
+endif()
+
+# Coverage-guided public-facade fuzzing needs feedback from the production
+# implementation itself, not only from the harness translation unit.  Build a
+# non-installed, production-equivalent static copy with sanitizer coverage;
+# do not enable the fault-injection hooks used by wirehair_test_support.
+set(WIREHAIR_PUBLIC_FUZZ_LIBRARY wirehair)
+if(BUILD_TESTS AND BUILD_CODEC_V2 AND WIREHAIR_ENABLE_LIBFUZZER)
+    add_library(wirehair_public_fuzz_support STATIC EXCLUDE_FROM_ALL
+        ${LIB_SOURCE_FILES})
+    wirehair_configure_library(wirehair_public_fuzz_support STATIC)
+    target_compile_options(wirehair_public_fuzz_support PRIVATE
+        -fsanitize=fuzzer-no-link)
+    set(WIREHAIR_PUBLIC_FUZZ_LIBRARY wirehair_public_fuzz_support)
 endif()
 add_executable(gen_small_dseeds ${WIREHAIR_TOOL_EXCLUDE} ${GEN_SMALL_DSEEDS})
 add_executable(gen_peel_seeds ${WIREHAIR_TOOL_EXCLUDE} ${GEN_PEEL_SEEDS})

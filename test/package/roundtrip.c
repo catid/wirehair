@@ -2,11 +2,30 @@
 
 #include <wirehair/wirehair.h>
 
+#include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 
 typedef char WirehairV2ProfileAbiSizeCheck[
     sizeof(WirehairV2Profile) == 32 ? 1 : -1];
+typedef char WirehairV2EncoderOptionsAbiSizeCheck[
+    sizeof(WirehairV2EncoderOptions) == 16 ? 1 : -1];
+typedef char WirehairV2EncoderOptionsStructOffsetCheck[
+    offsetof(WirehairV2EncoderOptions, struct_bytes) == 0 ? 1 : -1];
+typedef char WirehairV2EncoderOptionsVersionOffsetCheck[
+    offsetof(WirehairV2EncoderOptions, options_version) == 4 ? 1 : -1];
+typedef char WirehairV2EncoderOptionsPolicyOffsetCheck[
+    offsetof(WirehairV2EncoderOptions, source_policy) == 8 ? 1 : -1];
+typedef char WirehairV2EncoderOptionsReservedOffsetCheck[
+    offsetof(WirehairV2EncoderOptions, reserved) == 12 ? 1 : -1];
+typedef char WirehairV2EncoderSourcePolicyAbiSizeCheck[
+    sizeof(WirehairV2EncoderSourcePolicy) == 4 ? 1 : -1];
+typedef char WirehairV2EncoderSourcePolicyValueCheck[
+    WirehairV2EncoderSource_Invalid == 0 &&
+    WirehairV2EncoderSource_Independent == 1 &&
+    WirehairV2EncoderSource_BorrowedImmutable == 2 &&
+    WirehairV2EncoderSource_Count == 3 &&
+    WirehairV2EncoderSource_Padding == 0x7fffffff ? 1 : -1];
 
 static int wirehair_package_v2_round_trip(
     const uint8_t* message,
@@ -18,15 +37,23 @@ static int wirehair_package_v2_round_trip(
     uint8_t profile[WIREHAIR_V2_PROFILE_SERIALIZED_BYTES];
     uint8_t block[32];
     uint8_t recreated_block[32];
+    uint8_t borrowed_block[32];
+    uint8_t borrowed_profile[WIREHAIR_V2_PROFILE_SERIALIZED_BYTES];
     uint8_t recovered[257];
     uint32_t profile_bytes = 0;
+    uint32_t borrowed_profile_bytes = 0;
     uint64_t recovered_bytes = 0;
     WirehairV2Codec encoder = 0;
     WirehairV2Codec recreated = 0;
+    WirehairV2Codec borrowed_default = 0;
+    WirehairV2Codec borrowed_explicit = 0;
+    WirehairV2Codec borrowed_descriptor = 0;
     WirehairV2Codec decoder = 0;
     WirehairV2Result decode_result = WirehairV2_NeedMore;
     uint32_t id;
     WirehairV2Profile parsed;
+    WirehairV2EncoderOptions options = WIREHAIR_V2_ENCODER_OPTIONS_INIT;
+    options.source_policy = WirehairV2EncoderSource_BorrowedImmutable;
 
     if (block_bytes > sizeof(block) || message_bytes > sizeof(recovered) ||
         wirehair_v2_encoder_create_profile_id(
@@ -49,25 +76,86 @@ static int wirehair_package_v2_round_trip(
         return 1;
     }
 
+    if (wirehair_v2_encoder_create_with_options(
+            message, message_bytes, block_bytes, &options,
+            borrowed_profile, sizeof(borrowed_profile),
+            &borrowed_profile_bytes, &borrowed_default) !=
+                WirehairV2_Success ||
+        borrowed_profile_bytes != sizeof(borrowed_profile) ||
+        memcmp(profile, borrowed_profile, sizeof(profile)) != 0 ||
+        wirehair_v2_encoder_create_profile_id_with_options(
+            profile_id, message, message_bytes, block_bytes, &options,
+            borrowed_profile, sizeof(borrowed_profile),
+            &borrowed_profile_bytes, &borrowed_explicit) !=
+                WirehairV2_Success ||
+        memcmp(profile, borrowed_profile, sizeof(profile)) != 0 ||
+        wirehair_v2_encoder_create_profile_with_options(
+            message, profile, profile_bytes, &options,
+            &borrowed_descriptor) != WirehairV2_Success)
+    {
+        wirehair_v2_free(encoder);
+        wirehair_v2_free(recreated);
+        wirehair_v2_free(borrowed_default);
+        wirehair_v2_free(borrowed_explicit);
+        wirehair_v2_free(borrowed_descriptor);
+        wirehair_v2_free(decoder);
+        return 4;
+    }
+    {
+        uint32_t written = 0;
+        if (wirehair_v2_encode(
+                borrowed_default, 0u, borrowed_block,
+                sizeof(borrowed_block), &written) != WirehairV2_Success ||
+            written != block_bytes ||
+            memcmp(borrowed_block, message, block_bytes) != 0 ||
+            wirehair_v2_encoder_detach_input(borrowed_default) !=
+                WirehairV2_Success ||
+            wirehair_v2_encoder_detach_input(borrowed_default) !=
+                WirehairV2_Success ||
+            wirehair_v2_encoder_detach_input(borrowed_explicit) !=
+                WirehairV2_Success ||
+            wirehair_v2_encoder_detach_input(borrowed_descriptor) !=
+                WirehairV2_Success)
+        {
+            wirehair_v2_free(encoder);
+            wirehair_v2_free(recreated);
+            wirehair_v2_free(borrowed_default);
+            wirehair_v2_free(borrowed_explicit);
+            wirehair_v2_free(borrowed_descriptor);
+            wirehair_v2_free(decoder);
+            return 5;
+        }
+    }
+
     for (id = block_count;
          id < block_count + 64u && decode_result == WirehairV2_NeedMore;
          ++id)
     {
         uint32_t written = 0;
         uint32_t recreated_written = 0;
+        uint32_t borrowed_written = 0;
         if (wirehair_v2_encode(
                 encoder, id, block, sizeof(block), &written) !=
                     WirehairV2_Success ||
             wirehair_v2_encode(
                 recreated, id, recreated_block, sizeof(recreated_block),
                 &recreated_written) != WirehairV2_Success ||
+            wirehair_v2_encode(
+                borrowed_descriptor, id, borrowed_block,
+                sizeof(borrowed_block), &borrowed_written) !=
+                    WirehairV2_Success ||
             written != recreated_written ||
-            memcmp(block, recreated_block, written) != 0)
+            written != borrowed_written ||
+            memcmp(block, recreated_block, written) != 0 ||
+            memcmp(block, borrowed_block, written) != 0)
         {
             wirehair_v2_free(encoder);
             wirehair_v2_free(recreated);
+            wirehair_v2_free(borrowed_default);
+            wirehair_v2_free(borrowed_explicit);
+            wirehair_v2_free(borrowed_descriptor);
             wirehair_v2_free(decoder);
-            return 2;
+            return 6;
         }
         decode_result = wirehair_v2_decode(decoder, id, block, written);
     }
@@ -80,12 +168,18 @@ static int wirehair_package_v2_round_trip(
     {
         wirehair_v2_free(encoder);
         wirehair_v2_free(recreated);
+        wirehair_v2_free(borrowed_default);
+        wirehair_v2_free(borrowed_explicit);
+        wirehair_v2_free(borrowed_descriptor);
         wirehair_v2_free(decoder);
-        return 3;
+        return 7;
     }
 
     wirehair_v2_free(encoder);
     wirehair_v2_free(recreated);
+    wirehair_v2_free(borrowed_default);
+    wirehair_v2_free(borrowed_explicit);
+    wirehair_v2_free(borrowed_descriptor);
     wirehair_v2_free(decoder);
     return 0;
 }

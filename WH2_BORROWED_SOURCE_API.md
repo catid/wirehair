@@ -1,7 +1,8 @@
 # WH2 borrowed-source encoder design
 
-Status: reviewed design and validation plan.  This document does not add a
-public symbol, change the default V2 API, or authorize production promotion.
+Status: implemented and functionally validated by
+`wirehair-sxvz.16.1.20.23.1.3`.  The API remains explicit opt-in and does not
+change the default V2 behavior or authorize production performance promotion.
 
 The retained-source systematic-emission screen recorded by
 `wirehair-sxvz.16.1.20.23` established one narrow result: when an encoder
@@ -24,7 +25,7 @@ Source lifetime is a local encoder-storage policy.  It is not part of the
 32-byte serialized equation profile, does not change the profile ID, and is
 not visible to a decoder.
 
-The future API is additive under the existing `WIREHAIR_2.0` ABI namespace.
+The API is additive under the existing `WIREHAIR_2.0` ABI namespace.
 It consists of a fixed-layout options record, three constructor variants that
 cover every existing V2 creation route, and one detach operation:
 
@@ -135,7 +136,7 @@ message copy.
 - Operations on one codec are externally serialized.  In particular, encode,
   detach, free, and source mutation must not race.
 
-There is no V2 raw-C reuse operation.  A future C++ `CreateBorrowed()` wrapper
+There is no V2 raw-C reuse operation.  The C++ `CreateBorrowed()` wrapper
 retains the current transactional replacement rule: success frees the old
 handle and ends its old borrow; failure preserves both the old handle and its
 lifetime obligation.  Move construction transfers the borrow and leaves the

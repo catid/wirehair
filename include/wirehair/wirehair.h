@@ -278,6 +278,48 @@ typedef struct WirehairV2Profile_t
     uint8_t reserved[3];       ///< Must be zero
 } WirehairV2Profile;
 
+/** Version of the fixed-layout WirehairV2EncoderOptions structure. */
+#define WIREHAIR_V2_ENCODER_OPTIONS_VERSION 1u
+
+/** Source-storage policy selected for a public V2 encoder. */
+typedef enum WirehairV2EncoderSourcePolicy_t
+{
+    /// Invalid fail-closed value; a zero-initialized options record is rejected
+    WirehairV2EncoderSource_Invalid = 0,
+
+    /// Source-independent behavior of the original V2 constructors
+    WirehairV2EncoderSource_Independent = 1,
+
+    /// Retain an immutable caller-owned message until detach or free
+    WirehairV2EncoderSource_BorrowedImmutable = 2,
+
+    WirehairV2EncoderSource_Count, ///< Sentinel; never a valid policy
+    WirehairV2EncoderSource_Padding = 0x7fffffff ///< Never a valid policy
+} WirehairV2EncoderSourcePolicy;
+
+/**
+    Local encoder-storage options.  This structure is exactly 16 bytes in
+    version 1 and is never serialized into the V2 equation profile.
+
+    source_policy stores an exact WirehairV2EncoderSourcePolicy value as a
+    uint32_t and must be Independent or BorrowedImmutable.  reserved must be
+    zero.  Unknown versions and every other policy value are rejected rather
+    than interpreted as a supported policy.
+*/
+typedef struct WirehairV2EncoderOptions_t
+{
+    uint32_t struct_bytes;     ///< Must equal sizeof(WirehairV2EncoderOptions)
+    uint32_t options_version;  ///< WIREHAIR_V2_ENCODER_OPTIONS_VERSION
+    uint32_t source_policy;    ///< Exact WirehairV2EncoderSourcePolicy value
+    uint32_t reserved;         ///< Must be zero
+} WirehairV2EncoderOptions;
+
+/** Default V2 encoder options, preserving source-independent behavior. */
+#define WIREHAIR_V2_ENCODER_OPTIONS_INIT \
+    { sizeof(WirehairV2EncoderOptions), \
+      WIREHAIR_V2_ENCODER_OPTIONS_VERSION, \
+      WirehairV2EncoderSource_Independent, 0u }
+
 /// Opaque encoder or decoder created by the serialized V2 API.
 typedef struct WirehairV2Codec_t { char impl; }* WirehairV2Codec;
 
@@ -349,6 +391,57 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create(
     WirehairV2Codec* codecOut);
 
 /**
+    Select the current certified profile and create an encoder with an explicit
+    source-storage policy.
+
+    options is required and its complete 16-byte record is read only during
+    this call.  Validation is fail-closed in this order: a wrong struct_bytes
+    returns
+    WirehairV2_InvalidSize, an unknown options_version returns
+    WirehairV2_UnsupportedVersion, nonzero reserved returns
+    WirehairV2_ReservedNonzero, and a null options pointer or any policy other
+    than Independent or BorrowedImmutable returns WirehairV2_InvalidInput.
+    WirehairV2EncoderSource_Independent has the same source-lifetime contract
+    as wirehair_v2_encoder_create().  WirehairV2EncoderSource_BorrowedImmutable
+    completes the same eager solve, then retains the exact caller-owned message
+    range for direct systematic packets without taking ownership or adding a
+    full-message allocation or copy.  Existing private padding of a partial
+    final block remains permitted.  An attached borrowed encoder copies only
+    meaningful source bytes for packet IDs below K and never reads beyond
+    messageBytes; every ID at or above K, including UINT32_MAX, uses the existing
+    solved-intermediate evaluator without reading the source.  The complete
+    range must be readable, allocated, and byte-for-byte immutable on entry and
+    throughout the call.  A failed call retains nothing and ends that
+    obligation; after success it continues until successful detach or
+    wirehair_v2_free().  Operations on one codec are externally serialized:
+    encode, detach, free, and source mutation must not race, including with
+    another operation on that codec.
+
+    The output and overlap contracts of wirehair_v2_encoder_create() also
+    apply.  In addition, every writable output must be disjoint from options;
+    message and options are read-only inputs and may overlap one another.  Only
+    an otherwise valid v1 options record with zero reserved and the exact
+    BorrowedImmutable policy structurally selects borrowing.  For that
+    selection, the complete retained message range must be representable
+    without address wrapping and serializedProfileOut must be disjoint from it.
+    Independent preserves the existing staged descriptor/message alias
+    exception.  Prohibited overlap or an invalid retained range returns
+    WirehairV2_InvalidInput without modifying any range and precedes ordinary
+    capacity, profile, dimension, and construction errors.  Fixed overlap
+    precedes options validation; an options error precedes
+    WirehairV2_BufferTooSmall.
+*/
+WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create_with_options(
+    const void* message,
+    uint64_t messageBytes,
+    uint32_t blockBytes,
+    const WirehairV2EncoderOptions* options,
+    void* serializedProfileOut,
+    uint32_t serializedProfileCapacity,
+    uint32_t* serializedProfileBytesOut,
+    WirehairV2Codec* codecOut);
+
+/**
     Select an explicit supported V2 equation profile and create an encoder.
 
     The current/default profile remains available through
@@ -362,6 +455,26 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create_profile_id(
     const void* message,
     uint64_t messageBytes,
     uint32_t blockBytes,
+    void* serializedProfileOut,
+    uint32_t serializedProfileCapacity,
+    uint32_t* serializedProfileBytesOut,
+    WirehairV2Codec* codecOut);
+
+/**
+    Explicit-profile form of wirehair_v2_encoder_create_with_options().
+
+    Profile selection and all output, overlap, validation, ownership, and
+    source-lifetime contracts are the corresponding contracts of
+    wirehair_v2_encoder_create_profile_id() and
+    wirehair_v2_encoder_create_with_options().
+*/
+WIREHAIR_EXPORT WirehairV2Result
+wirehair_v2_encoder_create_profile_id_with_options(
+    uint64_t profileId,
+    const void* message,
+    uint64_t messageBytes,
+    uint32_t blockBytes,
+    const WirehairV2EncoderOptions* options,
     void* serializedProfileOut,
     uint32_t serializedProfileCapacity,
     uint32_t* serializedProfileBytesOut,
@@ -383,6 +496,51 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create_profile(
     const void* serializedProfile,
     uint32_t serializedProfileBytes,
     WirehairV2Codec* codecOut);
+
+/**
+    Serialized-profile form of encoder creation with an explicit source policy.
+
+    A null codecOut returns WirehairV2_InvalidInput without reading any other
+    argument.  codecOut must be disjoint from both the canonical 32-byte
+    serialized-profile range and the readable 16-byte options record; fixed
+    overlap is a no-write WirehairV2_InvalidInput failure.  The message,
+    serialized profile, and options are read-only inputs and may overlap one
+    another because they are staged.
+
+    After fixed overlap checks, descriptor errors retain the result priority of
+    wirehair_v2_encoder_create_profile(), clear a disjoint codecOut, and precede
+    options errors.  A valid descriptor establishes the complete message range;
+    codecOut must be disjoint from that range for every policy.  A structurally
+    valid BorrowedImmutable selection additionally requires the retained range
+    to be representable without address wrapping.  Either range failure is
+    no-write WirehairV2_InvalidInput and precedes options and construction
+    errors.  Only after those checks is codecOut cleared and any options error
+    returned.  BorrowedImmutable retains the source under the lifetime contract
+    documented by wirehair_v2_encoder_create_with_options(); Independent
+    remains source-independent after success.
+*/
+WIREHAIR_EXPORT WirehairV2Result
+wirehair_v2_encoder_create_profile_with_options(
+    const void* message,
+    const void* serializedProfile,
+    uint32_t serializedProfileBytes,
+    const WirehairV2EncoderOptions* options,
+    WirehairV2Codec* codecOut);
+
+/**
+    End a successful V2 encoder's borrowed-source lifetime obligation.
+
+    This operation is allocation-free and idempotent.  It succeeds without a
+    state change for an independent or already detached encoder.  After a
+    successful detach, the caller may immediately change or release the former
+    source; later packets remain byte-identical and systematic packets use the
+    solved equation state.  A null or decoder handle returns
+    WirehairV2_InvalidInput.  Later equation evaluation of a partial final
+    packet may still report its existing allocation failure.  Detach must not
+    race encode, free, or source mutation.
+*/
+WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_detach_input(
+    WirehairV2Codec codec);
 
 /**
     Create a decoder using only the serialized descriptor for dimensions and
@@ -407,6 +565,16 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_decoder_create(
     packet output range; exact or partial overlap returns
     WirehairV2_InvalidInput without modifying either range, including when the
     packet buffer is too short.
+
+    For an attached BorrowedImmutable encoder, dataBytesOut and the exact
+    required packet output range must each be disjoint from the complete
+    retained message, for systematic and repair IDs alike.  The complete-source
+    counter check precedes the ordinary invalid-output path; the exact packet
+    checks apply even when outputCapacity is short.  A prohibited overlap
+    returns WirehairV2_InvalidInput without modifying the source, packet output,
+    or counter, before publishing the required size or reporting
+    WirehairV2_BufferTooSmall.  After successful detach, only the ordinary
+    overlap rules above apply.
 */
 WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encode(
     WirehairV2Codec codec,

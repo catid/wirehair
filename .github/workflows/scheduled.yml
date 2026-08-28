@@ -14,9 +14,9 @@ concurrency:
 
 jobs:
   v2-randomized-state-soak:
-    name: V2 randomized profile and state-sequence sanitizer soak
+    name: V2 randomized profile, state, and borrowed-facade sanitizer soak
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    timeout-minutes: 120
     env:
       ASAN_OPTIONS: detect_leaks=1:halt_on_error=1:strict_string_checks=1
       UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
@@ -37,8 +37,12 @@ jobs:
         run: >-
           cmake --build build/ci-v2-property-soak --parallel 2
           --target wirehair_v2_profile_fuzz wirehair_v2_stateful_fuzz
+          wirehair_v2_borrowed_facade_fuzz
       - name: Prepare preserved-input directories
-        run: mkdir -p build/ci-v2-property-soak/fuzz-artifacts/profile build/ci-v2-property-soak/fuzz-artifacts/stateful
+        run: >-
+          mkdir -p build/ci-v2-property-soak/fuzz-artifacts/profile
+          build/ci-v2-property-soak/fuzz-artifacts/stateful
+          build/ci-v2-property-soak/fuzz-artifacts/borrowed-facade
       - name: Run profile/property target for 30 minutes
         timeout-minutes: 32
         run: >-
@@ -54,6 +58,14 @@ jobs:
           -seed=3221344269 -max_total_time=1800 -max_len=65536 -timeout=5
           -rss_limit_mb=1024
           -artifact_prefix=build/ci-v2-property-soak/fuzz-artifacts/stateful/
+          codec/fuzz/corpus/stateful
+      - name: Run borrowed-facade target for 30 minutes
+        timeout-minutes: 32
+        run: >-
+          build/ci-v2-property-soak/codec/wirehair_v2_borrowed_facade_fuzz
+          -seed=2752512 -max_total_time=1800 -max_len=65536 -timeout=5
+          -rss_limit_mb=1024
+          -artifact_prefix=build/ci-v2-property-soak/fuzz-artifacts/borrowed-facade/
           codec/fuzz/corpus/stateful
       - name: Upload preserved inputs and sanitizer diagnostics
         if: always()

@@ -144,6 +144,22 @@ if (BUILD_TESTS)
         LABELS "v2;profile;serialization;golden;e2e;abi"
         TIMEOUT 120)
 
+    add_executable(wirehair_v2_borrowed_source_test
+        V2BorrowedSourceTest.cpp)
+    wirehair_apply_project_options(wirehair_v2_borrowed_source_test)
+    target_link_libraries(wirehair_v2_borrowed_source_test wirehair)
+    if(WIN32 AND WIREHAIR_PRIMARY_VARIANT STREQUAL "SHARED")
+        add_custom_command(TARGET wirehair_v2_borrowed_source_test POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:wirehair>
+                $<TARGET_FILE_DIR:wirehair_v2_borrowed_source_test>)
+    endif()
+    add_test(NAME wirehair_v2_borrowed_source_test
+        COMMAND wirehair_v2_borrowed_source_test)
+    set_tests_properties(wirehair_v2_borrowed_source_test PROPERTIES
+        LABELS "v2;borrowed-source;lifetime;transactional;e2e;abi"
+        TIMEOUT 120)
+
     set(_wirehair_v2_fuzz_common
         fuzz/V2FuzzDriver.cpp
         fuzz/V2FuzzDriver.h)
@@ -167,13 +183,32 @@ if (BUILD_TESTS)
     target_link_libraries(wirehair_v2_stateful_fuzz wirehair_v2_policy)
     wirehair_apply_project_options(wirehair_v2_stateful_fuzz)
 
+    add_executable(wirehair_v2_borrowed_facade_fuzz
+        fuzz/V2BorrowedFacadeFuzz.cpp
+        ${_wirehair_v2_fuzz_common})
+    target_compile_definitions(wirehair_v2_borrowed_facade_fuzz PRIVATE
+        "WIREHAIR_FUZZ_TARGET_NAME=\"borrowed-facade\""
+        "WIREHAIR_FUZZ_CORPUS_MANIFEST=\"${CMAKE_CURRENT_SOURCE_DIR}/fuzz/corpus/stateful/manifest.txt\"")
+    target_link_libraries(wirehair_v2_borrowed_facade_fuzz
+        ${WIREHAIR_PUBLIC_FUZZ_LIBRARY})
+    wirehair_apply_project_options(wirehair_v2_borrowed_facade_fuzz)
+    if(WIN32 AND WIREHAIR_PRIMARY_VARIANT STREQUAL "SHARED")
+        add_custom_command(TARGET wirehair_v2_borrowed_facade_fuzz POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:wirehair>
+                $<TARGET_FILE_DIR:wirehair_v2_borrowed_facade_fuzz>)
+    endif()
+
     if(WIREHAIR_ENABLE_LIBFUZZER)
         if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
             message(FATAL_ERROR
                 "WIREHAIR_ENABLE_LIBFUZZER requires Clang")
         endif()
+        target_compile_options(wirehair_v2_policy PRIVATE
+            -fsanitize=fuzzer-no-link)
         foreach(_wirehair_v2_fuzz_target IN ITEMS
-                wirehair_v2_profile_fuzz wirehair_v2_stateful_fuzz)
+                wirehair_v2_profile_fuzz wirehair_v2_stateful_fuzz
+                wirehair_v2_borrowed_facade_fuzz)
             target_compile_definitions(${_wirehair_v2_fuzz_target}
                 PRIVATE WIREHAIR_ENABLE_LIBFUZZER=1)
             target_compile_options(${_wirehair_v2_fuzz_target}
@@ -199,9 +234,17 @@ if (BUILD_TESTS)
                 --seed 0x13198a2e03707344
                 --trace-current
                 --artifact-dir "${_wirehair_v2_fuzz_artifacts}")
+        add_test(NAME wirehair_v2_borrowed_facade_fuzz_test
+            COMMAND wirehair_v2_borrowed_facade_fuzz
+                --mutations 10000
+                --max-seconds 55
+                --seed 0xa4093822299f31d0
+                --trace-current
+                --artifact-dir "${_wirehair_v2_fuzz_artifacts}")
         set_tests_properties(
             wirehair_v2_profile_fuzz_test
             wirehair_v2_stateful_fuzz_test
+            wirehair_v2_borrowed_facade_fuzz_test
             PROPERTIES
                 LABELS "fuzz;sanitizer;v2"
                 TIMEOUT 60

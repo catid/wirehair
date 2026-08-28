@@ -5,8 +5,10 @@
 #include "WirehairV2PrecodeEncode.h"
 #include "WirehairV2Solve.h"
 
+#include "../WirehairEnvironment.h"
 #include "../WirehairTools.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <limits>
@@ -17,6 +19,24 @@ namespace {
 
 static_assert(sizeof(WirehairV2Profile) == 32,
     "WirehairV2Profile is a fixed C ABI descriptor");
+static_assert(sizeof(WirehairV2EncoderOptions) == 16,
+    "WirehairV2EncoderOptions is a fixed C ABI descriptor");
+static_assert(offsetof(WirehairV2EncoderOptions, struct_bytes) == 0,
+    "WirehairV2EncoderOptions::struct_bytes ABI offset changed");
+static_assert(offsetof(WirehairV2EncoderOptions, options_version) == 4,
+    "WirehairV2EncoderOptions::options_version ABI offset changed");
+static_assert(offsetof(WirehairV2EncoderOptions, source_policy) == 8,
+    "WirehairV2EncoderOptions::source_policy ABI offset changed");
+static_assert(offsetof(WirehairV2EncoderOptions, reserved) == 12,
+    "WirehairV2EncoderOptions::reserved ABI offset changed");
+static_assert(sizeof(WirehairV2EncoderSourcePolicy) == 4,
+    "WirehairV2EncoderSourcePolicy enum ABI width changed");
+static_assert(WirehairV2EncoderSource_Invalid == 0 &&
+        WirehairV2EncoderSource_Independent == 1 &&
+        WirehairV2EncoderSource_BorrowedImmutable == 2 &&
+        WirehairV2EncoderSource_Count == 3 &&
+        WirehairV2EncoderSource_Padding == 0x7fffffff,
+    "WirehairV2EncoderSourcePolicy ABI values changed");
 static_assert(WIREHAIR_V2_PROFILE_SERIALIZED_BYTES == 32u,
     "the canonical V2 profile encoding changed unexpectedly");
 static_assert(wirehair_v2::kMaxPacketSeedAttempts == 256u,
@@ -30,6 +50,13 @@ enum class CodecMode
     Decoder
 };
 
+enum class EncoderSourceState
+{
+    Invalid,
+    Independent,
+    BorrowedImmutable
+};
+
 struct PublicCodec
 {
     wirehair_v2::Codec Impl;
@@ -37,7 +64,29 @@ struct PublicCodec
     uint32_t BlockBytes = 0u;
     CodecMode Mode = CodecMode::Encoder;
     bool Decoded = false;
+    EncoderSourceState SourceState = EncoderSourceState::Invalid;
+    const uint8_t* BorrowedSource = nullptr;
 };
+
+struct StagedEncoderOptions
+{
+    WirehairV2EncoderOptions Value = {};
+    WirehairV2Result Result = WirehairV2_InvalidInput;
+    bool BorrowedImmutable = false;
+};
+
+PublicCodec* AllocatePublicCodec()
+{
+#if defined(WIREHAIR_TESTING)
+    const wirehair::EnvironmentValue environment(
+        "WIREHAIR_TEST_FORCE_V2_FACADE_OOM");
+    const char* value = environment.Get();
+    if (value && value[0] == '1' && value[1] == '\0') {
+        return nullptr;
+    }
+#endif
+    return new (std::nothrow) PublicCodec;
+}
 
 bool NamedV2ProfileAvailable()
 {
@@ -208,9 +257,73 @@ bool MemoryRangesOverlap(
     {
         return true;
     }
+    if (firstBytes == 0u || secondBytes == 0u) {
+        return false;
+    }
     const uintptr_t firstEnd = firstBegin + firstBytes;
     const uintptr_t secondEnd = secondBegin + secondBytes;
     return firstBegin < secondEnd && secondBegin < firstEnd;
+}
+
+StagedEncoderOptions StageEncoderOptions(
+    const WirehairV2EncoderOptions* options)
+{
+    StagedEncoderOptions staged;
+    if (!options) {
+        return staged;
+    }
+
+    std::memcpy(&staged.Value, options, sizeof(staged.Value));
+    if (staged.Value.struct_bytes != sizeof(WirehairV2EncoderOptions)) {
+        staged.Result = WirehairV2_InvalidSize;
+        return staged;
+    }
+    if (staged.Value.options_version !=
+        WIREHAIR_V2_ENCODER_OPTIONS_VERSION)
+    {
+        staged.Result = WirehairV2_UnsupportedVersion;
+        return staged;
+    }
+    if (staged.Value.reserved != 0u) {
+        staged.Result = WirehairV2_ReservedNonzero;
+        return staged;
+    }
+    if (staged.Value.source_policy !=
+            (uint32_t)WirehairV2EncoderSource_Independent &&
+        staged.Value.source_policy !=
+            (uint32_t)WirehairV2EncoderSource_BorrowedImmutable)
+    {
+        staged.Result = WirehairV2_InvalidInput;
+        return staged;
+    }
+
+    staged.Result = WirehairV2_Success;
+    staged.BorrowedImmutable = staged.Value.source_policy ==
+        (uint32_t)WirehairV2EncoderSource_BorrowedImmutable;
+    return staged;
+}
+
+bool CompleteMessageRangeRepresentable(
+    const void* message,
+    uint64_t messageBytes)
+{
+    if (messageBytes >
+        (uint64_t)std::numeric_limits<size_t>::max())
+    {
+        return false;
+    }
+    const uintptr_t begin = reinterpret_cast<uintptr_t>(message);
+    return (size_t)messageBytes <=
+        std::numeric_limits<uintptr_t>::max() - begin;
+}
+
+bool WritableRangeOverlapsOptions(
+    const void* writable,
+    size_t writableBytes,
+    const WirehairV2EncoderOptions* options)
+{
+    return writable && options && MemoryRangesOverlap(
+        writable, writableBytes, options, sizeof(*options));
 }
 
 bool OutputOverlapsMessageInput(
@@ -278,6 +391,32 @@ bool EncoderConstructorRangesOverlap(
     return false;
 }
 
+bool EncoderConstructorRangesOverlapWithOptions(
+    const void* message,
+    uint64_t messageBytes,
+    const WirehairV2EncoderOptions* options,
+    void* serializedProfileOut,
+    uint32_t* serializedProfileBytesOut,
+    WirehairV2Codec* codecOut)
+{
+    return EncoderConstructorRangesOverlap(
+            message,
+            messageBytes,
+            serializedProfileOut,
+            serializedProfileBytesOut,
+            codecOut) ||
+        WritableRangeOverlapsOptions(
+            serializedProfileOut,
+            WIREHAIR_V2_PROFILE_SERIALIZED_BYTES,
+            options) ||
+        WritableRangeOverlapsOptions(
+            serializedProfileBytesOut,
+            sizeof(*serializedProfileBytesOut),
+            options) ||
+        WritableRangeOverlapsOptions(
+            codecOut, sizeof(*codecOut), options);
+}
+
 bool CodecOutputOverlapsCanonicalProfile(
     const void* serializedProfile,
     WirehairV2Codec* codecOut)
@@ -287,6 +426,29 @@ bool CodecOutputOverlapsCanonicalProfile(
         WIREHAIR_V2_PROFILE_SERIALIZED_BYTES,
         codecOut,
         sizeof(*codecOut));
+}
+
+
+bool CodecOutputOverlapsOptions(
+    const WirehairV2EncoderOptions* options,
+    WirehairV2Codec* codecOut)
+{
+    return WritableRangeOverlapsOptions(
+        codecOut, sizeof(*codecOut), options);
+}
+
+void PublishEncoderSourceState(
+    PublicCodec* codec,
+    const StagedEncoderOptions& options,
+    const void* message)
+{
+    if (options.BorrowedImmutable) {
+        codec->SourceState = EncoderSourceState::BorrowedImmutable;
+        codec->BorrowedSource = static_cast<const uint8_t*>(message);
+    } else {
+        codec->SourceState = EncoderSourceState::Independent;
+        codec->BorrowedSource = nullptr;
+    }
 }
 
 wirehair_v2::SeedProfile ExpandProfile(const WirehairV2Profile& profile)
@@ -400,7 +562,7 @@ WirehairV2Result CreateEncoderForProfile(
         return WirehairV2_UnsupportedPlatform;
     }
 
-    PublicCodec* codec = new (std::nothrow) PublicCodec;
+    PublicCodec* codec = AllocatePublicCodec();
     if (!codec) {
         return WirehairV2_OOM;
     }
@@ -418,6 +580,8 @@ WirehairV2Result CreateEncoderForProfile(
     codec->BlockBytes = profile.block_bytes;
     codec->Mode = CodecMode::Encoder;
     codec->Decoded = false;
+    codec->SourceState = EncoderSourceState::Independent;
+    codec->BorrowedSource = nullptr;
     codec_out = codec;
     return WirehairV2_Success;
 }
@@ -606,7 +770,7 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create(
         return WirehairV2_UnsupportedPlatform;
     }
 
-    PublicCodec* codec = new (std::nothrow) PublicCodec;
+    PublicCodec* codec = AllocatePublicCodec();
     if (!codec) {
         return WirehairV2_OOM;
     }
@@ -637,6 +801,8 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create(
     codec->BlockBytes = blockBytes;
     codec->Mode = CodecMode::Encoder;
     codec->Decoded = false;
+    codec->SourceState = EncoderSourceState::Independent;
+    codec->BorrowedSource = nullptr;
     std::memcpy(serializedProfileOut, encoded, sizeof(encoded));
     *codecOut = ToHandle(codec);
     return WirehairV2_Success;
@@ -697,7 +863,7 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create_profile_id(
     }
 
     wirehair_v2::MessagePrecodeEncoderOptions options;
-    PublicCodec* codec = new (std::nothrow) PublicCodec;
+    PublicCodec* codec = AllocatePublicCodec();
     if (!codec) {
         return WirehairV2_OOM;
     }
@@ -729,6 +895,8 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create_profile_id(
     codec->BlockBytes = blockBytes;
     codec->Mode = CodecMode::Encoder;
     codec->Decoded = false;
+    codec->SourceState = EncoderSourceState::Independent;
+    codec->BorrowedSource = nullptr;
     std::memcpy(serializedProfileOut, encoded, sizeof(encoded));
     *codecOut = ToHandle(codec);
     return WirehairV2_Success;
@@ -771,6 +939,185 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create_profile(
     return create_result;
 }
 
+WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create_with_options(
+    const void* message,
+    uint64_t messageBytes,
+    uint32_t blockBytes,
+    const WirehairV2EncoderOptions* options,
+    void* serializedProfileOut,
+    uint32_t serializedProfileCapacity,
+    uint32_t* serializedProfileBytesOut,
+    WirehairV2Codec* codecOut)
+{
+    if (EncoderConstructorRangesOverlapWithOptions(
+            message,
+            messageBytes,
+            options,
+            serializedProfileOut,
+            serializedProfileBytesOut,
+            codecOut))
+    {
+        return WirehairV2_InvalidInput;
+    }
+
+    const StagedEncoderOptions staged = StageEncoderOptions(options);
+    if (staged.BorrowedImmutable) {
+        if (!CompleteMessageRangeRepresentable(message, messageBytes) ||
+            (serializedProfileOut && MemoryRangesOverlap(
+                message,
+                (size_t)messageBytes,
+                serializedProfileOut,
+                WIREHAIR_V2_PROFILE_SERIALIZED_BYTES)))
+        {
+            return WirehairV2_InvalidInput;
+        }
+    }
+
+    if (serializedProfileBytesOut) {
+        *serializedProfileBytesOut = WIREHAIR_V2_PROFILE_SERIALIZED_BYTES;
+    }
+    if (!codecOut) {
+        return WirehairV2_InvalidInput;
+    }
+    *codecOut = nullptr;
+    if (!serializedProfileBytesOut) {
+        return WirehairV2_InvalidInput;
+    }
+    if (staged.Result != WirehairV2_Success) {
+        return staged.Result;
+    }
+
+    const WirehairV2Result result = wirehair_v2_encoder_create(
+        message,
+        messageBytes,
+        blockBytes,
+        serializedProfileOut,
+        serializedProfileCapacity,
+        serializedProfileBytesOut,
+        codecOut);
+    if (result == WirehairV2_Success) {
+        PublishEncoderSourceState(FromHandle(*codecOut), staged, message);
+    }
+    return result;
+}
+
+WIREHAIR_EXPORT WirehairV2Result
+wirehair_v2_encoder_create_profile_id_with_options(
+    uint64_t profileId,
+    const void* message,
+    uint64_t messageBytes,
+    uint32_t blockBytes,
+    const WirehairV2EncoderOptions* options,
+    void* serializedProfileOut,
+    uint32_t serializedProfileCapacity,
+    uint32_t* serializedProfileBytesOut,
+    WirehairV2Codec* codecOut)
+{
+    if (EncoderConstructorRangesOverlapWithOptions(
+            message,
+            messageBytes,
+            options,
+            serializedProfileOut,
+            serializedProfileBytesOut,
+            codecOut))
+    {
+        return WirehairV2_InvalidInput;
+    }
+
+    const StagedEncoderOptions staged = StageEncoderOptions(options);
+    if (staged.BorrowedImmutable) {
+        if (!CompleteMessageRangeRepresentable(message, messageBytes) ||
+            (serializedProfileOut && MemoryRangesOverlap(
+                message,
+                (size_t)messageBytes,
+                serializedProfileOut,
+                WIREHAIR_V2_PROFILE_SERIALIZED_BYTES)))
+        {
+            return WirehairV2_InvalidInput;
+        }
+    }
+
+    if (serializedProfileBytesOut) {
+        *serializedProfileBytesOut = WIREHAIR_V2_PROFILE_SERIALIZED_BYTES;
+    }
+    if (!codecOut) {
+        return WirehairV2_InvalidInput;
+    }
+    *codecOut = nullptr;
+    if (!serializedProfileBytesOut) {
+        return WirehairV2_InvalidInput;
+    }
+    if (staged.Result != WirehairV2_Success) {
+        return staged.Result;
+    }
+
+    const WirehairV2Result result =
+        wirehair_v2_encoder_create_profile_id(
+            profileId,
+            message,
+            messageBytes,
+            blockBytes,
+            serializedProfileOut,
+            serializedProfileCapacity,
+            serializedProfileBytesOut,
+            codecOut);
+    if (result == WirehairV2_Success) {
+        PublishEncoderSourceState(FromHandle(*codecOut), staged, message);
+    }
+    return result;
+}
+
+WIREHAIR_EXPORT WirehairV2Result
+wirehair_v2_encoder_create_profile_with_options(
+    const void* message,
+    const void* serializedProfile,
+    uint32_t serializedProfileBytes,
+    const WirehairV2EncoderOptions* options,
+    WirehairV2Codec* codecOut)
+{
+    if (!codecOut) {
+        return WirehairV2_InvalidInput;
+    }
+    if (CodecOutputOverlapsCanonicalProfile(serializedProfile, codecOut) ||
+        CodecOutputOverlapsOptions(options, codecOut))
+    {
+        return WirehairV2_InvalidInput;
+    }
+
+    const StagedEncoderOptions staged = StageEncoderOptions(options);
+    WirehairV2Profile profile = {};
+    const WirehairV2Result parse_result = wirehair_v2_profile_deserialize(
+        serializedProfile, serializedProfileBytes, &profile);
+    if (parse_result == WirehairV2_Success) {
+        if (OutputOverlapsMessageInput(
+                message,
+                profile.message_bytes,
+                codecOut,
+                sizeof(*codecOut)) ||
+            (staged.BorrowedImmutable &&
+                !CompleteMessageRangeRepresentable(
+                    message, profile.message_bytes)))
+        {
+            return WirehairV2_InvalidInput;
+        }
+    }
+
+    *codecOut = nullptr;
+    if (parse_result != WirehairV2_Success) {
+        return parse_result;
+    }
+    if (staged.Result != WirehairV2_Success) {
+        return staged.Result;
+    }
+
+    const WirehairV2Result result = wirehair_v2_encoder_create_profile(
+        message, serializedProfile, serializedProfileBytes, codecOut);
+    if (result == WirehairV2_Success) {
+        PublishEncoderSourceState(FromHandle(*codecOut), staged, message);
+    }
+    return result;
+}
+
 WIREHAIR_EXPORT WirehairV2Result wirehair_v2_decoder_create(
     const void* serializedProfile,
     uint32_t serializedProfileBytes,
@@ -795,7 +1142,7 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_decoder_create(
         return WirehairV2_UnsupportedPlatform;
     }
 
-    PublicCodec* codec = new (std::nothrow) PublicCodec;
+    PublicCodec* codec = AllocatePublicCodec();
     if (!codec) {
         return WirehairV2_OOM;
     }
@@ -822,23 +1169,45 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encode(
     uint32_t* dataBytesOut)
 {
     PublicCodec* impl = FromHandle(codec);
-    if (!impl || impl->Mode != CodecMode::Encoder ||
-        !blockDataOut || !dataBytesOut)
+    const bool valid_encoder = impl && impl->Mode == CodecMode::Encoder;
+    uint64_t block_count = 0u;
+    uint32_t required = 0u;
+    if (valid_encoder) {
+        block_count = BlockCountWide(
+            impl->MessageBytes, impl->BlockBytes);
+        required = impl->BlockBytes;
+        if (block_count != 0u && blockId == block_count - 1u) {
+            required = (uint32_t)(impl->MessageBytes -
+                (block_count - 1u) * impl->BlockBytes);
+        }
+    }
+
+    const bool borrowed = valid_encoder &&
+        impl->SourceState == EncoderSourceState::BorrowedImmutable;
+    if (borrowed && dataBytesOut && MemoryRangesOverlap(
+            dataBytesOut,
+            sizeof(*dataBytesOut),
+            impl->BorrowedSource,
+            (size_t)impl->MessageBytes))
     {
+        return WirehairV2_InvalidInput;
+    }
+    if (!valid_encoder || !blockDataOut || !dataBytesOut) {
         if (dataBytesOut) {
             *dataBytesOut = 0u;
         }
         return WirehairV2_InvalidInput;
     }
-    const uint64_t block_count = BlockCountWide(
-        impl->MessageBytes, impl->BlockBytes);
-    uint32_t required = impl->BlockBytes;
-    if (block_count != 0u && blockId == block_count - 1u) {
-        required = (uint32_t)(impl->MessageBytes -
-            (block_count - 1u) * impl->BlockBytes);
-    }
     if (MemoryRangesOverlap(
             blockDataOut, required, dataBytesOut, sizeof(*dataBytesOut)))
+    {
+        return WirehairV2_InvalidInput;
+    }
+    if (borrowed && MemoryRangesOverlap(
+            blockDataOut,
+            required,
+            impl->BorrowedSource,
+            (size_t)impl->MessageBytes))
     {
         return WirehairV2_InvalidInput;
     }
@@ -846,8 +1215,29 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encode(
     if (outputCapacity < required) {
         return WirehairV2_BufferTooSmall;
     }
+    if (borrowed && blockId < block_count) {
+        const size_t source_offset =
+            (size_t)blockId * (size_t)impl->BlockBytes;
+        std::memcpy(
+            blockDataOut, impl->BorrowedSource + source_offset, required);
+        return WirehairV2_Success;
+    }
     return MapResult(impl->Impl.Encode(
         blockId, blockDataOut, outputCapacity, dataBytesOut));
+}
+
+WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_detach_input(
+    WirehairV2Codec codec)
+{
+    PublicCodec* impl = FromHandle(codec);
+    if (!impl || impl->Mode != CodecMode::Encoder ||
+        impl->SourceState == EncoderSourceState::Invalid)
+    {
+        return WirehairV2_InvalidInput;
+    }
+    impl->BorrowedSource = nullptr;
+    impl->SourceState = EncoderSourceState::Independent;
+    return WirehairV2_Success;
 }
 
 WIREHAIR_EXPORT WirehairV2Result wirehair_v2_decode(

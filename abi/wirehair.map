@@ -24,6 +24,10 @@ WIREHAIR_2.0 {
         wirehair_v2_encoder_create;
         wirehair_v2_encoder_create_profile;
         wirehair_v2_encoder_create_profile_id;
+        wirehair_v2_encoder_create_profile_id_with_options;
+        wirehair_v2_encoder_create_profile_with_options;
+        wirehair_v2_encoder_create_with_options;
+        wirehair_v2_encoder_detach_input;
         wirehair_v2_free;
         wirehair_v2_profile_deserialize;
         wirehair_v2_profile_serialize;
