@@ -2632,6 +2632,86 @@ class NamespaceSealTests(unittest.TestCase):
 
 
 class BuildVectorTests(unittest.TestCase):
+    def test_snapshot_clone_environment_binds_exact_campaign_owner(self) -> None:
+        if os.geteuid() not in (0, launch.CAMPAIGN_UID):
+            self.skipTest("campaign-owner fixture requires UID0 or UID1000")
+        with tempfile.TemporaryDirectory(prefix="wh2-clone-environment-") as temporary:
+            source = Path(temporary) / "source"
+            source.mkdir()
+            git_directory = source / ".git"
+            git_directory.mkdir()
+            if os.geteuid() != launch.CAMPAIGN_UID:
+                os.chown(source, launch.CAMPAIGN_UID, launch.CAMPAIGN_GID)
+                os.chown(git_directory, launch.CAMPAIGN_UID, launch.CAMPAIGN_GID)
+            environment = launch.snapshot_clone_environment(source)
+            self.assertEqual(environment["SUDO_UID"], str(launch.CAMPAIGN_UID))
+            self.assertEqual(
+                {key: value for key, value in environment.items()
+                 if key != "SUDO_UID"},
+                launch.GIT_ENVIRONMENT,
+            )
+
+    def test_snapshot_clone_environment_rejects_other_owner(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="wh2-clone-owner-") as temporary:
+            source = Path(temporary) / "source"
+            source.mkdir()
+            (source / ".git").mkdir()
+            wrong_uid = 0 if launch.CAMPAIGN_UID != 0 else 1
+            real_stat = launch.os.stat
+            def owner_stat(path: str, *, follow_symlinks: bool = True) -> os.stat_result:
+                value = real_stat(path, follow_symlinks=follow_symlinks)
+                if Path(path) == source:
+                    fields = list(value)
+                    fields[4] = wrong_uid
+                    return os.stat_result(fields)
+                return value
+            with mock.patch.object(
+                launch.os, "stat", side_effect=owner_stat,
+            ):
+                with self.assertRaises(launch.LaunchError):
+                    launch.snapshot_clone_environment(source)
+
+    @unittest.skipUnless(os.geteuid() == 0, "root snapshot clone probe")
+    def test_materialize_snapshot_clones_campaign_owned_input_as_root(self) -> None:
+        before_fds = launch.open_fd_roster()
+        before_children = launch.direct_child_pids()
+        with tempfile.TemporaryDirectory(prefix="wh2-root-snapshot-") as temporary:
+            parent = Path(temporary)
+            source = parent / "source"
+            source.mkdir()
+            git(source, "init", "--quiet")
+            git(source, "config", "user.name", "Facade Snapshot Test")
+            git(source, "config", "user.email", "facade@example.invalid")
+            tracked = source / "source.cpp"
+            tracked.write_text("int value = 1;\n", encoding="ascii")
+            git(source, "add", "source.cpp")
+            git(source, "commit", "--quiet", "-m", "snapshot fixture")
+            git(source, "checkout", "--quiet", "--detach")
+            commit = git(source, "rev-parse", "HEAD").decode("ascii").strip()
+            for raw_root, directories, files in os.walk(str(source)):
+                for name in directories + files:
+                    os.chown(
+                        str(Path(raw_root) / name),
+                        launch.CAMPAIGN_UID, launch.CAMPAIGN_GID,
+                        follow_symlinks=False,
+                    )
+            os.chown(source, launch.CAMPAIGN_UID, launch.CAMPAIGN_GID)
+            destination = parent / "snapshot"
+            receipt = launch.materialize_snapshot(source, destination, commit)
+            self.assertEqual(receipt.commit, commit)
+            self.assertEqual(
+                [entry["repository_relative_path"] for entry in receipt.entries],
+                ["source.cpp"],
+            )
+            source_info = os.stat(str(source / "source.cpp"), follow_symlinks=False)
+            copied_info = os.stat(str(destination / "source.cpp"), follow_symlinks=False)
+            self.assertNotEqual(
+                (source_info.st_dev, source_info.st_ino),
+                (copied_info.st_dev, copied_info.st_ino),
+            )
+        self.assertEqual(launch.direct_child_pids(), before_children)
+        self.assertEqual(launch.open_fd_roster(), before_fds)
+
     def test_fresh_directory_establishes_mode_under_service_umask(self) -> None:
         with tempfile.TemporaryDirectory(
             prefix="wh2-facade-fresh-directory-",
@@ -2791,6 +2871,195 @@ class BuildVectorTests(unittest.TestCase):
         self.assertTrue(fired)
         self.assertEqual(launch.direct_child_pids(), before_children)
         self.assertEqual(launch.open_fd_roster(), before_fds)
+
+    @unittest.skipUnless(
+        hasattr(os, "fork") and hasattr(os, "pidfd_open")
+        and hasattr(launch.signal, "pidfd_send_signal"),
+        "subreaper command-containment primitives are unavailable",
+    )
+    def test_bounded_command_reaps_exited_adopted_child_without_false_leak(
+        self,
+    ) -> None:
+        # The command intentionally exits without waiting for an already-dead
+        # child.  Linux reparents that zombie to this process after
+        # BoundedCommandOwnership enables subreaper mode.  It must be reaped,
+        # but it is not a live descendant and must not invalidate rc=0.
+        program = (
+            "import os\n"
+            "child=os.fork()\n"
+            "if child == 0:\n"
+            " os._exit(0)\n"
+            "os.waitid(os.P_PID,child,os.WEXITED|os.WNOWAIT)\n"
+            "os._exit(0)\n"
+        )
+        before_fds = launch.open_fd_roster()
+        before_children = launch.direct_child_pids()
+        output, error = launch._bounded_command(
+            ["/usr/bin/python3.12", "-c", program], cwd=None,
+            environment={"PATH": "/usr/bin:/bin"}, timeout=5.0,
+        )
+        self.assertEqual(output, b"")
+        self.assertEqual(error, b"")
+        self.assertEqual(launch.direct_child_pids(), before_children)
+        self.assertEqual(launch.open_fd_roster(), before_fds)
+
+    @unittest.skipUnless(
+        hasattr(os, "fork") and hasattr(os, "pidfd_open")
+        and hasattr(launch.signal, "pidfd_send_signal"),
+        "subreaper command-containment primitives are unavailable",
+    )
+    def test_bounded_command_does_not_signal_unreparented_zombie(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="wh2-zombie-parent-") as temporary:
+            pid_path = Path(temporary) / "zombie.pid"
+            baseline = launch.open_fd_roster()
+            child_baseline = tuple(launch.direct_child_pids())
+            owner = launch.BoundedCommandOwnership(
+                label="unreparented zombie probe", fd_baseline=baseline,
+                child_baseline=child_baseline,
+                service_baseline=(os.getpid(),),
+            )
+            parent_pid = os.fork()
+            if parent_pid == 0:
+                zombie_pid = os.fork()
+                if zombie_pid == 0:
+                    os._exit(23)
+                os.waitid(
+                    os.P_PID, zombie_pid, os.WEXITED | os.WNOWAIT,
+                )
+                pid_path.write_text(str(zombie_pid), encoding="ascii")
+                time.sleep(30.0)
+                os._exit(0)
+            zombie_pid = -1
+            try:
+                deadline = time.monotonic() + 2.0
+                raw_zombie_pid = ""
+                while time.monotonic() < deadline:
+                    try:
+                        raw_zombie_pid = pid_path.read_text(encoding="ascii")
+                    except FileNotFoundError:
+                        pass
+                    if raw_zombie_pid.isdigit():
+                        break
+                    time.sleep(0.001)
+                self.assertTrue(raw_zombie_pid.isdigit())
+                zombie_pid = int(raw_zombie_pid)
+                def exact_service_roster() -> list:
+                    result = [os.getpid()]
+                    for candidate in (parent_pid, zombie_pid):
+                        if Path("/proc/{}".format(candidate)).is_dir():
+                            result.append(candidate)
+                    return sorted(result)
+                with mock.patch.object(
+                    launch, "current_service_pids",
+                    side_effect=exact_service_roster,
+                ):
+                    descendants = owner.quiesce()
+                self.assertIn(parent_pid, descendants)
+                self.assertNotIn(zombie_pid, descendants)
+                for candidate in (parent_pid, zombie_pid):
+                    with self.assertRaises(ProcessLookupError):
+                        os.kill(candidate, 0)
+                    with self.assertRaises(ChildProcessError):
+                        os.waitpid(candidate, os.WNOHANG)
+            finally:
+                for candidate in (parent_pid, zombie_pid):
+                    if candidate <= 0:
+                        continue
+                    try:
+                        os.kill(candidate, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        os.waitpid(candidate, 0)
+                    except ChildProcessError:
+                        pass
+        self.assertEqual(launch.direct_child_pids(), list(child_baseline))
+        self.assertEqual(launch.open_fd_roster(), baseline)
+
+    def test_bounded_command_does_not_classify_disappeared_cgroup_pid_live(
+        self,
+    ) -> None:
+        baseline = launch.open_fd_roster()
+        owner = launch.BoundedCommandOwnership(
+            label="disappeared descendant probe", fd_baseline=baseline,
+            child_baseline=(), service_baseline=(os.getpid(),),
+        )
+        service_rosters = iter([
+            [os.getpid(), 999_999_999], [os.getpid()], [os.getpid()],
+        ])
+        with mock.patch.object(
+            launch, "current_service_pids",
+            side_effect=lambda: next(service_rosters),
+        ), mock.patch.object(
+            launch, "direct_child_pids", return_value=[],
+        ), mock.patch.object(
+            launch.os, "waitpid", side_effect=ChildProcessError,
+        ), mock.patch.object(
+            owner, "_signal_pid", return_value=False,
+        ):
+            self.assertEqual(owner.quiesce(), [])
+        self.assertEqual(launch.open_fd_roster(), baseline)
+
+    def test_bounded_command_ignores_shared_cgroup_sibling_arrivals(self) -> None:
+        baseline = launch.open_fd_roster()
+        owner = launch.BoundedCommandOwnership(
+            label="shared service probe", fd_baseline=baseline,
+            child_baseline=(), service_baseline=(os.getpid(), 111_111_111),
+        )
+        with mock.patch.object(
+            launch, "current_service_pids",
+            side_effect=AssertionError("shared service roster must not be consumed"),
+        ), mock.patch.object(
+            launch, "direct_child_pids", return_value=[],
+        ), mock.patch.object(
+            owner, "_signal_pid",
+            side_effect=AssertionError("unrelated sibling must not be signaled"),
+        ):
+            self.assertEqual(owner.quiesce(), [])
+        self.assertEqual(launch.open_fd_roster(), baseline)
+
+    def test_bounded_descendant_signal_does_not_hide_roster_failure(self) -> None:
+        baseline = launch.open_fd_roster()
+        def fake_pidfd_open(pid: int, flags: int = 0) -> int:
+            del pid, flags
+            return os.open("/dev/null", os.O_RDONLY | os.O_CLOEXEC)
+        with mock.patch.object(
+            launch, "process_start_ticks", return_value=42,
+        ), mock.patch.object(
+            launch.os, "pidfd_open", side_effect=fake_pidfd_open, create=True,
+        ), mock.patch.object(
+            launch, "current_service_pids",
+            side_effect=FileNotFoundError("injected authority roster failure"),
+        ):
+            with self.assertRaises(FileNotFoundError):
+                launch.BoundedCommandOwnership._signal_pid(999_999_999)
+        self.assertEqual(launch.open_fd_roster(), baseline)
+
+    def test_bounded_descendant_natural_exit_preserves_live_observation(self) -> None:
+        baseline = launch.open_fd_roster()
+        read_fd, write_fd = os.pipe2(os.O_CLOEXEC)
+        try:
+            def fake_pidfd_open(pid: int, flags: int = 0) -> int:
+                del pid, flags
+                return os.dup(read_fd)
+            with mock.patch.object(
+                launch, "process_start_ticks", return_value=42,
+            ), mock.patch.object(
+                launch.os, "pidfd_open", side_effect=fake_pidfd_open,
+                create=True,
+            ), mock.patch.object(
+                launch, "current_service_pids", return_value=[999_999_999],
+            ), mock.patch.object(
+                launch.signal, "pidfd_send_signal",
+                side_effect=ProcessLookupError, create=True,
+            ):
+                self.assertTrue(
+                    launch.BoundedCommandOwnership._signal_pid(999_999_999)
+                )
+        finally:
+            os.close(read_fd)
+            os.close(write_fd)
+        self.assertEqual(launch.open_fd_roster(), baseline)
 
     @unittest.skipUnless(
         hasattr(os, "pidfd_open")

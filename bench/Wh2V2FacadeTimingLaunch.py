@@ -995,7 +995,7 @@ class BoundedCommandOwnership:
             raise
 
     @staticmethod
-    def _signal_pid(pid: int) -> None:
+    def _signal_pid(pid: int) -> bool:
         baseline = open_fd_roster()
         try:
             try:
@@ -1003,9 +1003,36 @@ class BoundedCommandOwnership:
                 pidfd = os.pidfd_open(pid, 0)
                 if process_start_ticks(pid) != start_ticks:
                     fail("bounded descendant identity changed before kill")
+            except (FileNotFoundError, ProcessLookupError):
+                return False
+            # Authority-roster failures are not evidence that the target
+            # disappeared.  Keep them outside the absence-only catch so
+            # quiescence fails closed if either held namespace cannot be read.
+            if (
+                pid not in current_service_pids()
+                and pid not in direct_child_pids()
+            ):
+                return False
+            try:
+                if process_start_ticks(pid) != start_ticks:
+                    fail("bounded descendant identity changed during kill admission")
+            except (FileNotFoundError, ProcessLookupError):
+                return False
+            readable, _, exceptional = select.select(
+                [pidfd], [], [pidfd], 0.0,
+            )
+            if exceptional:
+                fail("bounded descendant pidfd readiness differs")
+            if readable:
+                return False
+            try:
                 signal.pidfd_send_signal(pidfd, signal.SIGKILL, None, 0)
             except (FileNotFoundError, ProcessLookupError):
-                return
+                # The identity-bound pidfd was nonterminal at the readiness
+                # sample.  A concurrent natural exit does not erase that
+                # proven post-command liveness.
+                return True
+            return True
         finally:
             close_fd_delta(baseline, ())
 
@@ -1014,10 +1041,14 @@ class BoundedCommandOwnership:
         observed: set[int] = set(self.observed_descendants)
         process = self.process
         pid = getattr(process, "pid", -1) if process is not None else -1
+        isolated_service = self.service_baseline == (os.getpid(),)
         deadline = time.monotonic() + 5.0
         while True:
             try:
-                service_now = set(current_service_pids())
+                service_now = (
+                    set(current_service_pids())
+                    if isolated_service else set(self.service_baseline)
+                )
                 child_now = set(direct_child_pids())
             except BaseException as exc:
                 failures.append("descendant roster: " + exception_text(exc))
@@ -1025,15 +1056,49 @@ class BoundedCommandOwnership:
             new_service = service_now - set(self.service_baseline)
             new_children = child_now - set(self.child_baseline)
             candidates = sorted(new_service | new_children)
-            observed.update(candidates)
+            live_candidates: List[int] = []
             for candidate in candidates:
+                try:
+                    waited, status_value = os.waitpid(candidate, os.WNOHANG)
+                    if waited == candidate:
+                        # A subreaper adopts both live descendants and
+                        # already-exited zombies.  Reap the latter as ordinary
+                        # command closure; they cannot execute after the
+                        # command has returned and are not a live escape.
+                        if candidate == pid and process is not None:
+                            process.returncode = wait_status_code(status_value)
+                        continue
+                    if waited != 0:
+                        failures.append(
+                            "descendant {} initial reap identity differs".format(
+                                candidate))
+                    live_candidates.append(candidate)
+                except ChildProcessError:
+                    # A service-cgroup descendant may not yet have been
+                    # reparented to this subreaper.  Let the identity-bound
+                    # pidfd signal distinguish a still-live member from a PID
+                    # that disappeared after the roster snapshot.
+                    try:
+                        if self._signal_pid(candidate):
+                            observed.add(candidate)
+                    except BaseException as exc:
+                        failures.append(
+                            "descendant {} signal: {}".format(
+                                candidate, exception_text(exc)))
+                except BaseException as exc:
+                    failures.append(
+                        "descendant {} initial reap: {}".format(
+                            candidate, exception_text(exc)))
+                    live_candidates.append(candidate)
+            observed.update(live_candidates)
+            for candidate in live_candidates:
                 try:
                     self._signal_pid(candidate)
                 except BaseException as exc:
                     failures.append(
                         "descendant {} signal: {}".format(
                             candidate, exception_text(exc)))
-            for candidate in candidates:
+            for candidate in live_candidates:
                 try:
                     waited, status_value = os.waitpid(candidate, os.WNOHANG)
                     if waited not in (0, candidate):
@@ -1082,16 +1147,13 @@ class BoundedCommandOwnership:
         except BaseException as exc:
             failures.append("descriptor delta: " + exception_text(exc))
         try:
-            final_service = set(current_service_pids())
             final_children = set(direct_child_pids())
-            if final_service - set(self.service_baseline):
-                failures.append("service descendants remain after cleanup")
             if final_children - set(self.child_baseline):
                 failures.append("adopted descendants remain after cleanup")
-            if self.service_baseline == (os.getpid(),) and final_service != {
-                os.getpid()
-            }:
-                failures.append("isolated service baseline changed")
+            if isolated_service:
+                final_service = set(current_service_pids())
+                if final_service != {os.getpid()}:
+                    failures.append("isolated service baseline changed")
         except BaseException as exc:
             failures.append("final descendant proof: " + exception_text(exc))
         self.observed_descendants = sorted(observed)
@@ -2747,14 +2809,46 @@ def _fresh_directory(path: Path, *, uid: int, gid: int,
         fail("fresh directory policy differs: " + str(path))
 
 
-def _run_git_outside(root: Path, arguments: Sequence[str], timeout: float) -> bytes:
+def _run_git_outside(
+    root: Path, arguments: Sequence[str], timeout: float,
+    *, environment: Mapping[str, str] = GIT_ENVIRONMENT,
+) -> bytes:
     output, error = _bounded_command(
-        [str(GIT), *list(arguments)], cwd=root, environment=GIT_ENVIRONMENT,
+        [str(GIT), *list(arguments)], cwd=root, environment=environment,
         timeout=timeout,
     )
     if error:
         fail("snapshot Git command wrote stderr: " + sha256_bytes(error))
     return output
+
+
+def snapshot_clone_environment(source: Path) -> Dict[str, str]:
+    """Authorize Git's local upload-pack for one exact UID-1000 input.
+
+    ``git clone --no-local`` launches a separate local ``git-upload-pack``.
+    Git deliberately strips command-line ``-c safe.directory=...`` state
+    before that helper, but preserves ``SUDO_UID`` and documents it as the
+    additional owner root may trust.  Bind both repository directories to the
+    campaign identity before supplying that narrowly scoped environment.
+    """
+    exact_absolute(source, "snapshot clone source", must_exist=True)
+    git_directory = source / ".git"
+    try:
+        if git_directory.resolve(strict=True) != git_directory:
+            fail("snapshot clone Git directory traverses a symbolic link")
+        for path in (source, git_directory):
+            info = os.stat(str(path), follow_symlinks=False)
+            if (
+                not stat.S_ISDIR(info.st_mode)
+                or info.st_uid != CAMPAIGN_UID
+                or info.st_gid != CAMPAIGN_GID
+            ):
+                fail("snapshot clone source ownership differs: " + str(path))
+    except OSError as exc:
+        fail("snapshot clone source policy is unavailable: " + exception_text(exc))
+    environment = dict(GIT_ENVIRONMENT)
+    environment["SUDO_UID"] = str(CAMPAIGN_UID)
+    return environment
 
 
 def seal_directory_tree(path: Path, *, allow_symlinks: bool = False) -> None:
@@ -2789,6 +2883,7 @@ def seal_directory_tree(path: Path, *, allow_symlinks: bool = False) -> None:
 def materialize_snapshot(source: Path, destination: Path,
                          commit: str) -> GitTreeReceipt:
     """Copy one exact commit into a fresh, self-contained root-owned checkout."""
+    clone_environment = snapshot_clone_environment(source)
     verify_git_tree(source, commit)
     if destination.exists():
         fail("snapshot destination already exists")
@@ -2799,6 +2894,7 @@ def materialize_snapshot(source: Path, destination: Path,
             str(source), str(destination),
         ),
         120.0,
+        environment=clone_environment,
     )
     _run_git_outside(
         destination,
@@ -3989,6 +4085,10 @@ def seal_build_authority(config: BuildSealConfig) -> str:
         config.harness_source, config.current_source, config.parent_source,
     ):
         exact_absolute(path, "build input", must_exist=True)
+        # Establish the only non-root Git ownership exception before the first
+        # source-derived Git command executes.  materialize_snapshot repeats
+        # this check immediately before cloning to close later drift.
+        snapshot_clone_environment(path)
     require_science_namespaces_absent()
     if BUILD_AUTHORITY_PATH.exists():
         fail("successful build authority already exists")
