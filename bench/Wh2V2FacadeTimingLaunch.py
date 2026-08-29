@@ -80,7 +80,7 @@ FROZEN_ROLE_CMAKE_SHA256 = (
     "2a95010b94fa027f646106b753a5fc607b0982ee4eb9893ffe56ea6c1d97b17b"
 )
 FROZEN_HEALTH_ADAPTER_SHA256 = (
-    "aef639e91970326a128471e76e63b371a7f611756b6a7116193fe775141dc4e5"
+    "d6fa8cde8293796bdb97d05f1c7e9330a8ade4991f31644474562eee05f73464"
 )
 
 BUILD_AUTHORITY_DIR = Path("/var/lib/wirehair")
@@ -372,7 +372,7 @@ spec=importlib.util.spec_from_file_location(name,screen)
 if spec is None or spec.loader is None: raise SystemExit("screen spec")
 module=importlib.util.module_from_spec(spec); sys.modules[name]=module
 spec.loader.exec_module(module)
-module.load_health_adapter(root,sys.argv[3],sys.argv[4],sys.argv[5])
+module.load_health_adapter(root,sys.argv[3],sys.argv[4],sys.argv[5],sys.argv[6])
 paths=set()
 for raw in open("/proc/self/maps","rb"):
     fields=raw.rstrip(b"\n").split(None,5)
@@ -4361,6 +4361,7 @@ def seal_build_authority(config: BuildSealConfig) -> str:
         str(snapshots["harness"].root / CONTROLLER_RELATIVE),
         str(snapshots["harness"].root), profile_manifest["sha256"],
         profile_adapter["sha256"], config.expected_harness_commit,
+        receipts["current"]["git_sha256"],
     ]
     commands.append(run_build_command(
         "controller-runtime-map-profile", profile_argv,
@@ -8013,8 +8014,10 @@ class WorkerMapMonitor:
             match = re.fullmatch(r"/proc/self/fd/([0-9]+)", argv[0])
             if (
                 match is None
-                or argv[1:3] != ["-c", "core.fsmonitor=false"]
-                or len(argv) < 6 or argv[3] != "-c"
+                or argv[1:5] != [
+                    "-c", "core.fsmonitor=false", "-c", "core.filemode=false",
+                ]
+                or len(argv) < 8 or argv[5] != "-c"
             ):
                 fail("controller health-Git fixed option vector differs")
             fd_number = int(match.group(1))
@@ -8032,9 +8035,9 @@ class WorkerMapMonitor:
                 self.prepared.harness_root
             ):
                 fail("controller health-Git FD/cwd authority differs")
-            if argv[4] != "safe.directory=" + root:
+            if argv[6] != "safe.directory=" + root:
                 fail("controller health-Git safe-directory authority differs")
-            command = tuple(argv[5:])
+            command = tuple(argv[7:])
             source = tuple(HEALTH_SOURCE_PATHS)
             permitted_direct = {
                 ("rev-parse", "--show-toplevel"),

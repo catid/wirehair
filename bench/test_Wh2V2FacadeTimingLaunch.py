@@ -3216,6 +3216,7 @@ class BuildVectorTests(unittest.TestCase):
         )
         expected_argv = ast.parse(
             '[git_fd_path,"-c","core.fsmonitor=false","-c",'
+            '"core.filemode=false","-c",'
             '"safe.directory="+str(root),*arguments]',
             mode="eval",
         ).body
@@ -3276,6 +3277,112 @@ class BuildVectorTests(unittest.TestCase):
             ast.dump(run_git_calls[0].args[2], include_attributes=False),
             current_git_expression,
         )
+
+        profile_tree = ast.parse(
+            launch.CONTROLLER_MAP_PROFILE_CODE,
+            filename="CONTROLLER_MAP_PROFILE_CODE",
+        )
+        profile_load_calls = [
+            node for node in ast.walk(profile_tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "load_health_adapter"
+        ]
+        self.assertEqual(len(profile_load_calls), 1)
+        self.assertEqual(
+            [ast.dump(value, include_attributes=False)
+             for value in profile_load_calls[0].args],
+            [ast.dump(ast.parse(value, mode="eval").body,
+                      include_attributes=False) for value in (
+                "root", "sys.argv[3]", "sys.argv[4]", "sys.argv[5]",
+                "sys.argv[6]",
+            )],
+        )
+
+        launcher_tree = ast.parse(
+            MODULE_PATH.read_text(encoding="utf-8"), filename=str(MODULE_PATH),
+        )
+        seal_function = next(
+            node for node in launcher_tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "seal_build_authority"
+        )
+        profile_assignment = next(
+            node for node in ast.walk(seal_function)
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "profile_argv"
+                for target in node.targets
+            )
+        )
+        self.assertIsInstance(profile_assignment.value, ast.List)
+        profile_git_expression = ast.dump(ast.parse(
+            'receipts["current"]["git_sha256"]', mode="eval",
+        ).body, include_attributes=False)
+        self.assertEqual(
+            ast.dump(profile_assignment.value.elts[-1], include_attributes=False),
+            profile_git_expression,
+        )
+
+    def test_health_git_monitor_joins_frozen_option_vector(self) -> None:
+        class Value:
+            pass
+
+        prepared = Value()
+        prepared.harness_root = Path("/sealed/harness")
+        prepared.build_authority = {"source_authority": {
+            "current": {"root": "/sealed/current"},
+            "parent": {"root": "/sealed/parent"},
+        }}
+        controller = Value()
+        controller.pid = 424242
+        monitor = launch.WorkerMapMonitor(
+            prepared=prepared, layout=Value(), sampler=Value(), guardian=Value(),
+            controller=controller, controller_argv=(),
+            controller_security={"topology": {
+                "parent_pid": os.getpid(), "process_group": controller.pid,
+                "session": controller.pid,
+            }},
+            root_deadline_ns=1,
+        )
+        new_argv = [
+            "/proc/self/fd/9", "-c", "core.fsmonitor=false", "-c",
+            "core.filemode=false", "-c", "safe.directory=/sealed/harness",
+            "rev-parse", "--show-toplevel",
+        ]
+        old_argv = [
+            "/proc/self/fd/9", "-c", "core.fsmonitor=false", "-c",
+            "safe.directory=/sealed/harness", "rev-parse", "--show-toplevel",
+        ]
+        git_info = os.stat(str(launch.GIT), follow_symlinks=False)
+        real_stat = os.stat
+
+        def fake_stat(path: str, *args: object, **kwargs: object) -> os.stat_result:
+            if path == "/proc/111/fd/9":
+                return git_info
+            return real_stat(path, *args, **kwargs)
+
+        security = {
+            "affinity": list(launch.RUN_CPUS),
+            "topology": {
+                "parent_pid": controller.pid, "process_group": 111,
+                "session": 111,
+            },
+        }
+        with mock.patch.object(
+            launch, "process_argv", return_value=new_argv,
+        ), mock.patch.object(
+            launch.os, "stat", side_effect=fake_stat,
+        ), mock.patch.object(
+            launch.os, "readlink", return_value="/sealed/harness",
+        ), mock.patch.object(
+            launch, "process_security_receipt", return_value=security,
+        ):
+            monitor._classify_git(111)
+        self.assertEqual(monitor.git_by_pid[111], security)
+        with mock.patch.object(launch, "process_argv", return_value=old_argv):
+            with self.assertRaises(launch.LaunchError):
+                monitor._classify_git(222)
 
     def test_role_vectors_bind_role_commits_and_disable_injection_slots(self) -> None:
         argv = launch.role_configure_argv(

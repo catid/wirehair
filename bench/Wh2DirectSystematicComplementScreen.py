@@ -8171,6 +8171,7 @@ def git_receipt(
         process = subprocess.Popen(
             [
                 git_fd_path, "-c", "core.fsmonitor=false",
+                "-c", "core.filemode=false",
                 "-c", "safe.directory=" + str(root), *arguments,
             ],
             executable=git_fd_path, pass_fds=(git_fd,), cwd=root,
