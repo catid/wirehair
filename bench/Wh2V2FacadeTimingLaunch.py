@@ -199,6 +199,10 @@ EXTERNAL_DEADLINE_SECONDS = 900
 # addition to every launcher-owned interval.
 SERVICE_ACTIVATION_STOP_MARGIN_SECONDS = 60
 SERVICE_DEADLINE_SECONDS = 1020
+# Git 2.43's local pack pipeline peaks above 64 tasks even when the build unit
+# is pinned to two CPUs.  The exact sealed boundary measured 77 tasks; retain a
+# bounded margin without constraining the independently frozen Ninja -j2 law.
+BUILD_TASKS_MAX = 128
 SAMPLER_READY_SECONDS = 12.0
 CONTROLLER_ADMISSION_SECONDS = 12.0
 SAMPLER_STOP_SECONDS = 8.0
@@ -2500,7 +2504,8 @@ def build_systemd_run_argv(config: BuildSealConfig) -> List[str]:
         "User=0", "Group=0", "SupplementaryGroups=", "Restart=no",
         "ExitType=cgroup", "KillMode=control-group", "SendSIGKILL=yes",
         "TimeoutStopSec=1s", "RuntimeMaxSec=2400s", "AllowedCPUs=0-1",
-        "AllowedMemoryNodes=0", "CPUAffinity=0-1", "TasksMax=64",
+        "AllowedMemoryNodes=0", "CPUAffinity=0-1",
+        "TasksMax={}".format(BUILD_TASKS_MAX),
         "LimitCORE=0", "UMask=0077", "PrivateTmp=yes",
         "PrivateDevices=yes", "PrivateNetwork=yes", "DevicePolicy=closed",
         "ProtectControlGroups=yes", "ProtectProc=invisible",

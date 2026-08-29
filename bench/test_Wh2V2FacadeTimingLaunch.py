@@ -151,6 +151,20 @@ class CanonicalAndParserTests(unittest.TestCase):
             launch.EXTERNAL_DEADLINE_SECONDS,
         )
 
+    def test_build_systemd_git_task_budget_is_exact(self) -> None:
+        config = launch.BuildSealConfig(
+            harness_source=Path("/var/lib/facade-harness"),
+            current_source=Path("/var/lib/facade-current"),
+            parent_source=Path("/var/lib/facade-parent"),
+            build_root=Path("/var/lib/facade-build"),
+            expected_harness_commit="b" * 40,
+        )
+        argv = launch.build_systemd_run_argv(config)
+        self.assertEqual(launch.BUILD_TASKS_MAX, 128)
+        self.assertIn("--property=TasksMax=128", argv)
+        self.assertNotIn("--property=TasksMax=64", argv)
+        self.assertIn("--property=AllowedCPUs=0-1", argv)
+
     def test_owned_fd_close_return_fault_is_resumable(self) -> None:
         class Owner:
             pass
