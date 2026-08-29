@@ -337,42 +337,112 @@ Before any production promotion:
 - Prove the default and repair core objects are unchanged or provide a sealed
   pre-change/default A/B closure with no regression.
 
-## Broader timing license
+## Public-facade timing closure
 
-The broader timing campaign remains encoder-only.  It may compare the current
-equation and direct modes in one binary, but that binary must expose, schedule,
-and serialize only those two WH2 arms.  Dormant Wirehair1 implementation text
-from the shared `Wh2NativeCodec.cpp` translation unit may remain linked; it is
-not a selectable axis and supplies no comparison evidence.  Any actual
-Wirehair1 or literal pre-change comparison uses separately sealed role
-binaries, because even equation-neutral hooks have produced percent-level
-layout bias historically.
+Performance promotion is a separate, encoder-only evidence task tracked by
+`wirehair-sxvz.16.1.20.23.1.3.1`.  Earlier retained-source screens used an
+internal `NativeArm` and cannot establish the timing of the exported facade,
+default-policy neutrality, an exact pre-feature comparison, or superiority to
+Wirehair1.  Their observations are not combined with this task's statistics.
 
-The screen must retain:
+The required first gate is exactly one sealed public-C-API falsifier using two
+independently built role binaries.  Both binaries compile the identical worker
+translation unit from the later harness commit, but each includes the public
+header and links the library built from its own exact implementation commit:
 
-- full constructor plus IDs `[0,K)` as the primary measured scope;
-- true equation/equation and direct/direct A/A panels;
-- exact source, configuration, descriptor, systematic-byte, and repair-byte
-  receipts.  This NativeArm screen uses exact `K*B` sources; partial-final-
-  block evidence belongs to the later public-API implementation gates, not to
-  this timing falsifier.  In the same-binary falsifier, a binary-bound
-  `construction_equivalent:true` may attest the field-by-field comparison of
-  system rows, runtime primes, intermediate bytes, and normalized non-time
-  statistics; the later cross-binary campaign must serialize a stable state
-  fingerprint for those values rather than relying on that Boolean alone;
-- exactly `K` qualified direct packets in the primary scope;
-- a branchless/pre-change repair control in addition to direct/equation policy
-  neutrality;
-- canonical ABBA/BAAB records, a hard external deadline, and a single newly
-  created immutable output directory.  Before the one-shot, an independent
-  fresh-build audit must bind compiler identity, normalized compile/link
-  commands, options, object roster, source manifest, and the executable hash;
-  the runner revalidates that source and executable seal before and after the
-  child.  The later cross-role campaign embeds the complete per-role build
-  receipts in its own sealed provenance;
-- preregistered cell and pooled confidence gates.
+- current commit `d6ddb35e046956174202584fb5a26c9a79679ea8` exposes `C`,
+  `E`, and `D`;
+- exact parent commit `101584b7e5c30326b1791429221c331c82a00807` exposes
+  `P` and `L`.
 
-The development timing domain is the existing 24-cell Cartesian product:
+The arms use only exported constructors and encode entry points:
+
+- `C` calls `wirehair_v2_encoder_create_with_options()` with
+  `WirehairV2EncoderSource_BorrowedImmutable`;
+- `E` calls the same constructor with
+  `WirehairV2EncoderSource_Independent`;
+- `D` calls the existing `wirehair_v2_encoder_create()` at the current
+  commit;
+- `P` calls `wirehair_v2_encoder_create()` at the exact parent commit;
+- `L` calls the parent commit's public Wirehair1 constructor and encoder.
+
+The role libraries are never built from the harness worktree.  Each build
+receipt binds the implementation and harness Git trees, ordered source/blob
+manifest, compiler and linker identities and commands, CMake configuration,
+object and archive closure, executable and library hashes, and resolved
+dynamic-dependency closure.  Before the sole run, strict builds, selftests,
+sanitizers, and repeated local and independent adversarial reviews must all
+complete without a P0 or P1 finding.
+
+The falsifier covers this exact 10-cell Cartesian product:
+
+```text
+K = {8, 128, 512, 5000, 64000}
+B = {64, 1280}
+```
+
+For each cell, work is distributed across 12 matched replicates as:
+
+```text
+N(K) = max(24, ceil(65536 / K))
+n[r] = floor(N / 12) + (r < N mod 12)
+```
+
+Every replicate measures these four scopes:
+
+1. a prebuilt encoder emitting systematic IDs `[0,K)`;
+2. fresh eager construction followed by systematic IDs `[0,K)`;
+3. fresh eager construction followed by repair IDs `[K,2K)`, including a
+   nested construction-plus-first-repair clock;
+4. a prebuilt encoder emitting repair IDs `[K,2K)`.
+
+Each scope contains the five true A/A controls `D/D`, `E/E`, `C/C`, `P/P`,
+and `L/L`, plus `E/D`, `C/E`, `D/P`, and `C/L`.  The controller schedules the
+cross-role invocations as matched ABBA/BAAB blocks on one pinned worker CPU.
+The complete roster is therefore exactly
+`12 replicates * 10 cells * 4 scopes * 9 comparisons = 4,320` panels.
+
+The public evidence must bind the exact source and work allocation, canonical
+per-arm descriptors, serialized WH2 configuration, public-state fingerprint,
+systematic bytes, repairs `[K,2K)`, first repair, representative high IDs, and
+public decode roundtrip.  `C`, `E`, `D`, and `P` must have identical WH2
+source, configuration, public state, systematic, repair, and high-ID receipts.
+`L` is a different equation system: it must reproduce the source systematics,
+retain exact stable role-local repair and high-ID receipts, and pass its public
+decode roundtrip, but it is never required to equal WH2 repairs or
+configuration.
+
+The timing worker must not link an internal codec or expose a timing-only path
+counter.  Instead, it authenticates the attached `BorrowedImmutable` policy
+and records exactly `K` systematic invocations eligible for the borrowed route
+and zero eligible repair invocations.  The already-passed production tests and
+source review, not this timing receipt, remain authoritative for direct-route
+execution.
+
+Statistics use matched log contrasts, `math.fsum`, unbiased variance, and
+`t11 = 2.200985160082949`.  The frozen gates are:
+
+- every A/A interval, and every `E/D` and `D/P` interval, lies strictly inside
+  the two-sided `[-log1p(0.02), +log1p(0.02)]` range for every cell and scope;
+- in both systematic scopes, neither `C/E` nor `C/L` has a cell point estimate
+  above `1.02`, and each equal-cell, width, and preregistered size-band upper
+  95% bound is strictly below `0.99`;
+- the bands are `small={8,128}`, `medium={512,5000}`, and `large={64000}`;
+- in both repair scopes, `C/E` has no cell point estimate above `1.02`, and
+  every cell and group upper 95% bound is at most `1.02`.  Wirehair1 repair
+  timing is descriptive because `L` uses different equations.
+
+The controller's exact internal deadline is 840 seconds inside the 900-second
+external scientific guardian.  The controller stops worker timing at T+820
+and reserves its final 20 seconds for health finalization; the systemd
+activation/stop backstop is separate from the scientific deadline.  Evidence
+must be canonical, complete, immutable,
+and independently replayable, including raw records, summary, role build
+receipts, source and executable closure, affinity, containment, thermal,
+DIMM/EDAC health, durable attempt accounting, and `COMPLETE` published last.
+
+A valid pass licenses only creation and execution of a separately tracked and
+preregistered role campaign over the full 24-cell development domain:
 
 ```text
 K = {8, 32, 100, 128, 512, 1000, 2048, 5000, 8192,
@@ -380,80 +450,10 @@ K = {8, 32, 100, 128, 512, 1000, 2048, 5000, 8192,
 B = {64, 1280}
 ```
 
-It is deliberately smaller than the later production domain.  Work for one
-cell is distributed over 12 independent replicates as:
-
-```text
-N(K) = max(24, ceil(65536 / K))
-n[r] = floor(N / 12) + (r < N mod 12)
-```
-
-Thus every replicate executes at least two invocations per slot and contains
-both the primary and opposite four-slot counterbalanced blocks.
-
-The first gate is a new, never-before-timed 10-cell falsifier:
-
-```text
-K = {8, 128, 512, 5000, 64000}
-B = {64, 1280}
-```
-
-It uses only the current same-binary equation (`E`) and direct (`C`) WH2 arms,
-never Wirehair1, with a 115-second internal and 120-second external deadline.
-For every cell it measures baseline A/A, candidate A/A, and `C/E` in these
-three scopes:
-
-1. fresh eager initialization plus systematic IDs `[0,K)`;
-2. fresh eager initialization plus repair IDs `[K,2K)`, retaining both the
-   nested initialization-plus-first-repair timestamp and the full total;
-3. a prebuilt encoder evaluating repair IDs `[K,2K)`.
-
-Every A/A 95% interval must lie strictly inside
-`[-log1p(0.02), +log1p(0.02)]`.  For the systematic `C/E` contrast, no cell
-point estimate may exceed `log1p(0.02)`, and the equal-cell aggregate and each
-width and size-band aggregate must have upper 95% bounds below `log(0.99)`.
-The preregistered bands are `small={8,128}`, `medium={512,5000}`, and
-`large={64000}`, each pooled equally across its two payload widths.  For every
-repair metric, no cell point may exceed `log1p(0.02)` and all cell, width,
-size-band, and equal-cell aggregate upper 95% bounds must be below
-`log1p(0.02)`.  Statistics use paired log contrasts, `math.fsum`, unbiased
-variance, and
-`t11 = 2.200985160082949`.  A valid pass licenses only the full role-separated
-campaign.
-
-The full campaign uses two independently built and sealed workers:
-
-- current source exposes `C` (direct) and `E` (equation evaluation);
-- exact pre-change source commit
-  `87a3f1cb1d6562a6652c1ec0b99f6131eaeade09` exposes `P` (pre-change WH2)
-  and `L` (pre-change Wirehair1).
-
-The pre-change worker must never compile the current `Wh2NativeCodec.cpp`.
-Each role receipt binds its Git commit, ordered source/blob manifest, compiler,
-normalized compile and link command, CMake options, object/archive roster,
-executable hash and metadata, and dynamic dependency closure.  A fresh
-reproducibility build must match before the one-shot campaign.  Workers run
-sequentially on one pinned CPU while the controller and health sampler stay on
-other physical cores.
-
-The full campaign covers all 24 development cells and the same three timing
-scopes.  It interprets `C/E` as the policy effect, `E/P` as the contamination
-closure, `C/P` as the historical-WH2 comparison, and `C/L` only as isolated
-encoder evidence against historical Wirehair1.  `P`, `E`, and `C` must agree
-on the exact configuration and attempts, source, system rows, runtime primes,
-intermediate bytes, normalized non-time statistics, all systematic bytes,
-repairs `[K,2K)`, and high-ID repair controls.  `C` records exactly `K` direct
-systematic hits and zero repair hits.
-
-`E/P` must be equivalent within the strict two-sided 2% interval for every
-cell and scope.  `C/E`, `C/P`, and the repair gates retain the falsifier's
-noninferiority and aggregate-improvement directions; `C/L` is descriptive
-unless a separate stricter WH1 gate is preregistered.  The campaign has a
-1770-second internal and 1800-second external deadline, canonical exact-roster
-JSONL, empty stderr, full CPU/thermal/EDAC coverage, and immutable raw and
-summary artifacts.  Missing data, failed outcomes, deadline/health failures,
-or any A/A failure invalidate the whole campaign; no cell may be dropped.
-
-No result from that campaign establishes a receive-path improvement, changes
-the default API, proves Wirehair1 superiority, or authorizes the public symbols
-above without the implementation gates in this document.
+Any A/A gate failure is invalid evidence; a candidate/equivalence gate failure
+with otherwise complete infrastructure is a valid scientific reject.  The
+screen does not itself establish receive or decoder performance, all-K recovery,
+default-policy promotion, production promotion, or final Wirehair1
+superiority.  A valid reject is final for this claim.  Reject or invalid
+evidence licenses neither a rerun nor post-hoc cell or scope narrowing, and in
+all outcomes the functional opt-in API remains unchanged.

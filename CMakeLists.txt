@@ -863,6 +863,56 @@ if(BUILD_TESTS)
         set_tests_properties(wirehair_wh2_native_codec_test PROPERTIES
             TIMEOUT 180
             LABELS "wh2;benchmark;contract;native;codec")
+        add_executable(wirehair_wh2_v2_facade_timing_worker_test
+            bench/Wh2FrozenTrace.cpp
+            bench/Wh2FrozenTrace.h
+            bench/Wh2V2FacadeTimingWorker.cpp)
+        target_link_libraries(
+            wirehair_wh2_v2_facade_timing_worker_test PRIVATE wirehair)
+        target_compile_definitions(
+            wirehair_wh2_v2_facade_timing_worker_test PRIVATE
+            WIREHAIR_WH2_FACADE_ROLE_CURRENT=1
+            "WIREHAIR_WH2_HARNESS_GIT_COMMIT=\"${WIREHAIR_WH2_SOURCE_GIT_COMMIT}\""
+            "WIREHAIR_WH2_IMPLEMENTATION_GIT_COMMIT=\"d6ddb35e046956174202584fb5a26c9a79679ea8\"")
+        wirehair_apply_project_options(
+            wirehair_wh2_v2_facade_timing_worker_test)
+        add_test(
+            NAME wirehair_wh2_v2_facade_timing_worker_selftest
+            COMMAND wirehair_wh2_v2_facade_timing_worker_test --selftest)
+        set_tests_properties(
+            wirehair_wh2_v2_facade_timing_worker_selftest PROPERTIES
+                TIMEOUT 120
+                LABELS
+                    "wh2;benchmark;contract;public-api;encoder;facade;timing")
+        add_test(
+            NAME wirehair_wh2_v2_facade_timing_screen_selftest
+            COMMAND ${Python3_EXECUTABLE} -I -B
+                ${PROJECT_SOURCE_DIR}/bench/Wh2V2FacadeTimingScreen.py
+                --selftest)
+        set_tests_properties(
+            wirehair_wh2_v2_facade_timing_screen_selftest PROPERTIES
+                TIMEOUT 60
+                LABELS
+                    "wh2;benchmark;contract;public-api;encoder;facade;timing")
+        add_test(
+            NAME wirehair_wh2_v2_facade_timing_launcher_selftest
+            COMMAND ${Python3_EXECUTABLE} -I -B
+                ${PROJECT_SOURCE_DIR}/bench/Wh2V2FacadeTimingLaunch.py
+                --selftest)
+        set_tests_properties(
+            wirehair_wh2_v2_facade_timing_launcher_selftest PROPERTIES
+                TIMEOUT 60
+                LABELS
+                    "wh2;benchmark;contract;public-api;encoder;facade;timing")
+        add_test(
+            NAME wirehair_wh2_v2_facade_timing_launcher_contract_test
+            COMMAND ${Python3_EXECUTABLE} -I -B
+                ${PROJECT_SOURCE_DIR}/bench/test_Wh2V2FacadeTimingLaunch.py)
+        set_tests_properties(
+            wirehair_wh2_v2_facade_timing_launcher_contract_test PROPERTIES
+                TIMEOUT 120
+                LABELS
+                    "wh2;benchmark;contract;public-api;encoder;facade;timing")
         add_executable(wirehair_wh2_phase_attribution_test
             bench/Wh2NativeCodec.cpp
             bench/Wh2NativeCodec.h

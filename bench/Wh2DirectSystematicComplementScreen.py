@@ -8169,7 +8169,10 @@ def git_receipt(
         if time.monotonic() >= receipt_deadline:
             fail("static Git receipt reached its global deadline")
         process = subprocess.Popen(
-            [git_fd_path, "-c", "core.fsmonitor=false", *arguments],
+            [
+                git_fd_path, "-c", "core.fsmonitor=false",
+                "-c", "safe.directory=" + str(root), *arguments,
+            ],
             executable=git_fd_path, pass_fds=(git_fd,), cwd=root,
             env=environment, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, start_new_session=True,
