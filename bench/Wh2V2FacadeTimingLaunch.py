@@ -2735,6 +2735,10 @@ def _fresh_directory(path: Path, *, uid: int, gid: int,
     except FileExistsError:
         fail("fresh directory already exists: " + str(path))
     os.chown(str(path), uid, gid, follow_symlinks=False)
+    # systemd intentionally launches the root sealer with UMask=0077.  The
+    # requested campaign mode is an authority property, not an umask hint, so
+    # establish it explicitly after the exclusive create and ownership handoff.
+    os.chmod(str(path), mode, follow_symlinks=False)
     info = os.stat(str(path), follow_symlinks=False)
     if (
         not stat.S_ISDIR(info.st_mode) or info.st_uid != uid or info.st_gid != gid

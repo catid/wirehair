@@ -2632,6 +2632,46 @@ class NamespaceSealTests(unittest.TestCase):
 
 
 class BuildVectorTests(unittest.TestCase):
+    def test_fresh_directory_establishes_mode_under_service_umask(self) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="wh2-facade-fresh-directory-",
+        ) as temporary:
+            parent = Path(temporary)
+            child = parent / "sealed-root"
+            real_stat = launch.os.stat
+
+            class RootProtectedParent:
+                def __init__(self, value: os.stat_result) -> None:
+                    self._value = value
+                    self.st_mode = stat.S_IFDIR | 0o755
+                    self.st_uid = 0
+                    self.st_gid = 0
+
+                def __getattr__(self, name: str) -> object:
+                    return getattr(self._value, name)
+
+            def root_parent_stat(path: object, *arguments: object,
+                                 **keywords: object) -> object:
+                value = real_stat(path, *arguments, **keywords)
+                if Path(path) == parent:
+                    return RootProtectedParent(value)
+                return value
+
+            previous_umask = os.umask(0o077)
+            try:
+                with mock.patch.object(
+                    launch.os, "stat", side_effect=root_parent_stat,
+                ):
+                    launch._fresh_directory(
+                        child, uid=os.getuid(), gid=os.getgid(), mode=0o755,
+                    )
+            finally:
+                os.umask(previous_umask)
+            info = child.stat()
+            self.assertEqual(info.st_uid, os.getuid())
+            self.assertEqual(info.st_gid, os.getgid())
+            self.assertEqual(stat.S_IMODE(info.st_mode), 0o755)
+
     def test_retained_replay_preserves_invalid_aa_disposition(self) -> None:
         raw = b"synthetic-raw\n"
         failures = ["aa_ci:D/D:prebuilt-systematic:K8:B64"]
