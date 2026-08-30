@@ -27,6 +27,63 @@ static const char kNativeArmOwnedSource[] = "native-arm-owned-kxb-v1";
 static const char kFixtureSourceAcquisition[] =
     "fixture-copy-before-clock-move-v1";
 
+template <bool Measure>
+class FixtureTimer;
+
+template <>
+class FixtureTimer<true>
+{
+public:
+    FixtureTimer()
+        : Start(std::chrono::steady_clock::now())
+    {
+    }
+
+    uint64_t Stop() const
+    {
+        const std::chrono::steady_clock::time_point finish =
+            std::chrono::steady_clock::now();
+        const std::chrono::nanoseconds elapsed =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                finish - Start);
+        return elapsed.count() > 0 ? (uint64_t)elapsed.count() : 0u;
+    }
+
+private:
+    std::chrono::steady_clock::time_point Start;
+};
+
+template <>
+class FixtureTimer<false>
+{
+public:
+    uint64_t Stop() const
+    {
+        return 0u;
+    }
+};
+
+template <bool Measure>
+struct FixtureElapsedPolicy;
+
+template <>
+struct FixtureElapsedPolicy<true>
+{
+    static bool Valid(uint64_t elapsed)
+    {
+        return elapsed > 0u;
+    }
+};
+
+template <>
+struct FixtureElapsedPolicy<false>
+{
+    static bool Valid(uint64_t elapsed)
+    {
+        return elapsed == 0u;
+    }
+};
+
 uint64_t SplitMix64(uint64_t& state)
 {
     state += UINT64_C(0x9e3779b97f4a7c15);
@@ -1448,7 +1505,8 @@ bool NativeEncoderFixture::GetStorageReceipt(
     return true;
 }
 
-TimedArmResult NativeEncoderFixture::Run() const
+template <bool Measure>
+TimedArmResult NativeEncoderFixture::RunImpl() const
 {
     TimedArmResult result;
     if (!IsInitialized()) {
@@ -1464,8 +1522,7 @@ TimedArmResult NativeEncoderFixture::Run() const
         std::vector<uint8_t> owned_source(ImplValue->Source);
         NativeArm arm;
         WirehairResult invocation_result = Wirehair_Error;
-        const std::chrono::steady_clock::time_point start =
-            std::chrono::steady_clock::now();
+        const FixtureTimer<Measure> timer;
         invocation_result = arm.InitializeOwnedSourceAfterGlobalInit(
             ImplValue->Spec,
             ImplValue->K,
@@ -1487,13 +1544,7 @@ TimedArmResult NativeEncoderFixture::Run() const
                 }
             }
         }
-        const std::chrono::steady_clock::time_point finish =
-            std::chrono::steady_clock::now();
-        const std::chrono::nanoseconds elapsed =
-            std::chrono::duration_cast<std::chrono::nanoseconds>(
-                finish - start);
-        result.ElapsedNanoseconds = elapsed.count() > 0 ?
-            (uint64_t)elapsed.count() : 0u;
+        result.ElapsedNanoseconds = timer.Stop();
         result.Result = invocation_result;
         if (invocation_result == Wirehair_Success)
         {
@@ -1512,7 +1563,9 @@ TimedArmResult NativeEncoderFixture::Run() const
                 !arm.UsesRetainedSourceFor(ImplValue->K);
             result.DirectSystematicPackets = direct_roster ?
                 ImplValue->K : 0u;
-            if (!result.BytesVerified || result.ElapsedNanoseconds == 0u ||
+            if (!result.BytesVerified ||
+                !FixtureElapsedPolicy<Measure>::Valid(
+                    result.ElapsedNanoseconds) ||
                 (!direct_roster && !equation_roster) ||
                 result.DirectSystematicPackets != expected_direct)
             {
@@ -1534,6 +1587,16 @@ TimedArmResult NativeEncoderFixture::Run() const
         result.Result = Wirehair_OOM;
         return result;
     }
+}
+
+TimedArmResult NativeEncoderFixture::Preflight() const
+{
+    return RunImpl<false>();
+}
+
+TimedArmResult NativeEncoderFixture::Run() const
+{
+    return RunImpl<true>();
 }
 
 struct NativeReceiveFixture::Impl
@@ -1606,7 +1669,8 @@ bool NativeReceiveFixture::IsInitialized() const
     return ImplValue && ImplValue->Initialized;
 }
 
-TimedArmResult NativeReceiveFixture::Run() const
+template <bool Measure>
+TimedArmResult NativeReceiveFixture::RunImpl() const
 {
     TimedArmResult result;
     if (!IsInitialized()) {
@@ -1636,8 +1700,7 @@ TimedArmResult NativeReceiveFixture::Run() const
                 return result;
             }
 
-            const std::chrono::steady_clock::time_point start =
-                std::chrono::steady_clock::now();
+            const FixtureTimer<Measure> timer;
             for (size_t packet_index = 0u;
                  packet_index < receive_packet_count;
                  ++packet_index)
@@ -1661,13 +1724,7 @@ TimedArmResult NativeReceiveFixture::Run() const
                     break;
                 }
             }
-            const std::chrono::steady_clock::time_point finish =
-                std::chrono::steady_clock::now();
-            const std::chrono::nanoseconds elapsed =
-                std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    finish - start);
-            result.ElapsedNanoseconds = elapsed.count() > 0 ?
-                (uint64_t)elapsed.count() : 0u;
+            result.ElapsedNanoseconds = timer.Stop();
         }
         else
         {
@@ -1693,8 +1750,7 @@ TimedArmResult NativeReceiveFixture::Run() const
                 result.Result = initialize_result;
                 return result;
             }
-            const std::chrono::steady_clock::time_point start =
-                std::chrono::steady_clock::now();
+            const FixtureTimer<Measure> timer;
             for (size_t packet_index = 0u;
                  packet_index < receive_packet_count;
                  ++packet_index)
@@ -1715,13 +1771,7 @@ TimedArmResult NativeReceiveFixture::Run() const
                     break;
                 }
             }
-            const std::chrono::steady_clock::time_point finish =
-                std::chrono::steady_clock::now();
-            const std::chrono::nanoseconds elapsed =
-                std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    finish - start);
-            result.ElapsedNanoseconds = elapsed.count() > 0 ?
-                (uint64_t)elapsed.count() : 0u;
+            result.ElapsedNanoseconds = timer.Stop();
 #else
             result.Result = Wirehair_UnsupportedPlatform;
             return result;
@@ -1741,7 +1791,10 @@ TimedArmResult NativeReceiveFixture::Run() const
             }
             result.DecodedOverhead = success_packet_count - arm.K;
             result.BytesVerified = recovered == arm.Source;
-            if (!result.BytesVerified || result.ElapsedNanoseconds == 0u) {
+            if (!result.BytesVerified ||
+                !FixtureElapsedPolicy<Measure>::Valid(
+                    result.ElapsedNanoseconds))
+            {
                 result.Result = Wirehair_Error;
             }
         }
@@ -1765,6 +1818,16 @@ TimedArmResult NativeReceiveFixture::Run() const
         result.DecodedOverhead = UINT32_MAX;
         return result;
     }
+}
+
+TimedArmResult NativeReceiveFixture::Preflight() const
+{
+    return RunImpl<false>();
+}
+
+TimedArmResult NativeReceiveFixture::Run() const
+{
+    return RunImpl<true>();
 }
 
 struct NativeSolveFixture::Impl

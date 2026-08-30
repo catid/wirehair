@@ -863,6 +863,41 @@ if(BUILD_TESTS)
         set_tests_properties(wirehair_wh2_native_codec_test PROPERTIES
             TIMEOUT 180
             LABELS "wh2;benchmark;contract;native;codec")
+        set(WIREHAIR_WH2_K2_PROJECTIVE_SCREEN_SOURCES
+            bench/Wh2FrozenTrace.cpp
+            bench/Wh2FrozenTrace.h
+            bench/Wh2K2ProjectiveCodec.cpp
+            bench/Wh2K2ProjectiveCodec.h
+            bench/Wh2K2ProjectiveScreen.cpp
+            bench/Wh2NativeCodec.cpp
+            bench/Wh2NativeCodec.h)
+        add_executable(wirehair_wh2_k2_projective_screen
+            ${WIREHAIR_WH2_K2_PROJECTIVE_SCREEN_SOURCES})
+        target_link_libraries(wirehair_wh2_k2_projective_screen PRIVATE
+            wirehair_v2_timing_policy)
+        wirehair_apply_project_options(wirehair_wh2_k2_projective_screen)
+        add_executable(wirehair_wh2_k2_projective_hook_selftest
+            ${WIREHAIR_WH2_K2_PROJECTIVE_SCREEN_SOURCES})
+        target_compile_definitions(
+            wirehair_wh2_k2_projective_hook_selftest PRIVATE
+            WIREHAIR_WH2_K2_PROJECTIVE_TEST_HOOKS=1)
+        target_link_libraries(
+            wirehair_wh2_k2_projective_hook_selftest PRIVATE
+            wirehair_v2_timing_policy)
+        wirehair_apply_project_options(
+            wirehair_wh2_k2_projective_hook_selftest)
+        add_test(
+            NAME wirehair_wh2_k2_projective_screen_selftest
+            COMMAND wirehair_wh2_k2_projective_screen --selftest)
+        add_test(
+            NAME wirehair_wh2_k2_projective_hook_selftest
+            COMMAND wirehair_wh2_k2_projective_hook_selftest --selftest)
+        set_tests_properties(
+            wirehair_wh2_k2_projective_screen_selftest
+            wirehair_wh2_k2_projective_hook_selftest PROPERTIES
+                TIMEOUT 120
+                LABELS
+                    "wh2;benchmark;contract;native;k2;projective;falsifier")
         add_executable(wirehair_wh2_v2_facade_timing_worker_test
             bench/Wh2FrozenTrace.cpp
             bench/Wh2FrozenTrace.h

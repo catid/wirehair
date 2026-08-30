@@ -1263,6 +1263,20 @@ void CheckOtherTimingScopes()
     std::vector<uint32_t> duplicate_ids = ids;
     duplicate_ids.back() = duplicate_ids.front();
 
+    NativeEncoderFixture empty_encoder_fixture;
+    NativeReceiveFixture empty_receive_fixture;
+    const wirehair_wh2_bench::TimedArmResult empty_encoder =
+        empty_encoder_fixture.Preflight();
+    const wirehair_wh2_bench::TimedArmResult empty_receive =
+        empty_receive_fixture.Preflight();
+    Check(empty_encoder.Result != Wirehair_Success &&
+              empty_encoder.ElapsedNanoseconds == 0u &&
+              !empty_encoder.BytesVerified &&
+              empty_receive.Result != Wirehair_Success &&
+              empty_receive.ElapsedNanoseconds == 0u &&
+              !empty_receive.BytesVerified,
+        "uninitialized clock-free fixture preflight succeeded");
+
     TransformState transform_state;
     const NativeArmSpec specs[] = {
         wirehair_wh2_bench::MakeWirehair1Arm(),
@@ -1279,6 +1293,18 @@ void CheckOtherTimingScopes()
             "encoder timing fixture preflight failed");
         Check(transform_state.Calls == calls_before_prepare,
             "encoder fixture preparation constructed the timed candidate");
+        const wirehair_wh2_bench::TimedArmResult encoder_preflight =
+            encoder_fixture.Preflight();
+        Check(encoder_preflight.Result == Wirehair_Success &&
+                  encoder_preflight.BytesVerified &&
+                  encoder_preflight.ElapsedNanoseconds == 0u &&
+                  encoder_preflight.DecodedOverhead == UINT32_MAX,
+            "clock-free encoder fixture preflight failed");
+        const uint32_t expected_preflight_transform_calls =
+            calls_before_prepare +
+            (spec.Kind == NativeArmKind::Wirehair2Experiment ? 1u : 0u);
+        Check(transform_state.Calls == expected_preflight_transform_calls,
+            "clock-free encoder preflight arm construction count changed");
         const wirehair_wh2_bench::TimedArmResult encoder_result =
             encoder_fixture.Run();
         Check(encoder_result.Result == Wirehair_Success &&
@@ -1288,7 +1314,7 @@ void CheckOtherTimingScopes()
             "fresh encoder timing scope failed");
         const uint32_t expected_transform_calls =
             calls_before_prepare +
-            (spec.Kind == NativeArmKind::Wirehair2Experiment ? 1u : 0u);
+            (spec.Kind == NativeArmKind::Wirehair2Experiment ? 2u : 0u);
         Check(transform_state.Calls == expected_transform_calls,
             "fresh encoder timing did not construct its arm exactly once");
 
@@ -1314,6 +1340,13 @@ void CheckOtherTimingScopes()
                   Wirehair_InvalidInput &&
                   receive_fixture.IsInitialized(),
             "receive timing accepted an overflowing K+cap domain");
+        const wirehair_wh2_bench::TimedArmResult receive_preflight =
+            receive_fixture.Preflight();
+        Check(receive_preflight.Result == Wirehair_Success &&
+                  receive_preflight.BytesVerified &&
+                  receive_preflight.ElapsedNanoseconds == 0u &&
+                  receive_preflight.DecodedOverhead == 0u,
+            "clock-free receive fixture preflight failed");
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
         wirehair_v2::ResetDecoderReceivePathCountersForTesting();
 #endif

@@ -408,9 +408,17 @@ public:
 
     bool IsInitialized() const;
     bool GetStorageReceipt(NativeEncoderStorageReceipt& receipt_out) const;
+    /** Execute identical semantic work without reading a clock.
+     *  A successful result always reports ElapsedNanoseconds == 0 and must
+     *  never be included in timing statistics.
+     */
+    TimedArmResult Preflight() const;
     TimedArmResult Run() const;
 
 private:
+    template <bool Measure>
+    TimedArmResult RunImpl() const;
+
     struct Impl;
     std::unique_ptr<Impl> ImplValue;
 };
@@ -444,9 +452,17 @@ public:
         uint32_t receive_overhead_cap);
 
     bool IsInitialized() const;
+    /** Execute identical receive/recover work without reading a clock.
+     *  A successful result always reports ElapsedNanoseconds == 0 and must
+     *  never be included in timing statistics.
+     */
+    TimedArmResult Preflight() const;
     TimedArmResult Run() const;
 
 private:
+    template <bool Measure>
+    TimedArmResult RunImpl() const;
+
     struct Impl;
     std::unique_ptr<Impl> ImplValue;
 };
