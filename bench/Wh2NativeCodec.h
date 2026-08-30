@@ -5,6 +5,8 @@
 #include <wirehair/wirehair.h>
 
 #include <stdint.h>
+#include <array>
+#include <cstddef>
 #include <memory>
 #include <vector>
 
@@ -298,6 +300,31 @@ struct TimedArmResult
     uint64_t DirectSystematicPackets = 0u;
 };
 
+/** Fixed invocation count for one native batch-throughput observation. */
+static const std::size_t kNativeBatch8Size = 8u;
+
+/**
+    Complete post-clock receipt for one fixed batch of eight fresh fixture
+    invocations.
+
+    ElapsedNanoseconds is the single aggregate interval around the eight
+    sequential timed cores.  VerificationMask bit i, Results[i],
+    DecodedOverheads[i], and DirectSystematicPackets[i] all describe the same
+    inner invocation.  A failed aggregate keeps the raw inner results for
+    diagnosis but clears elapsed time and every receipt that was not
+    semantically qualified.
+*/
+struct Batch8ArmResult
+{
+    Batch8ArmResult();
+
+    uint64_t ElapsedNanoseconds;
+    std::array<WirehairResult, kNativeBatch8Size> Results;
+    uint32_t VerificationMask;
+    std::array<uint32_t, kNativeBatch8Size> DecodedOverheads;
+    std::array<uint64_t, kNativeBatch8Size> DirectSystematicPackets;
+};
+
 /**
     Structured ownership receipt for NativeEncoderFixture's timed scope.
 
@@ -414,10 +441,14 @@ public:
      */
     TimedArmResult Preflight() const;
     TimedArmResult Run() const;
+    Batch8ArmResult PreflightBatch8() const;
+    Batch8ArmResult RunBatch8() const;
 
 private:
     template <bool Measure>
     TimedArmResult RunImpl() const;
+    template <bool Measure>
+    Batch8ArmResult RunBatch8Impl() const;
 
     struct Impl;
     std::unique_ptr<Impl> ImplValue;
@@ -458,10 +489,14 @@ public:
      */
     TimedArmResult Preflight() const;
     TimedArmResult Run() const;
+    Batch8ArmResult PreflightBatch8() const;
+    Batch8ArmResult RunBatch8() const;
 
 private:
     template <bool Measure>
     TimedArmResult RunImpl() const;
+    template <bool Measure>
+    Batch8ArmResult RunBatch8Impl() const;
 
     struct Impl;
     std::unique_ptr<Impl> ImplValue;

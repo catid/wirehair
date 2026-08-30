@@ -14,6 +14,7 @@
 namespace {
 
 using wirehair_wh2_bench::IsolatedSolveResult;
+using wirehair_wh2_bench::Batch8ArmResult;
 using wirehair_wh2_bench::NativeArm;
 using wirehair_wh2_bench::NativeArmKind;
 using wirehair_wh2_bench::NativeArmSpec;
@@ -1426,6 +1427,324 @@ void CheckOtherTimingScopes()
     }
 }
 
+bool CheckBatch8Receipt(
+    const Batch8ArmResult& result,
+    bool measured,
+    uint32_t decoded_overhead,
+    uint64_t direct_systematic_packets,
+    const char* message)
+{
+    bool valid = result.VerificationMask == UINT32_C(0xff) &&
+        (measured ? result.ElapsedNanoseconds > 0u :
+            result.ElapsedNanoseconds == 0u);
+    for (size_t invocation = 0u;
+         invocation < wirehair_wh2_bench::kNativeBatch8Size;
+         ++invocation)
+    {
+        valid = valid &&
+            result.Results[invocation] == Wirehair_Success &&
+            result.DecodedOverheads[invocation] == decoded_overhead &&
+            result.DirectSystematicPackets[invocation] ==
+                direct_systematic_packets;
+    }
+    return Check(valid, message);
+}
+
+bool IsClearedBatch8Receipt(
+    const Batch8ArmResult& result,
+    size_t exceptional_invocation =
+        wirehair_wh2_bench::kNativeBatch8Size,
+    WirehairResult exceptional_result = Wirehair_Error)
+{
+    if (result.ElapsedNanoseconds != 0u ||
+        result.VerificationMask != 0u)
+    {
+        return false;
+    }
+    for (size_t invocation = 0u;
+         invocation < wirehair_wh2_bench::kNativeBatch8Size;
+         ++invocation)
+    {
+        const WirehairResult expected_result =
+            invocation == exceptional_invocation ?
+                exceptional_result : Wirehair_Error;
+        if (result.Results[invocation] != expected_result ||
+            result.DecodedOverheads[invocation] != UINT32_MAX ||
+            result.DirectSystematicPackets[invocation] != 0u)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+void CheckBatch8TimingScopes()
+{
+    const uint32_t K = 36u;
+    const uint32_t block_bytes = 64u;
+    std::vector<uint8_t> source;
+    Check(wirehair_wh2_bench::MakeDeterministicSource(
+              K,
+              block_bytes,
+              UINT64_C(0x5da733a7eae9085d),
+              source),
+        "batch8 source generation failed");
+    const std::vector<uint32_t> ids = ConsecutiveIds(K, 0u, 64u);
+
+    NativeEncoderFixture uninitialized_encoder;
+    NativeReceiveFixture uninitialized_receive;
+    Check(IsClearedBatch8Receipt(
+              uninitialized_encoder.PreflightBatch8()) &&
+              IsClearedBatch8Receipt(
+                  uninitialized_encoder.RunBatch8()) &&
+              IsClearedBatch8Receipt(
+                  uninitialized_receive.PreflightBatch8()) &&
+              IsClearedBatch8Receipt(
+                  uninitialized_receive.RunBatch8()),
+        "uninitialized batch8 fixture exposed stale outcomes");
+
+    // Wirehair1 is the frozen A/A control.  Exercise both public batch scopes
+    // with eight complete inner receipts and a clock-free preflight.
+    NativeArm wh1;
+    Check(wh1.Initialize(
+              wirehair_wh2_bench::MakeWirehair1Arm(),
+              K,
+              block_bytes,
+              source) == Wirehair_Success,
+        "Wirehair1 batch8 arm setup failed");
+    NativeEncoderFixture wh1_encoder;
+    Check(wh1_encoder.Initialize(
+              wirehair_wh2_bench::MakeWirehair1Arm(),
+              K,
+              block_bytes,
+              source) == Wirehair_Success,
+        "Wirehair1 batch8 encoder setup failed");
+    CheckBatch8Receipt(
+        wh1_encoder.PreflightBatch8(),
+        false,
+        UINT32_MAX,
+        0u,
+        "Wirehair1 encoder batch8 preflight failed");
+    CheckBatch8Receipt(
+        wh1_encoder.RunBatch8(),
+        true,
+        UINT32_MAX,
+        0u,
+        "Wirehair1 encoder batch8 timed receipt failed");
+
+    NativeReceiveFixture wh1_receive;
+    Check(wh1_receive.Initialize(wh1, ids, 64u) == Wirehair_Success,
+        "Wirehair1 batch8 receive setup failed");
+    CheckBatch8Receipt(
+        wh1_receive.PreflightBatch8(),
+        false,
+        0u,
+        0u,
+        "Wirehair1 receive batch8 preflight failed");
+    CheckBatch8Receipt(
+        wh1_receive.RunBatch8(),
+        true,
+        0u,
+        0u,
+        "Wirehair1 receive batch8 timed receipt failed");
+
+    // Omit one systematic packet and search a bounded repair prefix whose
+    // first repair does not complete decoding.  This exercises the duplicated
+    // receive loop's nonzero-overhead receipt rather than only its OH0 path.
+    NativeReceiveFixture wh1_delayed_receive;
+    uint32_t delayed_overhead = UINT32_MAX;
+    bool found_delayed_trace = false;
+    for (uint32_t missing = 0u;
+         missing < K && !found_delayed_trace;
+         ++missing)
+    {
+        for (uint32_t repair_start = K;
+             repair_start < K + 128u && !found_delayed_trace;
+             ++repair_start)
+        {
+            std::vector<uint32_t> delayed_ids;
+            delayed_ids.reserve((size_t)K + 64u);
+            for (uint32_t id = 0u; id < K; ++id) {
+                if (id != missing) delayed_ids.push_back(id);
+            }
+            for (uint32_t id = repair_start;
+                 delayed_ids.size() < (size_t)K + 64u;
+                 ++id)
+            {
+                delayed_ids.push_back(id);
+            }
+
+            NativeReceiveFixture candidate;
+            if (candidate.Initialize(wh1, delayed_ids, 64u) !=
+                Wirehair_Success)
+            {
+                continue;
+            }
+            const wirehair_wh2_bench::TimedArmResult preflight =
+                candidate.Preflight();
+            if (preflight.Result == Wirehair_Success &&
+                preflight.BytesVerified && preflight.DecodedOverhead > 0u &&
+                preflight.DecodedOverhead <= 64u)
+            {
+                delayed_overhead = preflight.DecodedOverhead;
+                wh1_delayed_receive = std::move(candidate);
+                found_delayed_trace = true;
+            }
+        }
+    }
+    Check(found_delayed_trace,
+        "no bounded Wirehair1 nonzero-overhead batch trace found");
+    if (found_delayed_trace)
+    {
+        CheckBatch8Receipt(
+            wh1_delayed_receive.PreflightBatch8(),
+            false,
+            delayed_overhead,
+            0u,
+            "Wirehair1 delayed batch8 preflight lost decoded overhead");
+        CheckBatch8Receipt(
+            wh1_delayed_receive.RunBatch8(),
+            true,
+            delayed_overhead,
+            0u,
+            "Wirehair1 delayed batch8 run lost decoded overhead");
+    }
+
+    // The transform callback makes fresh encoder construction observable.
+    // Direct systematic emission simultaneously checks all eight direct-count
+    // receipts without changing the equation construction.
+    TransformState encoder_transform;
+    NativeArmSpec direct_spec =
+        wirehair_wh2_bench::MakeExperimentalWh2Arm(
+            1u,
+            RuntimeCandidateTransform,
+            &encoder_transform);
+    direct_spec.SystematicEmission =
+        wirehair_wh2_bench::NativeSystematicEmission::RetainedSourceDirect;
+    NativeEncoderFixture transformed_encoder;
+    Check(transformed_encoder.Initialize(
+              direct_spec, K, block_bytes, source) == Wirehair_Success &&
+              encoder_transform.Calls == 0u,
+        "transformed batch8 encoder setup constructed an invocation");
+    NativeArmSpec invalid_spec = direct_spec;
+    invalid_spec.Kind = NativeArmKind::Invalid;
+    Check(transformed_encoder.Initialize(
+              invalid_spec, K, block_bytes, source) ==
+              Wirehair_InvalidInput &&
+              transformed_encoder.IsInitialized(),
+        "failed batch8 encoder reinitialization replaced valid state");
+    CheckBatch8Receipt(
+        transformed_encoder.PreflightBatch8(),
+        false,
+        UINT32_MAX,
+        K,
+        "transformed encoder batch8 preflight failed");
+    Check(encoder_transform.Calls == 8u,
+        "encoder batch8 preflight did not construct exactly eight arms");
+    CheckBatch8Receipt(
+        transformed_encoder.RunBatch8(),
+        true,
+        UINT32_MAX,
+        K,
+        "transformed encoder batch8 timed receipt failed");
+    Check(encoder_transform.Calls == 16u,
+        "encoder batch8 run did not construct exactly eight fresh arms");
+
+    // Exact decoder initialization and recovery counts prove eight distinct
+    // receive invocation states rather than eight reuses of one decoder.
+    TransformState receive_transform;
+    const NativeArmSpec receive_spec =
+        wirehair_wh2_bench::MakeExperimentalWh2Arm(
+            1u,
+            RuntimeCandidateTransform,
+            &receive_transform);
+    NativeArm wh2;
+    Check(wh2.Initialize(
+              receive_spec, K, block_bytes, source) == Wirehair_Success &&
+              receive_transform.Calls == 1u,
+        "WH2 batch8 receive arm setup failed");
+    NativeReceiveFixture wh2_receive;
+    Check(wh2_receive.Initialize(wh2, ids, 64u) == Wirehair_Success,
+        "WH2 batch8 receive setup failed");
+    const std::vector<uint32_t> short_ids = ConsecutiveIds(K, 0u, 4u);
+    Check(wh2_receive.Initialize(wh2, short_ids, 64u) ==
+              Wirehair_InvalidInput &&
+              wh2_receive.IsInitialized(),
+        "failed batch8 receive reinitialization replaced valid state");
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    wirehair_v2::ResetDecoderReceivePathCountersForTesting();
+#endif
+    CheckBatch8Receipt(
+        wh2_receive.PreflightBatch8(),
+        false,
+        0u,
+        0u,
+        "WH2 receive batch8 preflight failed");
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    {
+        const wirehair_v2::DecoderReceivePathCounters counters =
+            wirehair_v2::DecoderReceivePathCountersForTesting();
+        Check(counters.ValidatedSystemInitializations == 8u &&
+                  counters.DirectSystematicCompletions == 8u &&
+                  counters.RecoveryPreflights == 8u,
+            "WH2 batch8 preflight did not use eight fresh decoders");
+    }
+    wirehair_v2::ResetDecoderReceivePathCountersForTesting();
+#endif
+    CheckBatch8Receipt(
+        wh2_receive.RunBatch8(),
+        true,
+        0u,
+        0u,
+        "WH2 receive batch8 timed receipt failed");
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    {
+        const wirehair_v2::DecoderReceivePathCounters counters =
+            wirehair_v2::DecoderReceivePathCountersForTesting();
+        Check(counters.ValidatedSystemInitializations == 8u &&
+                  counters.DirectSystematicCompletions == 8u &&
+                  counters.RecoveryPreflights == 8u,
+            "WH2 batch8 run did not use eight fresh decoders");
+    }
+
+    // Preparation failure is transactional: no timer starts and no completed
+    // invocation receipt can leak from a preceding call.
+    wirehair_v2::ResetDecoderReceivePathCountersForTesting();
+    wirehair_v2::SetDecoderAllocationFailureCountdownForTesting(0);
+    const Batch8ArmResult setup_oom = wh2_receive.PreflightBatch8();
+    wirehair_v2::SetDecoderAllocationFailureCountdownForTesting(-1);
+    Check(IsClearedBatch8Receipt(setup_oom, 0u, Wirehair_OOM),
+        "batch8 decoder setup failure exposed partial timing receipts");
+    Check(wirehair_v2::DecoderReceivePathCountersForTesting().
+              ValidatedSystemInitializations == 0u,
+        "failed batch8 preparation entered a decoder timed core");
+
+    // Exact WH2 decoder setup has four guarded allocations.  Exhausting them
+    // lets invocation zero prepare successfully, then fails invocation one;
+    // no timed core or partial semantic receipt may be published.
+    wirehair_v2::ResetDecoderReceivePathCountersForTesting();
+    wirehair_v2::SetDecoderAllocationFailureCountdownForTesting(4);
+    const Batch8ArmResult late_setup_oom = wh2_receive.PreflightBatch8();
+    wirehair_v2::SetDecoderAllocationFailureCountdownForTesting(-1);
+    const wirehair_v2::DecoderReceivePathCounters late_setup_counters =
+        wirehair_v2::DecoderReceivePathCountersForTesting();
+    Check(IsClearedBatch8Receipt(late_setup_oom, 1u, Wirehair_OOM),
+        "late batch8 decoder setup failure exposed partial receipts");
+    Check(late_setup_counters.ValidatedSystemInitializations == 1u &&
+              late_setup_counters.DirectSystematicCompletions == 0u &&
+              late_setup_counters.ColdSolveAttempts == 0u &&
+              late_setup_counters.RecoveryPreflights == 0u,
+        "late batch8 setup failure entered a decoder timed core");
+
+    CheckBatch8Receipt(
+        wh2_receive.PreflightBatch8(),
+        false,
+        0u,
+        0u,
+        "batch8 receive was not reusable after setup failure");
+#endif
+}
+
 void CheckNativeReceiveTrustedResume()
 {
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
@@ -2097,6 +2416,7 @@ int main()
     CheckTransactionalArmAndValidation();
     CheckIsolatedSolveFixture();
     CheckOtherTimingScopes();
+    CheckBatch8TimingScopes();
     CheckNativeReceiveTrustedResume();
     CheckNativeReceivePackedDispatchSeam();
     CheckNativeReceiveBudgetColdFallback();

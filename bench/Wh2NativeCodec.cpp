@@ -1431,6 +1431,15 @@ struct NativeEncoderFixture::Impl
     bool Initialized = false;
 };
 
+Batch8ArmResult::Batch8ArmResult()
+    : ElapsedNanoseconds(0u)
+    , VerificationMask(0u)
+{
+    Results.fill(Wirehair_Error);
+    DecodedOverheads.fill(UINT32_MAX);
+    DirectSystematicPackets.fill(0u);
+}
+
 NativeEncoderFixture::NativeEncoderFixture()
 {
 }
@@ -1597,6 +1606,126 @@ TimedArmResult NativeEncoderFixture::Preflight() const
 TimedArmResult NativeEncoderFixture::Run() const
 {
     return RunImpl<true>();
+}
+
+template <bool Measure>
+Batch8ArmResult NativeEncoderFixture::RunBatch8Impl() const
+{
+    Batch8ArmResult result;
+    if (!IsInitialized()) {
+        return result;
+    }
+
+    size_t failure_invocation = 0u;
+    try
+    {
+        // All output buffers, source copies, and empty arm handles are
+        // distinct and prepared before the one aggregate interval.
+        std::array<std::vector<uint8_t>, kNativeBatch8Size> encoded;
+        std::array<std::vector<uint8_t>, kNativeBatch8Size> owned_sources;
+        std::array<NativeArm, kNativeBatch8Size> arms;
+        for (size_t invocation = 0u;
+             invocation < kNativeBatch8Size;
+             ++invocation)
+        {
+            failure_invocation = invocation;
+            encoded[invocation].assign(ImplValue->Source.size(), 0u);
+            owned_sources[invocation] = ImplValue->Source;
+        }
+
+        const FixtureTimer<Measure> timer;
+        for (size_t invocation = 0u;
+             invocation < kNativeBatch8Size;
+             ++invocation)
+        {
+            failure_invocation = invocation;
+            WirehairResult invocation_result =
+                arms[invocation].InitializeOwnedSourceAfterGlobalInit(
+                    ImplValue->Spec,
+                    ImplValue->K,
+                    ImplValue->BlockBytes,
+                    std::move(owned_sources[invocation]));
+            if (invocation_result == Wirehair_Success)
+            {
+                for (uint32_t block_id = 0u;
+                     block_id < ImplValue->K;
+                     ++block_id)
+                {
+                    invocation_result = arms[invocation].EncodeInto(
+                        block_id,
+                        encoded[invocation].data() +
+                            (size_t)block_id * ImplValue->BlockBytes,
+                        ImplValue->BlockBytes);
+                    if (invocation_result != Wirehair_Success) {
+                        break;
+                    }
+                }
+            }
+            result.Results[invocation] = invocation_result;
+        }
+        result.ElapsedNanoseconds = timer.Stop();
+
+        bool batch_valid = FixtureElapsedPolicy<Measure>::Valid(
+            result.ElapsedNanoseconds);
+        const uint64_t expected_direct =
+            ImplValue->Spec.SystematicEmission ==
+                NativeSystematicEmission::RetainedSourceDirect ?
+                ImplValue->K : 0u;
+        for (size_t invocation = 0u;
+             invocation < kNativeBatch8Size;
+             ++invocation)
+        {
+            if (result.Results[invocation] != Wirehair_Success) {
+                batch_valid = false;
+                continue;
+            }
+
+            const NativeArm& arm = arms[invocation];
+            const bool bytes_verified =
+                encoded[invocation] == ImplValue->Source;
+            const bool direct_roster =
+                arm.UsesRetainedSourceFor(0u) &&
+                arm.UsesRetainedSourceFor(ImplValue->K - 1u) &&
+                !arm.UsesRetainedSourceFor(ImplValue->K);
+            const bool equation_roster =
+                !arm.UsesRetainedSourceFor(0u) &&
+                !arm.UsesRetainedSourceFor(ImplValue->K - 1u) &&
+                !arm.UsesRetainedSourceFor(ImplValue->K);
+            const uint64_t direct_count = direct_roster ?
+                ImplValue->K : 0u;
+            if (!bytes_verified ||
+                (!direct_roster && !equation_roster) ||
+                direct_count != expected_direct)
+            {
+                batch_valid = false;
+                continue;
+            }
+            result.VerificationMask |= UINT32_C(1) << invocation;
+            result.DirectSystematicPackets[invocation] = direct_count;
+        }
+        if (!batch_valid) {
+            result.ElapsedNanoseconds = 0u;
+        }
+        return result;
+    }
+    catch (const std::bad_alloc&) {
+        result.Results[failure_invocation] = Wirehair_OOM;
+        return result;
+    }
+    catch (const std::length_error&) {
+        result.Results[failure_invocation] = Wirehair_OOM;
+        return result;
+    }
+}
+
+Batch8ArmResult NativeEncoderFixture::PreflightBatch8() const
+{
+    return RunBatch8Impl<false>();
+}
+
+Batch8ArmResult NativeEncoderFixture::RunBatch8() const
+{
+    return RunBatch8Impl<true>();
 }
 
 struct NativeReceiveFixture::Impl
@@ -1828,6 +1957,217 @@ TimedArmResult NativeReceiveFixture::Preflight() const
 TimedArmResult NativeReceiveFixture::Run() const
 {
     return RunImpl<true>();
+}
+
+template <bool Measure>
+Batch8ArmResult NativeReceiveFixture::RunBatch8Impl() const
+{
+    Batch8ArmResult result;
+    if (!IsInitialized()) {
+        return result;
+    }
+
+    size_t failure_invocation = 0u;
+    try
+    {
+        const NativeArm::Impl& arm = *ImplValue->ArmState;
+        const size_t receive_packet_count =
+            (size_t)arm.K + ImplValue->ReceiveOverheadCap;
+
+        // Scope dispatch and all fresh-state preparation happen before the
+        // timer.  Each branch then runs one homogeneous core eight times.
+        if (arm.Kind == NativeArmKind::Wirehair1)
+        {
+            std::array<LegacyCodecOwner, kNativeBatch8Size> decoders;
+            std::array<std::vector<uint8_t>, kNativeBatch8Size> recovered;
+            std::array<uint32_t, kNativeBatch8Size> success_packet_counts = {};
+            for (size_t invocation = 0u;
+                 invocation < kNativeBatch8Size;
+                 ++invocation)
+            {
+                failure_invocation = invocation;
+                recovered[invocation].assign(arm.Source.size(), 0u);
+                const WirehairResult create_result = wirehair_decoder_create_ex(
+                    nullptr,
+                    (uint64_t)arm.Source.size(),
+                    arm.BlockBytes,
+                    &decoders[invocation].Codec);
+                if (create_result != Wirehair_Success)
+                {
+                    result.Results[invocation] = create_result;
+                    return result;
+                }
+            }
+
+            const FixtureTimer<Measure> timer;
+            for (size_t invocation = 0u;
+                 invocation < kNativeBatch8Size;
+                 ++invocation)
+            {
+                failure_invocation = invocation;
+                WirehairResult receive_result = Wirehair_NeedMore;
+                for (size_t packet_index = 0u;
+                     packet_index < receive_packet_count;
+                     ++packet_index)
+                {
+                    receive_result = wirehair_decode(
+                        decoders[invocation].Codec,
+                        ImplValue->PacketIds[packet_index],
+                        ImplValue->PacketStorage.data() +
+                            packet_index * arm.BlockBytes,
+                        arm.BlockBytes);
+                    if (receive_result == Wirehair_Success)
+                    {
+                        success_packet_counts[invocation] =
+                            (uint32_t)packet_index + 1u;
+                        receive_result = wirehair_recover(
+                            decoders[invocation].Codec,
+                            recovered[invocation].data(),
+                            recovered[invocation].size());
+                        break;
+                    }
+                    if (receive_result != Wirehair_NeedMore) {
+                        break;
+                    }
+                }
+                result.Results[invocation] = receive_result;
+            }
+            result.ElapsedNanoseconds = timer.Stop();
+
+            bool batch_valid = FixtureElapsedPolicy<Measure>::Valid(
+                result.ElapsedNanoseconds);
+            for (size_t invocation = 0u;
+                 invocation < kNativeBatch8Size;
+                 ++invocation)
+            {
+                if (result.Results[invocation] != Wirehair_Success ||
+                    success_packet_counts[invocation] < arm.K ||
+                    success_packet_counts[invocation] >
+                        (uint64_t)arm.K + ImplValue->ReceiveOverheadCap ||
+                    recovered[invocation] != arm.Source)
+                {
+                    batch_valid = false;
+                    continue;
+                }
+                result.VerificationMask |= UINT32_C(1) << invocation;
+                result.DecodedOverheads[invocation] =
+                    success_packet_counts[invocation] - arm.K;
+            }
+            if (!batch_valid) {
+                result.ElapsedNanoseconds = 0u;
+            }
+            return result;
+        }
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS) || \
+    defined(WIREHAIR_V2_ENABLE_BENCHMARK_EQUATIONS)
+        std::array<wirehair_v2::MessagePrecodeDecoder,
+            kNativeBatch8Size> decoders;
+        std::array<std::vector<uint8_t>, kNativeBatch8Size> recovered;
+        std::array<uint32_t, kNativeBatch8Size> success_packet_counts = {};
+        for (size_t invocation = 0u;
+             invocation < kNativeBatch8Size;
+             ++invocation)
+        {
+            failure_invocation = invocation;
+            recovered[invocation].assign(arm.Source.size(), 0u);
+            const WirehairResult initialize_result =
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+                decoders[invocation].InitializeForValidatedSystemForTesting(
+#else
+                decoders[invocation].InitializeForValidatedSystemForBenchmark(
+#endif
+                    (uint64_t)arm.Source.size(),
+                    arm.BlockBytes,
+                    arm.System,
+                    arm.PacketConfig,
+                    arm.Attempt);
+            if (initialize_result != Wirehair_Success)
+            {
+                result.Results[invocation] = initialize_result;
+                return result;
+            }
+        }
+
+        const FixtureTimer<Measure> timer;
+        for (size_t invocation = 0u;
+             invocation < kNativeBatch8Size;
+             ++invocation)
+        {
+            failure_invocation = invocation;
+            WirehairResult receive_result = Wirehair_NeedMore;
+            for (size_t packet_index = 0u;
+                 packet_index < receive_packet_count;
+                 ++packet_index)
+            {
+                receive_result = decoders[invocation].DecodeResult(
+                    ImplValue->PacketIds[packet_index],
+                    ImplValue->PacketStorage.data() +
+                        packet_index * arm.BlockBytes,
+                    arm.BlockBytes);
+                if (receive_result == Wirehair_Success)
+                {
+                    success_packet_counts[invocation] =
+                        (uint32_t)packet_index + 1u;
+                    receive_result = decoders[invocation].RecoverResult(
+                        recovered[invocation].data(),
+                        recovered[invocation].size());
+                    break;
+                }
+                if (receive_result != Wirehair_NeedMore) {
+                    break;
+                }
+            }
+            result.Results[invocation] = receive_result;
+        }
+        result.ElapsedNanoseconds = timer.Stop();
+
+        bool batch_valid = FixtureElapsedPolicy<Measure>::Valid(
+            result.ElapsedNanoseconds);
+        for (size_t invocation = 0u;
+             invocation < kNativeBatch8Size;
+             ++invocation)
+        {
+            if (result.Results[invocation] != Wirehair_Success ||
+                success_packet_counts[invocation] < arm.K ||
+                success_packet_counts[invocation] >
+                    (uint64_t)arm.K + ImplValue->ReceiveOverheadCap ||
+                recovered[invocation] != arm.Source)
+            {
+                batch_valid = false;
+                continue;
+            }
+            result.VerificationMask |= UINT32_C(1) << invocation;
+            result.DecodedOverheads[invocation] =
+                success_packet_counts[invocation] - arm.K;
+        }
+        if (!batch_valid) {
+            result.ElapsedNanoseconds = 0u;
+        }
+        return result;
+#else
+        result.Results[0] = Wirehair_UnsupportedPlatform;
+        return result;
+#endif
+    }
+    catch (const std::bad_alloc&) {
+        result.Results[failure_invocation] = Wirehair_OOM;
+        return result;
+    }
+    catch (const std::length_error&) {
+        result.Results[failure_invocation] = Wirehair_OOM;
+        return result;
+    }
+}
+
+Batch8ArmResult NativeReceiveFixture::PreflightBatch8() const
+{
+    return RunBatch8Impl<false>();
+}
+
+Batch8ArmResult NativeReceiveFixture::RunBatch8() const
+{
+    return RunBatch8Impl<true>();
 }
 
 struct NativeSolveFixture::Impl
