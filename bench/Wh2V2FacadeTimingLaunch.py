@@ -417,6 +417,10 @@ SAFE_RELATIVE = re.compile(r"^[A-Za-z0-9_.+@=/\-]+$")
 MAX_TRACKED_FILES = 65536
 MAX_TRACKED_FILE_BYTES = 1024 * 1024 * 1024
 MAX_TRACKED_TOTAL_BYTES = 4 * 1024 * 1024 * 1024
+MAX_NINJA_INPUTS = 4096
+MAX_NINJA_GRAPH_FILES = 64
+MAX_NINJA_GRAPH_FILE_BYTES = 16 * 1024 * 1024
+MAX_NINJA_GRAPH_TOTAL_BYTES = 64 * 1024 * 1024
 MAX_DOCUMENT_BYTES = 16 * 1024 * 1024
 MAX_RAW_BYTES = 32 * 1024 * 1024
 MAX_JOURNAL_ARTIFACT_BYTES = MAX_RAW_BYTES
@@ -1170,13 +1174,19 @@ def _bounded_command(
     argv: Sequence[str], *, cwd: Optional[Path], environment: Mapping[str, str],
     timeout: float, stdout_limit: int = MAX_COMMAND_OUTPUT_BYTES,
     stderr_limit: int = MAX_STDERR_BYTES,
+    pass_fds: Sequence[int] = (),
 ) -> Tuple[bytes, bytes]:
+    inherited_fds = tuple(pass_fds)
     if (
         not argv or not Path(argv[0]).is_absolute()
         or any(type(item) is not str or not item or len(item) > 4096 for item in argv)
         or timeout <= 0.0
+        or any(type(fd) is not int or fd <= 2 for fd in inherited_fds)
+        or len(inherited_fds) != len(set(inherited_fds))
     ):
         fail("bounded command contract differs")
+    for fd in inherited_fds:
+        os.fstat(fd)
     ownership = BoundedCommandOwnership.create("bounded command " + argv[0])
     primary: Optional[BaseException] = None
     code = -1
@@ -1187,7 +1197,7 @@ def _bounded_command(
                 list(argv), cwd=None if cwd is None else str(cwd),
                 env=dict(environment), stdin=subprocess.DEVNULL,
                 stdout=stdout_file, stderr=stderr_file, close_fds=True,
-                start_new_session=True,
+                pass_fds=inherited_fds, start_new_session=True,
             )
             ownership.may_have_released = True
             try:
@@ -3942,31 +3952,732 @@ def content_receipt(path: Path, where: str) -> Dict[str, Any]:
     }
 
 
-def ninja_input_closure(build: Path, target: str) -> Dict[str, Any]:
-    output, error = _bounded_command(
-        [str(NINJA), "-C", str(build), "-t", "inputs", target],
-        cwd=build, environment=BUILD_ENVIRONMENT_FIXED, timeout=20.0,
-        stdout_limit=64 * 1024 * 1024,
-    )
-    if error or not output or b"\0" in output or b"\r" in output:
-        fail("Ninja input closure differs: " + target)
+def _strict_ninja_lines(raw: bytes, where: str) -> List[bytes]:
+    if (
+        not raw or not raw.endswith(b"\n") or b"\0" in raw or b"\r" in raw
+        or any(byte < 0x20 or byte > 0x7e for byte in raw[:-1]
+               if byte != 0x0a)
+    ):
+        fail(where + " framing differs")
+    lines = raw[:-1].split(b"\n")
+    if not lines or any(not line or len(line) > 4096 for line in lines):
+        fail(where + " line roster differs")
+    return lines
+
+
+def _parse_ninja_path(raw: bytes, where: str, *, relative_only: bool = False,
+                      basename_only: bool = False) -> str:
     try:
-        names = output.decode("utf-8").splitlines()
+        value = raw.decode("ascii")
     except UnicodeDecodeError as exc:
-        fail("Ninja input closure is not UTF-8: " + exception_text(exc))
-    paths = sorted({
-        _resolve_command_path(build, name).resolve(strict=True)
-        for name in names if name
-    }, key=str)
-    if not paths:
-        fail("Ninja input closure is empty: " + target)
-    entries = [
-        content_receipt(path, "Ninja input " + str(path)) for path in paths
-    ]
-    return {
-        "entries": entries, "raw_sha256": sha256_bytes(output),
-        "target": target,
+        fail(where + " is not ASCII: " + exception_text(exc))
+    if (
+        not value or len(value) > 4096
+        or SAFE_RELATIVE.fullmatch(value) is None
+        or "//" in value
+    ):
+        fail(where + " differs")
+    path = Path(value)
+    if path.is_absolute():
+        if relative_only or os.path.normpath(value) != value:
+            fail(where + " differs")
+        components = value[1:].split("/")
+    else:
+        if os.path.normpath(value) != value:
+            fail(where + " differs")
+        components = value.split("/")
+    if (
+        any(component in ("", ".", "..") for component in components)
+        or (basename_only and len(components) != 1)
+    ):
+        fail(where + " differs")
+    return value
+
+
+_NINJA_FD_CLOSE_STATES: Dict[int, Tuple[List[int], int, int, int]] = {}
+
+
+def _close_ninja_fd(owned: List[int], where: str) -> None:
+    state_key = id(owned)
+    pending = _NINJA_FD_CLOSE_STATES.get(state_key)
+    current = owned[-1] if owned else -1
+    if pending is None:
+        if current < 0:
+            if owned:
+                owned.pop()
+            return
+        info = os.fstat(current)
+        pending = (owned, current, info.st_dev, info.st_ino)
+        _NINJA_FD_CLOSE_STATES[state_key] = pending
+    pending_owner, fd, device, inode = pending
+    if pending_owner is not owned:
+        fail(where + " descriptor ownership changed during close")
+    if not owned or current not in (fd, -1):
+        try:
+            info = os.fstat(fd)
+        except OSError as exc:
+            if exc.errno != errno.EBADF:
+                raise
+        else:
+            if (info.st_dev, info.st_ino) != (device, inode):
+                fail(where + " descriptor number was reused during close")
+            fail(where + " descriptor roster advanced before close")
+        _NINJA_FD_CLOSE_STATES.pop(state_key, None)
+        return
+    try:
+        info = os.fstat(fd)
+    except OSError as exc:
+        if exc.errno != errno.EBADF:
+            raise
+    else:
+        if (info.st_dev, info.st_ino) != (device, inode):
+            fail(where + " descriptor number was reused during close")
+        try:
+            os.close(fd)
+        except BaseException:
+            try:
+                info = os.fstat(fd)
+            except OSError as probe:
+                if probe.errno != errno.EBADF:
+                    raise
+            else:
+                if (info.st_dev, info.st_ino) != (device, inode):
+                    fail(where + " descriptor number was reused during close")
+                raise
+    owned[-1] = -1
+    _NINJA_FD_CLOSE_STATES.pop(state_key, None)
+    owned.pop()
+
+
+def _close_ninja_fds(owned: List[int], where: str) -> None:
+    failures: List[str] = []
+    while owned:
+        try:
+            _close_ninja_fd(owned, where)
+        except BaseException as exc:
+            failures.append(exception_text(exc))
+            try:
+                _close_ninja_fd(owned, where + " recovery")
+            except BaseException as recovery:
+                failures.append(exception_text(recovery))
+                break
+    if failures:
+        fail(where + " descriptor closure differed: " + " | ".join(failures))
+
+
+def _open_ninja_path(owned: List[int], path: Path, *, directory: bool,
+                     where: str,
+                     directory_authority: Optional[List[Any]] = None) -> int:
+    if not path.is_absolute() or os.path.normpath(str(path)) != str(path):
+        fail(where + " is not a canonical absolute path")
+    components = str(path)[1:].split("/")
+    if not components or any(component in ("", ".", "..")
+                             for component in components):
+        fail(where + " path differs")
+    try:
+        open_registered(
+            owned, "/",
+            os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+        if directory_authority is not None:
+            info = os.fstat(owned[-1])
+            named = os.stat("/", follow_symlinks=False)
+            if full_stat(info) != full_stat(named):
+                fail(where + " root directory authority differs")
+            directory_authority.append(
+                (owned[-1], -1, "/", full_stat(info)),
+            )
+        for index, component in enumerate(components):
+            final = index == len(components) - 1
+            parent_fd = owned[-1]
+            flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK
+            if not final or directory:
+                flags |= os.O_DIRECTORY
+            flags |= getattr(os, "O_NOFOLLOW", 0)
+            open_registered(owned, component, flags, dir_fd=parent_fd)
+            if directory_authority is not None and (not final or directory):
+                info = os.fstat(owned[-1])
+                named = os.stat(
+                    component, dir_fd=parent_fd, follow_symlinks=False,
+                )
+                if full_stat(info) != full_stat(named):
+                    fail(where + " directory authority differs")
+                directory_authority.append(
+                    (owned[-1], parent_fd, component, full_stat(info)),
+                )
+    except OSError as exc:
+        raise LaunchError(
+            where + " open failed: " + exception_text(exc)
+        ) from exc
+    return owned[-1]
+
+
+def _open_ninja_relative_path(owned: List[int], root_fd: int, name: str, *,
+                              directory: bool, where: str,
+                              directory_authority: Optional[List[Any]] = None
+                              ) -> int:
+    _parse_ninja_path(
+        name.encode("ascii"), where, relative_only=True,
+    )
+    components = name.split("/")
+    try:
+        open_registered(
+            owned, ".",
+            os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+            | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=root_fd,
+        )
+        if directory_authority is not None:
+            info = os.fstat(owned[-1])
+            named = os.stat(".", dir_fd=root_fd, follow_symlinks=False)
+            if full_stat(info) != full_stat(named):
+                fail(where + " root directory authority differs")
+            directory_authority.append(
+                (owned[-1], root_fd, ".", full_stat(info)),
+            )
+        for index, component in enumerate(components):
+            final = index == len(components) - 1
+            parent_fd = owned[-1]
+            flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK
+            if not final or directory:
+                flags |= os.O_DIRECTORY
+            flags |= getattr(os, "O_NOFOLLOW", 0)
+            open_registered(owned, component, flags, dir_fd=parent_fd)
+            if directory_authority is not None and (not final or directory):
+                info = os.fstat(owned[-1])
+                named = os.stat(
+                    component, dir_fd=parent_fd, follow_symlinks=False,
+                )
+                if full_stat(info) != full_stat(named):
+                    fail(where + " directory authority differs")
+                directory_authority.append(
+                    (owned[-1], parent_fd, component, full_stat(info)),
+                )
+    except OSError as exc:
+        raise LaunchError(
+            where + " open failed: " + exception_text(exc)
+        ) from exc
+    return owned[-1]
+
+
+def _verify_ninja_directories(authority: Sequence[Any], where: str) -> None:
+    for directory_fd, parent_fd, name, before in authority:
+        current = os.fstat(directory_fd)
+        named = (
+            os.stat(name, follow_symlinks=False)
+            if parent_fd < 0 else
+            os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        )
+        if full_stat(current) != before or full_stat(named) != before:
+            fail(where + " directory authority changed: " + name)
+
+
+def _ninja_regular_receipt(path: Path, name: str,
+                           build_fd: Optional[int] = None) -> Dict[str, Any]:
+    owned: List[int] = []
+    directories: List[Any] = []
+    fd = -1
+    primary: Optional[BaseException] = None
+    result: Optional[Dict[str, Any]] = None
+    try:
+        if build_fd is not None and not Path(name).is_absolute():
+            fd = _open_ninja_relative_path(
+                owned, build_fd, name, directory=False,
+                where="Ninja input " + name,
+                directory_authority=directories,
+            )
+            named_before = os.stat(
+                name, dir_fd=build_fd, follow_symlinks=False,
+            )
+        else:
+            fd = _open_ninja_path(
+                owned, path, directory=False, where="Ninja input " + name,
+                directory_authority=directories,
+            )
+            named_before = os.stat(str(path), follow_symlinks=False)
+        before = os.fstat(fd)
+        if (
+            not stat.S_ISREG(before.st_mode) or before.st_size < 0
+            or before.st_size > MAX_TRACKED_FILE_BYTES
+        ):
+            fail("Ninja input file policy differs: " + name)
+        digest = hash_fd(fd, before.st_size)
+        after = os.fstat(fd)
+        named_after = (
+            os.stat(name, dir_fd=build_fd, follow_symlinks=False)
+            if build_fd is not None and not Path(name).is_absolute() else
+            os.stat(str(path), follow_symlinks=False)
+        )
+        _verify_ninja_directories(directories, "Ninja input " + name)
+        if (
+            full_stat(before) != full_stat(after)
+            or full_stat(before) != full_stat(named_before)
+            or full_stat(before) != full_stat(named_after)
+        ):
+            fail("Ninja input changed while hashing: " + name)
+        result = {
+            "bytes": before.st_size, "ninja_name": name,
+            "path": str(path), "sha256": digest,
+            "stat": stat_receipt(before),
+        }
+    except BaseException as exc:
+        primary = exc
+    try:
+        _close_ninja_fds(owned, "Ninja input " + name)
+    except BaseException as exc:
+        if primary is not None:
+            raise LaunchError(
+                exception_text(primary) + " | " + exception_text(exc)
+            ) from primary
+        raise
+    if primary is not None:
+        raise primary
+    if result is None:
+        fail("Ninja input receipt handoff differs: " + name)
+    return result
+
+
+def _ninja_tool(build_fd: int, arguments: Sequence[str], where: str,
+                *, stdout_limit: int) -> bytes:
+    directory = os.fstat(build_fd)
+    if not stat.S_ISDIR(directory.st_mode):
+        fail(where + " build descriptor differs")
+    stable_build = "/proc/self/fd/{}".format(build_fd)
+    output, error = _bounded_command(
+        [str(NINJA), "-C", stable_build, *list(arguments)],
+        cwd=None, environment=BUILD_ENVIRONMENT_FIXED, timeout=20.0,
+        stdout_limit=stdout_limit, pass_fds=(build_fd,),
+    )
+    if error:
+        fail(where + " wrote stderr")
+    return output
+
+
+def _ninja_query(build_fd: int, name: str,
+                 where: str) -> Tuple[bytes, List[bytes]]:
+    _parse_ninja_path(name.encode("ascii"), where + " name")
+    output = _ninja_tool(
+        build_fd, ("-t", "query", name), where,
+        stdout_limit=4 * 1024 * 1024,
+    )
+    lines = _strict_ninja_lines(output, where)
+    if (
+        len(lines) < 2 or len(lines) > MAX_NINJA_INPUTS
+        or lines[0] != (name + ":").encode("ascii")
+        or b"  validations:" in lines
+    ):
+        fail(where + " structure differs")
+    return output, lines
+
+
+def _ninja_phony_roster(build_fd: int) -> set:
+    output = _ninja_tool(
+        build_fd, ("-t", "targets", "rule", "phony"),
+        "Ninja phony roster", stdout_limit=64 * 1024 * 1024,
+    )
+    if not output:
+        return set()
+    lines = _strict_ninja_lines(output, "Ninja phony roster")
+    if len(lines) > MAX_NINJA_INPUTS:
+        fail("Ninja phony roster count differs")
+    names = {
+        _parse_ninja_path(line, "Ninja phony roster name") for line in lines
     }
+    if len(names) != len(lines):
+        fail("Ninja phony roster repeats a name")
+    return names
+
+
+def _ninja_directory_receipt(build_root: Path, build_fd: int,
+                             raw_name: bytes, where: str) -> Dict[str, Any]:
+    name = _parse_ninja_path(raw_name, where, relative_only=True)
+    path = build_root / name
+    owned: List[int] = []
+    directories: List[Any] = []
+    fd = -1
+    primary: Optional[BaseException] = None
+    result: Optional[Dict[str, Any]] = None
+    try:
+        fd = _open_ninja_relative_path(
+            owned, build_fd, name, directory=True, where=where,
+            directory_authority=directories,
+        )
+        before = os.fstat(fd)
+        named = os.stat(name, dir_fd=build_fd, follow_symlinks=False)
+        if (
+            not stat.S_ISDIR(before.st_mode)
+            or full_stat(before) != full_stat(named)
+        ):
+            fail(where + " directory policy differs")
+        query, query_lines = _ninja_query(
+            build_fd, name, where + " source-node query",
+        )
+        if (
+            len(query_lines) < 3
+            or query_lines[0] != (name + ":").encode("ascii")
+            or query_lines[1] != b"  outputs:"
+            or len(query_lines[2:]) != len(set(query_lines[2:]))
+        ):
+            fail(where + " is not a source-only directory node")
+        for line in query_lines[2:]:
+            if not line.startswith(b"    "):
+                fail(where + " source-node output roster differs")
+            _parse_ninja_path(line[4:], where + " source-node output")
+        after = os.fstat(fd)
+        named_after = os.stat(
+            name, dir_fd=build_fd, follow_symlinks=False,
+        )
+        _verify_ninja_directories(directories, where)
+        if (
+            full_stat(before) != full_stat(after)
+            or full_stat(before) != full_stat(named_after)
+        ):
+            fail(where + " changed during source-node query")
+        result = {
+            "ninja_name": name, "path": str(path),
+            "source_query_bytes": len(query),
+            "source_query_sha256": sha256_bytes(query),
+            "stat": stat_receipt(before),
+        }
+    except BaseException as exc:
+        primary = exc
+    try:
+        _close_ninja_fds(owned, where)
+    except BaseException as exc:
+        if primary is not None:
+            raise LaunchError(
+                exception_text(primary) + " | " + exception_text(exc)
+            ) from primary
+        raise
+    if primary is not None:
+        raise primary
+    if result is None:
+        fail(where + " receipt handoff differs")
+    return result
+
+
+def _ninja_graph_file(
+    owned: List[int], path: Path, kind: str, where: str, *,
+    build_fd: int, relative_name: str,
+) -> Dict[str, Any]:
+    directories: List[Any] = []
+    fd = _open_ninja_relative_path(
+        owned, build_fd, relative_name, directory=False, where=where,
+        directory_authority=directories,
+    )
+    before = os.fstat(fd)
+    if (
+        not stat.S_ISREG(before.st_mode) or before.st_size < 1
+        or before.st_size > MAX_NINJA_GRAPH_FILE_BYTES
+    ):
+        fail(where + " file policy differs")
+    raw = os.pread(fd, before.st_size, 0)
+    after = os.fstat(fd)
+    named = os.stat(
+        relative_name, dir_fd=build_fd, follow_symlinks=False,
+    )
+    if (
+        len(raw) != before.st_size
+        or full_stat(before) != full_stat(after)
+        or full_stat(before) != full_stat(named)
+    ):
+        fail(where + " changed during admission")
+    return {
+        "_build_fd": build_fd, "_directories": directories,
+        "_fd": fd, "_raw": raw,
+        "_relative_name": relative_name, "_stat": full_stat(before),
+        "receipt": {
+            "bytes": before.st_size, "kind": kind, "path": str(path),
+            "sha256": sha256_bytes(raw), "stat": stat_receipt(before),
+        },
+    }
+
+
+def _open_ninja_graph_authority(
+    build_root: Path, build_fd: int, owned: List[int],
+) -> List[Dict[str, Any]]:
+    pending = ["build.ninja"]
+    seen: set = set()
+    records: List[Dict[str, Any]] = []
+    total_bytes = 0
+    while pending:
+        if len(records) >= MAX_NINJA_GRAPH_FILES:
+            fail("Ninja manifest count bound exceeded")
+        name = pending.pop(0)
+        if name in seen:
+            fail("Ninja manifest is loaded more than once: " + name)
+        seen.add(name)
+        record = _ninja_graph_file(
+            owned, build_root / name, "manifest", "Ninja manifest " + name,
+            build_fd=build_fd, relative_name=name,
+        )
+        raw = record["_raw"]
+        total_bytes += len(raw)
+        if total_bytes > MAX_NINJA_GRAPH_TOTAL_BYTES:
+            fail("Ninja graph byte bound exceeded")
+        if not raw.endswith(b"\n") or b"\0" in raw or b"\r" in raw:
+            fail("Ninja manifest framing differs: " + name)
+        for line in raw[:-1].split(b"\n"):
+            stripped = line.lstrip(b" \t")
+            if stripped.startswith(b"dyndep"):
+                fail("Ninja dyndep graph sources are not admitted: " + name)
+            if stripped.startswith(b"builddir"):
+                fail("Ninja relocated log authority is not admitted: " + name)
+            if b"|@" in line:
+                fail("Ninja validation edges are not admitted: " + name)
+            for keyword in (b"include", b"subninja"):
+                directive = keyword + b" "
+                if line.startswith(directive):
+                    child = _parse_ninja_path(
+                        line[len(directive):],
+                        "Ninja " + keyword.decode("ascii") + " path",
+                        relative_only=True,
+                    )
+                    if child in seen or child in pending:
+                        fail("Ninja manifest inclusion roster differs: " + child)
+                    if len(seen) + len(pending) >= MAX_NINJA_GRAPH_FILES:
+                        fail("Ninja manifest count bound exceeded")
+                    pending.append(child)
+                elif line.startswith(keyword):
+                    fail("Ninja manifest directive syntax differs: " + name)
+        records.append(record)
+    for name in (".ninja_deps", ".ninja_log"):
+        path = build_root / name
+        try:
+            os.stat(name, dir_fd=build_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        if len(records) >= MAX_NINJA_GRAPH_FILES:
+            fail("Ninja graph file count bound exceeded")
+        record = _ninja_graph_file(
+            owned, path, "ancillary", "Ninja ancillary graph file " + name,
+            build_fd=build_fd, relative_name=name,
+        )
+        total_bytes += len(record["_raw"])
+        if total_bytes > MAX_NINJA_GRAPH_TOTAL_BYTES:
+            fail("Ninja graph byte bound exceeded")
+        records.append(record)
+    return records
+
+
+def _verify_ninja_graph_authority(records: Sequence[Mapping[str, Any]]) -> None:
+    for record in records:
+        _verify_ninja_directories(
+            record["_directories"], "Ninja graph",
+        )
+        fd = record["_fd"]
+        raw = record["_raw"]
+        before = record["_stat"]
+        receipt = record["receipt"]
+        current = os.fstat(fd)
+        named = os.stat(
+            record["_relative_name"], dir_fd=record["_build_fd"],
+            follow_symlinks=False,
+        )
+        if (
+            full_stat(current) != before or full_stat(named) != before
+            or current.st_size != len(raw)
+            or hash_fd(fd, current.st_size) != receipt["sha256"]
+        ):
+            fail("Ninja graph authority changed: " + receipt["path"])
+
+
+def ninja_input_projection(closure: Mapping[str, Any]) -> Tuple[Any, ...]:
+    return (
+        closure["raw_sha256"],
+        tuple(
+            (entry["path"], entry["bytes"], entry["sha256"])
+            for entry in closure["graph"] if entry["kind"] == "manifest"
+        ),
+        tuple(
+            (entry["ninja_name"], entry["path"], entry["bytes"],
+             entry["sha256"])
+            for entry in closure["entries"]
+        ),
+        tuple(
+            (
+                entry["name"], entry["query_sha256"],
+                entry["filesystem_entry"],
+                tuple(
+                    (directory["ninja_name"], directory["path"],
+                     directory["stat"]["device"],
+                     directory["stat"]["inode"],
+                     directory["source_query_sha256"])
+                    for directory in entry["order_only_directories"]
+                ),
+            )
+            for entry in closure["phony"]
+        ),
+    )
+
+
+def ninja_input_closure(build: Path, target: str) -> Dict[str, Any]:
+    build_root = build.resolve(strict=True)
+    if build_root != build or not build.is_absolute():
+        fail("Ninja build directory is not canonical")
+    build_fds: List[int] = []
+    graph_fds: List[int] = []
+    graph_records: List[Dict[str, Any]] = []
+    primary: Optional[BaseException] = None
+    result: Optional[Dict[str, Any]] = None
+    try:
+        open_registered(
+            build_fds, str(build),
+            os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+        build_fd = build_fds[-1]
+        build_before = os.fstat(build_fd)
+        build_named = os.stat(str(build), follow_symlinks=False)
+        if (
+            not stat.S_ISDIR(build_before.st_mode)
+            or full_stat(build_before) != full_stat(build_named)
+        ):
+            fail("Ninja build directory authority differs")
+        graph_records = _open_ninja_graph_authority(
+            build_root, build_fd, graph_fds,
+        )
+        _ninja_query(
+            build_fd, target, "Ninja target query " + target,
+        )
+        phony_names = _ninja_phony_roster(build_fd)
+        output = _ninja_tool(
+            build_fd, ("-t", "inputs", target),
+            "Ninja input closure command " + target,
+            stdout_limit=64 * 1024 * 1024,
+        )
+        name_lines = _strict_ninja_lines(output, "Ninja input closure " + target)
+        if len(name_lines) > MAX_NINJA_INPUTS:
+            fail("Ninja input closure name roster differs: " + target)
+        names = [
+            _parse_ninja_path(line, "Ninja input name") for line in name_lines
+        ]
+        if len(names) != len(set(names)):
+            fail("Ninja input closure name roster differs: " + target)
+        entries: List[Dict[str, Any]] = []
+        phony: List[Dict[str, Any]] = []
+        total_entry_bytes = 0
+        for raw_name, name in zip(name_lines, names):
+            is_phony = name in phony_names
+            candidate = _resolve_command_path(build, name)
+            try:
+                os.stat(str(candidate), follow_symlinks=False)
+            except FileNotFoundError:
+                present = False
+            else:
+                present = True
+            if not is_phony or present:
+                if not present:
+                    fail("missing Ninja input is not an authenticated phony node: "
+                         + name)
+                entry = _ninja_regular_receipt(candidate, name, build_fd)
+                total_entry_bytes += entry["bytes"]
+                if total_entry_bytes > MAX_TRACKED_TOTAL_BYTES:
+                    fail("Ninja input closure byte bound exceeded: " + target)
+                entries.append(entry)
+            if not is_phony:
+                continue
+            query, query_lines = _ninja_query(
+                build_fd, name, "Ninja phony query " + name,
+            )
+            if not present:
+                _parse_ninja_path(
+                    raw_name, "Ninja missing phony name", relative_only=True,
+                    basename_only=True,
+                )
+                try:
+                    os.stat(name, dir_fd=build_fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    pass
+                else:
+                    fail("Ninja phony name became present before query: " + name)
+            expected_header = [
+                (name + ":").encode("ascii"), b"  input: phony",
+            ]
+            if (
+                len(query_lines) < 3 or query_lines[:2] != expected_header
+                or query_lines.count(b"  outputs:") != 1
+            ):
+                fail("Ninja phony query structure differs: " + name)
+            outputs_index = query_lines.index(b"  outputs:")
+            output_lines = query_lines[outputs_index + 1:]
+            if not output_lines or len(output_lines) != len(set(output_lines)):
+                fail("Ninja phony output roster differs: " + name)
+            for line in output_lines:
+                if not line.startswith(b"    "):
+                    fail("Ninja phony output roster differs: " + name)
+                _parse_ninja_path(line[4:], "Ninja phony output")
+            order_directories: List[Dict[str, Any]] = []
+            seen_order_directories: set = set()
+            for line in query_lines[2:outputs_index]:
+                if not line.startswith(b"    || "):
+                    fail("Ninja phony has a content-bearing dependency: " + name)
+                directory = _ninja_directory_receipt(
+                    build_root, build_fd, line[7:],
+                    "Ninja phony order-only dependency " + name,
+                )
+                key = (directory["ninja_name"], directory["path"])
+                if key in seen_order_directories:
+                    fail("Ninja phony repeats an order-only directory: " + name)
+                seen_order_directories.add(key)
+                order_directories.append(directory)
+            if present:
+                if _ninja_regular_receipt(candidate, name, build_fd) != entry:
+                    fail("Ninja phony filesystem entry changed: " + name)
+            else:
+                try:
+                    os.stat(name, dir_fd=build_fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    pass
+                else:
+                    fail("Ninja phony name became present during query: " + name)
+            if full_stat(os.fstat(build_fd)) != full_stat(build_before):
+                fail("Ninja build directory changed during phony query")
+            phony.append({
+                "name": name, "query_bytes": len(query),
+                "query_sha256": sha256_bytes(query),
+                "filesystem_entry": present,
+                "order_only_directories": order_directories,
+            })
+        if not entries:
+            fail("Ninja input closure is empty: " + target)
+        build_after = os.fstat(build_fd)
+        build_named_after = os.stat(str(build), follow_symlinks=False)
+        if (
+            full_stat(build_before) != full_stat(build_after)
+            or full_stat(build_before) != full_stat(build_named_after)
+        ):
+            fail("Ninja build directory changed during input closure")
+        _verify_ninja_graph_authority(graph_records)
+        result = {
+            "entries": entries, "raw_sha256": sha256_bytes(output),
+            "graph": [record["receipt"] for record in graph_records],
+            "phony": phony, "target": target,
+        }
+    except BaseException as exc:
+        primary = exc
+    cleanup_failures: List[str] = []
+    for owned, where in (
+        (graph_fds, "Ninja graph authority"),
+        (build_fds, "Ninja build directory"),
+    ):
+        try:
+            _close_ninja_fds(owned, where)
+        except BaseException as exc:
+            cleanup_failures.append(exception_text(exc))
+    if cleanup_failures:
+        cleanup = " | ".join(cleanup_failures)
+        if primary is not None:
+            raise LaunchError(
+                exception_text(primary) + " | " + cleanup
+            ) from primary
+        fail(cleanup)
+    if primary is not None:
+        raise primary
+    if result is None:
+        fail("Ninja input closure handoff differs: " + target)
+    return result
 
 
 def linker_input_closure() -> List[Dict[str, Any]]:
@@ -4423,18 +5134,9 @@ def seal_build_authority(config: BuildSealConfig) -> str:
             build = paths[path_name]
             after = ninja_input_closure(build, "build.ninja")
             cmake_inputs_after[key] = after
-            before_projection = [
-                (entry["path"], entry["bytes"], entry["sha256"])
-                for entry in cmake_inputs_before[key]["entries"]
-            ]
-            after_projection = [
-                (entry["path"], entry["bytes"], entry["sha256"])
-                for entry in after["entries"]
-            ]
-            if (
-                before_projection != after_projection
-                or cmake_inputs_before[key]["raw_sha256"] != after["raw_sha256"]
-            ):
+            if ninja_input_projection(
+                cmake_inputs_before[key]
+            ) != ninja_input_projection(after):
                 fail(key + " CMake input closure changed during its build")
         target_inputs[role + "-implementation"] = ninja_input_closure(
             paths[role + "_impl_build"], "libwirehair.so.2.0.0",

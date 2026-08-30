@@ -2646,6 +2646,476 @@ class NamespaceSealTests(unittest.TestCase):
 
 
 class BuildVectorTests(unittest.TestCase):
+    def test_ninja_input_closure_authenticates_phony_nodes(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="wh2-facade-ninja-input-") as raw:
+            build = Path(raw)
+            source = build / "input"
+            source.write_bytes(b"sealed input\n")
+            order_directory = build / "order-directory"
+            order_directory.mkdir()
+            (build / "rules.ninja").write_text(
+                "rule copy\n"
+                "  command = /usr/bin/cp $in $out\n",
+                encoding="ascii",
+            )
+            (build / "build.ninja").write_text(
+                "include rules.ninja\n"
+                "build order: phony || order-directory\n"
+                "build output: copy input || order\n",
+                encoding="ascii",
+            )
+            closure = launch.ninja_input_closure(build, "output")
+            self.assertEqual(
+                [entry["path"] for entry in closure["entries"]],
+                [str(source)],
+            )
+            self.assertEqual(closure["entries"][0]["ninja_name"], "input")
+            self.assertEqual(
+                [Path(entry["path"]).name for entry in closure["graph"]],
+                ["build.ninja", "rules.ninja"],
+            )
+            self.assertEqual(
+                [entry["name"] for entry in closure["phony"]], ["order"],
+            )
+            self.assertEqual(
+                closure["phony"][0]["order_only_directories"][0][
+                    "ninja_name"
+                ],
+                "order-directory",
+            )
+            self.assertEqual(
+                closure["phony"][0]["order_only_directories"][0]["path"],
+                str(order_directory),
+            )
+            self.assertGreater(closure["phony"][0]["query_bytes"], 0)
+            self.assertRegex(
+                closure["phony"][0]["query_sha256"], r"^[0-9a-f]{64}$",
+            )
+
+            phony_path = build / "order"
+            phony_path.symlink_to("absent")
+            with self.assertRaises(launch.LaunchError):
+                launch.ninja_input_closure(build, "output")
+            phony_path.unlink()
+
+            with mock.patch.object(
+                launch, "_bounded_command", return_value=(b"input\norder", b""),
+            ):
+                with self.assertRaises(launch.LaunchError):
+                    launch.ninja_input_closure(build, "output")
+
+            (build / "build.ninja").write_text(
+                "rule copy\n"
+                "  command = /usr/bin/cp $in $out\n"
+                "build missing: copy absent\n"
+                "build output: copy input || missing\n",
+                encoding="ascii",
+            )
+            with self.assertRaises(launch.LaunchError):
+                launch.ninja_input_closure(build, "output")
+
+    def test_ninja_input_closure_rejects_unreceipted_names_and_dependencies(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(prefix="wh2-facade-ninja-reject-") as raw:
+            build = Path(raw)
+            (build / "input").write_bytes(b"input\n")
+            (build / "dependency").write_bytes(b"dependency\n")
+            build_file = build / "build.ninja"
+            build_file.write_text(
+                "rule copy\n"
+                "  command = /usr/bin/cp $in $out\n"
+                "build order: phony dependency\n"
+                "build output: copy input || order\n",
+                encoding="ascii",
+            )
+            with self.assertRaises(launch.LaunchError):
+                launch.ninja_input_closure(build, "output")
+
+            (build / "order-directory").mkdir()
+            build_file.write_text(
+                "rule copy\n"
+                "  command = /usr/bin/cp $in $out\n"
+                "build order-directory: phony dependency\n"
+                "build order: phony || order-directory\n"
+                "build output: copy input || order\n",
+                encoding="ascii",
+            )
+            with self.assertRaises(launch.LaunchError):
+                launch.ninja_input_closure(build, "output")
+
+            (build / "graph.dd").write_bytes(b"ninja_dyndep_version = 1\n")
+            build_file.write_text(
+                "rule copy\n"
+                "  command = /usr/bin/cp $in $out\n"
+                "build output: copy input\n"
+                "  dyndep = graph.dd\n",
+                encoding="ascii",
+            )
+            with self.assertRaises(launch.LaunchError):
+                launch.ninja_input_closure(build, "output")
+
+            build_file.write_text(
+                "rule copy\n"
+                "  command = /usr/bin/cp $in $out\n"
+                "build output: copy alias\n",
+                encoding="ascii",
+            )
+            (build / "alias").symlink_to("input")
+            with self.assertRaises(launch.LaunchError):
+                launch.ninja_input_closure(build, "output")
+            (build / "alias").unlink()
+
+            build_file.write_text(
+                "rule copy\n"
+                "  command = /usr/bin/cp $in $out\n"
+                "build output: copy input || alias/order\n",
+                encoding="ascii",
+            )
+            (build / "alias").symlink_to("absent")
+            with self.assertRaises(launch.LaunchError):
+                launch.ninja_input_closure(build, "output")
+            (build / "alias").unlink()
+
+            (build / "hidden").write_bytes(b"hidden\n")
+            (build / "order").write_bytes(b"colliding phony path\n")
+            build_file.write_text(
+                "rule copy\n"
+                "  command = /usr/bin/cp $in $out\n"
+                "build order: phony hidden\n"
+                "build output: copy input || order\n",
+                encoding="ascii",
+            )
+            with self.assertRaises(launch.LaunchError):
+                launch.ninja_input_closure(build, "output")
+            (build / "order").unlink()
+
+            (build / "validation").write_bytes(b"validation\n")
+            build_file.write_text(
+                "rule copy\n"
+                "  command = /usr/bin/cp $in $out\n"
+                "build output: copy input |@ validation\n",
+                encoding="ascii",
+            )
+            with self.assertRaises(launch.LaunchError):
+                launch.ninja_input_closure(build, "output")
+
+            build_file.write_text(
+                "builddir = relocated\n"
+                "rule copy\n"
+                "  command = /usr/bin/cp $in $out\n"
+                "build output: copy input\n",
+                encoding="ascii",
+            )
+            with self.assertRaises(launch.LaunchError):
+                launch.ninja_input_closure(build, "output")
+
+            with mock.patch.object(
+                launch, "_bounded_command",
+                return_value=(b"left\vright\n", b""),
+            ):
+                with self.assertRaises(launch.LaunchError):
+                    launch.ninja_input_closure(build, "output")
+
+    def test_ninja_input_closure_rejects_missing_name_creation_race(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="wh2-facade-ninja-race-") as raw:
+            build = Path(raw)
+            (build / "input").write_bytes(b"input\n")
+            (build / "build.ninja").write_text(
+                "rule copy\n"
+                "  command = /usr/bin/cp $in $out\n"
+                "build order: phony\n"
+                "build output: copy input || order\n",
+                encoding="ascii",
+            )
+            original = launch._bounded_command
+
+            def create_before_query(*args: object, **kwargs: object) -> object:
+                argv = args[0]
+                if type(argv) is list and "query" in argv:
+                    (build / "order").write_bytes(b"appeared\n")
+                return original(*args, **kwargs)
+
+            with mock.patch.object(
+                launch, "_bounded_command", side_effect=create_before_query,
+            ):
+                with self.assertRaises(launch.LaunchError):
+                    launch.ninja_input_closure(build, "output")
+
+    def test_ninja_input_closure_binds_one_graph_across_tool_calls(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="wh2-facade-ninja-graph-") as raw:
+            build = Path(raw)
+            (build / "input").write_bytes(b"input\n")
+            build_file = build / "build.ninja"
+            original_graph = (
+                "rule copy\n"
+                "  command = /usr/bin/cp $in $out\n"
+                "build output: copy input order\n"
+            )
+            temporary_graph = (
+                "rule copy\n"
+                "  command = /usr/bin/cp $in $out\n"
+                "build order: phony\n"
+                "build output: copy input || order\n"
+            )
+            build_file.write_text(original_graph, encoding="ascii")
+            original = launch._bounded_command
+
+            def switch_graph_for_query(*args: object, **kwargs: object) -> object:
+                argv = args[0]
+                if type(argv) is list and "query" in argv:
+                    build_file.write_text(temporary_graph, encoding="ascii")
+                    try:
+                        return original(*args, **kwargs)
+                    finally:
+                        build_file.write_text(original_graph, encoding="ascii")
+                return original(*args, **kwargs)
+
+            with mock.patch.object(
+                launch, "_bounded_command", side_effect=switch_graph_for_query,
+            ):
+                with self.assertRaises(launch.LaunchError):
+                    launch.ninja_input_closure(build, "output")
+
+    def test_ninja_input_closure_rejects_nested_manifest_aba(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="wh2-facade-ninja-aba-") as raw:
+            build = Path(raw)
+            nested = build / "sub"
+            active = nested / "active"
+            replacement = nested / "replacement"
+            parked = nested / "parked"
+            active.mkdir(parents=True)
+            replacement.mkdir()
+            (build / "input").write_bytes(b"input\n")
+            (build / "order").write_bytes(b"order\n")
+            (build / "build.ninja").write_text(
+                "include sub/active/rules.ninja\n",
+                encoding="ascii",
+            )
+            (active / "rules.ninja").write_text(
+                "rule copy\n"
+                "  command = /usr/bin/cp $in $out\n"
+                "build output: copy input order\n",
+                encoding="ascii",
+            )
+            (replacement / "rules.ninja").write_text(
+                "rule copy\n"
+                "  command = /usr/bin/cp $in $out\n"
+                "build order: phony\n"
+                "build output: copy input || order\n",
+                encoding="ascii",
+            )
+            original = launch._bounded_command
+
+            def swap_manifest_ancestor(
+                *args: object, **kwargs: object
+            ) -> object:
+                active.rename(parked)
+                replacement.rename(active)
+                try:
+                    return original(*args, **kwargs)
+                finally:
+                    active.rename(replacement)
+                    parked.rename(active)
+
+            with mock.patch.object(
+                launch, "_bounded_command", side_effect=swap_manifest_ancestor,
+            ):
+                with self.assertRaises(launch.LaunchError):
+                    launch.ninja_input_closure(build, "output")
+
+    def test_ninja_relative_receipt_uses_held_build_directory(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="wh2-facade-input-aba-") as raw:
+            root = Path(raw)
+            active = root / "active"
+            replacement = root / "replacement"
+            parked = root / "parked"
+            active.mkdir()
+            replacement.mkdir()
+            original_raw = b"original input\n"
+            (active / "input").write_bytes(original_raw)
+            (replacement / "input").write_bytes(b"replacement input\n")
+            build_fd = os.open(
+                active, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC,
+            )
+            try:
+                active.rename(parked)
+                replacement.rename(active)
+                receipt = launch._ninja_regular_receipt(
+                    active / "input", "input", build_fd,
+                )
+            finally:
+                active.rename(replacement)
+                parked.rename(active)
+                os.close(build_fd)
+            self.assertEqual(
+                receipt["sha256"], launch.sha256_bytes(original_raw),
+            )
+
+    def test_ninja_relative_receipt_rejects_nested_swap_during_hash(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="wh2-facade-input-swap-") as raw:
+            root = Path(raw)
+            nested = root / "sub"
+            active = nested / "active"
+            replacement = nested / "replacement"
+            parked = nested / "parked"
+            active.mkdir(parents=True)
+            replacement.mkdir()
+            (active / "input").write_bytes(b"original input\n")
+            (replacement / "input").write_bytes(b"replacement input\n")
+            build_fd = os.open(
+                root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC,
+            )
+            original_hash = launch.hash_fd
+            swapped = False
+
+            def swap_before_hash(fd: int, size: int) -> str:
+                nonlocal swapped
+                if not swapped:
+                    active.rename(parked)
+                    replacement.rename(active)
+                    swapped = True
+                return original_hash(fd, size)
+
+            try:
+                with mock.patch.object(
+                    launch, "hash_fd", side_effect=swap_before_hash,
+                ):
+                    with self.assertRaises(launch.LaunchError):
+                        launch._ninja_regular_receipt(
+                            root / "sub/active/input",
+                            "sub/active/input", build_fd,
+                        )
+            finally:
+                if swapped:
+                    active.rename(replacement)
+                    parked.rename(active)
+                os.close(build_fd)
+
+    def test_ninja_graph_resource_bounds_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="wh2-facade-graph-bound-") as raw:
+            build = Path(raw)
+            (build / "input").write_bytes(b"input\n")
+            (build / "rules.ninja").write_text(
+                "rule copy\n"
+                "  command = /usr/bin/cp $in $out\n"
+                "build output: copy input\n",
+                encoding="ascii",
+            )
+            (build / "build.ninja").write_text(
+                "include rules.ninja\n", encoding="ascii",
+            )
+            baseline = launch.open_fd_roster()
+            with mock.patch.object(launch, "MAX_NINJA_GRAPH_FILES", 1):
+                with self.assertRaises(launch.LaunchError):
+                    launch.ninja_input_closure(build, "output")
+            self.assertEqual(launch.open_fd_roster(), baseline)
+            with mock.patch.object(
+                launch, "MAX_NINJA_GRAPH_FILE_BYTES", 1,
+            ):
+                with self.assertRaises(launch.LaunchError):
+                    launch.ninja_input_closure(build, "output")
+            self.assertEqual(launch.open_fd_roster(), baseline)
+
+    def test_ninja_path_descriptor_handoffs_restore_exact_fd_roster(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="wh2-facade-ninja-fds-") as raw:
+            root = Path(raw)
+            regular = root / "regular"
+            directory = root / "directory"
+            regular.write_bytes(b"input\n")
+            directory.mkdir()
+            root_fd = os.open(
+                root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC,
+            )
+            self.addCleanup(os.close, root_fd)
+            baseline = launch.open_fd_roster()
+            callbacks = (
+                (
+                    "_open_ninja_path",
+                    lambda: launch._ninja_regular_receipt(regular, "regular"),
+                ),
+                (
+                    "_open_ninja_relative_path",
+                    lambda: launch._ninja_directory_receipt(
+                        root, root_fd, b"directory", "directory",
+                    ),
+                ),
+            )
+            for helper_name, callback in callbacks:
+                original_open = getattr(launch, helper_name)
+                def open_then_raise(*args: object, **kwargs: object) -> object:
+                    original_open(*args, **kwargs)
+                    raise launch.LaunchError("injected open return fault")
+                with mock.patch.object(
+                    launch, helper_name, side_effect=open_then_raise,
+                ):
+                    with self.assertRaises(launch.LaunchError):
+                        callback()
+                self.assertEqual(launch.open_fd_roster(), baseline)
+
+            original_close = launch._close_ninja_fd
+            calls = 0
+
+            def close_fault_once(*args: object, **kwargs: object) -> object:
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    raise launch.LaunchError("injected pre-close fault")
+                return original_close(*args, **kwargs)
+
+            with mock.patch.object(
+                launch, "_close_ninja_fd", side_effect=close_fault_once,
+            ):
+                with self.assertRaises(launch.LaunchError):
+                    launch._ninja_regular_receipt(regular, "regular")
+            self.assertEqual(launch.open_fd_roster(), baseline)
+
+            class PopFaultState(dict):
+                fired = False
+
+                def pop(self, key: object, default: object = None) -> object:
+                    if not self.fired:
+                        self.fired = True
+                        raise RuntimeError("injected state-pop fault")
+                    return super().pop(key, default)
+
+            close_states = PopFaultState()
+            with mock.patch.object(
+                launch, "_NINJA_FD_CLOSE_STATES", close_states,
+            ):
+                with self.assertRaises(launch.LaunchError):
+                    launch._ninja_regular_receipt(regular, "regular")
+                self.assertTrue(close_states.fired)
+                self.assertFalse(close_states)
+            self.assertEqual(launch.open_fd_roster(), baseline)
+
+    def test_ninja_input_projection_binds_phony_order_directory(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="wh2-facade-ninja-projection-") as raw:
+            build = Path(raw)
+            (build / "input").write_bytes(b"input\n")
+            (build / "dir-one").mkdir()
+            (build / "dir-two").mkdir()
+            build_file = build / "build.ninja"
+
+            def write_graph(directory: str) -> None:
+                build_file.write_text(
+                    "rule copy\n"
+                    "  command = /usr/bin/cp $in $out\n"
+                    "build order: phony || " + directory + "\n"
+                    "build output: copy input || order\n",
+                    encoding="ascii",
+                )
+
+            write_graph("dir-one")
+            before = launch.ninja_input_closure(build, "output")
+            write_graph("dir-two")
+            after = launch.ninja_input_closure(build, "output")
+            self.assertEqual(before["raw_sha256"], after["raw_sha256"])
+            self.assertNotEqual(
+                launch.ninja_input_projection(before),
+                launch.ninja_input_projection(after),
+            )
+
     def test_snapshot_clone_environment_binds_exact_campaign_owner(self) -> None:
         if os.geteuid() not in (0, launch.CAMPAIGN_UID):
             self.skipTest("campaign-owner fixture requires UID0 or UID1000")
