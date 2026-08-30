@@ -958,6 +958,77 @@ if(BUILD_TESTS)
             PROPERTIES
                 TIMEOUT 180
                 LABELS "wh2;benchmark;control;aa;rdpru;batch128;native;counter")
+        if(NOT "${WIREHAIR_WH2_NATIVE_RDPRU_AA_SOURCE_SHA256}" STREQUAL
+           "0f553cce1df3acbc016250ccdf10fe3288980b3ae22bd4c6ee5c98e19bffa852")
+            message(FATAL_ERROR
+                "Frozen native RDPRU batch128 A/A v1 source hash changed")
+        endif()
+        add_executable(wirehair_wh2_native_rdpru_batch128_aa_calibration_v2
+            bench/Wh2FrozenTrace.cpp
+            bench/Wh2FrozenTrace.h
+            bench/Wh2NativeRdpruAaCalibrationV2.cpp
+            bench/Wh2RdpruTargetIdentityV2.cpp
+            bench/Wh2RdpruTargetIdentityV2.h
+            bench/Wh2NativeCodec.cpp
+            bench/Wh2NativeCodec.h)
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+            "${PROJECT_SOURCE_DIR}/bench/Wh2NativeRdpruAaCalibrationV2.cpp"
+            "${PROJECT_SOURCE_DIR}/bench/Wh2RdpruTargetIdentityV2.cpp"
+            "${PROJECT_SOURCE_DIR}/bench/Wh2RdpruTargetIdentityV2.h"
+            "${PROJECT_SOURCE_DIR}/bench/Wh2NativeCodec.cpp"
+            "${PROJECT_SOURCE_DIR}/bench/Wh2NativeCodec.h")
+        file(SHA256
+            "${PROJECT_SOURCE_DIR}/bench/Wh2NativeRdpruAaCalibrationV2.cpp"
+            WIREHAIR_WH2_NATIVE_RDPRU_AA_V2_SOURCE_SHA256)
+        if(NOT
+           "${WIREHAIR_WH2_NATIVE_RDPRU_AA_V2_SOURCE_SHA256}" STREQUAL
+           "ac31b0c9b58e09b03a779c9c2d11205ff696ac3372b812b553822fe852be4ee8")
+            message(FATAL_ERROR
+                "Frozen native RDPRU batch128 A/A v2 source hash changed")
+        endif()
+        file(SHA256
+            "${PROJECT_SOURCE_DIR}/bench/Wh2RdpruTargetIdentityV2.cpp"
+            WIREHAIR_WH2_RDPRU_TARGET_IDENTITY_V2_SOURCE_SHA256)
+        file(SHA256
+            "${PROJECT_SOURCE_DIR}/bench/Wh2RdpruTargetIdentityV2.h"
+            WIREHAIR_WH2_RDPRU_TARGET_IDENTITY_V2_HEADER_SHA256)
+        if(NOT
+           "${WIREHAIR_WH2_RDPRU_TARGET_IDENTITY_V2_SOURCE_SHA256}" STREQUAL
+           "51ce3b59fcacd378e69da5c8e4a25327369a50fbae6809bccfeedcd4b72dc7b2")
+            message(FATAL_ERROR
+                "Frozen RDPRU target-identity v2 source hash changed")
+        endif()
+        if(NOT
+           "${WIREHAIR_WH2_RDPRU_TARGET_IDENTITY_V2_HEADER_SHA256}" STREQUAL
+           "af484c4382a5ec5ffab52fc3dfd5398b6d8dfed30d2347930c2f65c1787aa42c")
+            message(FATAL_ERROR
+                "Frozen RDPRU target-identity v2 header hash changed")
+        endif()
+        target_link_libraries(
+            wirehair_wh2_native_rdpru_batch128_aa_calibration_v2 PRIVATE
+            wirehair_v2_timing_policy)
+        target_compile_definitions(
+            wirehair_wh2_native_rdpru_batch128_aa_calibration_v2 PRIVATE
+            "WIREHAIR_WH2_SOURCE_GIT_COMMIT=\"${WIREHAIR_WH2_SOURCE_GIT_COMMIT}\""
+            "WIREHAIR_WH2_NATIVE_RDPRU_AA_V2_SOURCE_SHA256=\"${WIREHAIR_WH2_NATIVE_RDPRU_AA_V2_SOURCE_SHA256}\""
+            "WIREHAIR_WH2_NATIVE_RDPRU_AA_V1_PARENT_SOURCE_SHA256=\"${WIREHAIR_WH2_NATIVE_RDPRU_AA_SOURCE_SHA256}\""
+            "WIREHAIR_WH2_RDPRU_TARGET_IDENTITY_V2_SOURCE_SHA256=\"${WIREHAIR_WH2_RDPRU_TARGET_IDENTITY_V2_SOURCE_SHA256}\""
+            "WIREHAIR_WH2_RDPRU_TARGET_IDENTITY_V2_HEADER_SHA256=\"${WIREHAIR_WH2_RDPRU_TARGET_IDENTITY_V2_HEADER_SHA256}\""
+            "WIREHAIR_WH2_NATIVE_CODEC_HEADER_SHA256=\"${WIREHAIR_WH2_NATIVE_CODEC_HEADER_SHA256}\""
+            "WIREHAIR_WH2_NATIVE_CODEC_SOURCE_SHA256=\"${WIREHAIR_WH2_NATIVE_CODEC_SOURCE_SHA256}\""
+            "WIREHAIR_WH2_CMAKE_SHA256=\"${WIREHAIR_WH2_CMAKE_SHA256}\"")
+        wirehair_apply_project_options(
+            wirehair_wh2_native_rdpru_batch128_aa_calibration_v2)
+        add_test(
+            NAME wirehair_wh2_native_rdpru_batch128_aa_calibration_v2_selftest
+            COMMAND wirehair_wh2_native_rdpru_batch128_aa_calibration_v2
+                --selftest)
+        set_tests_properties(
+            wirehair_wh2_native_rdpru_batch128_aa_calibration_v2_selftest
+            PROPERTIES
+                TIMEOUT 180
+                LABELS
+                    "wh2;benchmark;control;aa;rdpru;batch128;native;counter;target-v2")
         set(WIREHAIR_WH2_K3_HYPEROVAL_FALSIFIER_SOURCES
             bench/Wh2FrozenTrace.cpp
             bench/Wh2FrozenTrace.h
