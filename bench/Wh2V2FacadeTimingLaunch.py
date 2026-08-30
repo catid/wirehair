@@ -3801,7 +3801,7 @@ def publish_root_file_noreplace(path: Path, data: bytes,
         else:
             fail("fixed authority target already exists")
         fd = os.open(
-            temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
+            temporary, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
             | getattr(os, "O_NOFOLLOW", 0), mode, dir_fd=directory_fd,
         )
         view = memoryview(data)

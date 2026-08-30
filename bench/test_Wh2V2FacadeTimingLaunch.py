@@ -2646,6 +2646,31 @@ class NamespaceSealTests(unittest.TestCase):
 
 
 class BuildVectorTests(unittest.TestCase):
+    @unittest.skipUnless(os.geteuid() == 0, "requires root-owned authority path")
+    def test_fixed_authority_publication_hashes_real_temporary_file(self) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="wh2-facade-authority-", dir="/var/lib",
+        ) as raw:
+            authority_dir = Path(raw)
+            authority_path = authority_dir / "build-authority.json"
+            payload = b'{"schema":"test"}\n'
+            with mock.patch.object(
+                launch, "BUILD_AUTHORITY_DIR", authority_dir,
+            ), mock.patch.object(
+                launch, "BUILD_AUTHORITY_PATH", authority_path,
+            ):
+                receipt = launch.publish_root_file_noreplace(
+                    authority_path, payload, mode=0o400,
+                )
+            self.assertEqual(authority_path.read_bytes(), payload)
+            self.assertEqual(receipt["sha256"], launch.sha256_bytes(payload))
+            self.assertEqual(receipt["bytes"], len(payload))
+            self.assertEqual(stat.S_IMODE(authority_path.stat().st_mode), 0o400)
+            self.assertEqual(
+                sorted(path.name for path in authority_dir.iterdir()),
+                [authority_path.name],
+            )
+
     def test_ninja_input_closure_authenticates_phony_nodes(self) -> None:
         with tempfile.TemporaryDirectory(prefix="wh2-facade-ninja-input-") as raw:
             build = Path(raw)
