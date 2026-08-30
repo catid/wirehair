@@ -888,6 +888,80 @@ if(BUILD_TESTS)
             wirehair_wh2_native_aa_calibration_selftest PROPERTIES
                 TIMEOUT 180
                 LABELS "wh2;benchmark;control;aa;native;timing")
+        set(WIREHAIR_WH2_K3_HYPEROVAL_FALSIFIER_SOURCES
+            bench/Wh2FrozenTrace.cpp
+            bench/Wh2FrozenTrace.h
+            bench/Wh2K3HyperovalCodec.cpp
+            bench/Wh2K3HyperovalCodec.h
+            bench/Wh2K3HyperovalFalsifier.cpp)
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+            "${PROJECT_SOURCE_DIR}/bench/Wh2K3HyperovalCodec.cpp"
+            "${PROJECT_SOURCE_DIR}/bench/Wh2K3HyperovalCodec.h"
+            "${PROJECT_SOURCE_DIR}/bench/Wh2K3HyperovalFalsifier.cpp")
+        file(SHA256
+            "${PROJECT_SOURCE_DIR}/bench/Wh2K3HyperovalCodec.cpp"
+            WIREHAIR_WH2_K3_CODEC_SOURCE_SHA256)
+        file(SHA256
+            "${PROJECT_SOURCE_DIR}/bench/Wh2K3HyperovalCodec.h"
+            WIREHAIR_WH2_K3_CODEC_HEADER_SHA256)
+        file(SHA256
+            "${PROJECT_SOURCE_DIR}/bench/Wh2K3HyperovalFalsifier.cpp"
+            WIREHAIR_WH2_K3_FALSIFIER_SOURCE_SHA256)
+        set(WIREHAIR_WH2_K3_MANIFEST_DEFINITIONS
+            "WIREHAIR_WH2_K3_LOW_CORPUS_SHA256=\"20cc19b3c3f46943cab8e9c7dcff74789b0417b2ff79d68c03cdab28acb4ce57\""
+            "WIREHAIR_WH2_K3_HIGH_IID_SHA256=\"e03dab0bb1d0b891ac728aadde67b7e23b9bed0e1235bb0c6786bc4d46a65149\""
+            "WIREHAIR_WH2_K3_SEQUENTIAL_SHA256=\"2124143403967032b04b1b707cacc819d9c812c08811a0bbd7546a1f49fe1b4c\""
+            "WIREHAIR_WH2_K3_DELTA257_SHA256=\"990c36aaf9df5f8d4eb2d4e9dd5892b9389446af99e0e6c28de0fde190fbdd4d\""
+            "WIREHAIR_WH2_K3_DELTA65535_SHA256=\"39e569a8bbabab6b013555cbf0d72c1352de08d6fea9d6ef226fad457b6f7ca7\""
+            "WIREHAIR_WH2_K3_DESCENDING_SHA256=\"f86301a78dcfd6ca438cc0d77314cae46d2d15b2bb5da079f6c414b50616d2a1\""
+            "WIREHAIR_WH2_K3_ONE_LOW_SHA256=\"de7e383e7e21f530105155388a9f26855c2658e0a239ec40837c969dbce311d0\""
+            "WIREHAIR_WH2_K3_TWO_LOW_SHA256=\"4c95789ed24f3203f019ea462e6f40e5ea67d4fd20c6123e44cbdc6a7f964621\""
+            "WIREHAIR_WH2_K3_CANONICAL_SHA256=\"d9b8b203d5cd21b3d846f5217fde0f7f0d3979b78992f51c30a96ebdee321d2e\""
+            "WIREHAIR_WH2_K3_TRACE_SHA256=\"7cb9e6b5e6951eb84e65fa75faa279e927be1c455c6ce5f2cfd458f94aef9d93\""
+            "WIREHAIR_WH2_K3_COMPLEMENT_SHA256=\"417aea72753f71a01b755fa414b59f655ea01922708a3001d9b0b455571981d9\"")
+        add_executable(wirehair_wh2_k3_hyperoval_falsifier
+            ${WIREHAIR_WH2_K3_HYPEROVAL_FALSIFIER_SOURCES})
+        target_compile_definitions(
+            wirehair_wh2_k3_hyperoval_falsifier PRIVATE
+            ${WIREHAIR_WH2_K3_MANIFEST_DEFINITIONS}
+            "WIREHAIR_WH2_SOURCE_GIT_COMMIT=\"${WIREHAIR_WH2_SOURCE_GIT_COMMIT}\""
+            "WIREHAIR_WH2_K3_CODEC_SOURCE_SHA256=\"${WIREHAIR_WH2_K3_CODEC_SOURCE_SHA256}\""
+            "WIREHAIR_WH2_K3_CODEC_HEADER_SHA256=\"${WIREHAIR_WH2_K3_CODEC_HEADER_SHA256}\""
+            "WIREHAIR_WH2_K3_FALSIFIER_SOURCE_SHA256=\"${WIREHAIR_WH2_K3_FALSIFIER_SOURCE_SHA256}\"")
+        target_link_libraries(
+            wirehair_wh2_k3_hyperoval_falsifier PRIVATE
+                ${WIREHAIR_INTERNAL_LIBRARY}
+                Threads::Threads)
+        wirehair_apply_project_options(
+            wirehair_wh2_k3_hyperoval_falsifier)
+        add_executable(wirehair_wh2_k3_hyperoval_hook_selftest
+            ${WIREHAIR_WH2_K3_HYPEROVAL_FALSIFIER_SOURCES})
+        target_compile_definitions(
+            wirehair_wh2_k3_hyperoval_hook_selftest PRIVATE
+            WIREHAIR_WH2_K3_HYPEROVAL_TEST_HOOKS=1
+            ${WIREHAIR_WH2_K3_MANIFEST_DEFINITIONS}
+            "WIREHAIR_WH2_SOURCE_GIT_COMMIT=\"${WIREHAIR_WH2_SOURCE_GIT_COMMIT}\""
+            "WIREHAIR_WH2_K3_CODEC_SOURCE_SHA256=\"${WIREHAIR_WH2_K3_CODEC_SOURCE_SHA256}\""
+            "WIREHAIR_WH2_K3_CODEC_HEADER_SHA256=\"${WIREHAIR_WH2_K3_CODEC_HEADER_SHA256}\""
+            "WIREHAIR_WH2_K3_FALSIFIER_SOURCE_SHA256=\"${WIREHAIR_WH2_K3_FALSIFIER_SOURCE_SHA256}\"")
+        target_link_libraries(
+            wirehair_wh2_k3_hyperoval_hook_selftest PRIVATE
+                ${WIREHAIR_INTERNAL_LIBRARY}
+                Threads::Threads)
+        wirehair_apply_project_options(
+            wirehair_wh2_k3_hyperoval_hook_selftest)
+        add_test(
+            NAME wirehair_wh2_k3_hyperoval_falsifier_selftest
+            COMMAND wirehair_wh2_k3_hyperoval_falsifier --selftest)
+        add_test(
+            NAME wirehair_wh2_k3_hyperoval_hook_selftest
+            COMMAND wirehair_wh2_k3_hyperoval_hook_selftest --selftest)
+        set_tests_properties(
+            wirehair_wh2_k3_hyperoval_falsifier_selftest
+            wirehair_wh2_k3_hyperoval_hook_selftest PROPERTIES
+                TIMEOUT 120
+                LABELS
+                    "wh2;benchmark;contract;k3;hyperoval;falsifier")
         set(WIREHAIR_WH2_K2_PROJECTIVE_SCREEN_SOURCES
             bench/Wh2FrozenTrace.cpp
             bench/Wh2FrozenTrace.h
