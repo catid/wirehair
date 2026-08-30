@@ -1694,7 +1694,6 @@ class AttemptJournal:
             journal._fault("attempt-private-created", path.name)
             rename_noreplace_at(parent_fd, temporary, path.name)
             temporary_exists = False
-            journal._fault("attempt-fixed-created", path.name)
             consumed = True
             info = os.fstat(journal.directory_fd)
             named = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
@@ -1705,6 +1704,14 @@ class AttemptJournal:
                 or info.st_uid != expected_uid or info.st_gid != expected_gid
             ):
                 fail("attempt directory policy differs")
+            # renameat2 changes the path exposed by /proc/self/fd for this
+            # directory.  Refresh the receipt only after binding the held
+            # inode to the fixed name; retaining the private-name receipt
+            # would make every later terminal authority check fail.
+            journal.directory_fd_authority = fd_authority_receipt(
+                journal.directory_fd,
+            )
+            journal._fault("attempt-fixed-created", path.name)
             os.fsync(parent_fd)
             journal.write_json("ATTEMPT", attempt)
             if owner is not None:
@@ -1732,9 +1739,18 @@ class AttemptJournal:
                         temporary_exists = False
             if consumed:
                 recovery_error: Optional[BaseException] = None
-                if journal is not None and "ATTEMPT" not in journal.names:
+                if journal is not None:
                     try:
-                        journal.write_json("ATTEMPT", attempt)
+                        # Recover a rename-return/assignment handoff before
+                        # any resumable ATTEMPT publication uses this journal.
+                        # Keep this inside the recovery envelope: even a
+                        # receipt failure must report a consumed fixed name
+                        # with its held journal rather than escape ambiguously.
+                        journal.directory_fd_authority = fd_authority_receipt(
+                            journal.directory_fd,
+                        )
+                        if "ATTEMPT" not in journal.names:
+                            journal.write_json("ATTEMPT", attempt)
                     except BaseException as recovery_exc:
                         recovery_error = recovery_exc
                 message = (
@@ -8523,7 +8539,8 @@ class WorkerMapMonitor:
     scientific_finished: bool = False
 
     def __post_init__(self) -> None:
-        if self.controller_security.get("topology") != {
+        final_process = self.controller_security.get("final_process")
+        if type(final_process) is not dict or final_process.get("topology") != {
             "parent_pid": os.getpid(),
             "process_group": self.controller.pid,
             "session": self.controller.pid,

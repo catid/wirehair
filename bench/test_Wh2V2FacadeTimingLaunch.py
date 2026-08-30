@@ -263,6 +263,81 @@ class GitGateTests(unittest.TestCase):
 
 
 class JournalTests(unittest.TestCase):
+    def test_reservation_refreshes_directory_authority_after_rename(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="wh2-facade-journal-") as temporary:
+            path = Path(temporary) / "attempt"
+            journal = launch.AttemptJournal.reserve(
+                path, {"attempt": 1}, expected_uid=os.getuid(),
+                expected_gid=os.getgid(), test_parent=True,
+            )
+            try:
+                journal.verify_descriptor_authority()
+                self.assertEqual(
+                    os.readlink("/proc/self/fd/{}".format(journal.directory_fd)),
+                    str(path),
+                )
+            finally:
+                journal.close()
+
+    def test_consumed_post_rename_fault_refreshes_directory_authority(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="wh2-facade-journal-") as temporary:
+            path = Path(temporary) / "attempt"
+            real_rename = launch.rename_noreplace_at
+            fired = False
+            def rename_then_raise(*arguments: object) -> None:
+                nonlocal fired
+                real_rename(*arguments)
+                if arguments[2] == path.name and not fired:
+                    fired = True
+                    raise RuntimeError("injected rename-return handoff fault")
+            with mock.patch.object(
+                launch, "rename_noreplace_at", side_effect=rename_then_raise,
+            ):
+                with self.assertRaises(launch.AttemptConsumedError) as caught:
+                    launch.AttemptJournal.reserve(
+                        path, {"attempt": 1}, expected_uid=os.getuid(),
+                        expected_gid=os.getgid(), test_parent=True,
+                    )
+            journal = caught.exception.journal
+            try:
+                self.assertTrue(fired)
+                journal.verify_descriptor_authority()
+                self.assertEqual(journal.names, ["ATTEMPT"])
+            finally:
+                journal.close()
+
+    def test_consumed_rename_receipt_failure_retains_journal(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="wh2-facade-journal-") as temporary:
+            path = Path(temporary) / "attempt"
+            real_rename = launch.rename_noreplace_at
+            real_receipt = launch.fd_authority_receipt
+            def rename_then_raise(*arguments: object) -> None:
+                real_rename(*arguments)
+                if arguments[2] == path.name:
+                    raise RuntimeError("injected rename-return handoff fault")
+            def fixed_receipt_failure(fd: int) -> tuple:
+                receipt = real_receipt(fd)
+                if receipt[-1] == str(path):
+                    raise RuntimeError("injected fixed-name receipt fault")
+                return receipt
+            with mock.patch.object(
+                launch, "rename_noreplace_at", side_effect=rename_then_raise,
+            ), mock.patch.object(
+                launch, "fd_authority_receipt", side_effect=fixed_receipt_failure,
+            ):
+                with self.assertRaises(launch.AttemptConsumedError) as caught:
+                    launch.AttemptJournal.reserve(
+                        path, {"attempt": 1}, expected_uid=os.getuid(),
+                        expected_gid=os.getgid(), test_parent=True,
+                    )
+            journal = caught.exception.journal
+            try:
+                self.assertIn("fixed-name receipt fault", str(caught.exception))
+                self.assertEqual(journal.names, [])
+                self.assertTrue(path.is_dir())
+            finally:
+                journal.close()
+
     def test_consumed_reservation_never_completes_without_attempt_prefix(self) -> None:
         with tempfile.TemporaryDirectory(prefix="wh2-facade-journal-") as temporary:
             path = Path(temporary) / "attempt"
@@ -1752,6 +1827,35 @@ class RuntimePrimitiveTests(unittest.TestCase):
             os.close(gate_r)
             if blocked.gate_fd >= 0:
                 os.close(blocked.gate_fd)
+
+    def test_controller_monitor_uses_nested_final_process_topology(self) -> None:
+        process = launch.ProcessHandle(
+            role="controller", pid=os.getpid(), pidfd=-1,
+            start_ticks=1, argv=("<scratch>",), stdout_fd=-1, stderr_fd=-1,
+        )
+        expected = {
+            "parent_pid": os.getpid(), "process_group": process.pid,
+            "session": process.pid,
+        }
+        monitor = launch.WorkerMapMonitor(
+            None, None, None, None, process, (),
+            {"final_process": {"topology": expected}}, 1,
+        )
+        self.assertEqual(
+            monitor.controller_security["final_process"]["topology"],
+            expected,
+        )
+        forged = dict(expected)
+        forged["parent_pid"] += 1
+        with self.assertRaises(launch.LaunchError):
+            launch.WorkerMapMonitor(
+                None, None, None, None, process, (),
+                {
+                    "topology": expected,
+                    "final_process": {"topology": forged},
+                },
+                1,
+            )
 
     def test_sampler_gate_ownership_cannot_erase_release_possibility(self) -> None:
         gate_r, gate_w = os.pipe2(os.O_CLOEXEC)
@@ -3834,10 +3938,10 @@ class BuildVectorTests(unittest.TestCase):
         monitor = launch.WorkerMapMonitor(
             prepared=prepared, layout=Value(), sampler=Value(), guardian=Value(),
             controller=controller, controller_argv=(),
-            controller_security={"topology": {
+            controller_security={"final_process": {"topology": {
                 "parent_pid": os.getpid(), "process_group": controller.pid,
                 "session": controller.pid,
-            }},
+            }}},
             root_deadline_ns=1,
         )
         new_argv = [
