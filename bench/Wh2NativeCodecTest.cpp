@@ -8,16 +8,20 @@
 #include <cstdio>
 #include <cstring>
 #include <map>
+#include <new>
 #include <numeric>
+#include <stdexcept>
 #include <vector>
 
 namespace {
 
 using wirehair_wh2_bench::IsolatedSolveResult;
 using wirehair_wh2_bench::Batch8ArmResult;
+using wirehair_wh2_bench::Batch128CounterArmResult;
 using wirehair_wh2_bench::NativeArm;
 using wirehair_wh2_bench::NativeArmKind;
 using wirehair_wh2_bench::NativeArmSpec;
+using wirehair_wh2_bench::NativeCounterBracket;
 using wirehair_wh2_bench::NativeEncoderFixture;
 using wirehair_wh2_bench::NativeReceiveFixture;
 using wirehair_wh2_bench::NativeRecoveryFixture;
@@ -1745,6 +1749,628 @@ void CheckBatch8TimingScopes()
 #endif
 }
 
+enum class FakeCounterReadAction : uint32_t
+{
+    Succeed = 0u,
+    ReturnFalse,
+    ThrowBadAlloc,
+    ThrowLengthError,
+    ThrowRuntimeError
+};
+
+struct FakeCounterReaderState
+{
+    uint32_t ExpectedSelector = 0u;
+    uint32_t Calls = 0u;
+    uint32_t ReplacementCalls = 0u;
+    bool SelectorsMatched = true;
+    NativeCounterBracket* BracketToMutate = nullptr;
+    uint64_t Values[2] = { 0u, 0u };
+    FakeCounterReadAction Actions[2] = {
+        FakeCounterReadAction::Succeed,
+        FakeCounterReadAction::Succeed
+    };
+};
+
+bool ReplacementCounterRead(
+    void* context,
+    uint32_t selector,
+    uint64_t* value_out)
+{
+    (void)selector;
+    (void)value_out;
+    if (context) {
+        ++static_cast<FakeCounterReaderState*>(context)->ReplacementCalls;
+    }
+    return false;
+}
+
+bool FakeCounterRead(
+    void* context,
+    uint32_t selector,
+    uint64_t* value_out)
+{
+    if (!context || !value_out) {
+        return false;
+    }
+    FakeCounterReaderState& state =
+        *static_cast<FakeCounterReaderState*>(context);
+    const uint32_t call = state.Calls++;
+    state.SelectorsMatched = state.SelectorsMatched &&
+        selector == state.ExpectedSelector;
+    if (call == 0u && state.BracketToMutate)
+    {
+        state.BracketToMutate->Read = ReplacementCounterRead;
+        state.BracketToMutate->Selector = state.ExpectedSelector ^ 1u;
+        state.BracketToMutate->Context = nullptr;
+    }
+    if (call >= 2u) {
+        return false;
+    }
+    *value_out = state.Values[call];
+    switch (state.Actions[call])
+    {
+    case FakeCounterReadAction::Succeed:
+        return true;
+    case FakeCounterReadAction::ReturnFalse:
+        return false;
+    case FakeCounterReadAction::ThrowBadAlloc:
+        throw std::bad_alloc();
+    case FakeCounterReadAction::ThrowLengthError:
+        throw std::length_error("injected counter reader failure");
+    case FakeCounterReadAction::ThrowRuntimeError:
+        throw std::runtime_error("injected non-allocation reader failure");
+    }
+    return false;
+}
+
+NativeCounterBracket MakeFakeCounterBracket(
+    FakeCounterReaderState& state)
+{
+    NativeCounterBracket bracket;
+    bracket.Context = &state;
+    bracket.Read = FakeCounterRead;
+    bracket.Selector = state.ExpectedSelector;
+    return bracket;
+}
+
+bool CheckBatch128Receipt(
+    const Batch128CounterArmResult& result,
+    bool counter_read,
+    uint64_t counter_start,
+    uint64_t counter_end,
+    uint32_t decoded_overhead,
+    uint64_t direct_systematic_packets,
+    const char* message)
+{
+    const uint64_t expected_delta =
+        counter_end > counter_start ? counter_end - counter_start : 0u;
+    bool valid = result.VerificationMask[0] == UINT64_MAX &&
+        result.VerificationMask[1] == UINT64_MAX;
+    if (counter_read)
+    {
+        valid = valid && result.BeginReadSucceeded &&
+            result.EndReadSucceeded &&
+            result.CounterStart == counter_start &&
+            result.CounterEnd == counter_end &&
+            result.CounterDelta == expected_delta;
+    }
+    else
+    {
+        valid = valid && !result.BeginReadSucceeded &&
+            !result.EndReadSucceeded && result.CounterStart == 0u &&
+            result.CounterEnd == 0u && result.CounterDelta == 0u;
+    }
+    for (size_t invocation = 0u;
+         invocation < wirehair_wh2_bench::kNativeCounterBatchSize;
+         ++invocation)
+    {
+        valid = valid &&
+            result.Results[invocation] == Wirehair_Success &&
+            result.DecodedOverheads[invocation] == decoded_overhead &&
+            result.DirectSystematicPackets[invocation] ==
+                direct_systematic_packets;
+    }
+    return Check(valid, message);
+}
+
+bool IsClearedBatch128Receipt(
+    const Batch128CounterArmResult& result,
+    size_t exceptional_invocation =
+        wirehair_wh2_bench::kNativeCounterBatchSize,
+    WirehairResult exceptional_result = Wirehair_Error)
+{
+    if (result.CounterStart != 0u || result.CounterEnd != 0u ||
+        result.CounterDelta != 0u || result.BeginReadSucceeded ||
+        result.EndReadSucceeded || result.VerificationMask[0] != 0u ||
+        result.VerificationMask[1] != 0u)
+    {
+        return false;
+    }
+    for (size_t invocation = 0u;
+         invocation < wirehair_wh2_bench::kNativeCounterBatchSize;
+         ++invocation)
+    {
+        const WirehairResult expected_result =
+            invocation == exceptional_invocation ?
+                exceptional_result : Wirehair_Error;
+        if (result.Results[invocation] != expected_result ||
+            result.DecodedOverheads[invocation] != UINT32_MAX ||
+            result.DirectSystematicPackets[invocation] != 0u)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool HasUnqualifiedBatch128RawSuccess(
+    const Batch128CounterArmResult& result,
+    uint64_t expected_start)
+{
+    if (!result.BeginReadSucceeded || result.EndReadSucceeded ||
+        result.CounterStart != expected_start || result.CounterEnd != 0u ||
+        result.CounterDelta != 0u || result.VerificationMask[0] != 0u ||
+        result.VerificationMask[1] != 0u)
+    {
+        return false;
+    }
+    for (size_t invocation = 0u;
+         invocation < wirehair_wh2_bench::kNativeCounterBatchSize;
+         ++invocation)
+    {
+        if (result.Results[invocation] != Wirehair_Success ||
+            result.DecodedOverheads[invocation] != UINT32_MAX ||
+            result.DirectSystematicPackets[invocation] != 0u)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+void CheckBatch128CounterScopes()
+{
+    static_assert(wirehair_wh2_bench::kNativeCounterBatchSize == 128u,
+        "native counter batch size changed");
+    const uint32_t K = 12u;
+    const uint32_t block_bytes = 37u;
+    std::vector<uint8_t> source;
+    Check(wirehair_wh2_bench::MakeDeterministicSource(
+              K,
+              block_bytes,
+              UINT64_C(0xbd482f031ec78ad2),
+              source),
+        "batch128 source generation failed");
+    const std::vector<uint32_t> ids = ConsecutiveIds(K, 0u, 8u);
+
+    FakeCounterReaderState untouched_reader;
+    untouched_reader.ExpectedSelector = 1u;
+    untouched_reader.Values[0] = 100u;
+    untouched_reader.Values[1] = 200u;
+    const NativeCounterBracket untouched_bracket =
+        MakeFakeCounterBracket(untouched_reader);
+    NativeEncoderFixture uninitialized_encoder;
+    NativeReceiveFixture uninitialized_receive;
+    Check(IsClearedBatch128Receipt(
+              uninitialized_encoder.PreflightBatch128()) &&
+              IsClearedBatch128Receipt(
+                  uninitialized_encoder.RunWh1Batch128Counter(
+                      untouched_bracket)) &&
+              IsClearedBatch128Receipt(
+                  uninitialized_receive.PreflightBatch128()) &&
+              IsClearedBatch128Receipt(
+                  uninitialized_receive.RunWh1Batch128Counter(
+                      untouched_bracket)) &&
+              untouched_reader.Calls == 0u,
+        "uninitialized batch128 fixture invoked a reader or leaked state");
+
+    NativeArm wh1;
+    Check(wh1.Initialize(
+              wirehair_wh2_bench::MakeWirehair1Arm(),
+              K,
+              block_bytes,
+              source) == Wirehair_Success,
+        "Wirehair1 batch128 arm setup failed");
+    NativeEncoderFixture wh1_encoder;
+    Check(wh1_encoder.Initialize(
+              wirehair_wh2_bench::MakeWirehair1Arm(),
+              K,
+              block_bytes,
+              source) == Wirehair_Success,
+        "Wirehair1 batch128 encoder setup failed");
+    NativeReceiveFixture wh1_receive;
+    Check(wh1_receive.Initialize(wh1, ids, 8u) == Wirehair_Success,
+        "Wirehair1 batch128 receive setup failed");
+
+    CheckBatch128Receipt(
+        wh1_encoder.PreflightBatch128(),
+        false,
+        0u,
+        0u,
+        UINT32_MAX,
+        0u,
+        "Wirehair1 encoder batch128 preflight failed");
+    CheckBatch128Receipt(
+        wh1_receive.PreflightBatch128(),
+        false,
+        0u,
+        0u,
+        0u,
+        0u,
+        "Wirehair1 receive batch128 preflight failed");
+
+    FakeCounterReaderState encoder_reader;
+    encoder_reader.ExpectedSelector = 0u;
+    encoder_reader.Values[0] = UINT64_C(1000000);
+    encoder_reader.Values[1] = UINT64_C(1254321);
+    CheckBatch128Receipt(
+        wh1_encoder.RunWh1Batch128Counter(
+            MakeFakeCounterBracket(encoder_reader)),
+        true,
+        encoder_reader.Values[0],
+        encoder_reader.Values[1],
+        UINT32_MAX,
+        0u,
+        "Wirehair1 encoder batch128 counter receipt failed");
+    Check(encoder_reader.Calls == 2u &&
+              encoder_reader.SelectorsMatched,
+        "encoder batch128 did not perform two same-selector reads");
+
+    FakeCounterReaderState receive_reader;
+    receive_reader.ExpectedSelector = 1u;
+    receive_reader.Values[0] = UINT64_C(7000000);
+    receive_reader.Values[1] = UINT64_C(7654321);
+    CheckBatch128Receipt(
+        wh1_receive.RunWh1Batch128Counter(
+            MakeFakeCounterBracket(receive_reader)),
+        true,
+        receive_reader.Values[0],
+        receive_reader.Values[1],
+        0u,
+        0u,
+        "Wirehair1 receive batch128 counter receipt failed");
+    Check(receive_reader.Calls == 2u &&
+              receive_reader.SelectorsMatched,
+        "receive batch128 did not perform two same-selector reads");
+
+    // A callback may legally reach caller-owned state through Context.  The
+    // fixture must freeze all bracket fields before Begin so such a callback
+    // cannot replace the end reader or change its selector mid-interval.
+    FakeCounterReaderState mutable_encoder_reader;
+    mutable_encoder_reader.ExpectedSelector = 0u;
+    mutable_encoder_reader.Values[0] = UINT64_C(8000000);
+    mutable_encoder_reader.Values[1] = UINT64_C(8123456);
+    NativeCounterBracket mutable_encoder_bracket =
+        MakeFakeCounterBracket(mutable_encoder_reader);
+    mutable_encoder_reader.BracketToMutate = &mutable_encoder_bracket;
+    CheckBatch128Receipt(
+        wh1_encoder.RunWh1Batch128Counter(mutable_encoder_bracket),
+        true,
+        mutable_encoder_reader.Values[0],
+        mutable_encoder_reader.Values[1],
+        UINT32_MAX,
+        0u,
+        "encoder batch128 did not freeze its counter bracket");
+    Check(mutable_encoder_reader.Calls == 2u &&
+              mutable_encoder_reader.ReplacementCalls == 0u &&
+              mutable_encoder_reader.SelectorsMatched &&
+              mutable_encoder_bracket.Read == ReplacementCounterRead &&
+              mutable_encoder_bracket.Selector == 1u &&
+              mutable_encoder_bracket.Context == nullptr,
+        "encoder batch128 reloaded a caller-mutated counter bracket");
+
+    FakeCounterReaderState mutable_receive_reader;
+    mutable_receive_reader.ExpectedSelector = 1u;
+    mutable_receive_reader.Values[0] = UINT64_C(9000000);
+    mutable_receive_reader.Values[1] = UINT64_C(9234567);
+    NativeCounterBracket mutable_receive_bracket =
+        MakeFakeCounterBracket(mutable_receive_reader);
+    mutable_receive_reader.BracketToMutate = &mutable_receive_bracket;
+    CheckBatch128Receipt(
+        wh1_receive.RunWh1Batch128Counter(mutable_receive_bracket),
+        true,
+        mutable_receive_reader.Values[0],
+        mutable_receive_reader.Values[1],
+        0u,
+        0u,
+        "receive batch128 did not freeze its counter bracket");
+    Check(mutable_receive_reader.Calls == 2u &&
+              mutable_receive_reader.ReplacementCalls == 0u &&
+              mutable_receive_reader.SelectorsMatched &&
+              mutable_receive_bracket.Read == ReplacementCounterRead &&
+              mutable_receive_bracket.Selector == 0u &&
+              mutable_receive_bracket.Context == nullptr,
+        "receive batch128 reloaded a caller-mutated counter bracket");
+
+    NativeCounterBracket null_reader;
+    null_reader.Context = &receive_reader;
+    null_reader.Selector = 1u;
+    Check(IsClearedBatch128Receipt(
+              wh1_encoder.RunWh1Batch128Counter(null_reader),
+              0u,
+              Wirehair_InvalidInput) &&
+              IsClearedBatch128Receipt(
+                  wh1_receive.RunWh1Batch128Counter(null_reader),
+                  0u,
+                  Wirehair_InvalidInput),
+        "batch128 accepted a null reader");
+
+    // Begin failures, including an exception escaping a fake platform reader,
+    // execute no inner core and publish no partial counter value.
+    FakeCounterReaderState begin_failure;
+    begin_failure.ExpectedSelector = 0u;
+    begin_failure.Values[0] = UINT64_C(111111);
+    begin_failure.Actions[0] = FakeCounterReadAction::ReturnFalse;
+    Check(IsClearedBatch128Receipt(
+              wh1_encoder.RunWh1Batch128Counter(
+                  MakeFakeCounterBracket(begin_failure))) &&
+              begin_failure.Calls == 1u,
+        "failed batch128 begin read executed or published inner work");
+    begin_failure.Calls = 0u;
+    begin_failure.SelectorsMatched = true;
+    Check(IsClearedBatch128Receipt(
+              wh1_receive.RunWh1Batch128Counter(
+                  MakeFakeCounterBracket(begin_failure))) &&
+              begin_failure.Calls == 1u,
+        "failed receive batch128 begin read executed inner work");
+
+    FakeCounterReaderState begin_exception;
+    begin_exception.ExpectedSelector = 0u;
+    begin_exception.Values[0] = UINT64_C(222222);
+    begin_exception.Actions[0] = FakeCounterReadAction::ThrowBadAlloc;
+    Check(IsClearedBatch128Receipt(
+              wh1_receive.RunWh1Batch128Counter(
+                  MakeFakeCounterBracket(begin_exception))) &&
+              begin_exception.Calls == 1u,
+        "throwing batch128 begin reader escaped or ran an inner core");
+
+    FakeCounterReaderState runtime_begin_exception;
+    runtime_begin_exception.ExpectedSelector = 1u;
+    runtime_begin_exception.Values[0] = UINT64_C(232323);
+    runtime_begin_exception.Actions[0] =
+        FakeCounterReadAction::ThrowRuntimeError;
+    Check(IsClearedBatch128Receipt(
+              wh1_encoder.RunWh1Batch128Counter(
+                  MakeFakeCounterBracket(runtime_begin_exception))) &&
+              runtime_begin_exception.Calls == 1u,
+        "non-allocation encoder begin exception escaped batch128");
+    runtime_begin_exception.Calls = 0u;
+    runtime_begin_exception.SelectorsMatched = true;
+    Check(IsClearedBatch128Receipt(
+              wh1_receive.RunWh1Batch128Counter(
+                  MakeFakeCounterBracket(runtime_begin_exception))) &&
+              runtime_begin_exception.Calls == 1u,
+        "non-allocation receive begin exception escaped batch128");
+
+    // End failures retain exactly the raw 128 core outcomes, while all
+    // post-End verification and counter-validity receipts remain absent.
+    FakeCounterReaderState end_failure;
+    end_failure.ExpectedSelector = 1u;
+    end_failure.Values[0] = UINT64_C(333333);
+    end_failure.Values[1] = UINT64_C(444444);
+    end_failure.Actions[1] = FakeCounterReadAction::ReturnFalse;
+    const Batch128CounterArmResult failed_end =
+        wh1_encoder.RunWh1Batch128Counter(
+            MakeFakeCounterBracket(end_failure));
+    Check(HasUnqualifiedBatch128RawSuccess(
+              failed_end, end_failure.Values[0]) &&
+              end_failure.Calls == 2u,
+        "failed batch128 end read lost raw results or qualified evidence");
+    end_failure.Calls = 0u;
+    end_failure.SelectorsMatched = true;
+    const Batch128CounterArmResult failed_receive_end =
+        wh1_receive.RunWh1Batch128Counter(
+            MakeFakeCounterBracket(end_failure));
+    Check(HasUnqualifiedBatch128RawSuccess(
+              failed_receive_end, end_failure.Values[0]) &&
+              end_failure.Calls == 2u,
+        "failed receive batch128 end qualified invalid evidence");
+
+    FakeCounterReaderState end_exception;
+    end_exception.ExpectedSelector = 1u;
+    end_exception.Values[0] = UINT64_C(555555);
+    end_exception.Values[1] = UINT64_C(666666);
+    end_exception.Actions[1] = FakeCounterReadAction::ThrowLengthError;
+    const Batch128CounterArmResult throwing_end =
+        wh1_receive.RunWh1Batch128Counter(
+            MakeFakeCounterBracket(end_exception));
+    Check(HasUnqualifiedBatch128RawSuccess(
+              throwing_end, end_exception.Values[0]) &&
+              end_exception.Calls == 2u,
+        "throwing batch128 end reader escaped or qualified evidence");
+
+    FakeCounterReaderState runtime_end_exception;
+    runtime_end_exception.ExpectedSelector = 0u;
+    runtime_end_exception.Values[0] = UINT64_C(676767);
+    runtime_end_exception.Values[1] = UINT64_C(787878);
+    runtime_end_exception.Actions[1] =
+        FakeCounterReadAction::ThrowRuntimeError;
+    const Batch128CounterArmResult runtime_encoder_end =
+        wh1_encoder.RunWh1Batch128Counter(
+            MakeFakeCounterBracket(runtime_end_exception));
+    Check(HasUnqualifiedBatch128RawSuccess(
+              runtime_encoder_end, runtime_end_exception.Values[0]) &&
+              runtime_end_exception.Calls == 2u,
+        "non-allocation encoder end exception escaped batch128");
+    runtime_end_exception.Calls = 0u;
+    runtime_end_exception.SelectorsMatched = true;
+    const Batch128CounterArmResult runtime_receive_end =
+        wh1_receive.RunWh1Batch128Counter(
+            MakeFakeCounterBracket(runtime_end_exception));
+    Check(HasUnqualifiedBatch128RawSuccess(
+              runtime_receive_end, runtime_end_exception.Values[0]) &&
+              runtime_end_exception.Calls == 2u,
+        "non-allocation receive end exception escaped batch128");
+
+    // Raw values remain diagnostic on reset/equality; delta is deliberately
+    // not wrapped or made positive.  The controller must reject delta zero.
+    FakeCounterReaderState nonincreasing_reader;
+    nonincreasing_reader.ExpectedSelector = 0u;
+    nonincreasing_reader.Values[0] = UINT64_C(900000);
+    nonincreasing_reader.Values[1] = UINT64_C(900000);
+    CheckBatch128Receipt(
+        wh1_encoder.RunWh1Batch128Counter(
+            MakeFakeCounterBracket(nonincreasing_reader)),
+        true,
+        nonincreasing_reader.Values[0],
+        nonincreasing_reader.Values[1],
+        UINT32_MAX,
+        0u,
+        "batch128 equal counter reads did not preserve zero delta");
+    nonincreasing_reader.Calls = 0u;
+    nonincreasing_reader.SelectorsMatched = true;
+    nonincreasing_reader.Values[0] = UINT64_MAX - 5u;
+    nonincreasing_reader.Values[1] = 3u;
+    CheckBatch128Receipt(
+        wh1_receive.RunWh1Batch128Counter(
+            MakeFakeCounterBracket(nonincreasing_reader)),
+        true,
+        nonincreasing_reader.Values[0],
+        nonincreasing_reader.Values[1],
+        0u,
+        0u,
+        "batch128 reset/wrap values produced an unsigned delta");
+
+    // WH2 identities are rejected before callback dispatch, even when the
+    // supplied bracket itself is otherwise valid.
+    NativeEncoderFixture wh2_encoder;
+    Check(wh2_encoder.Initialize(
+              wirehair_wh2_bench::MakeCertifiedWh2Arm(0u),
+              K,
+              block_bytes,
+              source) == Wirehair_Success,
+        "batch128 non-WH1 encoder fixture setup failed");
+    FakeCounterReaderState rejected_encoder_reader;
+    rejected_encoder_reader.ExpectedSelector = 1u;
+    rejected_encoder_reader.Values[0] = 10u;
+    rejected_encoder_reader.Values[1] = 20u;
+    Check(IsClearedBatch128Receipt(
+              wh2_encoder.PreflightBatch128(),
+              0u,
+              Wirehair_InvalidInput) &&
+              IsClearedBatch128Receipt(
+                  wh2_encoder.RunWh1Batch128Counter(
+                      MakeFakeCounterBracket(rejected_encoder_reader)),
+                  0u,
+                  Wirehair_InvalidInput) &&
+              rejected_encoder_reader.Calls == 0u,
+        "batch128 non-WH1 encoder reached a counter callback");
+
+    NativeArm wh2;
+    bool found_wh2 = false;
+    for (uint32_t attempt = 0u; attempt <= 255u; ++attempt)
+    {
+        if (wh2.Initialize(
+                wirehair_wh2_bench::MakeCertifiedWh2Arm(attempt),
+                K,
+                block_bytes,
+                source) == Wirehair_Success)
+        {
+            found_wh2 = true;
+            break;
+        }
+    }
+    Check(found_wh2, "batch128 non-WH1 receive arm setup failed");
+    if (found_wh2)
+    {
+        NativeReceiveFixture wh2_receive;
+        Check(wh2_receive.Initialize(wh2, ids, 8u) == Wirehair_Success,
+            "batch128 non-WH1 receive fixture setup failed");
+        FakeCounterReaderState rejected_receive_reader;
+        rejected_receive_reader.ExpectedSelector = 0u;
+        rejected_receive_reader.Values[0] = 30u;
+        rejected_receive_reader.Values[1] = 40u;
+        Check(IsClearedBatch128Receipt(
+                  wh2_receive.PreflightBatch128(),
+                  0u,
+                  Wirehair_InvalidInput) &&
+                  IsClearedBatch128Receipt(
+                      wh2_receive.RunWh1Batch128Counter(
+                          MakeFakeCounterBracket(rejected_receive_reader)),
+                      0u,
+                      Wirehair_InvalidInput) &&
+                  rejected_receive_reader.Calls == 0u,
+            "batch128 non-WH1 receive reached a counter callback");
+    }
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    // Every independently prepared slot is an injectable transaction
+    // boundary.  All 256 cases below must fail before Begin, attribute OOM to
+    // the exact slot, leave earlier prepared states unpublished, and permit a
+    // clean retry on the same fixture.
+    bool encoder_oom_cases_valid = true;
+    bool receive_oom_cases_valid = true;
+    for (size_t failure = 0u;
+         failure < wirehair_wh2_bench::kNativeCounterBatchSize;
+         ++failure)
+    {
+        FakeCounterReaderState oom_reader;
+        oom_reader.ExpectedSelector = 0u;
+        oom_reader.Values[0] = 50u;
+        oom_reader.Values[1] = 60u;
+        wirehair_wh2_bench::
+            SetNativeCounterBatchAllocationFailureCountdownForTesting(
+                (int64_t)failure);
+        const Batch128CounterArmResult encoder_oom =
+            wh1_encoder.RunWh1Batch128Counter(
+                MakeFakeCounterBracket(oom_reader));
+        wirehair_wh2_bench::
+            SetNativeCounterBatchAllocationFailureCountdownForTesting(-1);
+        encoder_oom_cases_valid = encoder_oom_cases_valid &&
+            IsClearedBatch128Receipt(
+                encoder_oom, failure, Wirehair_OOM) &&
+            oom_reader.Calls == 0u;
+
+        oom_reader.Calls = 0u;
+        oom_reader.SelectorsMatched = true;
+        wirehair_wh2_bench::
+            SetNativeCounterBatchAllocationFailureCountdownForTesting(
+                (int64_t)failure);
+        const Batch128CounterArmResult receive_oom =
+            wh1_receive.RunWh1Batch128Counter(
+                MakeFakeCounterBracket(oom_reader));
+        wirehair_wh2_bench::
+            SetNativeCounterBatchAllocationFailureCountdownForTesting(-1);
+        receive_oom_cases_valid = receive_oom_cases_valid &&
+            IsClearedBatch128Receipt(
+                receive_oom, failure, Wirehair_OOM) &&
+            oom_reader.Calls == 0u;
+    }
+    Check(encoder_oom_cases_valid,
+        "batch128 encoder preparation OOM matrix was not transactional");
+    Check(receive_oom_cases_valid,
+        "batch128 receive preparation OOM matrix was not transactional");
+
+    FakeCounterReaderState retry_reader;
+    retry_reader.ExpectedSelector = 1u;
+    retry_reader.Values[0] = UINT64_C(10000000);
+    retry_reader.Values[1] = UINT64_C(11000000);
+    CheckBatch128Receipt(
+        wh1_encoder.RunWh1Batch128Counter(
+            MakeFakeCounterBracket(retry_reader)),
+        true,
+        retry_reader.Values[0],
+        retry_reader.Values[1],
+        UINT32_MAX,
+        0u,
+        "batch128 encoder retry after OOM failed");
+    retry_reader.Calls = 0u;
+    retry_reader.SelectorsMatched = true;
+    retry_reader.Values[0] = UINT64_C(12000000);
+    retry_reader.Values[1] = UINT64_C(13000000);
+    CheckBatch128Receipt(
+        wh1_receive.RunWh1Batch128Counter(
+            MakeFakeCounterBracket(retry_reader)),
+        true,
+        retry_reader.Values[0],
+        retry_reader.Values[1],
+        0u,
+        0u,
+        "batch128 receive retry after OOM failed");
+#endif
+}
+
 void CheckNativeReceiveTrustedResume()
 {
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
@@ -2417,6 +3043,7 @@ int main()
     CheckIsolatedSolveFixture();
     CheckOtherTimingScopes();
     CheckBatch8TimingScopes();
+    CheckBatch128CounterScopes();
     CheckNativeReceiveTrustedResume();
     CheckNativeReceivePackedDispatchSeam();
     CheckNativeReceiveBudgetColdFallback();

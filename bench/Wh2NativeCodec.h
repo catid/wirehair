@@ -325,6 +325,65 @@ struct Batch8ArmResult
     std::array<uint64_t, kNativeBatch8Size> DirectSystematicPackets;
 };
 
+/** Fixed invocation count for one native counter-bracket observation. */
+static const std::size_t kNativeCounterBatchSize = 128u;
+
+/**
+    Injected counter reader used by the batch-128 fixture seam.
+
+    The fixture deliberately owns no hardware-counter implementation.  A
+    controller supplies one reader and selector, allowing clock-free tests to
+    prove ordering and failure behavior without executing privileged or
+    platform-specific instructions in this translation unit.
+*/
+typedef bool (*NativeCounterReadFunction)(
+    void* context,
+    uint32_t selector,
+    uint64_t* value_out);
+
+struct NativeCounterBracket
+{
+    void* Context = nullptr;
+    NativeCounterReadFunction Read = nullptr;
+    uint32_t Selector = 0u;
+};
+
+/**
+    Complete receipt for one fixed batch of 128 fresh Wirehair1 invocations.
+
+    PreflightBatch128() performs the same semantic work without counter reads;
+    its counter values and read flags remain zero/false.  A measured call
+    publishes CounterDelta only for two successful, strictly increasing
+    reads.  VerificationMask[0] covers invocations 0..63 and
+    VerificationMask[1] covers invocations 64..127.
+
+    Preparation is outside the bracket.  A failed begin read executes no
+    inner cores.  A failed end read retains the 128 raw Results but does not
+    publish a verification mask, decoded-overhead/direct-count receipts, end
+    value, or delta.
+*/
+struct Batch128CounterArmResult
+{
+    Batch128CounterArmResult();
+
+    uint64_t CounterStart;
+    uint64_t CounterEnd;
+    uint64_t CounterDelta;
+    bool BeginReadSucceeded;
+    bool EndReadSucceeded;
+    std::array<WirehairResult, kNativeCounterBatchSize> Results;
+    std::array<uint64_t, 2u> VerificationMask;
+    std::array<uint32_t, kNativeCounterBatchSize> DecodedOverheads;
+    std::array<uint64_t, kNativeCounterBatchSize>
+        DirectSystematicPackets;
+};
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+/** Test-only preparation-failure seam; negative disables injection. */
+void SetNativeCounterBatchAllocationFailureCountdownForTesting(
+    int64_t countdown);
+#endif
+
 /**
     Structured ownership receipt for NativeEncoderFixture's timed scope.
 
@@ -443,12 +502,18 @@ public:
     TimedArmResult Run() const;
     Batch8ArmResult PreflightBatch8() const;
     Batch8ArmResult RunBatch8() const;
+    Batch128CounterArmResult PreflightBatch128() const;
+    Batch128CounterArmResult RunWh1Batch128Counter(
+        const NativeCounterBracket& bracket) const;
 
 private:
     template <bool Measure>
     TimedArmResult RunImpl() const;
     template <bool Measure>
     Batch8ArmResult RunBatch8Impl() const;
+    template <bool ReadCounter>
+    Batch128CounterArmResult RunWh1Batch128CounterImpl(
+        const NativeCounterBracket* bracket) const;
 
     struct Impl;
     std::unique_ptr<Impl> ImplValue;
@@ -491,12 +556,18 @@ public:
     TimedArmResult Run() const;
     Batch8ArmResult PreflightBatch8() const;
     Batch8ArmResult RunBatch8() const;
+    Batch128CounterArmResult PreflightBatch128() const;
+    Batch128CounterArmResult RunWh1Batch128Counter(
+        const NativeCounterBracket& bracket) const;
 
 private:
     template <bool Measure>
     TimedArmResult RunImpl() const;
     template <bool Measure>
     Batch8ArmResult RunBatch8Impl() const;
+    template <bool ReadCounter>
+    Batch128CounterArmResult RunWh1Batch128CounterImpl(
+        const NativeCounterBracket* bracket) const;
 
     struct Impl;
     std::unique_ptr<Impl> ImplValue;

@@ -27,6 +27,20 @@ static const char kNativeArmOwnedSource[] = "native-arm-owned-kxb-v1";
 static const char kFixtureSourceAcquisition[] =
     "fixture-copy-before-clock-move-v1";
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+thread_local int64_t NativeCounterBatchAllocationFailureCountdown = -1;
+
+void TriggerNativeCounterBatchAllocationFailureForTesting()
+{
+    if (NativeCounterBatchAllocationFailureCountdown == 0) {
+        throw std::bad_alloc();
+    }
+    if (NativeCounterBatchAllocationFailureCountdown > 0) {
+        --NativeCounterBatchAllocationFailureCountdown;
+    }
+}
+#endif
+
 template <bool Measure>
 class FixtureTimer;
 
@@ -1440,6 +1454,27 @@ Batch8ArmResult::Batch8ArmResult()
     DirectSystematicPackets.fill(0u);
 }
 
+Batch128CounterArmResult::Batch128CounterArmResult()
+    : CounterStart(0u)
+    , CounterEnd(0u)
+    , CounterDelta(0u)
+    , BeginReadSucceeded(false)
+    , EndReadSucceeded(false)
+{
+    Results.fill(Wirehair_Error);
+    VerificationMask.fill(0u);
+    DecodedOverheads.fill(UINT32_MAX);
+    DirectSystematicPackets.fill(0u);
+}
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+void SetNativeCounterBatchAllocationFailureCountdownForTesting(
+    int64_t countdown)
+{
+    NativeCounterBatchAllocationFailureCountdown = countdown;
+}
+#endif
+
 NativeEncoderFixture::NativeEncoderFixture()
 {
 }
@@ -1726,6 +1761,208 @@ Batch8ArmResult NativeEncoderFixture::PreflightBatch8() const
 Batch8ArmResult NativeEncoderFixture::RunBatch8() const
 {
     return RunBatch8Impl<true>();
+}
+
+template <bool ReadCounter>
+Batch128CounterArmResult
+NativeEncoderFixture::RunWh1Batch128CounterImpl(
+    const NativeCounterBracket* bracket) const
+{
+    Batch128CounterArmResult result;
+    NativeCounterBracket frozen_bracket;
+    if (!IsInitialized()) {
+        return result;
+    }
+    // This counter seam is deliberately WH1-only.  Reject other identities
+    // before inspecting or invoking any caller-supplied callback.
+    if (ImplValue->Spec.Kind != NativeArmKind::Wirehair1)
+    {
+        result.Results[0] = Wirehair_InvalidInput;
+        return result;
+    }
+    if (ReadCounter && (!bracket || !bracket->Read))
+    {
+        result.Results[0] = Wirehair_InvalidInput;
+        return result;
+    }
+    if (ReadCounter) {
+        frozen_bracket = *bracket;
+    }
+
+    size_t failure_invocation = 0u;
+    try
+    {
+        // Allocate 128 independent output/source/handle states before Begin.
+        // Fresh WH1 construction plus IDs [0,K) remains the existing encoder
+        // timed core and is the only work between the two injected reads.
+        std::array<std::vector<uint8_t>, kNativeCounterBatchSize> encoded;
+        std::array<std::vector<uint8_t>, kNativeCounterBatchSize>
+            owned_sources;
+        std::array<NativeArm, kNativeCounterBatchSize> arms;
+        for (size_t invocation = 0u;
+             invocation < kNativeCounterBatchSize;
+             ++invocation)
+        {
+            failure_invocation = invocation;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            TriggerNativeCounterBatchAllocationFailureForTesting();
+#endif
+            encoded[invocation].assign(ImplValue->Source.size(), 0u);
+            owned_sources[invocation] = ImplValue->Source;
+        }
+
+        if (ReadCounter)
+        {
+            uint64_t counter_start = 0u;
+            try
+            {
+                if (!frozen_bracket.Read(
+                        frozen_bracket.Context,
+                        frozen_bracket.Selector,
+                        &counter_start))
+                {
+                    return result;
+                }
+            }
+            catch (...)
+            {
+                return result;
+            }
+            result.CounterStart = counter_start;
+            result.BeginReadSucceeded = true;
+        }
+
+        bool core_threw = false;
+        try
+        {
+            for (size_t invocation = 0u;
+                 invocation < kNativeCounterBatchSize;
+                 ++invocation)
+            {
+                failure_invocation = invocation;
+                WirehairResult invocation_result =
+                    arms[invocation].InitializeOwnedSourceAfterGlobalInit(
+                        ImplValue->Spec,
+                        ImplValue->K,
+                        ImplValue->BlockBytes,
+                        std::move(owned_sources[invocation]));
+                if (invocation_result == Wirehair_Success)
+                {
+                    for (uint32_t block_id = 0u;
+                         block_id < ImplValue->K;
+                         ++block_id)
+                    {
+                        invocation_result = arms[invocation].EncodeInto(
+                            block_id,
+                            encoded[invocation].data() +
+                                (size_t)block_id * ImplValue->BlockBytes,
+                            ImplValue->BlockBytes);
+                        if (invocation_result != Wirehair_Success) {
+                            break;
+                        }
+                    }
+                }
+                result.Results[invocation] = invocation_result;
+            }
+        }
+        catch (const std::bad_alloc&)
+        {
+            result.Results[failure_invocation] = Wirehair_OOM;
+            core_threw = true;
+        }
+        catch (const std::length_error&)
+        {
+            result.Results[failure_invocation] = Wirehair_OOM;
+            core_threw = true;
+        }
+        catch (...)
+        {
+            result.Results[failure_invocation] = Wirehair_Error;
+            core_threw = true;
+        }
+
+        if (ReadCounter)
+        {
+            uint64_t counter_end = 0u;
+            try
+            {
+                if (!frozen_bracket.Read(
+                        frozen_bracket.Context,
+                        frozen_bracket.Selector,
+                        &counter_end))
+                {
+                    return result;
+                }
+            }
+            catch (...)
+            {
+                return result;
+            }
+            result.CounterEnd = counter_end;
+            result.EndReadSucceeded = true;
+            if (counter_end > result.CounterStart) {
+                result.CounterDelta = counter_end - result.CounterStart;
+            }
+        }
+        if (core_threw) {
+            return result;
+        }
+
+        const uint64_t expected_direct = 0u;
+        for (size_t invocation = 0u;
+             invocation < kNativeCounterBatchSize;
+             ++invocation)
+        {
+            if (result.Results[invocation] != Wirehair_Success) {
+                continue;
+            }
+
+            const NativeArm& arm = arms[invocation];
+            const bool bytes_verified =
+                encoded[invocation] == ImplValue->Source;
+            const bool direct_roster =
+                arm.UsesRetainedSourceFor(0u) &&
+                arm.UsesRetainedSourceFor(ImplValue->K - 1u) &&
+                !arm.UsesRetainedSourceFor(ImplValue->K);
+            const bool equation_roster =
+                !arm.UsesRetainedSourceFor(0u) &&
+                !arm.UsesRetainedSourceFor(ImplValue->K - 1u) &&
+                !arm.UsesRetainedSourceFor(ImplValue->K);
+            const uint64_t direct_count = direct_roster ?
+                ImplValue->K : 0u;
+            if (!bytes_verified ||
+                (!direct_roster && !equation_roster) ||
+                direct_count != expected_direct)
+            {
+                continue;
+            }
+            result.VerificationMask[invocation >> 6] |=
+                UINT64_C(1) << (invocation & 63u);
+            result.DirectSystematicPackets[invocation] = direct_count;
+        }
+        return result;
+    }
+    catch (const std::bad_alloc&)
+    {
+        result.Results[failure_invocation] = Wirehair_OOM;
+        return result;
+    }
+    catch (const std::length_error&)
+    {
+        result.Results[failure_invocation] = Wirehair_OOM;
+        return result;
+    }
+}
+
+Batch128CounterArmResult NativeEncoderFixture::PreflightBatch128() const
+{
+    return RunWh1Batch128CounterImpl<false>(nullptr);
+}
+
+Batch128CounterArmResult NativeEncoderFixture::RunWh1Batch128Counter(
+    const NativeCounterBracket& bracket) const
+{
+    return RunWh1Batch128CounterImpl<true>(&bracket);
 }
 
 struct NativeReceiveFixture::Impl
@@ -2168,6 +2405,207 @@ Batch8ArmResult NativeReceiveFixture::PreflightBatch8() const
 Batch8ArmResult NativeReceiveFixture::RunBatch8() const
 {
     return RunBatch8Impl<true>();
+}
+
+template <bool ReadCounter>
+Batch128CounterArmResult
+NativeReceiveFixture::RunWh1Batch128CounterImpl(
+    const NativeCounterBracket* bracket) const
+{
+    Batch128CounterArmResult result;
+    NativeCounterBracket frozen_bracket;
+    if (!IsInitialized()) {
+        return result;
+    }
+
+    const NativeArm::Impl& arm = *ImplValue->ArmState;
+    // Reject WH2 and invalid callbacks before any caller-controlled read.
+    if (arm.Kind != NativeArmKind::Wirehair1)
+    {
+        result.Results[0] = Wirehair_InvalidInput;
+        return result;
+    }
+    if (ReadCounter && (!bracket || !bracket->Read))
+    {
+        result.Results[0] = Wirehair_InvalidInput;
+        return result;
+    }
+    if (ReadCounter) {
+        frozen_bracket = *bracket;
+    }
+
+    size_t failure_invocation = 0u;
+    try
+    {
+        const size_t receive_packet_count =
+            (size_t)arm.K + ImplValue->ReceiveOverheadCap;
+        std::array<LegacyCodecOwner, kNativeCounterBatchSize> decoders;
+        std::array<std::vector<uint8_t>, kNativeCounterBatchSize> recovered;
+        std::array<uint32_t, kNativeCounterBatchSize>
+            success_packet_counts = {};
+
+        // All decoder construction and output allocation precede Begin.
+        for (size_t invocation = 0u;
+             invocation < kNativeCounterBatchSize;
+             ++invocation)
+        {
+            failure_invocation = invocation;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            TriggerNativeCounterBatchAllocationFailureForTesting();
+#endif
+            recovered[invocation].assign(arm.Source.size(), 0u);
+            const WirehairResult create_result = wirehair_decoder_create_ex(
+                nullptr,
+                (uint64_t)arm.Source.size(),
+                arm.BlockBytes,
+                &decoders[invocation].Codec);
+            if (create_result != Wirehair_Success)
+            {
+                result.Results[invocation] = create_result;
+                return result;
+            }
+        }
+
+        if (ReadCounter)
+        {
+            uint64_t counter_start = 0u;
+            try
+            {
+                if (!frozen_bracket.Read(
+                        frozen_bracket.Context,
+                        frozen_bracket.Selector,
+                        &counter_start))
+                {
+                    return result;
+                }
+            }
+            catch (...)
+            {
+                return result;
+            }
+            result.CounterStart = counter_start;
+            result.BeginReadSucceeded = true;
+        }
+
+        bool core_threw = false;
+        try
+        {
+            for (size_t invocation = 0u;
+                 invocation < kNativeCounterBatchSize;
+                 ++invocation)
+            {
+                failure_invocation = invocation;
+                WirehairResult receive_result = Wirehair_NeedMore;
+                for (size_t packet_index = 0u;
+                     packet_index < receive_packet_count;
+                     ++packet_index)
+                {
+                    receive_result = wirehair_decode(
+                        decoders[invocation].Codec,
+                        ImplValue->PacketIds[packet_index],
+                        ImplValue->PacketStorage.data() +
+                            packet_index * arm.BlockBytes,
+                        arm.BlockBytes);
+                    if (receive_result == Wirehair_Success)
+                    {
+                        success_packet_counts[invocation] =
+                            (uint32_t)packet_index + 1u;
+                        receive_result = wirehair_recover(
+                            decoders[invocation].Codec,
+                            recovered[invocation].data(),
+                            recovered[invocation].size());
+                        break;
+                    }
+                    if (receive_result != Wirehair_NeedMore) {
+                        break;
+                    }
+                }
+                result.Results[invocation] = receive_result;
+            }
+        }
+        catch (const std::bad_alloc&)
+        {
+            result.Results[failure_invocation] = Wirehair_OOM;
+            core_threw = true;
+        }
+        catch (const std::length_error&)
+        {
+            result.Results[failure_invocation] = Wirehair_OOM;
+            core_threw = true;
+        }
+        catch (...)
+        {
+            result.Results[failure_invocation] = Wirehair_Error;
+            core_threw = true;
+        }
+
+        if (ReadCounter)
+        {
+            uint64_t counter_end = 0u;
+            try
+            {
+                if (!frozen_bracket.Read(
+                        frozen_bracket.Context,
+                        frozen_bracket.Selector,
+                        &counter_end))
+                {
+                    return result;
+                }
+            }
+            catch (...)
+            {
+                return result;
+            }
+            result.CounterEnd = counter_end;
+            result.EndReadSucceeded = true;
+            if (counter_end > result.CounterStart) {
+                result.CounterDelta = counter_end - result.CounterStart;
+            }
+        }
+        if (core_threw) {
+            return result;
+        }
+
+        for (size_t invocation = 0u;
+             invocation < kNativeCounterBatchSize;
+             ++invocation)
+        {
+            if (result.Results[invocation] != Wirehair_Success ||
+                success_packet_counts[invocation] < arm.K ||
+                success_packet_counts[invocation] >
+                    (uint64_t)arm.K + ImplValue->ReceiveOverheadCap ||
+                recovered[invocation] != arm.Source)
+            {
+                continue;
+            }
+            result.VerificationMask[invocation >> 6] |=
+                UINT64_C(1) << (invocation & 63u);
+            result.DecodedOverheads[invocation] =
+                success_packet_counts[invocation] - arm.K;
+        }
+        return result;
+    }
+    catch (const std::bad_alloc&)
+    {
+        result.Results[failure_invocation] = Wirehair_OOM;
+        return result;
+    }
+    catch (const std::length_error&)
+    {
+        result.Results[failure_invocation] = Wirehair_OOM;
+        return result;
+    }
+}
+
+Batch128CounterArmResult NativeReceiveFixture::PreflightBatch128() const
+{
+    return RunWh1Batch128CounterImpl<false>(nullptr);
+}
+
+Batch128CounterArmResult NativeReceiveFixture::RunWh1Batch128Counter(
+    const NativeCounterBracket& bracket) const
+{
+    return RunWh1Batch128CounterImpl<true>(&bracket);
 }
 
 struct NativeSolveFixture::Impl

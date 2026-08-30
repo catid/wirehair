@@ -915,6 +915,49 @@ if(BUILD_TESTS)
             wirehair_wh2_native_batch8_aa_calibration_selftest PROPERTIES
                 TIMEOUT 180
                 LABELS "wh2;benchmark;control;aa;batch8;native;timing")
+        add_executable(wirehair_wh2_native_rdpru_batch128_aa_calibration
+            bench/Wh2FrozenTrace.cpp
+            bench/Wh2FrozenTrace.h
+            bench/Wh2NativeRdpruAaCalibration.cpp
+            bench/Wh2NativeCodec.cpp
+            bench/Wh2NativeCodec.h)
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+            "${PROJECT_SOURCE_DIR}/bench/Wh2NativeRdpruAaCalibration.cpp"
+            "${PROJECT_SOURCE_DIR}/bench/Wh2NativeCodec.cpp"
+            "${PROJECT_SOURCE_DIR}/bench/Wh2NativeCodec.h")
+        file(SHA256
+            "${PROJECT_SOURCE_DIR}/bench/Wh2NativeRdpruAaCalibration.cpp"
+            WIREHAIR_WH2_NATIVE_RDPRU_AA_SOURCE_SHA256)
+        file(SHA256
+            "${PROJECT_SOURCE_DIR}/bench/Wh2NativeCodec.h"
+            WIREHAIR_WH2_NATIVE_CODEC_HEADER_SHA256)
+        file(SHA256
+            "${PROJECT_SOURCE_DIR}/bench/Wh2NativeCodec.cpp"
+            WIREHAIR_WH2_NATIVE_CODEC_SOURCE_SHA256)
+        file(SHA256
+            "${PROJECT_SOURCE_DIR}/CMakeLists.txt"
+            WIREHAIR_WH2_CMAKE_SHA256)
+        target_link_libraries(
+            wirehair_wh2_native_rdpru_batch128_aa_calibration PRIVATE
+            wirehair_v2_timing_policy)
+        target_compile_definitions(
+            wirehair_wh2_native_rdpru_batch128_aa_calibration PRIVATE
+            "WIREHAIR_WH2_SOURCE_GIT_COMMIT=\"${WIREHAIR_WH2_SOURCE_GIT_COMMIT}\""
+            "WIREHAIR_WH2_NATIVE_RDPRU_AA_SOURCE_SHA256=\"${WIREHAIR_WH2_NATIVE_RDPRU_AA_SOURCE_SHA256}\""
+            "WIREHAIR_WH2_NATIVE_CODEC_HEADER_SHA256=\"${WIREHAIR_WH2_NATIVE_CODEC_HEADER_SHA256}\""
+            "WIREHAIR_WH2_NATIVE_CODEC_SOURCE_SHA256=\"${WIREHAIR_WH2_NATIVE_CODEC_SOURCE_SHA256}\""
+            "WIREHAIR_WH2_CMAKE_SHA256=\"${WIREHAIR_WH2_CMAKE_SHA256}\"")
+        wirehair_apply_project_options(
+            wirehair_wh2_native_rdpru_batch128_aa_calibration)
+        add_test(
+            NAME wirehair_wh2_native_rdpru_batch128_aa_calibration_selftest
+            COMMAND wirehair_wh2_native_rdpru_batch128_aa_calibration
+                --selftest)
+        set_tests_properties(
+            wirehair_wh2_native_rdpru_batch128_aa_calibration_selftest
+            PROPERTIES
+                TIMEOUT 180
+                LABELS "wh2;benchmark;control;aa;rdpru;batch128;native;counter")
         set(WIREHAIR_WH2_K3_HYPEROVAL_FALSIFIER_SOURCES
             bench/Wh2FrozenTrace.cpp
             bench/Wh2FrozenTrace.h
