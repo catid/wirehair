@@ -447,10 +447,12 @@ def _validate_observation(
         fail("{} failed solve claims verified bytes".format(context))
     timings = [observation.get(key) for key in TIMING_KEYS]
     if timing_visible:
-        if (result != 0 or any(not _is_int63(item) for item in timings) or
-                observation["outer_ns"] <= 0 or
-                sum(observation[key] for _, key in PHASE_KEYS[1:]) >
-                    observation["outer_ns"]):
+        if result != 0 or any(not _is_int63(item) for item in timings):
+            fail("{} has invalid visible phase timing".format(context))
+        phase_total = sum(
+            observation[key] for _, key in PHASE_KEYS[1:])
+        if (observation["outer_ns"] <= 0 or phase_total <= 0 or
+                phase_total > observation["outer_ns"]):
             fail("{} has invalid visible phase timing".format(context))
     elif any(item is not None for item in timings):
         fail("{} exposes timing from a weak panel".format(context))
@@ -596,10 +598,11 @@ def _validate_payload(
             fail("phase slot ledger is out of order")
         values = [totals.get(key) for key in TIMING_KEYS]
         if comparable:
-            if (any(not _is_int63(value) for value in values) or
-                    totals["outer_ns"] <= 0 or
-                    sum(totals[key] for _, key in PHASE_KEYS[1:]) >
-                        totals["outer_ns"]):
+            if any(not _is_int63(value) for value in values):
+                fail("phase slot has invalid visible timing totals")
+            phase_total = sum(totals[key] for _, key in PHASE_KEYS[1:])
+            if (totals["outer_ns"] <= 0 or phase_total <= 0 or
+                    phase_total > totals["outer_ns"]):
                 fail("phase slot has invalid visible timing totals")
             for key in TIMING_KEYS:
                 if totals[key] != sum(

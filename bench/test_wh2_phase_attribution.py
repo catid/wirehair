@@ -412,6 +412,26 @@ class PhaseAttributionTest(unittest.TestCase):
                 "outer"]["status"], "comparable")
         self.assertEqual(analysis["decision"]["outcome"], "n16_sufficient")
 
+    def test_visible_success_rejects_zero_internal_phase_total(self):
+        records = self.build_records()
+        observation = records[-1]["payload"]["measured_observations"][0][
+            "observation"]
+        for _, key in subject.PHASE_KEYS[1:]:
+            observation[key] = 0
+        with self.assertRaisesRegex(
+                subject.PhaseRunnerError, "invalid visible phase timing"):
+            self.validate(records)
+
+    def test_visible_slot_rejects_zero_internal_phase_total(self):
+        records = self.build_records()
+        slot = records[-1]["payload"]["slot_sums"][0]
+        for _, key in subject.PHASE_KEYS[1:]:
+            slot[key] = 0
+        with self.assertRaisesRegex(
+                subject.PhaseRunnerError,
+                "phase slot has invalid visible timing totals"):
+            self.validate(records)
+
     def test_frozen_two_percent_decision_is_conservative(self):
         records = self.build_records()
         for row in records:

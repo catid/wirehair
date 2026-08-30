@@ -253,6 +253,20 @@ void TestChronologyAndTimingRejections()
         "zero successful outer interval accepted");
 
     changed = BuildPanel(NativePanelOrder::ABBA, n, false);
+    changed.Observations[2].Stats.BuildNanoseconds = 0u;
+    changed.Observations[2].Stats.PeelNanoseconds = 0u;
+    changed.Observations[2].Stats.ProjectNanoseconds = 0u;
+    changed.Observations[2].Stats.ResidualNanoseconds = 0u;
+    changed.Observations[2].Stats.BackSubNanoseconds = 0u;
+    Check(!Validate(changed, NativePanelOrder::ABBA, n, assembly),
+        "all-zero successful phase timing accepted");
+
+    changed = BuildPanel(NativePanelOrder::ABBA, n, false);
+    changed.Observations[2].Stats.ProjectNanoseconds = 0u;
+    Check(Validate(changed, NativePanelOrder::ABBA, n, assembly),
+        "single zero successful phase component rejected");
+
+    changed = BuildPanel(NativePanelOrder::ABBA, n, false);
     changed.Observations[2].BytesVerified = false;
     Check(!Validate(changed, NativePanelOrder::ABBA, n, assembly),
         "successful byte-verification failure accepted");
@@ -260,7 +274,7 @@ void TestChronologyAndTimingRejections()
     changed = BuildPanel(NativePanelOrder::ABBA, n, false);
     changed.Observations[2].ElapsedNanoseconds =
         static_cast<uint64_t>(std::numeric_limits<int64_t>::max());
-    changed.Observations[2].Stats.BuildNanoseconds = 0u;
+    changed.Observations[2].Stats.BuildNanoseconds = 1u;
     changed.Observations[2].Stats.PeelNanoseconds = 0u;
     changed.Observations[2].Stats.ProjectNanoseconds = 0u;
     changed.Observations[2].Stats.ResidualNanoseconds = 0u;

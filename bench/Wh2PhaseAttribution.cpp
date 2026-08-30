@@ -147,6 +147,7 @@ bool ValidSuccessfulTiming(const PhaseSolveObservation& observation)
         AddInt63(observation.Stats.ProjectNanoseconds, phases) &&
         AddInt63(observation.Stats.ResidualNanoseconds, phases) &&
         AddInt63(observation.Stats.BackSubNanoseconds, phases) &&
+        phases != 0u &&
         phases <= observation.ElapsedNanoseconds;
 }
 
@@ -195,6 +196,7 @@ bool SlotPhasesFitOuter(const PhaseSlotTotals& totals)
         AddInt63(totals.ProjectNanoseconds, phases) &&
         AddInt63(totals.ResidualNanoseconds, phases) &&
         AddInt63(totals.BackSubNanoseconds, phases) &&
+        phases != 0u &&
         phases <= totals.OuterNanoseconds;
 }
 
