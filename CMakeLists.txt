@@ -863,6 +863,31 @@ if(BUILD_TESTS)
         set_tests_properties(wirehair_wh2_native_codec_test PROPERTIES
             TIMEOUT 180
             LABELS "wh2;benchmark;contract;native;codec")
+        add_executable(wirehair_wh2_native_aa_calibration
+            bench/Wh2FrozenTrace.cpp
+            bench/Wh2FrozenTrace.h
+            bench/Wh2NativeAaCalibration.cpp
+            bench/Wh2NativeCodec.cpp
+            bench/Wh2NativeCodec.h)
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+            "${PROJECT_SOURCE_DIR}/bench/Wh2NativeAaCalibration.cpp")
+        file(SHA256
+            "${PROJECT_SOURCE_DIR}/bench/Wh2NativeAaCalibration.cpp"
+            WIREHAIR_WH2_NATIVE_AA_SOURCE_SHA256)
+        target_link_libraries(wirehair_wh2_native_aa_calibration PRIVATE
+            wirehair_v2_timing_policy)
+        target_compile_definitions(
+            wirehair_wh2_native_aa_calibration PRIVATE
+            "WIREHAIR_WH2_SOURCE_GIT_COMMIT=\"${WIREHAIR_WH2_SOURCE_GIT_COMMIT}\""
+            "WIREHAIR_WH2_NATIVE_AA_SOURCE_SHA256=\"${WIREHAIR_WH2_NATIVE_AA_SOURCE_SHA256}\"")
+        wirehair_apply_project_options(wirehair_wh2_native_aa_calibration)
+        add_test(
+            NAME wirehair_wh2_native_aa_calibration_selftest
+            COMMAND wirehair_wh2_native_aa_calibration --selftest)
+        set_tests_properties(
+            wirehair_wh2_native_aa_calibration_selftest PROPERTIES
+                TIMEOUT 180
+                LABELS "wh2;benchmark;control;aa;native;timing")
         set(WIREHAIR_WH2_K2_PROJECTIVE_SCREEN_SOURCES
             bench/Wh2FrozenTrace.cpp
             bench/Wh2FrozenTrace.h
