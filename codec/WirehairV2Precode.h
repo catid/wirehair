@@ -51,12 +51,13 @@ enum class HeavyCoefficientFamily : uint32_t
 };
 
 /**
-    Experiment-only segmentation of the D=12 Shuffle-2 dense equations.
+    Segmentation of the D=12 Shuffle-2 dense equations.
 
     An anchor is a freshly shuffled balanced half-row.  Rows between anchors
     retain the certified one-set/one-clear two-column delta cadence.  The
-    layouts are pure binary/GF(256) architecture arms; named/public profiles
-    always use Disabled.
+    layouts are pure binary/GF(256) architecture arms.  The original certified
+    profile uses Disabled; the additive Two07/mix2 profile uses Two07.
+    Four0369 remains experiment-only.
 */
 enum class DenseAnchorLayout : uint32_t
 {

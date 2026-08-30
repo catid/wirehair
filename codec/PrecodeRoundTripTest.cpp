@@ -1,4 +1,5 @@
 #include "WirehairV2Codec.h"
+#include "WirehairV2Plan.h"
 #include "WirehairV2PrecodeDecode.h"
 
 #include "../WirehairTools.h"
@@ -465,9 +466,177 @@ bool SameOptions(
     const wirehair_v2::MessagePrecodeEncoderOptions& b)
 {
     return a.RecoveryMixCount == b.RecoveryMixCount &&
+        a.DenseAnchors == b.DenseAnchors &&
         a.DenseIdentityCorner == b.DenseIdentityCorner &&
         a.PrecodeSeedSalt == b.PrecodeSeedSalt &&
         a.RecoveryRowSeedSalt == b.RecoveryRowSeedSalt;
+}
+
+bool SamePrecodeParams(
+    const wirehair_v2::PrecodeParams& a,
+    const wirehair_v2::PrecodeParams& b)
+{
+    return a.BlockCount == b.BlockCount &&
+        a.Staircase == b.Staircase &&
+        a.DenseRows == b.DenseRows &&
+        a.HeavyRows == b.HeavyRows &&
+        a.SourceHits == b.SourceHits &&
+        a.DenseIdentityCorner == b.DenseIdentityCorner &&
+        a.HeavyFamily == b.HeavyFamily &&
+        a.DenseAnchors == b.DenseAnchors &&
+        a.Seed == b.Seed;
+}
+
+bool SamePacketConfig(
+    const wirehair_v2::PacketRowConfig& a,
+    const wirehair_v2::PacketRowConfig& b)
+{
+    return a.PeelSeed == b.PeelSeed && a.MixCount == b.MixCount;
+}
+
+bool RunGraphSeedWidthContractCases()
+{
+    const uint32_t K = 64u;
+    const uint32_t narrow_block_bytes =
+        wirehair_v2::kTwo07Mix2GraphSeedBlockBytes;
+    // Exercise a different payload-width policy class, not just a different
+    // numeric width inside the small-block class.
+    const uint32_t wide_block_bytes = 320u * 1024u;
+    const wirehair_v2::SeedProfile narrow =
+        wirehair_v2::SelectSeedProfile(K, narrow_block_bytes);
+    const wirehair_v2::SeedProfile wide =
+        wirehair_v2::SelectSeedProfile(K, wide_block_bytes);
+
+    wirehair_v2::MessagePrecodeEncoderOptions certified_options;
+    wirehair_v2::PrecodeParams certified_narrow;
+    wirehair_v2::PrecodeParams certified_wide;
+    wirehair_v2::PacketRowConfig certified_narrow_packet;
+    wirehair_v2::PacketRowConfig certified_wide_packet;
+    wirehair_v2::MakeMessagePrecodeConfiguration(
+        narrow, certified_options, certified_narrow,
+        certified_narrow_packet);
+    wirehair_v2::MakeMessagePrecodeConfiguration(
+        wide, certified_options, certified_wide,
+        certified_wide_packet);
+
+    wirehair_v2::PrecodeParams expected_certified_narrow =
+        wirehair_v2::MakeCertifiedParams(
+            K,
+            wirehair_v2::MatrixSeedFromProfile(
+                narrow, 0u, wirehair_v2::kMessagePrecodeSeedSalt));
+    wirehair_v2::PrecodeParams expected_certified_wide =
+        wirehair_v2::MakeCertifiedParams(
+            K,
+            wirehair_v2::MatrixSeedFromProfile(
+                wide, 0u, wirehair_v2::kMessagePrecodeSeedSalt));
+    wirehair_v2::PacketRowConfig expected_certified_narrow_packet;
+    expected_certified_narrow_packet.PeelSeed =
+        wirehair_v2::PacketPeelSeedFromProfile(
+            narrow, wirehair_v2::kMessageRecoveryRowSeedSalt);
+    wirehair_v2::PacketRowConfig expected_certified_wide_packet;
+    expected_certified_wide_packet.PeelSeed =
+        wirehair_v2::PacketPeelSeedFromProfile(
+            wide, wirehair_v2::kMessageRecoveryRowSeedSalt);
+
+    if (narrow.BlockBytes != narrow_block_bytes ||
+        wide.BlockBytes != wide_block_bytes ||
+        narrow.Policy.ByteClass == wide.Policy.ByteClass ||
+        !SamePrecodeParams(
+            certified_narrow, expected_certified_narrow) ||
+        !SamePrecodeParams(certified_wide, expected_certified_wide) ||
+        !SamePacketConfig(
+            certified_narrow_packet,
+            expected_certified_narrow_packet) ||
+        !SamePacketConfig(
+            certified_wide_packet,
+            expected_certified_wide_packet) ||
+        certified_narrow.Seed != UINT64_C(0x3a880cf93d36784a) ||
+        certified_narrow_packet.PeelSeed != UINT32_C(0x4df9ea57) ||
+        certified_wide.Seed != UINT64_C(0x0e6034e9935ef8e3) ||
+        certified_wide_packet.PeelSeed != UINT32_C(0x7902a554) ||
+        certified_narrow.Seed == certified_wide.Seed ||
+        certified_narrow_packet.PeelSeed == certified_wide_packet.PeelSeed)
+    {
+        std::fprintf(stderr,
+            "contract: certified profile cross-width seed behavior changed\n");
+        return false;
+    }
+
+    wirehair_v2::MessagePrecodeEncoderOptions two07_mix2;
+    two07_mix2.DenseAnchors = wirehair_v2::DenseAnchorLayout::Two07;
+    two07_mix2.RecoveryMixCount = 2u;
+    wirehair_v2::PrecodeParams two07_narrow;
+    wirehair_v2::PrecodeParams two07_wide;
+    wirehair_v2::PacketRowConfig two07_narrow_packet;
+    wirehair_v2::PacketRowConfig two07_wide_packet;
+    wirehair_v2::MakeMessagePrecodeConfiguration(
+        narrow, two07_mix2, two07_narrow, two07_narrow_packet);
+    wirehair_v2::MakeMessagePrecodeConfiguration(
+        wide, two07_mix2, two07_wide, two07_wide_packet);
+
+    const wirehair_v2::SeedProfile normalized =
+        wirehair_v2::SelectSeedProfile(
+            K, wirehair_v2::kTwo07Mix2GraphSeedBlockBytes);
+    wirehair_v2::PrecodeParams expected_two07 =
+        wirehair_v2::MakeCertifiedParams(
+            K,
+            wirehair_v2::MatrixSeedFromProfile(
+                normalized, 0u, wirehair_v2::kMessagePrecodeSeedSalt));
+    expected_two07.DenseAnchors = wirehair_v2::DenseAnchorLayout::Two07;
+    wirehair_v2::PacketRowConfig expected_two07_packet;
+    expected_two07_packet.PeelSeed =
+        wirehair_v2::PacketPeelSeedFromProfile(
+            normalized, wirehair_v2::kMessageRecoveryRowSeedSalt);
+    expected_two07_packet.MixCount = 2u;
+
+    if (!SamePrecodeParams(two07_narrow, two07_wide) ||
+        !SamePacketConfig(two07_narrow_packet, two07_wide_packet) ||
+        !SamePrecodeParams(two07_narrow, expected_two07) ||
+        !SamePacketConfig(two07_narrow_packet, expected_two07_packet) ||
+        two07_narrow.Seed != UINT64_C(0x3a880cf93d36784a) ||
+        two07_narrow_packet.PeelSeed != UINT32_C(0x4df9ea57) ||
+        two07_narrow.DenseAnchors !=
+            wirehair_v2::DenseAnchorLayout::Two07 ||
+        two07_narrow_packet.MixCount != 2u)
+    {
+        std::fprintf(stderr,
+            "contract: Two07/mix2 graph seeds depend on payload width\n");
+        return false;
+    }
+
+    const uint32_t attempts[] = { 0u, 1u, 2u, 255u };
+    for (uint32_t attempt : attempts)
+    {
+        const wirehair_v2::PrecodeParams narrow_attempt =
+            wirehair_v2::PrecodeParamsForAttempt(two07_narrow, attempt);
+        const wirehair_v2::PrecodeParams wide_attempt =
+            wirehair_v2::PrecodeParamsForAttempt(two07_wide, attempt);
+        const wirehair_v2::PacketRowConfig narrow_packet_attempt =
+            wirehair_v2::PacketConfigForAttempt(
+                two07_narrow_packet, attempt);
+        const wirehair_v2::PacketRowConfig wide_packet_attempt =
+            wirehair_v2::PacketConfigForAttempt(two07_wide_packet, attempt);
+        if (!SamePrecodeParams(narrow_attempt, wide_attempt) ||
+            !SamePacketConfig(narrow_packet_attempt, wide_packet_attempt))
+        {
+            std::fprintf(stderr,
+                "contract: Two07/mix2 attempt %u depends on payload width\n",
+                attempt);
+            return false;
+        }
+    }
+    const wirehair_v2::PrecodeParams attempt_one =
+        wirehair_v2::PrecodeParamsForAttempt(two07_narrow, 1u);
+    const wirehair_v2::PacketRowConfig packet_attempt_one =
+        wirehair_v2::PacketConfigForAttempt(two07_narrow_packet, 1u);
+    if (attempt_one.Seed != UINT64_C(0xd8bf86b2bc80f45f) ||
+        packet_attempt_one.PeelSeed != UINT32_C(0xec316410))
+    {
+        std::fprintf(stderr,
+            "contract: Two07/mix2 normalized attempt stepping changed\n");
+        return false;
+    }
+    return true;
 }
 
 bool RunOptionContractCase(
@@ -500,6 +669,7 @@ bool RunOptionContractCase(
             wirehair_v2::kPacketRowContractVersion ||
         profile.V2StaircaseCount != profile.DenseCount ||
         profile.V2RecoveryMixCount != options.RecoveryMixCount ||
+        profile.V2DenseAnchorLayout != (uint32_t)options.DenseAnchors ||
         profile.V2DenseIdentityCorner != options.DenseIdentityCorner ||
         profile.V2PrecodeSeedSalt != options.PrecodeSeedSalt ||
         profile.V2RecoveryRowSeedSalt != options.RecoveryRowSeedSalt)
@@ -516,6 +686,7 @@ bool RunOptionContractCase(
         inherited.System().Params.DenseRows != profile.V2DenseRowCount ||
         inherited.System().Params.HeavyRows != profile.V2HeavyRowCount ||
         inherited.System().Params.SourceHits != profile.V2SourceHits ||
+        inherited.System().Params.DenseAnchors != options.DenseAnchors ||
         inherited.System().Params.Seed != profile.V2PrecodeSeed ||
         inherited.PacketPeelSeed() != profile.V2PacketPeelSeed ||
         !CompleteDirectRepairOnly(
@@ -550,6 +721,9 @@ bool RunOptionContractCase(
 
 bool RunBoundContractCases()
 {
+    if (!RunGraphSeedWidthContractCases()) {
+        return false;
+    }
     wirehair_v2::MessagePrecodeEncoderOptions defaults;
     wirehair_v2::MessagePrecodeEncoderOptions variant = defaults;
     variant.RecoveryMixCount = 2u;
@@ -575,6 +749,87 @@ bool RunBoundContractCases()
     {
         std::fprintf(stderr,
             "contract: unsupported recovery mix count was accepted\n");
+        return false;
+    }
+    variant = defaults;
+    variant.DenseAnchors = wirehair_v2::DenseAnchorLayout::Two07;
+    if (invalid_encoder.InitializePrecodeEncoder(
+            invalid_message.data(),
+            invalid_message_bytes,
+            invalid_block_bytes,
+            nullptr,
+            &variant) != Wirehair_InvalidInput ||
+        invalid_decoder.InitializeResult(
+            invalid_message_bytes,
+            invalid_block_bytes,
+            nullptr,
+            &variant) != Wirehair_InvalidInput)
+    {
+        std::fprintf(stderr,
+            "contract: Two07/mix3 pair was accepted\n");
+        return false;
+    }
+    variant.RecoveryMixCount = 2u;
+    variant.DenseIdentityCorner = true;
+    const wirehair_v2::SeedProfile invalid_profile =
+        wirehair_v2::SelectSeedProfile(invalid_K, invalid_block_bytes);
+    wirehair_v2::MessagePrecodeEncoderOptions ignored_options;
+    wirehair_v2::PrecodeParams ignored_params;
+    wirehair_v2::PacketRowConfig ignored_packet;
+    if (wirehair_v2::ResolveMessagePrecodeOptions(
+            invalid_profile, &variant, ignored_options) ||
+        wirehair_v2::ResolveMessagePrecodeConfiguration(
+            invalid_profile, variant, ignored_params, ignored_packet))
+    {
+        std::fprintf(stderr,
+            "contract: Two07/mix2 identity corner was accepted\n");
+        return false;
+    }
+    variant.DenseIdentityCorner = false;
+    wirehair_v2::SeedProfile noncanonical_two07 = invalid_profile;
+    noncanonical_two07.DenseCount =
+        (uint16_t)(noncanonical_two07.DenseCount + 4u);
+    if (!wirehair_v2::ResolveMessagePrecodeOptions(
+            noncanonical_two07, &variant, ignored_options) ||
+        wirehair_v2::ResolveMessagePrecodeConfiguration(
+            noncanonical_two07,
+            variant,
+            ignored_params,
+            ignored_packet) ||
+        invalid_encoder.InitializePrecodeEncoder(
+            invalid_message.data(),
+            invalid_message_bytes,
+            invalid_block_bytes,
+            &noncanonical_two07,
+            &variant) != Wirehair_InvalidInput ||
+        invalid_decoder.InitializeResult(
+            invalid_message_bytes,
+            invalid_block_bytes,
+            &noncanonical_two07,
+            &variant) != Wirehair_InvalidInput)
+    {
+        std::fprintf(stderr,
+            "contract: noncanonical Two07 staircase was accepted\n");
+        return false;
+    }
+    if (!RunOptionContractCase("two07-mix2", variant, defaults)) {
+        return false;
+    }
+    variant.DenseAnchors = wirehair_v2::DenseAnchorLayout::Four0369;
+    if (invalid_encoder.InitializePrecodeEncoder(
+            invalid_message.data(),
+            invalid_message_bytes,
+            invalid_block_bytes,
+            nullptr,
+            &variant) != Wirehair_InvalidInput ||
+        invalid_decoder.InitializeResult(
+            invalid_message_bytes,
+            invalid_block_bytes,
+            nullptr,
+            &variant) != Wirehair_InvalidInput)
+    {
+        std::fprintf(stderr,
+            "contract: Four0369/mix2 pair was accepted\n");
         return false;
     }
     variant = defaults;
@@ -705,6 +960,12 @@ bool RunBoundContractCases()
     malformed = alternate_encoder.Profile();
     malformed.V2RecoveryRowSeedSalt ^= UINT64_C(1);
     if (!reject_profile(malformed, "packet salt")) {
+        return false;
+    }
+    malformed = alternate_encoder.Profile();
+    malformed.V2DenseAnchorLayout =
+        (uint32_t)wirehair_v2::DenseAnchorLayout::Two07;
+    if (!reject_profile(malformed, "dense-anchor option")) {
         return false;
     }
     malformed = alternate_encoder.Profile();

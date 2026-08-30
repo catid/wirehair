@@ -1363,6 +1363,56 @@ if(BUILD_TESTS)
                     LABELS
                         "wh2;benchmark;contract;native;encoder;systematic;complement;symbols")
         endif()
+        if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND
+           NOT CMAKE_CROSSCOMPILING)
+            add_executable(wirehair_wh2_mix2_seed_repair_worker
+                bench/Wh2Mix2SeedRepairWorker.cpp
+                bench/Wh2FrozenTrace.cpp
+                bench/Wh2FrozenTrace.h
+                bench/Wh2NativeCodec.cpp
+                bench/Wh2NativeCodec.h)
+            target_compile_definitions(
+                wirehair_wh2_mix2_seed_repair_worker PRIVATE
+                "WIREHAIR_WH2_SOURCE_GIT_COMMIT=\"${WIREHAIR_WH2_SOURCE_GIT_COMMIT}\"")
+            target_link_libraries(
+                wirehair_wh2_mix2_seed_repair_worker PRIVATE
+                wirehair_v2_timing_policy
+                Threads::Threads)
+            wirehair_apply_project_options(
+                wirehair_wh2_mix2_seed_repair_worker)
+            add_test(
+                NAME wirehair_wh2_mix2_seed_repair_worker_selftest
+                COMMAND wirehair_wh2_mix2_seed_repair_worker --self-test)
+            set_tests_properties(
+                wirehair_wh2_mix2_seed_repair_worker_selftest PROPERTIES
+                    TIMEOUT 120
+                    LABELS
+                        "wh2;benchmark;contract;native;recovery;mix2;repair")
+            add_test(
+                NAME wirehair_wh2_mix2_seed_repair_worker_controller_test
+                COMMAND ${Python3_EXECUTABLE} -B
+                    ${PROJECT_SOURCE_DIR}/bench/test_wh2_mix2_seed_repair_worker.py
+                    $<TARGET_FILE:wirehair_wh2_mix2_seed_repair_worker>)
+            set_tests_properties(
+                wirehair_wh2_mix2_seed_repair_worker_controller_test
+                PROPERTIES
+                    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+                    ENVIRONMENT "PYTHONWARNINGS=error"
+                    TIMEOUT 120
+                    LABELS
+                        "wh2;benchmark;contract;native;recovery;mix2;repair")
+            add_test(
+                NAME wirehair_wh2_mix2_promotion_short_screen_test
+                COMMAND ${Python3_EXECUTABLE} -B
+                    ${PROJECT_SOURCE_DIR}/bench/test_wh2_mix2_promotion_short_screen.py)
+            set_tests_properties(
+                wirehair_wh2_mix2_promotion_short_screen_test PROPERTIES
+                    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+                    ENVIRONMENT "PYTHONWARNINGS=error"
+                    TIMEOUT 30
+                    LABELS
+                        "wh2;benchmark;contract;native;recovery;mix2;promotion")
+        endif()
         add_executable(wirehair_wh2_contract_worker
             bench/Wh2ContractWorker.cpp
             bench/Wh2FrozenTrace.cpp
@@ -1444,6 +1494,15 @@ if(BUILD_TESTS)
             ENVIRONMENT "PYTHONWARNINGS=error"
             TIMEOUT 120
             LABELS "wh2;benchmark;contract;recovery;precodefail;runner")
+        add_test(
+            NAME wh2_mix2_seed_repair_contract_test
+            COMMAND ${Python3_EXECUTABLE} -B -m unittest -v
+                bench/test_wh2_mix2_seed_repair_contract.py)
+        set_tests_properties(wh2_mix2_seed_repair_contract_test PROPERTIES
+            WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+            ENVIRONMENT "PYTHONWARNINGS=error"
+            TIMEOUT 120
+            LABELS "wh2;benchmark;contract;native;recovery;mix2;repair")
         add_test(
             NAME wh2_select_development_architecture_test
             COMMAND ${Python3_EXECUTABLE} -m unittest -v

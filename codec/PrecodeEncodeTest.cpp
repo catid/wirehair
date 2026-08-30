@@ -1221,6 +1221,7 @@ bool TestMessagePrecodeEncoder()
         encoder.Profile().BlockCount != K ||
         encoder.Profile().BlockBytes != bb ||
         encoder.Options().RecoveryMixCount != options.RecoveryMixCount ||
+        encoder.Options().DenseAnchors != options.DenseAnchors ||
         !encoder.Options().DenseIdentityCorner ||
         !encoder.IntermediateBlocks() ||
         !encoder.BlockEncoder().IsInitialized())
@@ -1599,6 +1600,8 @@ bool TestSystematicSourceCache()
             selected_profile.V2PacketPeelSeed ||
         cached_profile.V2RecoveryMixCount !=
             selected_profile.V2RecoveryMixCount ||
+        cached_profile.V2DenseAnchorLayout !=
+            selected_profile.V2DenseAnchorLayout ||
         cached_profile.V2DenseIdentityCorner !=
             selected_profile.V2DenseIdentityCorner ||
         cached_profile.V2PrecodeSeedSalt !=

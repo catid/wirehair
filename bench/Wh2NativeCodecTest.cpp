@@ -1113,14 +1113,17 @@ void CheckTransactionalArmAndValidation()
     NativeArmSpec unknown_base = canonical;
     unknown_base.BaseKind = static_cast<NativeWh2BaseKind>(UINT32_MAX);
     invalid_canonical_specs.push_back(unknown_base);
-    for (uint32_t option = 0u; option < 6u; ++option)
+    for (uint32_t option = 0u; option < 7u; ++option)
     {
         NativeArmSpec nondefault = canonical;
         if (option == 0u) nondefault.Wh2Options.RecoveryMixCount = 2u;
-        else if (option == 1u) nondefault.Wh2Options.DenseIdentityCorner = true;
-        else if (option == 2u) nondefault.Wh2Options.PrecodeSeedSalt = 1u;
-        else if (option == 3u) nondefault.Wh2Options.RecoveryRowSeedSalt = 1u;
-        else if (option == 4u)
+        else if (option == 1u)
+            nondefault.Wh2Options.DenseAnchors =
+                wirehair_v2::DenseAnchorLayout::Two07;
+        else if (option == 2u) nondefault.Wh2Options.DenseIdentityCorner = true;
+        else if (option == 3u) nondefault.Wh2Options.PrecodeSeedSalt = 1u;
+        else if (option == 4u) nondefault.Wh2Options.RecoveryRowSeedSalt = 1u;
+        else if (option == 5u)
             nondefault.Wh2Options.CacheSystematicSource = true;
         else
             nondefault.Wh2Options.CacheReceivedSystematicPackets = true;

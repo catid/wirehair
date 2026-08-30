@@ -30,6 +30,9 @@ struct SeedProfile
     uint64_t V2PrecodeSeed = 0;
     uint32_t V2PacketPeelSeed = 0;
     uint32_t V2RecoveryMixCount = 0;
+    // Fixed-width DenseAnchorLayout value.  Keep the seed-profile contract
+    // independent of the precode header while binding the exact dense graph.
+    uint32_t V2DenseAnchorLayout = 0;
     bool V2DenseIdentityCorner = false;
     uint64_t V2PrecodeSeedSalt = 0;
     uint64_t V2RecoveryRowSeedSalt = 0;

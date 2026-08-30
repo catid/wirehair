@@ -50,6 +50,10 @@
 namespace wirehair_v2 {
 
 static const uint32_t kDefaultRecoveryMixCount = kCertifiedPacketMixCount;
+// The additive Two07/mix2 profile derives one graph for each K regardless of
+// payload width.  This makes its offline K-indexed construction-attempt map
+// portable across every supported block size.
+static const uint32_t kTwo07Mix2GraphSeedBlockBytes = 2u;
 static const uint64_t kMessagePrecodeSeedSalt =
     UINT64_C(0x763263707265636f);
 static const uint64_t kMessageRecoveryRowSeedSalt =
@@ -303,6 +307,7 @@ struct MessagePrecodeEncoderOptions
     // equation system. Keep it explicit so supplied options can be checked
     // against a selected profile rather than silently ignored.
     uint32_t RecoveryMixCount = kDefaultRecoveryMixCount;
+    DenseAnchorLayout DenseAnchors = DenseAnchorLayout::Disabled;
     bool DenseIdentityCorner = false;
     uint64_t PrecodeSeedSalt = kMessagePrecodeSeedSalt;
     uint64_t RecoveryRowSeedSalt = kMessageRecoveryRowSeedSalt;
@@ -313,6 +318,17 @@ struct MessagePrecodeEncoderOptions
     bool CacheSystematicSource = false;
     bool CacheReceivedSystematicPackets = false;
 };
+
+/**
+    Derive the exact unstepped precode and packet configuration for a message
+    contract.  Both seeds share one profile-specific graph-seed selection so
+    they cannot diverge and the normalized Two07/mix2 input is computed once.
+*/
+void MakeMessagePrecodeConfiguration(
+    const SeedProfile& payload_profile,
+    const MessagePrecodeEncoderOptions& options,
+    PrecodeParams& params,
+    PacketRowConfig& packet_config);
 
 /** True when any selected V2 precode contract state is present. */
 bool HasMessagePrecodeContractState(const SeedProfile& profile);

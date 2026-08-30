@@ -127,6 +127,7 @@ bool SameProfile(
         a.V2PrecodeSeed == b.V2PrecodeSeed &&
         a.V2PacketPeelSeed == b.V2PacketPeelSeed &&
         a.V2RecoveryMixCount == b.V2RecoveryMixCount &&
+        a.V2DenseAnchorLayout == b.V2DenseAnchorLayout &&
         a.V2DenseIdentityCorner == b.V2DenseIdentityCorner &&
         a.V2PrecodeSeedSalt == b.V2PrecodeSeedSalt &&
         a.V2RecoveryRowSeedSalt == b.V2RecoveryRowSeedSalt &&

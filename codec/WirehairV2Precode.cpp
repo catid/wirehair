@@ -121,13 +121,20 @@ bool ValidatePrecodeParams(const PrecodeParams& params)
         (uint64_t)params.BlockCount + params.Staircase;
     if (params.DenseAnchors != DenseAnchorLayout::Disabled)
     {
-#if !defined(WIREHAIR_V2_ENABLE_TEST_HOOKS) && \
-    !defined(WIREHAIR_V2_ENABLE_BENCHMARK_EQUATIONS)
-        return false;
-#else
         if (params.DenseRows != 12u || params.HeavyRows != 12u ||
             params.DenseIdentityCorner ||
             params.HeavyFamily != HeavyCoefficientFamily::PeriodicCauchy)
+        {
+            return false;
+        }
+#if !defined(WIREHAIR_V2_ENABLE_TEST_HOOKS) && \
+    !defined(WIREHAIR_V2_ENABLE_BENCHMARK_EQUATIONS)
+        // The named-profile layer additionally binds Two07 to mix2.  This
+        // structure-only validator has no packet-row configuration, so admit
+        // only that production anchor layout and retain Four0369 as a hook.
+        if (params.DenseAnchors != DenseAnchorLayout::Two07 ||
+            params.Staircase != wirehair::GetDenseCount(params.BlockCount) ||
+            params.SourceHits != CertifiedSourceHits(params.BlockCount))
         {
             return false;
         }

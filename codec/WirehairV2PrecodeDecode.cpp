@@ -594,6 +594,7 @@ WirehairResult MessagePrecodeDecoder::InitializeResolvedSystem(
         system.Params.BlockCount != block_count ||
         packet_seed_attempt >= kMaxPacketSeedAttempts ||
         options.RecoveryMixCount != packet_config.MixCount ||
+        options.DenseAnchors != system.Params.DenseAnchors ||
         options.DenseIdentityCorner !=
             system.Params.DenseIdentityCorner ||
         !HasValidPrecodeSystemShape(system))
@@ -737,6 +738,7 @@ WirehairResult MessagePrecodeDecoder::InitializeForValidatedSystem(
         }
         MessagePrecodeEncoderOptions options;
         options.RecoveryMixCount = packet_config.MixCount;
+        options.DenseAnchors = system.Params.DenseAnchors;
         options.DenseIdentityCorner = system.Params.DenseIdentityCorner;
         SeedProfile profile = SelectSeedProfile(block_count, block_bytes);
         GuardedDecoderAllocation();

@@ -124,6 +124,7 @@ bool CertifiedEquationOptions(
 {
     const wirehair_v2::MessagePrecodeEncoderOptions defaults;
     return options.RecoveryMixCount == defaults.RecoveryMixCount &&
+        options.DenseAnchors == defaults.DenseAnchors &&
         options.DenseIdentityCorner == defaults.DenseIdentityCorner &&
         options.PrecodeSeedSalt == defaults.PrecodeSeedSalt &&
         options.RecoveryRowSeedSalt == defaults.RecoveryRowSeedSalt;

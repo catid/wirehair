@@ -22,6 +22,7 @@ bool IsDefaultProfile(const wirehair_v2::SeedProfile& profile)
         profile.V2SourceHits == 0u && profile.V2PrecodeSeed == 0u &&
         profile.V2PacketPeelSeed == 0u &&
         profile.V2RecoveryMixCount == 0u &&
+        profile.V2DenseAnchorLayout == 0u &&
         !profile.V2DenseIdentityCorner &&
         profile.V2PrecodeSeedSalt == 0u &&
         profile.V2RecoveryRowSeedSalt == 0u &&
@@ -78,6 +79,8 @@ bool CheckPatternInitializedAccessors()
         system.Params.BlockCount != 0u || system.Params.Staircase != 0u ||
         system.Params.DenseRows != 0u || system.Params.HeavyRows != 0u ||
         system.Params.SourceHits != 0u || system.Params.DenseIdentityCorner ||
+        system.Params.DenseAnchors !=
+            wirehair_v2::DenseAnchorLayout::Disabled ||
         system.Params.Seed != 0u || !system.StaircaseRows.empty() ||
         !system.DenseBasisRowColumns.empty() ||
         stats.StaircaseBlockOps != 0u ||
@@ -106,6 +109,7 @@ bool CheckPatternInitializedAccessors()
         message_encoder->IntermediateBlocks() != nullptr ||
         !IsDefaultProfile(message_encoder->Profile()) ||
         options.RecoveryMixCount != wirehair_v2::kDefaultRecoveryMixCount ||
+        options.DenseAnchors != wirehair_v2::DenseAnchorLayout::Disabled ||
         options.DenseIdentityCorner ||
         options.PrecodeSeedSalt != wirehair_v2::kMessagePrecodeSeedSalt ||
         options.RecoveryRowSeedSalt !=
@@ -139,12 +143,16 @@ bool CheckPatternInitializedAccessors()
         !IsDefaultProfile(message_decoder->Profile()) ||
         decoder_options.RecoveryMixCount !=
             wirehair_v2::kDefaultRecoveryMixCount ||
+        decoder_options.DenseAnchors !=
+            wirehair_v2::DenseAnchorLayout::Disabled ||
         decoder_options.DenseIdentityCorner ||
         decoder_options.PrecodeSeedSalt !=
             wirehair_v2::kMessagePrecodeSeedSalt ||
         decoder_options.RecoveryRowSeedSalt !=
             wirehair_v2::kMessageRecoveryRowSeedSalt ||
         decoder_system.Params.BlockCount != 0u ||
+        decoder_system.Params.DenseAnchors !=
+            wirehair_v2::DenseAnchorLayout::Disabled ||
         !decoder_system.StaircaseRows.empty() ||
         !decoder_system.DenseBasisRowColumns.empty() ||
         solve_stats.PacketRows != 0u ||

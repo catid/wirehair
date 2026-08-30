@@ -1,0 +1,85 @@
+{
+  "schema": "wirehair.wh2.mix2-seed-repair-contract.v5",
+  "contract_id": "wirehair2-two07-mix2-graph-b2-all-k-v5",
+  "candidate_profile": {
+    "schema": "wirehair.wh2.mix2-production-profile.v1",
+    "arm": "wirehair2_two07_mix2_graph_b2_v1",
+    "codec": "wirehair2_candidate",
+    "binary_dense_rows": 12,
+    "gf256_heavy_rows": 12,
+    "graph_seed_block_bytes": 2,
+    "heavy_family": "periodic-cauchy",
+    "source_hits": "certified-by-K",
+    "dense_identity_corner": false,
+    "dense_anchor_layout": "two07",
+    "field": "GF(256)",
+    "mix_count": 2,
+    "construction_seed_basis": "production-normalized-b2-v1",
+    "precode_seed_salt": "0x763263707265636f",
+    "packet_seed_salt": "0x76327265636f7665",
+    "seed_schedule_sha256": "fe8101781024b4a30797d66cb1512640e6a939586ad5e32f73c5b7ff6f411294"
+  },
+  "applicability": {
+    "equation_scope": "only the exact candidate_profile object, including its K-indexed SelectSeedProfile(K,2) graph basis, before uint8 attempt stepping",
+    "forbidden_inference": "the repair map is not evidence for the legacy width-sensitive profile, another dense-anchor layout, or another packet mix count"
+  },
+  "domain": {
+    "K_min": 2,
+    "K_max": 64000,
+    "map_entries": 63999,
+    "block_bytes": 2,
+    "overhead": 0,
+    "loss_ppm": 500000,
+    "source_seed_derivation": "MakeDeterministicSource(K,2,0x6d69783273656564); state is seed xor (K*0xd6e8feb86659fd93) xor (block_bytes*0xa0761d6478bd642f), followed by SplitMix64 words serialized little-endian",
+    "cell_order": "root-major-then-schedule",
+    "schedules": [
+      "burst",
+      "adversarial",
+      "repair-only"
+    ]
+  },
+  "training": {
+    "roots": [
+      "0xd1b54a32d192ed03",
+      "0x94d049bb133111eb",
+      "0x8538ecb5bd456ea3"
+    ],
+    "selection_rule": "for each K, test uint8 construction attempts in ascending order; reject an attempt at its first failing cell in frozen cell order; select the first attempt that byte-recovers at overhead 0 on all nine cells",
+    "lower_attempt_evidence": "retain exactly one first-failure witness for every lower attempt and all nine success receipts for the selected attempt"
+  },
+  "packet_trace": {
+    "loss_rate_conversion": "double(loss_ppm) / 1000000.0",
+    "trace_seed": "loss_seed xor (K * 0x9e3779b97f4a7c15) xor (block_bytes * 0xbf58476d1ce4e5b9) mod 2^64",
+    "rng": "SplitMix64; Unit=(Next() >> 11) / 2^53; drop iff Unit < loss_rate",
+    "burst": "candidate packet IDs 0,1,...; RNG seed trace_seed xor 0x10fade; eight-drop bursts start on an idle candidate with probability loss_rate/(8-7*loss_rate)",
+    "adversarial": "candidate packet IDs UINT32_MAX-2*i modulo 2^32; RNG seed trace_seed xor 0x10fade and IID drops",
+    "repair-only": "candidate packet IDs K+i modulo 2^32; RNG seed trace_seed xor 0x10fade and IID drops",
+    "nested_overhead": "generate one K+4 delivered-ID prefix; score OH0 from exactly its first K IDs",
+    "candidate_limit": "256*(K+4)+65536 attempted candidates",
+    "trace_sha256": "SHA-256 of all K+4 delivered IDs encoded consecutively as unsigned 32-bit little-endian words"
+  },
+  "validation": {
+    "roots": [
+      "0xc0ac29b7c97c50dd",
+      "0x3f84d5b5b5470917",
+      "0x9216d5d98979fb1b"
+    ],
+    "rule": "replay exactly the frozen map byte indexed by K-2 on all nine disjoint cells; runtime search, retries, substitutions, and post-hoc map edits are forbidden",
+    "gate": "zero overhead-0 weak K values and zero unsupported, construction, fatal, internal, or byte-mismatch outcomes"
+  },
+  "attempt_schedule": {
+    "attempt_count": 256,
+    "graph_seed_profile": "SelectSeedProfile(K,2)",
+    "precode_base_seed": "MatrixSeedFromProfile(graph_seed_profile,0,0x763263707265636f)",
+    "precode_attempt_stride": "0x9e3779b97f4a7c15",
+    "packet_base_seed": "PacketPeelSeedFromProfile(graph_seed_profile,0x76327265636f7665)",
+    "packet_attempt_stride": "0x9e3779b9"
+  },
+  "repair_map": {
+    "schema": "wirehair.wh2.mix2-repair-map.v1",
+    "encoding": "63999 uint8 attempt values indexed by K-2",
+    "freeze_rule": "SHA-256 the exact 63999 bytes and complete canonical derivation audit before any validation worker starts",
+    "bundle_chain": "the validation manifest binds the repair-map receipt; that receipt binds the derivation manifest, freeze, summary, audit, and map; every self-hash and semantic relationship is rechecked before validation",
+    "runtime_search": false
+  }
+}

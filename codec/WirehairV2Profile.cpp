@@ -105,6 +105,17 @@ bool IsSupportedProfileId(uint64_t profile_id)
     return profile_id == WIREHAIR_V2_PROFILE_CERTIFIED_2026_07;
 }
 
+bool OptionsForProfileId(
+    uint64_t profile_id,
+    wirehair_v2::MessagePrecodeEncoderOptions& options)
+{
+    options = wirehair_v2::MessagePrecodeEncoderOptions();
+    if (profile_id == WIREHAIR_V2_PROFILE_CERTIFIED_2026_07) {
+        return true;
+    }
+    return false;
+}
+
 uint16_t Load16LE(const uint8_t* data)
 {
     return (uint16_t)((uint16_t)data[0] |
@@ -453,7 +464,8 @@ void PublishEncoderSourceState(
 
 wirehair_v2::SeedProfile ExpandProfile(const WirehairV2Profile& profile)
 {
-    if (!IsSupportedProfileId(profile.profile_id)) {
+    wirehair_v2::MessagePrecodeEncoderOptions options;
+    if (!OptionsForProfileId(profile.profile_id, options)) {
         return wirehair_v2::SeedProfile{};
     }
 
@@ -461,21 +473,17 @@ wirehair_v2::SeedProfile ExpandProfile(const WirehairV2Profile& profile)
         (uint32_t)BlockCountWide(profile.message_bytes, profile.block_bytes);
     wirehair_v2::SeedProfile expanded =
         wirehair_v2::SelectSeedProfile(block_count, profile.block_bytes);
-    wirehair_v2::MessagePrecodeEncoderOptions options;
 
-    wirehair_v2::PrecodeParams params = wirehair_v2::MakeCertifiedParams(
-        block_count,
-        wirehair_v2::MatrixSeedFromProfile(
-            expanded, 0u, options.PrecodeSeedSalt));
+    wirehair_v2::PrecodeParams params;
+    wirehair_v2::PacketRowConfig packet_config;
+    wirehair_v2::MakeMessagePrecodeConfiguration(
+        expanded, options, params, packet_config);
     params.Staircase = expanded.DenseCount;
+    params.DenseAnchors = options.DenseAnchors;
     params.DenseIdentityCorner = options.DenseIdentityCorner;
     params = wirehair_v2::PrecodeParamsForAttempt(
         params, profile.seed_attempt);
 
-    wirehair_v2::PacketRowConfig packet_config;
-    packet_config.PeelSeed = wirehair_v2::PacketPeelSeedFromProfile(
-        expanded, options.RecoveryRowSeedSalt);
-    packet_config.MixCount = options.RecoveryMixCount;
     packet_config = wirehair_v2::PacketConfigForAttempt(
         packet_config, profile.seed_attempt);
 
@@ -489,23 +497,33 @@ wirehair_v2::SeedProfile ExpandProfile(const WirehairV2Profile& profile)
 WirehairV2Result MakePublicProfile(
     const wirehair_v2::SeedProfile& expanded,
     uint64_t message_bytes,
+    uint64_t profile_id,
     WirehairV2Profile& profile)
 {
+    wirehair_v2::MessagePrecodeEncoderOptions expected_options;
     if (!expanded.V2SeedSelected ||
+        !OptionsForProfileId(profile_id, expected_options) ||
         expanded.V2SeedAttempt >= wirehair_v2::kMaxPacketSeedAttempts ||
         expanded.V2PrecodeContractVersion !=
             wirehair_v2::kPrecodeContractVersion ||
         expanded.V2PacketRowContractVersion !=
             wirehair_v2::kPacketRowContractVersion ||
         expanded.V2RecoveryMixCount !=
-            wirehair_v2::kCertifiedPacketMixCount)
+            expected_options.RecoveryMixCount ||
+        expanded.V2DenseAnchorLayout !=
+            (uint32_t)expected_options.DenseAnchors ||
+        expanded.V2DenseIdentityCorner !=
+            expected_options.DenseIdentityCorner ||
+        expanded.V2PrecodeSeedSalt != expected_options.PrecodeSeedSalt ||
+        expanded.V2RecoveryRowSeedSalt !=
+            expected_options.RecoveryRowSeedSalt)
     {
         return WirehairV2_Error;
     }
     profile = WirehairV2Profile{};
     profile.struct_bytes = (uint32_t)sizeof(WirehairV2Profile);
     profile.profile_version = WIREHAIR_V2_PROFILE_VERSION;
-    profile.profile_id = WIREHAIR_V2_PROFILE_CERTIFIED_2026_07;
+    profile.profile_id = profile_id;
     profile.message_bytes = message_bytes;
     profile.block_bytes = expanded.BlockBytes;
     profile.seed_attempt = (uint8_t)expanded.V2SeedAttempt;
@@ -517,7 +535,7 @@ WirehairV2Result MakePublicProfile(
 
     // The compact descriptor deliberately omits every derived value.  Rebuild
     // them and compare here so a future implementation cannot publish the
-    // current profile ID after changing one of its frozen equation constants.
+    // selected profile ID after changing one of its frozen equation constants.
     const wirehair_v2::SeedProfile canonical = ExpandProfile(profile);
     if (canonical.BlockCount != expanded.BlockCount ||
         canonical.BlockBytes != expanded.BlockBytes ||
@@ -536,6 +554,7 @@ WirehairV2Result MakePublicProfile(
         canonical.V2PrecodeSeed != expanded.V2PrecodeSeed ||
         canonical.V2PacketPeelSeed != expanded.V2PacketPeelSeed ||
         canonical.V2RecoveryMixCount != expanded.V2RecoveryMixCount ||
+        canonical.V2DenseAnchorLayout != expanded.V2DenseAnchorLayout ||
         canonical.V2DenseIdentityCorner !=
             expanded.V2DenseIdentityCorner ||
         canonical.V2PrecodeSeedSalt != expanded.V2PrecodeSeedSalt ||
@@ -770,12 +789,16 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create(
         return WirehairV2_UnsupportedPlatform;
     }
 
+    wirehair_v2::MessagePrecodeEncoderOptions options;
+    if (!OptionsForProfileId(WIREHAIR_V2_PROFILE_CURRENT, options)) {
+        return WirehairV2_UnsupportedProfile;
+    }
     PublicCodec* codec = AllocatePublicCodec();
     if (!codec) {
         return WirehairV2_OOM;
     }
     const WirehairResult create_result = codec->Impl.InitializePrecodeEncoder(
-        message, messageBytes, blockBytes);
+        message, messageBytes, blockBytes, nullptr, &options);
     if (create_result != Wirehair_Success) {
         delete codec;
         return MapResult(create_result);
@@ -783,7 +806,8 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create(
 
     WirehairV2Profile profile = {};
     WirehairV2Result result = MakePublicProfile(
-        codec->Impl.Profile(), messageBytes, profile);
+        codec->Impl.Profile(), messageBytes,
+        WIREHAIR_V2_PROFILE_CURRENT, profile);
     uint8_t encoded[WIREHAIR_V2_PROFILE_SERIALIZED_BYTES];
     uint32_t encoded_bytes = 0u;
     if (result == WirehairV2_Success) {
@@ -863,6 +887,9 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create_profile_id(
     }
 
     wirehair_v2::MessagePrecodeEncoderOptions options;
+    if (!OptionsForProfileId(profileId, options)) {
+        return WirehairV2_UnsupportedProfile;
+    }
     PublicCodec* codec = AllocatePublicCodec();
     if (!codec) {
         return WirehairV2_OOM;
@@ -876,7 +903,7 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create_profile_id(
 
     WirehairV2Profile profile = {};
     WirehairV2Result result = MakePublicProfile(
-        codec->Impl.Profile(), messageBytes, profile);
+        codec->Impl.Profile(), messageBytes, profileId, profile);
     uint8_t encoded[WIREHAIR_V2_PROFILE_SERIALIZED_BYTES];
     uint32_t encoded_bytes = 0u;
     if (result == WirehairV2_Success) {
