@@ -2062,26 +2062,6 @@ extern "C" int gf256_set_thread_wide_xor(int enable)
 #endif
 }
 
-extern "C" int gf256_try_addset5_wide_mem(
-    void * GF256_RESTRICT vz,
-    const void * const * GF256_RESTRICT vsrcs,
-    int bytes)
-{
-#if defined(GF256_TRY_WIDE_XOR)
-    if (bytes > 0 && gf256_try_addset_multi_mem_avx2_target(
-            reinterpret_cast<uint8_t*>(vz), vsrcs, 5, bytes))
-    {
-        WH_BUMP(2, bytes);
-        return 1;
-    }
-#else
-    (void)vz;
-    (void)vsrcs;
-    (void)bytes;
-#endif
-    return 0;
-}
-
 extern "C" void gf256_add_multi_mem(
     void * GF256_RESTRICT vz,
     const void * const * GF256_RESTRICT vsrcs,
