@@ -15,6 +15,8 @@
 #include <cstdlib>
 #include <chrono>
 #include <cstring>
+#include <memory>
+#include <new>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -1301,6 +1303,358 @@ bool CheckPacketEvaluationFusion()
 }
 
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+uint32_t FindPacketWithTermCount(
+    uint32_t K,
+    uint32_t P,
+    const wirehair_v2::PacketRowConfig& config,
+    uint32_t packet_terms,
+    uint32_t first_id)
+{
+    uint32_t id = first_id;
+    for (uint32_t trial = 0u; trial < 1000000u; ++trial, ++id)
+    {
+        if (wirehair_v2::GeneratePacketMatrixRow(
+                K, P, id, config).size() == packet_terms)
+        {
+            return id;
+        }
+        if (id == UINT32_MAX) {
+            break;
+        }
+    }
+    return UINT32_MAX;
+}
+
+bool CheckPacketDispatchEvaluationCase(
+    const wirehair_v2::PrecodeSystem& system,
+    const wirehair_v2::PacketRowConfig& config,
+    uint32_t block_id,
+    uint32_t block_bytes,
+    uint32_t expected_terms,
+    wirehair_v2::PacketEvaluatorRouteForTesting expected_route,
+    unsigned input_offset,
+    unsigned output_offset)
+{
+    const uint32_t K = system.Params.BlockCount;
+    const uint32_t P = system.Params.Staircase +
+        system.Params.DenseRows + system.Params.HeavyRows;
+    const std::vector<uint32_t> row =
+        wirehair_v2::GeneratePacketMatrixRow(K, P, block_id, config);
+    if (row.size() != expected_terms)
+    {
+        std::fprintf(stderr,
+            "solve: packet dispatch fixture changed K=%u id=%u "
+            "terms=%zu expected=%u\n",
+            K, block_id, row.size(), expected_terms);
+        return false;
+    }
+
+    const size_t intermediate_bytes = (size_t)(K + P) * block_bytes;
+    std::unique_ptr<uint8_t[]> input_storage(
+        new (std::nothrow) uint8_t[intermediate_bytes + 128u]);
+    if (!input_storage) {
+        return false;
+    }
+    uint8_t* const intermediate = input_storage.get() + input_offset;
+    for (uint32_t column : row)
+    {
+        uint8_t* const source =
+            intermediate + (size_t)column * block_bytes;
+        for (uint32_t i = 0u; i < block_bytes; ++i) {
+            source[i] = (uint8_t)(
+                column * 17u + i * 29u + (i >> 7u) + block_id);
+        }
+    }
+    std::vector<uint8_t> expected(block_bytes, 0u);
+    for (uint32_t column : row)
+    {
+        const uint8_t* const source =
+            intermediate + (size_t)column * block_bytes;
+        for (uint32_t i = 0u; i < block_bytes; ++i) {
+            expected[i] ^= source[i];
+        }
+    }
+
+    wirehair_v2::PacketRowRuntime runtime;
+    if (!runtime.Initialize(K, P, config.MixCount)) {
+        return false;
+    }
+    std::vector<uint8_t> output_storage(
+        block_bytes + output_offset + 64u, 0xa5u);
+    uint8_t* const output = output_storage.data() + output_offset;
+    for (unsigned entry_point = 0u; entry_point < 3u; ++entry_point)
+    {
+        std::fill(output_storage.begin(), output_storage.end(), uint8_t{0xa5u});
+        uint64_t operations = UINT64_C(0xfedcba9876543210);
+        if (!CallPacketEvaluator(
+                (PacketEvaluatorKind)entry_point,
+                system,
+                config,
+                runtime,
+                intermediate,
+                block_bytes,
+                block_id,
+                output,
+                &operations) ||
+            operations != expected_terms ||
+            wirehair_v2::LastPacketEvaluatorRouteForTesting() !=
+                expected_route ||
+            std::memcmp(output, expected.data(), block_bytes) != 0)
+        {
+            std::fprintf(stderr,
+                "solve: packet dispatch evaluation mismatch K=%u id=%u "
+                "bb=%u mix=%u terms=%u entry=%u ops=%" PRIu64
+                " route=%u expected_route=%u\n",
+                K, block_id, block_bytes, config.MixCount,
+                expected_terms, entry_point, operations,
+                (unsigned)wirehair_v2::LastPacketEvaluatorRouteForTesting(),
+                (unsigned)expected_route);
+            return false;
+        }
+        for (size_t i = 0u; i < output_offset; ++i) {
+            if (output_storage[i] != 0xa5u) {
+                return false;
+            }
+        }
+        for (size_t i = output_offset + block_bytes;
+             i < output_storage.size();
+             ++i)
+        {
+            if (output_storage[i] != 0xa5u) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+bool CheckPacketMix3FiveTermSetXorSelection()
+{
+    class ScopedModeRestore
+    {
+    public:
+        ScopedModeRestore()
+            : Mode(wirehair_v2::PacketMix3FiveTermSetXorModeForTesting())
+        {
+        }
+        ~ScopedModeRestore()
+        {
+            (void)wirehair_v2::SetPacketMix3FiveTermSetXorModeForTesting(Mode);
+        }
+    private:
+        int Mode;
+    } restore;
+
+    if (!wirehair_v2::SetPacketMix3FiveTermSetXorModeForTesting(1) ||
+        wirehair_v2::SetPacketMix3FiveTermSetXorModeForTesting(-2) ||
+        wirehair_v2::SetPacketMix3FiveTermSetXorModeForTesting(2) ||
+        wirehair_v2::PacketMix3FiveTermSetXorModeForTesting() != 1)
+    {
+        std::fprintf(stderr, "solve: invalid MIX3 five-term mode accepted\n");
+        return false;
+    }
+
+    struct SelectionCase
+    {
+        uint32_t K;
+        uint32_t BlockBytes;
+        uint32_t MixCount;
+        uint32_t PacketTerms;
+        bool Production;
+    };
+    static const SelectionCase kSelectionCases[] = {
+        { 9999u, 1280u, 3u, 5u, false },
+        { 10000u, 1279u, 3u, 5u, false },
+        { 10000u, 1280u, 3u, 5u, true },
+        { 10000u, 32768u, 3u, 5u, true },
+        { 10000u, 32769u, 3u, 5u, false },
+        { 64000u, 4096u, 3u, 5u, true },
+        { 10000u, 1280u, 3u, 4u, false },
+        { 10000u, 1280u, 3u, 6u, false },
+        { 10000u, 1280u, 2u, 5u, false },
+        { 10000u, 1280u, 1u, 5u, false }
+    };
+    for (int mode = -1; mode <= 1; ++mode)
+    {
+        if (!wirehair_v2::SetPacketMix3FiveTermSetXorModeForTesting(mode)) {
+            return false;
+        }
+        for (const SelectionCase& selection : kSelectionCases)
+        {
+            const bool expected = mode < 0 ? false : selection.Production;
+            if (wirehair_v2::PacketMix3FiveTermSetXorSelectedForTesting(
+                    selection.K,
+                    selection.BlockBytes,
+                    selection.MixCount,
+                    selection.PacketTerms) != expected)
+            {
+                std::fprintf(stderr,
+                    "solve: MIX3 five-term selector mismatch mode=%d K=%u "
+                    "bb=%u mix=%u terms=%u\n",
+                    mode, selection.K, selection.BlockBytes,
+                    selection.MixCount, selection.PacketTerms);
+                return false;
+            }
+        }
+    }
+
+    wirehair_v2::PacketRowConfig mix3_config;
+    mix3_config.PeelSeed = UINT32_C(0x71d34ab9);
+    mix3_config.MixCount = 3u;
+
+    wirehair_v2::PrecodeSystem system_10000;
+    if (!wirehair_v2::BuildPrecodeSystem(
+            wirehair_v2::MakeCertifiedParams(
+                10000u, UINT64_C(0x6d69783331303030)),
+            system_10000))
+    {
+        return false;
+    }
+    const uint32_t P_10000 = system_10000.Params.Staircase +
+        system_10000.Params.DenseRows + system_10000.Params.HeavyRows;
+    const uint32_t id_10000_terms5 = FindPacketWithTermCount(
+        10000u, P_10000, mix3_config, 5u, UINT32_C(0xf1234000));
+    if (id_10000_terms5 == UINT32_MAX)
+    {
+        std::fprintf(stderr, "solve: MIX3 five-term fixture search failed\n");
+        return false;
+    }
+
+    for (int mode = -1; mode <= 1; ++mode)
+    {
+        const wirehair_v2::PacketEvaluatorRouteForTesting expected_route =
+            mode < 0 ?
+                wirehair_v2::PacketEvaluatorRouteForTesting::Fused :
+                wirehair_v2::PacketEvaluatorRouteForTesting::SetXor;
+        if (!wirehair_v2::SetPacketMix3FiveTermSetXorModeForTesting(mode) ||
+            !CheckPacketDispatchEvaluationCase(
+                system_10000, mix3_config, id_10000_terms5,
+                1280u, 5u, expected_route, 7u, 31u) ||
+            !CheckPacketDispatchEvaluationCase(
+                system_10000, mix3_config, id_10000_terms5,
+                1281u, 5u, expected_route, 31u, 7u))
+        {
+            return false;
+        }
+    }
+
+    wirehair_v2::PacketRowConfig mix2_config = mix3_config;
+    mix2_config.MixCount = 2u;
+    wirehair_v2::PrecodeSystem system_128;
+    wirehair_v2::PrecodeSystem system_9999;
+    if (!wirehair_v2::BuildPrecodeSystem(
+            wirehair_v2::MakeCertifiedParams(
+                128u, UINT64_C(0x6d69783330313238)),
+            system_128) ||
+        !wirehair_v2::BuildPrecodeSystem(
+            wirehair_v2::MakeCertifiedParams(
+                9999u, UINT64_C(0x6d69783339393939)),
+            system_9999))
+    {
+        return false;
+    }
+    const uint32_t P_128 = system_128.Params.Staircase +
+        system_128.Params.DenseRows + system_128.Params.HeavyRows;
+    const uint32_t P_9999 = system_9999.Params.Staircase +
+        system_9999.Params.DenseRows + system_9999.Params.HeavyRows;
+    const uint32_t id_128_terms4 = FindPacketWithTermCount(
+        128u, P_128, mix3_config, 4u, 0u);
+    const uint32_t id_128_terms6 = FindPacketWithTermCount(
+        128u, P_128, mix3_config, 6u, 0u);
+    const uint32_t id_9999_terms5 = FindPacketWithTermCount(
+        9999u, P_9999, mix3_config, 5u, 0u);
+    const uint32_t id_10000_terms6 = FindPacketWithTermCount(
+        10000u, P_10000, mix3_config, 6u, 0u);
+    const uint32_t id_10000_mix2_terms5 = FindPacketWithTermCount(
+        10000u, P_10000, mix2_config, 5u, 0u);
+    if (id_128_terms4 == UINT32_MAX || id_128_terms6 == UINT32_MAX ||
+        id_9999_terms5 == UINT32_MAX || id_10000_terms6 == UINT32_MAX ||
+        id_10000_mix2_terms5 == UINT32_MAX)
+    {
+        std::fprintf(stderr, "solve: packet route fixture search failed\n");
+        return false;
+    }
+
+    if (!wirehair_v2::SetPacketMix3FiveTermSetXorModeForTesting(+1) ||
+        !CheckPacketDispatchEvaluationCase(
+            system_9999, mix3_config, id_9999_terms5,
+            1280u, 5u,
+            wirehair_v2::PacketEvaluatorRouteForTesting::Fused, 1u, 7u) ||
+        !CheckPacketDispatchEvaluationCase(
+            system_10000, mix3_config, id_10000_terms5,
+            1279u, 5u,
+            wirehair_v2::PacketEvaluatorRouteForTesting::Fused, 7u, 15u) ||
+        !CheckPacketDispatchEvaluationCase(
+            system_10000, mix2_config, id_10000_mix2_terms5,
+            1280u, 5u,
+            wirehair_v2::PacketEvaluatorRouteForTesting::Fused, 15u, 1u) ||
+        !CheckPacketDispatchEvaluationCase(
+            system_128, mix3_config, id_128_terms4,
+            1280u, 4u,
+            wirehair_v2::PacketEvaluatorRouteForTesting::Fused, 1u, 15u) ||
+        !CheckPacketDispatchEvaluationCase(
+            system_128, mix3_config, id_128_terms6,
+            1280u, 6u,
+            wirehair_v2::PacketEvaluatorRouteForTesting::TailPaired,
+            7u, 31u) ||
+        !wirehair_v2::SetPacketMix3FiveTermSetXorModeForTesting(-1) ||
+        !CheckPacketDispatchEvaluationCase(
+            system_10000, mix3_config, id_10000_terms6,
+            1280u, 6u,
+            wirehair_v2::PacketEvaluatorRouteForTesting::SetXor, 31u, 7u))
+    {
+        return false;
+    }
+
+    if (!wirehair_v2::SetPacketMix3FiveTermSetXorModeForTesting(-1) ||
+        !CheckPacketDispatchEvaluationCase(
+            system_10000, mix3_config, id_10000_terms5,
+            1280u, 5u,
+            wirehair_v2::PacketEvaluatorRouteForTesting::Fused, 7u, 31u))
+    {
+        return false;
+    }
+    const wirehair_v2::PacketEvaluatorRouteForTesting route_before_rejection =
+        wirehair_v2::LastPacketEvaluatorRouteForTesting();
+    if (!wirehair_v2::SetPacketMix3FiveTermSetXorModeForTesting(0) ||
+        !CheckPacketOperationAliases(
+            system_10000, mix3_config, id_10000_terms5, 1280u, true) ||
+        wirehair_v2::LastPacketEvaluatorRouteForTesting() !=
+            route_before_rejection)
+    {
+        std::fprintf(stderr,
+            "solve: MIX3 five-term operation alias guard failed\n");
+        return false;
+    }
+    if (!CheckPacketDispatchEvaluationCase(
+            system_10000, mix3_config, id_10000_terms5,
+            1280u, 5u,
+            wirehair_v2::PacketEvaluatorRouteForTesting::SetXor, 7u, 31u))
+    {
+        return false;
+    }
+    const wirehair_v2::PacketEvaluatorRouteForTesting route_before_invalid =
+        wirehair_v2::LastPacketEvaluatorRouteForTesting();
+    uint8_t invalid_input = 0x3cu;
+    uint8_t invalid_output = 0xa5u;
+    uint64_t invalid_operations = UINT64_C(0x0123456789abcdef);
+    if (wirehair_v2::EvaluatePacketBlock(
+            system_10000, mix3_config, &invalid_input, 0u,
+            id_10000_terms5, &invalid_output, &invalid_operations) ||
+        invalid_input != 0x3cu || invalid_output != 0xa5u ||
+        invalid_operations != UINT64_C(0x0123456789abcdef) ||
+        wirehair_v2::LastPacketEvaluatorRouteForTesting() !=
+            route_before_invalid)
+    {
+        std::fprintf(stderr,
+            "solve: rejected packet evaluation changed route/output\n");
+        return false;
+    }
+
+    std::printf("packet MIX3 five-term set-XOR dispatch: PASS\n");
+    return true;
+}
+
 bool CheckPacketMixPairSelection()
 {
     class ScopedPairRestore
@@ -7807,6 +8161,7 @@ int main(int argc, char** argv)
     ok = CheckLowestBitIndex() && ok;
     ok = CheckPacketEvaluationFusion() && ok;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    ok = CheckPacketMix3FiveTermSetXorSelection() && ok;
     ok = CheckPacketMixPairSelection() && ok;
 #endif
     ok = CheckOddPacketPeelSeedInterleave() && ok;

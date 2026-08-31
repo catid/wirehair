@@ -38,6 +38,20 @@ if (BUILD_TESTS)
         PUBLIC WIREHAIR_V2_ENABLE_BENCHMARK_EQUATIONS=1)
     wirehair_apply_project_options(wirehair_v2_timing_policy)
 
+    # The five-term packet screen needs one counter-free same-binary selector.
+    # Keep it in a dedicated archive so canonical promotional timing artifacts
+    # remain selector-free and continue to satisfy their strict symbol audit.
+    add_library(wirehair_v2_count5_timing_policy STATIC EXCLUDE_FROM_ALL
+        ${WIREHAIR_V2_POLICY_SOURCES})
+    target_include_directories(wirehair_v2_count5_timing_policy
+        PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(wirehair_v2_count5_timing_policy
+        PUBLIC ${WIREHAIR_INTERNAL_LIBRARY})
+    target_compile_definitions(wirehair_v2_count5_timing_policy PUBLIC
+        WIREHAIR_V2_ENABLE_BENCHMARK_EQUATIONS=1
+        WIREHAIR_V2_ENABLE_COUNT5_BENCHMARK=1)
+    wirehair_apply_project_options(wirehair_v2_count5_timing_policy)
+
     target_compile_definitions(wirehair_v2_policy
         PUBLIC WIREHAIR_V2_ENABLE_TEST_HOOKS=1)
 
@@ -287,7 +301,14 @@ wirehair_apply_project_options(wirehair_v2_bench)
 
 add_executable(wirehair_v2_packet_eval_bench ${WIREHAIR_BENCH_EXCLUDE}
     ${PROJECT_SOURCE_DIR}/experiments/v2_packet_eval_bench.cpp)
-target_link_libraries(wirehair_v2_packet_eval_bench wirehair_v2_policy)
+if(BUILD_TESTS)
+    # Same-binary schedule screens need the narrow benchmark selector without
+    # generic test hooks or their timed TLS observation counters.
+    target_link_libraries(wirehair_v2_packet_eval_bench
+        wirehair_v2_count5_timing_policy)
+else()
+    target_link_libraries(wirehair_v2_packet_eval_bench wirehair_v2_policy)
+endif()
 wirehair_apply_project_options(wirehair_v2_packet_eval_bench)
 
 add_executable(wirehair_v2_resume_bench ${WIREHAIR_BENCH_EXCLUDE}

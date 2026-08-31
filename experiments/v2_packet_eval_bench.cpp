@@ -5,11 +5,17 @@
 // storage and output are reused and warmed, and A/B order rotates between
 // samples.
 //
-//   cmake -S . -B build -DWIREHAIR_BUILD_BENCHMARKS=ON
+//   cmake -S . -B build -DBUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Release -DWIREHAIR_BUILD_BENCHMARKS=ON
 //   cmake --build build --target wirehair_v2_packet_eval_bench
 //   taskset -c 2 build/codec/wirehair_v2_packet_eval_bench 40 2
+//
+// Frozen five-term MIX3 same-binary screens (one K/B cell per process):
+//
+//   taskset -c 2 <bench> 32 3 count5-packet 10000 1280
+//   taskset -c 2 <bench> 12 3 count5-recover 10000 1280
 
 #include "../codec/WirehairV2Precode.h"
+#include "../codec/WirehairV2PrecodeDecode.h"
 #include "../codec/WirehairV2Solve.h"
 #include "../WirehairTools.h"
 #include "../gf256.h"
@@ -17,10 +23,13 @@
 #include <algorithm>
 #include <chrono>
 #include <cinttypes>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <memory>
+#include <stdexcept>
 #include <vector>
 
 namespace {
@@ -784,6 +793,583 @@ bool RunSize(
     return true;
 }
 
+#if defined(WIREHAIR_V2_ENABLE_COUNT5_BENCHMARK)
+
+enum class Count5Gate
+{
+    Active,
+    Fallback,
+    SameArm
+};
+
+struct Count5LogStats
+{
+    double GeometricMean = 0.0;
+    double Lower95 = 0.0;
+    double Upper95 = 0.0;
+};
+
+struct Count5PanelMetadata
+{
+    const char* Workload = nullptr;
+    const char* Panel = nullptr;
+    const char* Shape = nullptr;
+    uint32_t K = 0u;
+    uint32_t BlockBytes = 0u;
+    uint32_t Units = 0u;
+    uint32_t Repetitions = 0u;
+    unsigned Samples = 0u;
+    uint32_t EligibleUnits = 0u;
+};
+
+double Count5StudentT975(unsigned samples)
+{
+    if (samples == 12u) return 2.200985160;
+    if (samples == 32u) return 2.039513446;
+    return 0.0;
+}
+
+bool ComputeCount5LogStats(
+    const std::vector<double>& log_ratios,
+    Count5LogStats& stats_out)
+{
+    const double t_value = Count5StudentT975(
+        (unsigned)log_ratios.size());
+    if (log_ratios.size() < 2u || t_value <= 0.0) {
+        return false;
+    }
+    long double sum = 0.0L;
+    for (double value : log_ratios)
+    {
+        if (!std::isfinite(value)) return false;
+        sum += (long double)value;
+    }
+    const long double mean = sum / log_ratios.size();
+    long double squares = 0.0L;
+    for (double value : log_ratios)
+    {
+        const long double difference = (long double)value - mean;
+        squares += difference * difference;
+    }
+    const long double standard_error = std::sqrt(
+        squares / (log_ratios.size() - 1u) / log_ratios.size());
+    const long double half_width = t_value * standard_error;
+    Count5LogStats stats;
+    stats.GeometricMean = (double)std::exp(mean);
+    stats.Lower95 = (double)std::exp(mean - half_width);
+    stats.Upper95 = (double)std::exp(mean + half_width);
+    if (!std::isfinite(stats.GeometricMean) ||
+        !std::isfinite(stats.Lower95) ||
+        !std::isfinite(stats.Upper95) || stats.Lower95 <= 0.0 ||
+        stats.Lower95 > stats.GeometricMean ||
+        stats.GeometricMean > stats.Upper95)
+    {
+        return false;
+    }
+    stats_out = stats;
+    return true;
+}
+
+bool Count5GatePasses(Count5Gate gate, const Count5LogStats& stats)
+{
+    if (gate == Count5Gate::Active) {
+        return stats.Upper95 < 0.99;
+    }
+    const bool bounded =
+        stats.Lower95 >= 0.99 && stats.Upper95 <= 1.01;
+    if (gate == Count5Gate::Fallback) {
+        return bounded;
+    }
+    return bounded && stats.Lower95 <= 1.0 && stats.Upper95 >= 1.0;
+}
+
+template<class Measure>
+bool RunCount5Panel(
+    const Count5PanelMetadata& metadata,
+    int left_mode,
+    int right_mode,
+    const char* left_name,
+    const char* right_name,
+    Count5Gate gate,
+    Measure& measure)
+{
+    uint64_t ignored = 0u;
+    if (!measure(left_mode, ignored) || !measure(right_mode, ignored)) {
+        std::fprintf(stderr,
+            "count5 warmup failed workload=%s panel=%s\n",
+            metadata.Workload, metadata.Panel);
+        return false;
+    }
+
+    std::vector<double> log_ratios;
+    std::vector<uint64_t> left_timings;
+    std::vector<uint64_t> right_timings;
+    log_ratios.reserve(metadata.Samples);
+    left_timings.reserve(metadata.Samples);
+    right_timings.reserve(metadata.Samples);
+    for (unsigned sample = 0u; sample < metadata.Samples; ++sample)
+    {
+        uint64_t left_ns = 0u;
+        uint64_t right_ns = 0u;
+        const bool left_first = (sample & 1u) == 0u;
+        const bool measured = left_first ?
+            (measure(left_mode, left_ns) &&
+                measure(right_mode, right_ns)) :
+            (measure(right_mode, right_ns) &&
+                measure(left_mode, left_ns));
+        if (!measured || left_ns == 0u || right_ns == 0u) {
+            std::fprintf(stderr,
+                "count5 measurement failed workload=%s panel=%s sample=%u\n",
+                metadata.Workload, metadata.Panel, sample);
+            return false;
+        }
+        const double ratio = (double)right_ns / (double)left_ns;
+        const double log_ratio = std::log(ratio);
+        if (!std::isfinite(log_ratio)) return false;
+        log_ratios.push_back(log_ratio);
+        left_timings.push_back(left_ns);
+        right_timings.push_back(right_ns);
+    }
+
+    // Emit only after the complete panel so terminal or pipe I/O cannot
+    // perturb the subsequent paired sample.
+    for (unsigned sample = 0u; sample < metadata.Samples; ++sample)
+    {
+        const double ratio =
+            (double)right_timings[sample] / (double)left_timings[sample];
+        std::printf(
+            "count5_raw,version=1,workload=%s,panel=%s,shape=%s,"
+            "K=%u,block_bytes=%u,units=%u,repetitions=%u,samples=%u,"
+            "eligible_units=%u,sample=%u,first=%s,left_arm=%s,"
+            "right_arm=%s,left_ns=%" PRIu64 ",right_ns=%" PRIu64
+            ",right_over_left=%.12f\n",
+            metadata.Workload, metadata.Panel, metadata.Shape,
+            metadata.K, metadata.BlockBytes, metadata.Units,
+            metadata.Repetitions, metadata.Samples, metadata.EligibleUnits,
+            sample, (sample & 1u) == 0u ? "left" : "right",
+            left_name, right_name,
+            left_timings[sample], right_timings[sample], ratio);
+    }
+
+    Count5LogStats stats;
+    if (!ComputeCount5LogStats(log_ratios, stats)) {
+        return false;
+    }
+    const bool gate_pass = Count5GatePasses(gate, stats);
+    std::printf(
+        "count5_summary,version=1,workload=%s,panel=%s,shape=%s,"
+        "K=%u,block_bytes=%u,units=%u,repetitions=%u,samples=%u,"
+        "eligible_units=%u,left_arm=%s,right_arm=%s,"
+        "geometric_mean=%.12f,lower95=%.12f,upper95=%.12f,"
+        "student_t_975=%.9f,gate=%s\n",
+        metadata.Workload, metadata.Panel, metadata.Shape,
+        metadata.K, metadata.BlockBytes, metadata.Units,
+        metadata.Repetitions, metadata.Samples, metadata.EligibleUnits,
+        left_name, right_name, stats.GeometricMean,
+        stats.Lower95, stats.Upper95,
+        Count5StudentT975(metadata.Samples), gate_pass ? "pass" : "fail");
+    return gate_pass;
+}
+
+struct Count5ModeReset
+{
+    ~Count5ModeReset()
+    {
+        (void)wirehair_v2::SetPacketMix3FiveTermSetXorModeForBenchmark(0);
+    }
+};
+
+bool BuildCount5System(uint32_t K, wirehair_v2::PrecodeSystem& system)
+{
+    return wirehair_v2::BuildPrecodeSystem(
+            wirehair_v2::MakeCertifiedParams(
+                K, UINT64_C(0x786f72667573696f)),
+            system) &&
+        wirehair_v2::ValidatePrecodeSystem(system);
+}
+
+std::vector<uint32_t> Count5RowsWithDegree(
+    const wirehair_v2::PrecodeSystem& system,
+    const wirehair_v2::PacketRowConfig& config,
+    uint32_t target_degree,
+    size_t count)
+{
+    const uint32_t K = system.Params.BlockCount;
+    const uint32_t P = system.Params.Staircase +
+        system.Params.DenseRows + system.Params.HeavyRows;
+    std::vector<uint32_t> rows;
+    rows.reserve(count);
+    for (uint32_t id = 0u; id < UINT32_C(1000000) && rows.size() < count;
+         ++id)
+    {
+        wirehair::PeelRowParameters params;
+        params.Initialize(
+            id, config.PeelSeed, (uint16_t)K, (uint16_t)P);
+        if (params.PeelCount == target_degree) {
+            rows.push_back(id);
+        }
+    }
+    return rows;
+}
+
+uint32_t Count5EligibleSourceIds(
+    const wirehair_v2::PrecodeSystem& system,
+    const wirehair_v2::PacketRowConfig& config)
+{
+    const uint32_t K = system.Params.BlockCount;
+    const uint32_t P = system.Params.Staircase +
+        system.Params.DenseRows + system.Params.HeavyRows;
+    uint32_t eligible = 0u;
+    for (uint32_t id = 0u; id < K; ++id)
+    {
+        wirehair::PeelRowParameters params;
+        params.Initialize(
+            id, config.PeelSeed, (uint16_t)K, (uint16_t)P);
+        eligible += params.PeelCount == 2u ? 1u : 0u;
+    }
+    return eligible;
+}
+
+unsigned Count5PacketRepetitions(uint32_t block_bytes)
+{
+    if (block_bytes == 1280u) return 256u;
+    if (block_bytes == 4096u) return 80u;
+    if (block_bytes == 32768u) return 10u;
+    return 0u;
+}
+
+bool RunCount5PacketScreen(
+    uint32_t K,
+    uint32_t block_bytes,
+    unsigned samples)
+{
+    Count5ModeReset mode_reset;
+    wirehair_v2::PrecodeSystem system;
+    if (!BuildCount5System(K, system)) return false;
+    wirehair_v2::PacketRowConfig config;
+    config.PeelSeed = UINT32_C(0x4d241359);
+    config.MixCount = 3u;
+    const uint32_t P = system.Params.Staircase +
+        system.Params.DenseRows + system.Params.HeavyRows;
+    wirehair_v2::PacketRowRuntime runtime;
+    if (!runtime.Initialize(K, P, config.MixCount)) return false;
+
+    const std::vector<uint32_t> active_rows =
+        Count5RowsWithDegree(system, config, 2u, 256u);
+    const std::vector<uint32_t> fallback_rows =
+        Count5RowsWithDegree(system, config, 3u, 256u);
+    if (active_rows.size() != 256u || fallback_rows.size() != 256u) {
+        std::fprintf(stderr,
+            "count5 row fixture shortfall K=%u active=%zu fallback=%zu\n",
+            K, active_rows.size(), fallback_rows.size());
+        return false;
+    }
+    const uint64_t intermediate_bytes_wide =
+        ((uint64_t)K + P) * block_bytes;
+    if (intermediate_bytes_wide >
+        (uint64_t)std::numeric_limits<size_t>::max())
+    {
+        return false;
+    }
+    AlignedStorage intermediate((size_t)intermediate_bytes_wide);
+    AlignedStorage left_output(block_bytes);
+    AlignedStorage right_output(block_bytes);
+    for (size_t i = 0u; i < (size_t)intermediate_bytes_wide; ++i) {
+        intermediate.Data[i] = (uint8_t)(i * 131u + (i >> 13) + 17u);
+    }
+
+    const auto verify_rows = [&](
+        const std::vector<uint32_t>& rows, uint64_t expected_ops) {
+        for (uint32_t id : rows)
+        {
+            uint64_t left_ops = 0u;
+            uint64_t right_ops = 0u;
+            if (!wirehair_v2::SetPacketMix3FiveTermSetXorModeForBenchmark(-1) ||
+                !EvaluateCached(
+                    system, config, runtime, intermediate.Data, block_bytes,
+                    id, left_output.Data, &left_ops) ||
+                !wirehair_v2::SetPacketMix3FiveTermSetXorModeForBenchmark(+1) ||
+                !EvaluateCached(
+                    system, config, runtime, intermediate.Data, block_bytes,
+                    id, right_output.Data, &right_ops) ||
+                std::memcmp(
+                    left_output.Data, right_output.Data, block_bytes) != 0 ||
+                left_ops != expected_ops || right_ops != expected_ops)
+            {
+                std::fprintf(stderr,
+                    "count5 packet oracle failed K=%u bb=%u id=%u "
+                    "left_ops=%" PRIu64 " right_ops=%" PRIu64
+                    " expected_ops=%" PRIu64 "\n",
+                    K, block_bytes, id,
+                    left_ops, right_ops, expected_ops);
+                return false;
+            }
+        }
+        return true;
+    };
+    if (!verify_rows(active_rows, 5u) ||
+        !verify_rows(fallback_rows, 6u))
+    {
+        return false;
+    }
+
+    const unsigned repetitions = Count5PacketRepetitions(block_bytes);
+    const std::vector<uint32_t>* timed_rows = &active_rows;
+    volatile uint64_t sink = 0u;
+    const auto measure = [&](int mode, uint64_t& elapsed_ns) {
+        if (!wirehair_v2::SetPacketMix3FiveTermSetXorModeForBenchmark(mode)) {
+            return false;
+        }
+        const Clock::time_point start = Clock::now();
+        for (unsigned repetition = 0u; repetition < repetitions; ++repetition)
+        {
+            for (uint32_t id : *timed_rows)
+            {
+                if (!EvaluateCached(
+                        system, config, runtime, intermediate.Data,
+                        block_bytes, id, left_output.Data))
+                {
+                    return false;
+                }
+            }
+        }
+        elapsed_ns = (uint64_t)
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                Clock::now() - start).count();
+        sink ^= left_output.Data[
+            ((size_t)(mode + 1) + timed_rows->size() + repetitions) %
+                block_bytes];
+        return elapsed_ns != 0u;
+    };
+
+    Count5PanelMetadata metadata;
+    metadata.Workload = "packet";
+    metadata.K = K;
+    metadata.BlockBytes = block_bytes;
+    metadata.Units = 256u;
+    metadata.Repetitions = repetitions;
+    metadata.Samples = samples;
+    metadata.EligibleUnits = 256u;
+    metadata.Panel = "active";
+    metadata.Shape = "degree2_mix3_terms5";
+    bool ok = RunCount5Panel(
+        metadata, -1, +1, "legacy", "candidate", Count5Gate::Active,
+        measure);
+
+    timed_rows = &fallback_rows;
+    metadata.Panel = "fallback";
+    metadata.Shape = "degree3_mix3_terms6";
+    metadata.EligibleUnits = 0u;
+    ok = RunCount5Panel(
+        metadata, -1, +1, "legacy_mode", "candidate_mode",
+        Count5Gate::Fallback, measure) && ok;
+
+    timed_rows = &active_rows;
+    metadata.Panel = "aa";
+    metadata.Shape = "degree2_mix3_terms5";
+    metadata.EligibleUnits = 256u;
+    ok = RunCount5Panel(
+        metadata, -1, -1, "legacy_a", "legacy_b", Count5Gate::SameArm,
+        measure) && ok;
+    std::printf(
+        "count5_screen,version=1,workload=packet,K=%u,block_bytes=%u,"
+        "sink=%" PRIu64 ",gate=%s\n",
+        K, block_bytes, (uint64_t)sink, ok ? "pass" : "fail");
+    return ok;
+}
+
+class Count5RecoverFixture
+{
+public:
+    bool Initialize(uint32_t K, uint32_t block_bytes)
+    {
+        KValue = K;
+        BlockBytesValue = block_bytes;
+        if (!BuildCount5System(K, System)) return false;
+        Config.PeelSeed = UINT32_C(0x4d241359);
+        Config.MixCount = 3u;
+        const uint64_t message_bytes_wide = (uint64_t)K * block_bytes;
+        if (message_bytes_wide >
+            (uint64_t)std::numeric_limits<size_t>::max())
+        {
+            return false;
+        }
+        const size_t message_bytes = (size_t)message_bytes_wide;
+        Decoder.reset(new wirehair_v2::MessagePrecodeDecoder);
+        if (Decoder->InitializeForValidatedSystemForBenchmark(
+                message_bytes_wide, block_bytes, System, Config, 0u) !=
+            Wirehair_Success)
+        {
+            return false;
+        }
+        std::vector<uint8_t> zero_block(block_bytes, 0u);
+        WirehairResult result = Wirehair_NeedMore;
+        for (uint32_t packet_index = 0u;
+             packet_index < K + 256u && result == Wirehair_NeedMore;
+             ++packet_index)
+        {
+            result = Decoder->DecodeResult(
+                K + packet_index, zero_block.data(), block_bytes);
+            Delivered = packet_index + 1u;
+        }
+        if (result != Wirehair_Success || !Decoder->IsDecoded()) {
+            std::fprintf(stderr,
+                "count5 repair-only fixture failed K=%u bb=%u delivered=%u "
+                "result=%d\n",
+                K, block_bytes, Delivered, (int)result);
+            return false;
+        }
+        Output.assign(message_bytes, uint8_t{0xa5});
+        if (!wirehair_v2::SetPacketMix3FiveTermSetXorModeForBenchmark(-1) ||
+            Decoder->RecoverResult(Output.data(), Output.size()) !=
+                Wirehair_Success ||
+            std::find_if(
+                Output.begin(), Output.end(),
+                [](uint8_t value) { return value != 0u; }) != Output.end())
+        {
+            std::fprintf(stderr,
+                "count5 recovery warm/oracle failed K=%u bb=%u\n",
+                K, block_bytes);
+            return false;
+        }
+        // The first legacy recovery may release retained cold receive state.
+        // Check the candidate on the stable repeated-RecoverResult path that
+        // the timed panels use, and overwrite a nonzero destination so a
+        // missing write cannot pass the all-zero message oracle.
+        std::fill(Output.begin(), Output.end(), uint8_t{0xa5});
+        if (!wirehair_v2::SetPacketMix3FiveTermSetXorModeForBenchmark(+1) ||
+            Decoder->RecoverResult(Output.data(), Output.size()) !=
+                Wirehair_Success ||
+            std::find_if(
+                Output.begin(), Output.end(),
+                [](uint8_t value) { return value != 0u; }) != Output.end())
+        {
+            std::fprintf(stderr,
+                "count5 candidate recovery oracle failed K=%u bb=%u\n",
+                K, block_bytes);
+            return false;
+        }
+        EligibleSourceIds = Count5EligibleSourceIds(System, Config);
+        return true;
+    }
+
+    bool Measure(int mode, uint64_t& elapsed_ns)
+    {
+        if (!Decoder ||
+            !wirehair_v2::SetPacketMix3FiveTermSetXorModeForBenchmark(mode))
+        {
+            return false;
+        }
+        const Clock::time_point start = Clock::now();
+        const WirehairResult result =
+            Decoder->RecoverResult(Output.data(), Output.size());
+        elapsed_ns = (uint64_t)
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                Clock::now() - start).count();
+        if (result != Wirehair_Success || elapsed_ns == 0u) return false;
+        Sink ^= Output[
+            ((size_t)(mode + 1) + Delivered + EligibleSourceIds) %
+                Output.size()];
+        return true;
+    }
+
+    uint32_t K() const { return KValue; }
+    uint32_t BlockBytes() const { return BlockBytesValue; }
+    uint32_t Eligible() const { return EligibleSourceIds; }
+    uint32_t DeliveredPackets() const { return Delivered; }
+    uint64_t SinkValue() const { return (uint64_t)Sink; }
+
+private:
+    wirehair_v2::PrecodeSystem System;
+    wirehair_v2::PacketRowConfig Config;
+    std::unique_ptr<wirehair_v2::MessagePrecodeDecoder> Decoder;
+    std::vector<uint8_t> Output;
+    uint32_t KValue = 0u;
+    uint32_t BlockBytesValue = 0u;
+    uint32_t EligibleSourceIds = 0u;
+    uint32_t Delivered = 0u;
+    volatile uint64_t Sink = 0u;
+};
+
+bool RunCount5RecoverScreen(
+    uint32_t K,
+    uint32_t block_bytes,
+    unsigned samples)
+{
+    Count5ModeReset mode_reset;
+    bool ok = true;
+    {
+        Count5RecoverFixture active;
+        if (!active.Initialize(K, block_bytes)) return false;
+        const auto measure = [&](int mode, uint64_t& elapsed_ns) {
+            return active.Measure(mode, elapsed_ns);
+        };
+        Count5PanelMetadata metadata;
+        metadata.Workload = "recover";
+        metadata.Panel = "active";
+        metadata.Shape = "all_source_ids_mix3";
+        metadata.K = K;
+        metadata.BlockBytes = block_bytes;
+        metadata.Units = K;
+        metadata.Repetitions = 1u;
+        metadata.Samples = samples;
+        metadata.EligibleUnits = active.Eligible();
+        if (metadata.EligibleUnits == 0u) return false;
+        ok = RunCount5Panel(
+            metadata, -1, +1, "legacy", "candidate",
+            Count5Gate::Active, measure) && ok;
+
+        metadata.Panel = "aa";
+        ok = RunCount5Panel(
+            metadata, -1, -1, "legacy_a", "legacy_b",
+            Count5Gate::SameArm, measure) && ok;
+        std::printf(
+            "count5_fixture,version=1,workload=recover,panel=active,"
+            "K=%u,block_bytes=%u,delivered=%u,eligible_units=%u,"
+            "sink=%" PRIu64 "\n",
+            active.K(), active.BlockBytes(), active.DeliveredPackets(),
+            active.Eligible(), active.SinkValue());
+    }
+
+    // The exact lower-K boundary is the recovery fallback: it exercises the
+    // same MIX3 evaluator and block width while making every five-term row
+    // ineligible for the new K >= 10000 dispatch.
+    if (K == 10000u)
+    {
+        Count5RecoverFixture fallback;
+        if (!fallback.Initialize(9999u, block_bytes)) return false;
+        const auto measure = [&](int mode, uint64_t& elapsed_ns) {
+            return fallback.Measure(mode, elapsed_ns);
+        };
+        Count5PanelMetadata metadata;
+        metadata.Workload = "recover";
+        metadata.Panel = "fallback";
+        metadata.Shape = "all_source_ids_mix3_K9999";
+        metadata.K = fallback.K();
+        metadata.BlockBytes = block_bytes;
+        metadata.Units = fallback.K();
+        metadata.Repetitions = 1u;
+        metadata.Samples = samples;
+        metadata.EligibleUnits = 0u;
+        ok = RunCount5Panel(
+            metadata, -1, +1, "legacy_mode", "candidate_mode",
+            Count5Gate::Fallback, measure) && ok;
+        std::printf(
+            "count5_fixture,version=1,workload=recover,panel=fallback,"
+            "K=%u,block_bytes=%u,delivered=%u,eligible_units=0,"
+            "sink=%" PRIu64 "\n",
+            fallback.K(), fallback.BlockBytes(),
+            fallback.DeliveredPackets(), fallback.SinkValue());
+    }
+    std::printf(
+        "count5_screen,version=1,workload=recover,K=%u,block_bytes=%u,"
+        "gate=%s\n",
+        K, block_bytes, ok ? "pass" : "fail");
+    return ok;
+}
+
+#endif // WIREHAIR_V2_ENABLE_COUNT5_BENCHMARK
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -798,15 +1384,21 @@ int main(int argc, char** argv)
     bool boundary_only = false;
     bool fallback_only = false;
     bool degrees_only = false;
+    bool count5_packet = false;
+    bool count5_recover = false;
     if (argc >= 2) {
         char* end = nullptr;
         const unsigned long parsed = std::strtoul(argv[1], &end, 10);
-        if (!end || *end != '\0' || parsed < 30u || parsed > 1000u) {
+        if (!end || *end != '\0' || parsed < 12u || parsed > 1000u) {
             std::fprintf(stderr,
                 "usage: %s [samples=30..1000] [mix_count=1|2|3] "
                 "[mode=packet|mtu|crossover|boundary|fallback|degrees|"
-                "gather|all] "
-                "[K=2..64000]\n",
+                "gather|all] [K=2..64000]\n"
+                "       %s 32 3 count5-packet "
+                "<K=10000|64000> <block_bytes=1280|4096|32768>\n"
+                "       %s 12 3 count5-recover "
+                "<K=10000|64000> <block_bytes=1280|4096|32768>\n",
+                argv[0], argv[0],
                 argv[0]);
             return 2;
         }
@@ -858,6 +1450,12 @@ int main(int argc, char** argv)
             run_gather = false;
             degrees_only = true;
         }
+        else if (std::strcmp(argv[3], "count5-packet") == 0) {
+            count5_packet = true;
+        }
+        else if (std::strcmp(argv[3], "count5-recover") == 0) {
+            count5_recover = true;
+        }
         else if (std::strcmp(argv[3], "gather") == 0) {
             run_packet = false;
             run_gather = true;
@@ -870,11 +1468,70 @@ int main(int argc, char** argv)
             std::fprintf(stderr,
                 "usage: %s [samples=30..1000] [mix_count=1|2|3] "
                 "[mode=packet|mtu|crossover|boundary|fallback|degrees|"
-                "gather|all] "
+                "gather|all|count5-packet|count5-recover] "
                 "[K=2..64000]\n",
                 argv[0]);
             return 2;
         }
+    }
+    if (count5_packet || count5_recover)
+    {
+        if (argc != 6 || mix_count != 3u ||
+            samples != (count5_packet ? 32u : 12u))
+        {
+            std::fprintf(stderr,
+                "usage: %s %u 3 %s <K=10000|64000> "
+                "<block_bytes=1280|4096|32768>\n",
+                argv[0], count5_packet ? 32u : 12u,
+                count5_packet ? "count5-packet" : "count5-recover");
+            return 2;
+        }
+        char* K_end = nullptr;
+        char* bytes_end = nullptr;
+        const unsigned long parsed_K = std::strtoul(argv[4], &K_end, 10);
+        const unsigned long parsed_bytes =
+            std::strtoul(argv[5], &bytes_end, 10);
+        if (!K_end || *K_end != '\0' ||
+            (parsed_K != 10000u && parsed_K != 64000u) ||
+            !bytes_end || *bytes_end != '\0' ||
+            (parsed_bytes != 1280u && parsed_bytes != 4096u &&
+                parsed_bytes != 32768u))
+        {
+            std::fprintf(stderr,
+                "count5 screen is frozen to K={10000,64000}, "
+                "block_bytes={1280,4096,32768}\n");
+            return 2;
+        }
+        if (gf256_init() != 0) return 1;
+#if defined(WIREHAIR_V2_ENABLE_COUNT5_BENCHMARK)
+        try
+        {
+            const bool ok = count5_packet ?
+                RunCount5PacketScreen(
+                    (uint32_t)parsed_K, (uint32_t)parsed_bytes, samples) :
+                RunCount5RecoverScreen(
+                    (uint32_t)parsed_K, (uint32_t)parsed_bytes, samples);
+            return ok ? 0 : 1;
+        }
+        catch (const std::bad_alloc&)
+        {
+            std::fprintf(stderr, "count5 screen allocation failed\n");
+            return 1;
+        }
+        catch (const std::length_error&)
+        {
+            std::fprintf(stderr, "count5 screen size overflow\n");
+            return 1;
+        }
+#else
+        std::fprintf(stderr,
+            "count5 screens require BUILD_TESTS=ON timing policy\n");
+        return 2;
+#endif
+    }
+    if (samples < 30u) {
+        std::fprintf(stderr, "legacy modes require at least 30 samples\n");
+        return 2;
     }
     if (argc == 5)
     {
