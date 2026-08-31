@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Freeze, derive, validate, and export the WH2 Two07/mix2 repair map.
 
-This is a separate v8 bench contract.  It does not reinterpret the rejected
+This is a separate v9 bench contract.  It does not reinterpret the rejected
 v5 contract, the uniform-raw descriptors used there, or the closed MIX2
 decision.
 The native worker performs exact byte recovery.  Derivation searches attempts
@@ -39,7 +39,7 @@ except ModuleNotFoundError as exc:  # Direct execution via python3 bench/<script
     import wh2_mix2_promotion_short_screen as short_screen_controller
 
 
-CONTRACT_SCHEMA = "wirehair.wh2.mix2-seed-repair-contract.v8"
+CONTRACT_SCHEMA = "wirehair.wh2.mix2-seed-repair-contract.v9"
 PROFILE_SCHEMA = "wirehair.wh2.mix2-production-profile.v1"
 DESCRIPTION_SCHEMA = "wirehair.wh2.mix2-seed-repair-worker-description.v3"
 WORKER_SCHEMA = "wirehair.wh2.mix2-seed-repair-worker.v3"
@@ -70,11 +70,11 @@ SHORT_SCREEN_ATTEMPT_STREAM_SCHEMA = \
     "wirehair.wh2.mix2-promotion-short-screen-attempt-stream.v2"
 # Frozen from bench/wh2_mix2_promotion_short_screen.py before any all-K run.
 SHORT_SCREEN_CONTRACT_SHA256 = \
-    "023e8d18f692855766ad0d5fda3a8ece453da30c9eb455e14eab80a110b1d6ad"
+    "28e6affc80680377df2e8099825b1b475b65e51d04116a8c2fd6465566041cdb"
 SHORT_SCREEN_ROOTS = (
-    "0xb889883a79549774",
-    "0xb5666de0987896af",
-    "0x8bfca269b0bc01e0",
+    "0xc4695292d9835286",
+    "0x7ccd510f122fc160",
+    "0x7001a960b7d9c0a4",
 )
 SHORT_SCREEN_ARMS = (
     "current_disabled_mix3",
@@ -83,16 +83,16 @@ SHORT_SCREEN_ARMS = (
 SHORT_SCREEN_TIMING_ORDERS = ("ABBA", "BAAB")
 SHORT_SCREEN_OBSERVATIONS_PER_ARM = 2
 SHORT_SCREEN_OFFICIAL_SCOPE = \
-    "v8 production-basis bounded promotion screen"
+    "v9 production-basis bounded promotion screen"
 
 DEFAULT_CONTRACT = Path(__file__).with_name(
-    "wh2_mix2_seed_repair_contract_v8.json")
+    "wh2_mix2_seed_repair_contract_v9.json")
 CONTROLLER_PATH = Path(__file__).resolve()
 REPO_ROOT = CONTROLLER_PATH.parent.parent
 K_MIN = 2
 K_MAX = 64000
 MAP_BYTES = K_MAX - K_MIN + 1
-SELECTION_CELL_COUNT = 18
+SELECTION_CELL_COUNT = 27
 VALIDATION_CELL_COUNT = 9
 SHORT_SCREEN_ATTEMPT_COUNT = 30
 SHORT_SCREEN_CELL_COUNT = 270
@@ -135,25 +135,28 @@ SELECTION_ROOTS = (
     "0xc0ac29b7c97c50dd",
     "0x3f84d5b5b5470917",
     "0x9216d5d98979fb1b",
+    "0xb889883a79549774",
+    "0xb5666de0987896af",
+    "0x8bfca269b0bc01e0",
 )
 VALIDATION_ROOTS = (
-    "0xcaaf509f857ba891",
-    "0x63d1496709b6a34d",
-    "0xede354579ef6042a",
+    "0xefd20c982041a46b",
+    "0x8827bc36ed906555",
+    "0x86029f23d6132efa",
 )
 VALIDATION_ROOT_NAMESPACE = \
-    "wirehair2-two07-mix2-graph-b2-all-k-v8:holdout-root:"
+    "wirehair2-two07-mix2-graph-b2-all-k-v9:holdout-root:"
 VALIDATION_ROOT_FULL_SHA256 = (
-    "caaf509f857ba89174b572bacaf15b500770be9c5eaa39c77cc2b8afe4d389bb",
-    "63d1496709b6a34d7067294df68b351c8d43a6c60cc83492a3bd75fe737dd6ff",
-    "ede354579ef6042a557cbc781f080340cabf0945f882505abe082a2b6f197730",
+    "efd20c982041a46b00dc0db6b4117e52e6cdc1265dc05e51b4d4c79705327196",
+    "8827bc36ed90655550b226632b470105958ff2ca85ad65cd9b55ba729c4f0a94",
+    "86029f23d6132efa80a6cf4b2484f8e789eae1fc76a4f4a6e4144b824b958081",
 )
 SCHEDULES = ("burst", "adversarial", "repair-only")
 VALIDATION_ROSTER_SCHEMA = \
     "wirehair.wh2.mix2-seed-repair-validation-roster.v1"
 VALIDATION_ROSTER_CELL_ORDER = "root-major-then-schedule"
 VALIDATION_ROSTER_SHA256 = \
-    "f2f495663f9c29f5b37e55f37e5d299270c75d2cf7d30ceffd6692e7c010d1d3"
+    "27bbf2b02f51da35527d47c6313a8a0ea4f4b1c1483c636341ce607ef5fb8581"
 EXPECTED_VALIDATION_ROSTER = {
     "schema": VALIDATION_ROSTER_SCHEMA,
     "cell_order": VALIDATION_ROSTER_CELL_ORDER,
@@ -174,11 +177,11 @@ SEMANTIC_REPLAY_ROSTER_SHA256 = (
 SELECTION_RULE = (
     "for each K, test uint8 construction attempts in ascending order; reject "
     "an attempt at its first failing cell in frozen cell order; select the "
-    "first attempt that byte-recovers at overhead 0 on all eighteen cells"
+    "first attempt that byte-recovers at overhead 0 on all twenty-seven cells"
 )
 LOWER_ATTEMPT_EVIDENCE = (
     "retain exactly one first-failure witness for every lower attempt and all "
-    "eighteen success receipts for the selected attempt"
+    "twenty-seven success receipts for the selected attempt"
 )
 VALIDATION_RULE = (
     "replay exactly the frozen map byte indexed by K-2 on all nine disjoint "
@@ -194,7 +197,7 @@ MAP_FREEZE_RULE = (
     "before any validation worker starts"
 )
 BUNDLE_CHAIN_RULE = (
-    "the derivation manifest binds an authenticated v8 short-screen PASS; the "
+    "the derivation manifest binds an authenticated v9 short-screen PASS; the "
     "validation manifest binds the repair-map receipt; that receipt binds the "
     "short-screen hashes, derivation manifest, freeze, summary, audit, and "
     "map; every self-hash and semantic relationship is rechecked before "
@@ -439,7 +442,7 @@ SHORT_SCREEN_SUMMARY_NAME = "promotion-short-screen-summary.json"
 
 
 class ContractError(RuntimeError):
-    """The v8 contract or one of its bound artifacts is invalid."""
+    """The v9 contract or one of its bound artifacts is invalid."""
 
 
 def fail(message: str) -> None:
@@ -584,10 +587,10 @@ def _load_canonical_object(path: Path, cap: int, context: str) \
 
 
 def load_contract(path: Path = DEFAULT_CONTRACT) -> Mapping[str, Any]:
-    data = _read_regular(path, 64 * 1024, "mix2 v8 contract")
-    value = _parse_json_bytes(data, "mix2 v8 contract")
+    data = _read_regular(path, 64 * 1024, "mix2 v9 contract")
+    value = _parse_json_bytes(data, "mix2 v9 contract")
     if not isinstance(value, dict) or value.get("schema") != CONTRACT_SCHEMA:
-        fail("contract schema is not the closed v8 identity")
+        fail("contract schema is not the closed v9 identity")
     expected_top = frozenset((
         "schema", "contract_id", "candidate_profile", "applicability",
         "domain", "selection", "packet_trace", "short_screen",
@@ -595,7 +598,7 @@ def load_contract(path: Path = DEFAULT_CONTRACT) -> Mapping[str, Any]:
     ))
     if set(value) != expected_top or \
             value.get("contract_id") != \
-                "wirehair2-two07-mix2-graph-b2-all-k-v8":
+                "wirehair2-two07-mix2-graph-b2-all-k-v9":
         fail("contract identity or top-level fields changed")
     profile = value.get("candidate_profile")
     expected_profile = {
@@ -685,7 +688,7 @@ def load_contract(path: Path = DEFAULT_CONTRACT) -> Mapping[str, Any]:
         fail("validation roots are not their frozen disjoint derivation")
     if not _same_frozen_json(
             value.get("packet_trace"), EXPECTED_PACKET_TRACE):
-        fail("packet trace law differs from the frozen v8 contract")
+        fail("packet trace law differs from the frozen v9 contract")
     attempt = value.get("attempt_schedule")
     if not _same_frozen_json(attempt, {
             "attempt_count": 256,
@@ -742,7 +745,7 @@ def _effective_packet_seed(base: int, attempt: int) -> str:
 
 def _controller_sha256() -> str:
     return sha256_bytes(_read_regular(
-        CONTROLLER_PATH, 4 * 1024 * 1024, "v8 controller"))
+        CONTROLLER_PATH, 4 * 1024 * 1024, "v9 controller"))
 
 
 def _sha256_open_fd(descriptor: int, context: str) -> str:
@@ -787,7 +790,7 @@ def _require_clean_source(expected_commit: str) -> None:
          "bench/Wh2NativeCodec.h",
          "bench/wh2_mix2_promotion_short_screen.py",
          "bench/wh2_mix2_seed_repair_contract.py",
-         "bench/wh2_mix2_seed_repair_contract_v8.json"],
+         "bench/wh2_mix2_seed_repair_contract_v9.json"],
         ["git", "rev-parse", "--verify", "HEAD^{commit}"],
     )
     outputs = []
@@ -938,7 +941,7 @@ def validate_derivation_record(
     successes = value.get("selected_successes")
     if not isinstance(successes, list) or \
             len(successes) != SELECTION_CELL_COUNT:
-        fail("selected attempt must retain exactly eighteen successes")
+        fail("selected attempt must retain exactly twenty-seven successes")
     ordinals = []
     for receipt in successes:
         _validate_cell(
@@ -1020,7 +1023,7 @@ class VerifiedWorker:
 
 @dataclass(frozen=True)
 class VerifiedShortScreen:
-    """Authenticated v8 bounded-screen PASS and its frozen 30 attempts."""
+    """Authenticated v9 bounded-screen PASS and its frozen 30 attempts."""
 
     binding: Mapping[str, str]
     attempt_map: bytes
@@ -1208,7 +1211,7 @@ def _validate_short_screen_result(
 def load_short_screen_bundle(
         contract: Mapping[str, Any], directory: Path, worker: VerifiedWorker,
         expected_summary_sha256: str) -> VerifiedShortScreen:
-    """Authenticate the prerequisite v8 bounded-screen PASS fail-closed."""
+    """Authenticate the prerequisite v9 bounded-screen PASS fail-closed."""
     expected_summary_sha256 = _require_sha(
         expected_summary_sha256, "externally recorded short-screen summary")
     if directory.is_symlink() or not directory.is_dir():
@@ -1273,7 +1276,7 @@ def load_short_screen_bundle(
                 SHORT_SCREEN_OBSERVATIONS_PER_ARM or
             set(SHORT_SCREEN_ROOTS) &
                 (set(SELECTION_ROOTS) | set(VALIDATION_ROOTS))):
-        fail("short-screen contract is not the frozen v8 prerequisite")
+        fail("short-screen contract is not the frozen v9 prerequisite")
     input_sha256 = _require_sha(
         input_receipt.get("input_sha256"), "short-screen input identity")
     if (input_receipt.get("schema") != SHORT_SCREEN_INPUT_SCHEMA or
@@ -1573,7 +1576,7 @@ def _short_screen_binding(value: Mapping[str, Any]) -> Mapping[str, str]:
     }
     if binding["short_screen_contract_sha256"] != \
             SHORT_SCREEN_CONTRACT_SHA256:
-        fail("short-screen binding does not name the frozen v8 contract")
+        fail("short-screen binding does not name the frozen v9 contract")
     return binding
 
 
@@ -2054,7 +2057,7 @@ def _run_all_k(
 
     deadline = time.monotonic() + deadline_seconds
     registry = _Registry()
-    with tempfile.TemporaryDirectory(prefix="wh2-mix2-v8-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="wh2-mix2-v9-") as temporary:
         temporary_path = Path(temporary)
         ranges = _split_ranges(jobs)
         futures = []

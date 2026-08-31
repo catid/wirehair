@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bounded v8 native-worker/controller compatibility test at K=2."""
+"""Bounded v9 native-worker/controller compatibility test at K=2."""
 
 from __future__ import annotations
 
@@ -39,6 +39,15 @@ K2_SELECTION_TRACE_GOLDENS = (
     (22, "65a956290dc94a53f7009673eea4350bdb1d6956ba76fffaef1b0c6bb3c3402b"),
     (14, "c53c720feef0da7e34ba75d26b636bc1a467fd931aed7349d1f27f4c7fef7757"),
     (14, "32dc33b76b4d035ab13dc7d90da37fa2a7c14fc7b31dd64c30c3f263ee222a48"),
+    (6, "cd9a54ed1f18bf97db08914e280ea7349e11ca2c4885a4d8052552ceba84208d"),
+    (9, "887f0c1f24c4e93f15584b5f1b6d5cca650800f0fec53a7bf3c625b7ed5d7b88"),
+    (9, "515d0225d4353d31d902606ef33b928994a28538c430ce7a4ff4f187d6054ae8"),
+    (6, "cd9a54ed1f18bf97db08914e280ea7349e11ca2c4885a4d8052552ceba84208d"),
+    (9, "88ac07201b4c3d1197d58477321e0bf39861a995a0a2c223b78de2c891fe3ff7"),
+    (9, "c6ee91ea3bffdd3544eb6c736a4a14253d3bd1fd2aba1c8feec8ccbeedac53fa"),
+    (6, "cd9a54ed1f18bf97db08914e280ea7349e11ca2c4885a4d8052552ceba84208d"),
+    (10, "6d9a15c58549a3d55bdeda0741cbaae5cb743756d05ce4f30a6de9e34e0327c6"),
+    (10, "cffcf16f52370f926662839ae1f6e48f9f8db2202f9957cab4d9de131f270d1f"),
 )
 K2_LOWER_FAILURE_GOLDENS = (
     (0, 0, "construct_failed", None),
@@ -138,7 +147,7 @@ def main():
             (cell["attempted_candidates"], cell["trace_sha256"])
             for cell in derivation["selected_successes"])
         if observed_selection_goldens != K2_SELECTION_TRACE_GOLDENS:
-            raise AssertionError("K=2 18-cell selection trace identity changed")
+            raise AssertionError("K=2 27-cell selection trace identity changed")
         observed_lower_goldens = tuple(
             (cell["cell_ordinal"], cell["root_index"], cell["outcome"],
              cell["decoded_extra"])

@@ -56,7 +56,7 @@ def derivation(K: int, attempt: int = 0) -> dict:
         "effective_precode_seed":
             subject._effective_precode_seed(base_precode, attempt),
         "lower_attempt_failure_witnesses": [
-            worker_cell(index % 18, index, False)
+            worker_cell(index % subject.SELECTION_CELL_COUNT, index, False)
             for index in range(attempt)
         ],
         "mode": "derive",
@@ -64,7 +64,8 @@ def derivation(K: int, attempt: int = 0) -> dict:
         "schema": subject.WORKER_DERIVATION_SCHEMA,
         "selected_attempt": attempt,
         "selected_successes": [
-            worker_cell(index, attempt) for index in range(18)
+            worker_cell(index, attempt)
+            for index in range(subject.SELECTION_CELL_COUNT)
         ],
         "source_sha256": hashlib.sha256(
             "source:{}".format(K).encode("ascii")).hexdigest(),
@@ -278,11 +279,14 @@ class ContractTests(unittest.TestCase):
             "0xc0ac29b7c97c50dd",
             "0x3f84d5b5b5470917",
             "0x9216d5d98979fb1b",
-        )
-        expected_roots = (
             "0xb889883a79549774",
             "0xb5666de0987896af",
             "0x8bfca269b0bc01e0",
+        )
+        expected_roots = (
+            "0xc4695292d9835286",
+            "0x7ccd510f122fc160",
+            "0x7001a960b7d9c0a4",
         )
         self.assertEqual(subject.K_VALUES, expected_K)
         self.assertEqual(subject.ROOTS, expected_roots)
@@ -290,6 +294,7 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(subject.SCHEDULES,
                          ("burst", "adversarial", "repair-only"))
         self.assertEqual(len(subject.K_VALUES), 30)
+        self.assertEqual(subject.SELECTION_CELL_COUNT, 27)
         self.assertEqual(subject.EXPECTED_CELL_COUNT, 270)
         self.assertEqual(subject.EXPECTED_RECORD_COUNT, 1080)
         self.assertEqual(subject.K_VALUES[0], 2)
@@ -305,6 +310,7 @@ class ContractTests(unittest.TestCase):
             set(subject.SELECTION_ROOTS), set(subject.ROOTS),
             set(subject.DISCARDED_V6_ROOTS),
             set(subject.RETIRED_V7_ROOTS),
+            set(subject.RETIRED_V8_FINAL_ROOTS),
             set(subject.FINAL_VALIDATION_ROOTS),
         )
         for left in range(len(frozen_root_sets)):
@@ -341,7 +347,7 @@ class ContractTests(unittest.TestCase):
                 "dense_anchor_layout": "two07",
                 "mix_count": 2,
                 "construction_attempt":
-                    "exact v8 18-cell-selected uint8 attempt indexed by K",
+                    "exact v9 27-cell-selected uint8 attempt indexed by K",
             })
         self.assertEqual(
             contract["complexity"], {
@@ -376,6 +382,8 @@ class ContractTests(unittest.TestCase):
                          list(subject.BENCHMARK_ROOT_FULL_SHA256))
         self.assertTrue(root_derivation["discarded_v6_roots_excluded"])
         self.assertTrue(root_derivation["retired_v7_roots_excluded"])
+        self.assertTrue(
+            root_derivation["retired_v8_final_roots_excluded"])
 
     def test_candidate_profile_and_description_are_exact(self) -> None:
         expected = hashlib.sha256(subject.canonical_json(

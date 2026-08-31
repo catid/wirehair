@@ -44,11 +44,11 @@ static const char kDerivationSchema[] =
 static const char kValidationSchema[] =
     "wirehair.wh2.mix2-seed-repair-validation-record.v3";
 static const char kContractSchema[] =
-    "wirehair.wh2.mix2-seed-repair-contract.v8";
+    "wirehair.wh2.mix2-seed-repair-contract.v9";
 static const char kValidationRosterSchema[] =
     "wirehair.wh2.mix2-seed-repair-validation-roster.v1";
 static const char kValidationRosterSha256[] =
-    "f2f495663f9c29f5b37e55f37e5d299270c75d2cf7d30ceffd6692e7c010d1d3";
+    "27bbf2b02f51da35527d47c6313a8a0ea4f4b1c1483c636341ce607ef5fb8581";
 static const char kProfileSchema[] =
     "wirehair.wh2.mix2-production-profile.v1";
 static const char kCandidateArm[] =
@@ -68,7 +68,7 @@ static const uint32_t kBlockBytes = 2u;
 static const uint32_t kMaximumK = 64000u;
 static const uint32_t kAttemptCount = 256u;
 static const uint32_t kScheduleCount = 3u;
-static const uint32_t kSelectionRootCount = 6u;
+static const uint32_t kSelectionRootCount = 9u;
 static const uint32_t kValidationRootCount = 3u;
 static const uint32_t kSelectionCellCount =
     kSelectionRootCount * kScheduleCount;
@@ -76,22 +76,25 @@ static const uint32_t kValidationCellCount =
     kValidationRootCount * kScheduleCount;
 static const uint64_t kSourceSeedBase = UINT64_C(0x6d69783273656564);
 
-// Selection retains the v5 root order exactly: its three former training
-// roots followed by its three former validation roots.  The cell ordinal is
-// global across this concatenated six-root roster.
+// Selection retains the v5 root order exactly, then appends the three observed
+// v8 short-screen roots as offline repair cells.  The cell ordinal is global
+// across this concatenated nine-root roster.
 static const uint64_t kSelectionRoots[kSelectionRootCount] = {
     UINT64_C(0xd1b54a32d192ed03),
     UINT64_C(0x94d049bb133111eb),
     UINT64_C(0x8538ecb5bd456ea3),
     UINT64_C(0xc0ac29b7c97c50dd),
     UINT64_C(0x3f84d5b5b5470917),
-    UINT64_C(0x9216d5d98979fb1b)
+    UINT64_C(0x9216d5d98979fb1b),
+    UINT64_C(0xb889883a79549774),
+    UINT64_C(0xb5666de0987896af),
+    UINT64_C(0x8bfca269b0bc01e0)
 };
 static const uint64_t kValidationRoots[kValidationRootCount] = {
-    // Fresh v8 all-K holdout.  Ordinary worker tests must not execute V.
-    UINT64_C(0xcaaf509f857ba891),
-    UINT64_C(0x63d1496709b6a34d),
-    UINT64_C(0xede354579ef6042a)
+    // Fresh v9 all-K holdout.  Ordinary worker tests must not execute V.
+    UINT64_C(0xefd20c982041a46b),
+    UINT64_C(0x8827bc36ed906555),
+    UINT64_C(0x86029f23d6132efa)
 };
 static const FrozenSchedule kSchedules[kScheduleCount] = {
     FrozenSchedule::Burst,
