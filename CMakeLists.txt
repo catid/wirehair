@@ -1515,6 +1515,16 @@ if(BUILD_TESTS)
             LABELS
                 "wh2;benchmark;contract;recovery;precodefail;mix2;selection")
         add_test(
+            NAME wh2_mix2_packet_offset_stage0_test
+            COMMAND ${Python3_EXECUTABLE} -B -m unittest -v
+                bench/test_wh2_mix2_packet_offset_stage0.py)
+        set_tests_properties(wh2_mix2_packet_offset_stage0_test PROPERTIES
+            WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+            ENVIRONMENT "PYTHONWARNINGS=error"
+            TIMEOUT 120
+            LABELS
+                "wh2;benchmark;contract;recovery;precodefail;mix2;selection")
+        add_test(
             NAME wh2_mix2_pair_stage1_test
             COMMAND ${Python3_EXECUTABLE} -B -m unittest -v
                 bench/test_wh2_mix2_pair_stage1.py)
