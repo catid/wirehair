@@ -290,12 +290,31 @@ add_executable(wirehair_v2_packet_eval_bench ${WIREHAIR_BENCH_EXCLUDE}
 target_link_libraries(wirehair_v2_packet_eval_bench wirehair_v2_policy)
 wirehair_apply_project_options(wirehair_v2_packet_eval_bench)
 
+add_executable(wirehair_v2_packet_fixed5_falsifier
+    ${WIREHAIR_BENCH_EXCLUDE}
+    ${PROJECT_SOURCE_DIR}/experiments/v2_packet_fixed5_falsifier.cpp
+    ${PROJECT_SOURCE_DIR}/bench/Wh2FrozenTrace.cpp
+    ${PROJECT_SOURCE_DIR}/bench/Wh2RdpruTargetIdentityV2.cpp)
+target_compile_definitions(wirehair_v2_packet_fixed5_falsifier PRIVATE
+    "WIREHAIR_FIXED5_SOURCE_GIT_COMMIT=\"${WIREHAIR_WH2_SOURCE_GIT_COMMIT}\"")
+target_link_libraries(wirehair_v2_packet_fixed5_falsifier PRIVATE
+    ${WIREHAIR_INTERNAL_LIBRARY})
+wirehair_apply_project_options(wirehair_v2_packet_fixed5_falsifier)
+
 add_executable(wirehair_v2_resume_bench ${WIREHAIR_BENCH_EXCLUDE}
     V2ResumeBench.cpp)
 target_link_libraries(wirehair_v2_resume_bench wirehair_v2_policy)
 wirehair_apply_project_options(wirehair_v2_resume_bench)
 
 if(BUILD_TESTS AND WIREHAIR_BUILD_BENCHMARKS)
+    add_test(
+        NAME wirehair_v2_packet_fixed5_falsifier_selftest
+        COMMAND wirehair_v2_packet_fixed5_falsifier --self-test)
+    set_tests_properties(
+        wirehair_v2_packet_fixed5_falsifier_selftest PROPERTIES
+            TIMEOUT 60
+            LABELS "v2;experimental;packet;fixed5;falsifier")
+
     add_test(
         NAME wirehair_v2_bench_cli_test
         COMMAND ${CMAKE_COMMAND}

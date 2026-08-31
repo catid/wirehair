@@ -396,6 +396,20 @@ extern void gf256_add_multi_mem(void * GF256_RESTRICT vz,
 */
 extern int gf256_set_thread_wide_xor(int enable);
 
+/**
+    Try the runtime-wide fixed-five XOR kernel:
+    `z[] = srcs[0][] + ... + srcs[4][]`.
+
+    Returns one after writing the destination.  Returns zero without reading
+    any source or writing the destination when the runtime-wide kernel is not
+    available for this build, CPU, or byte length.  The destination and source
+    ranges must not overlap.  Call gf256_init() before using this function.
+*/
+extern int gf256_try_addset5_wide_mem(
+    void * GF256_RESTRICT vz,
+    const void * const * GF256_RESTRICT vsrcs,
+    int bytes);
+
 /// Performs "z[] = srcs[0][] + ... + srcs[src_count-1][]" bulk operation.
 /// Destination and source ranges must not overlap.  Non-positive source
 /// counts and byte lengths are no-ops.

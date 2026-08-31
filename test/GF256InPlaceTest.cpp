@@ -410,6 +410,91 @@ static bool TestMultiSource()
     return true;
 }
 
+static bool TestTryAddset5Wide()
+{
+    static const unsigned kLengths[] = {
+        0u, 1u, 31u, 32u, 33u, 63u, 64u, 65u, 127u, 128u, 129u, 1280u
+    };
+    for (unsigned bytes : kLengths)
+    {
+        for (unsigned offset = 0u; offset < 4u; ++offset)
+        {
+            std::vector<uint8_t> destination(
+                bytes + 2u * kGuardBytes + 16u);
+            for (size_t i = 0u; i < destination.size(); ++i) {
+                destination[i] = (uint8_t)(i * 29u + bytes + offset);
+            }
+            const std::vector<uint8_t> destination_before = destination;
+            std::vector<uint8_t> expected = destination;
+            uint8_t* const destination_data =
+                destination.data() + kGuardBytes + offset;
+            const size_t destination_start = kGuardBytes + offset;
+            std::fill(
+                expected.begin() + destination_start,
+                expected.begin() + destination_start + bytes,
+                uint8_t{0});
+
+            std::vector<std::vector<uint8_t> > sources(5u);
+            std::vector<std::vector<uint8_t> > source_before(5u);
+            const void* pointers[5] = {};
+            for (unsigned source = 0u; source < 5u; ++source)
+            {
+                const unsigned source_offset =
+                    (offset + source * 5u + 1u) & 15u;
+                sources[source].resize(bytes + 2u * kGuardBytes + 16u);
+                for (size_t i = 0u; i < sources[source].size(); ++i) {
+                    sources[source][i] = (uint8_t)(
+                        i * 37u + source * 61u + bytes);
+                }
+                const uint8_t* const source_data =
+                    sources[source].data() + kGuardBytes + source_offset;
+                pointers[source] = source_data;
+                source_before[source] = sources[source];
+                for (unsigned i = 0u; i < bytes; ++i) {
+                    expected[destination_start + i] ^= source_data[i];
+                }
+            }
+
+#ifdef WH_COUNT
+            gf256_count_reset();
+#endif
+            const int used = gf256_try_addset5_wide_mem(
+                destination_data, pointers, (int)bytes);
+            if ((bytes < 32u && used != 0) ||
+                (used != 0 && destination != expected) ||
+                (used == 0 && destination != destination_before) ||
+                sources != source_before)
+            {
+                std::fprintf(stderr,
+                    "try-addset5-wide mismatch bytes=%u offset=%u used=%d\n",
+                    bytes, offset, used);
+                return false;
+            }
+#ifdef WH_COUNT
+            if (gf256_count_calls(2) != (used != 0 ? 1u : 0u) ||
+                gf256_count_bytes(2) != (used != 0 ? bytes : 0u))
+            {
+                std::fprintf(stderr,
+                    "try-addset5-wide accounting mismatch bytes=%u "
+                    "used=%d calls=%" PRIu64 " counted_bytes=%" PRIu64 "\n",
+                    bytes, used, gf256_count_calls(2), gf256_count_bytes(2));
+                return false;
+            }
+#endif
+        }
+    }
+
+    uint8_t untouched = 0xa5u;
+    if (gf256_try_addset5_wide_mem(&untouched, nullptr, -1) != 0 ||
+        untouched != 0xa5u)
+    {
+        std::fprintf(stderr,
+            "try-addset5-wide non-positive no-write contract failed\n");
+        return false;
+    }
+    return true;
+}
+
 static bool TestScaledMultiSource()
 {
     static const unsigned kLengths[] = {
@@ -741,6 +826,7 @@ int main(int argc, char** argv)
     if (!TestOperation(Operation::Multiply) ||
         !TestOperation(Operation::Divide) ||
         !TestMultiSource() ||
+        !TestTryAddset5Wide() ||
         !TestScaledMultiSource())
     {
         return 1;
