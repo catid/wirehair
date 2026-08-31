@@ -3572,6 +3572,10 @@ int CmdPrecodeFail(int argc, char** argv)
         wirehair_v2::DenseAnchorLayout::Disabled;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     uint32_t fail_thread_launch_after = UINT32_MAX;
+    uint32_t mix_count_option_count = 0u;
+    uint32_t packet_mix_pair_mode = 0u;
+    const char* packet_mix_pair_name = "01";
+    bool packet_mix_pair_explicit = false;
     bool dense_anchor_layout_explicit = false;
     bool source_hits_explicit = false;
     bool binary_dense_rows_explicit = false;
@@ -3622,6 +3626,9 @@ int CmdPrecodeFail(int argc, char** argv)
                 return 1;
             }
             mix_count_list = value;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            ++mix_count_option_count;
+#endif
         }
         else if (!std::strcmp(argv[i], "--payload-e2e")) {
             payload_e2e = true;
@@ -3674,6 +3681,37 @@ int CmdPrecodeFail(int argc, char** argv)
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
         else if (!std::strcmp(argv[i], "--full-payload-solve")) {
             full_payload_solve = true;
+        }
+        else if (!std::strcmp(argv[i], "--mix-pair"))
+        {
+            if (packet_mix_pair_explicit ||
+                !TakeArg(
+                    "precodefail", "--mix-pair", argc, argv, i, value))
+            {
+                std::fprintf(stderr,
+                    "precodefail --mix-pair may be specified once and "
+                    "expects 01, 02, or 12\n");
+                return 1;
+            }
+            if (!std::strcmp(value, "01")) {
+                packet_mix_pair_mode = 0u;
+                packet_mix_pair_name = "01";
+            }
+            else if (!std::strcmp(value, "02")) {
+                packet_mix_pair_mode = 1u;
+                packet_mix_pair_name = "02";
+            }
+            else if (!std::strcmp(value, "12")) {
+                packet_mix_pair_mode = 2u;
+                packet_mix_pair_name = "12";
+            }
+            else
+            {
+                std::fprintf(stderr,
+                    "precodefail --mix-pair expects 01, 02, or 12\n");
+                return 1;
+            }
+            packet_mix_pair_explicit = true;
         }
         else if (!std::strcmp(argv[i], "--source-hits")) {
             if (!TakeArg(
@@ -3925,6 +3963,14 @@ int CmdPrecodeFail(int argc, char** argv)
         }
     }
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    if (packet_mix_pair_explicit &&
+        (mix_count_option_count != 1u || mix_counts.size() != 1u ||
+         mix_counts[0] != 2))
+    {
+        std::fprintf(stderr,
+            "precodefail --mix-pair requires exactly one --mix-count 2\n");
+        return 1;
+    }
     if (source_hits_explicit &&
         (source_hits_override == 0u || source_hits_override > 8u))
     {
@@ -3971,6 +4017,12 @@ int CmdPrecodeFail(int argc, char** argv)
         packet_row_seed_avalanche);
     wirehair_v2::SetOddPacketPeelSeedXorForTesting(
         odd_packet_peel_seed_xor);
+    if (!wirehair_v2::SetPacketMixPairModeForTesting(
+            packet_mix_pair_mode))
+    {
+        std::fprintf(stderr, "precodefail invalid MIX2 pair mode\n");
+        return 1;
+    }
     if (!wirehair_v2::SetColdSolveWideXorModeForTesting(
             cold_solve_wide_xor_mode))
     {
@@ -4029,7 +4081,7 @@ int CmdPrecodeFail(int argc, char** argv)
         "cold_solve_wide_xor=%s "
         "exact_attempt_mode=%u exact_precode_attempt=%u "
         "exact_packet_attempt=%u construction_seed_basis=%s "
-        "seed_schedule_sha256=%s source_git_commit=%s\n",
+        "seed_schedule_sha256=%s source_git_commit=%s",
         trials, threads, loss, (unsigned long long)seed,
         source_hits_override,
         packet_peel_seed_xor,
@@ -4054,6 +4106,12 @@ int CmdPrecodeFail(int argc, char** argv)
             wirehair_v2::test::kRawArchitectureSeedScheduleSha256 :
             "0000000000000000000000000000000000000000000000000000000000000000",
         WIREHAIR_V2_STRINGIFY(WIREHAIR_V2_BENCH_SOURCE_GIT_COMMIT));
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    if (packet_mix_pair_explicit) {
+        std::printf(" mix_pair=%s", packet_mix_pair_name);
+    }
+#endif
+    std::printf("\n");
     std::printf(
         "N,bb,heavy_family,mix_count,staircase,binary_dense_rows,"
         "gf256_heavy_rows,source_hits,dense_identity_corner,"
@@ -4082,6 +4140,8 @@ int CmdPrecodeFail(int argc, char** argv)
                      packet_row_seed_avalanche), true) &&
                 (wirehair_v2::SetOddPacketPeelSeedXorForTesting(
                      odd_packet_peel_seed_xor), true) &&
+                wirehair_v2::SetPacketMixPairModeForTesting(
+                    packet_mix_pair_mode) &&
                 wirehair_v2::SetColdSolveWideXorModeForTesting(
                     cold_solve_wide_xor_mode);
         };

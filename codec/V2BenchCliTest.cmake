@@ -265,6 +265,23 @@ expect_failure("expects off, policy, or on" precodefail
 expect_success("64,8,periodic,2,[^,]*,[^,]*,[^,]*,[^,]*,[^,]*,0,2,"
     precodefail --N 64 --bb-list 8
     --overhead 0 --trials 2 --threads 2 --loss 0.1 --mix-count 2)
+foreach(pair IN ITEMS 01 02 12)
+    expect_success("mix_pair=${pair}" precodefail --N 64 --bb-list 8
+        --overhead 0 --trials 2 --threads 2 --loss 0.1
+        --mix-count 2 --mix-pair ${pair} --full-payload-solve)
+endforeach()
+expect_failure("--mix-pair expects 01, 02, or 12" precodefail --N 64
+    --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
+    --mix-count 2 --mix-pair 20)
+expect_failure("--mix-pair may be specified once" precodefail --N 64
+    --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
+    --mix-count 2 --mix-pair 01 --mix-pair 02)
+expect_failure("--mix-pair requires exactly one --mix-count 2" precodefail
+    --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
+    --mix-pair 02)
+expect_failure("--mix-pair requires exactly one --mix-count 2" precodefail
+    --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
+    --mix-count 2,3 --mix-pair 12)
 expect_failure("precodefail mix count must be in" precodefail --N 64
     --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
     --mix-count 4)

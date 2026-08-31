@@ -31,6 +31,7 @@ constexpr uint32_t kColdSolveWideXorMinBlockBytes = 512u;
 thread_local uint32_t OddPacketPeelSeedXor = 0u;
 thread_local uint32_t PacketRowSeedMultiplier = 1u;
 thread_local bool PacketRowSeedAvalanche = false;
+thread_local uint32_t PacketMixPairMode = 0u;
 thread_local int ColdSolveWideXorTestMode = 0;
 thread_local uint64_t ColdSolveWideXorObservationCount = 0u;
 thread_local int LastColdSolveWideXorSelection = 0;
@@ -125,7 +126,8 @@ PacketRowEquationIdentity CurrentPacketRowEquationIdentity() noexcept
     PacketRowEquationIdentity identity;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     identity.BlockIdMultiplier = PacketRowSeedMultiplier;
-    identity.BlockIdAvalanche = PacketRowSeedAvalanche ? 1u : 0u;
+    identity.BlockIdAvalanche =
+        (PacketRowSeedAvalanche ? 1u : 0u) | (PacketMixPairMode << 1u);
     identity.OddPeelSeedXor = OddPacketPeelSeedXor;
 #endif
     return identity;
@@ -449,6 +451,53 @@ inline uint32_t PacketPeelSeedForBlockId(
     return config.PeelSeed;
 }
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+GF256_FORCE_INLINE uint32_t PacketMixColumnOrdinal(
+    uint32_t mix_count,
+    uint32_t ordinal)
+{
+    if (mix_count == 2u)
+    {
+        CAT_DEBUG_ASSERT(ordinal < 2u);
+        CAT_DEBUG_ASSERT(PacketMixPairMode < 3u);
+        if (PacketMixPairMode == 1u) {
+            return ordinal == 0u ? 0u : 2u;
+        }
+        if (PacketMixPairMode == 2u) {
+            return ordinal + 1u;
+        }
+    }
+    return ordinal;
+}
+
+GF256_FORCE_INLINE uint16_t PacketMixColumn(
+    const wirehair::RowMixIterator& mix,
+    uint32_t mix_count,
+    uint32_t ordinal)
+{
+    return mix.Columns[PacketMixColumnOrdinal(mix_count, ordinal)];
+}
+
+#define WH2_PACKET_MIX_COLUMN(mix, mix_count, ordinal) \
+    PacketMixColumn(mix, mix_count, ordinal)
+
+GF256_FORCE_INLINE bool IsActivePacketMixPairDomainValid(
+    uint32_t precode_count,
+    uint32_t mix_count)
+{
+    // With only two precode columns, RowMixIterator's third output wraps to
+    // its first: mode 02 would cancel a duplicate, while mode 12 collapses to
+    // the unordered default pair.  Reject both so a requested alternative
+    // never silently ceases to represent a distinct experimental arm.
+    if (mix_count == 2u && PacketMixPairMode != 0u && precode_count < 3u) {
+        return false;
+    }
+    return true;
+}
+#else
+#define WH2_PACKET_MIX_COLUMN(mix, mix_count, ordinal) mix.Columns[ordinal]
+#endif
+
 bool InitializePacketRowParameters(
     uint32_t source_count,
     uint32_t precode_count,
@@ -502,7 +551,8 @@ bool ForEachPacketMatrixColumn(
     const wirehair::RowMixIterator mix(
         params, (uint16_t)precode_count, runtime.PrecodePrime());
     for (uint32_t i = 0; i < config.MixCount; ++i) {
-        append(source_count + mix.Columns[i]);
+        append(source_count +
+            WH2_PACKET_MIX_COLUMN(mix, config.MixCount, i));
     }
     return true;
 }
@@ -2342,6 +2392,20 @@ void SetOddPacketPeelSeedXorForTesting(uint32_t seed_xor)
     OddPacketPeelSeedXor = seed_xor;
 }
 
+bool SetPacketMixPairModeForTesting(uint32_t mode)
+{
+    if (mode >= 3u) {
+        return false;
+    }
+    PacketMixPairMode = mode;
+    return true;
+}
+
+uint32_t PacketMixPairModeForTesting()
+{
+    return PacketMixPairMode;
+}
+
 void SetBinaryPeelOracleForTesting(bool enabled)
 {
     if (enabled) {
@@ -2883,7 +2947,11 @@ bool PacketRowRuntime::Initialize(
     uint32_t precode_count,
     uint32_t mix_count)
 {
-    if (!IsPacketRowDomainValid(source_count, precode_count, mix_count))
+    if (!IsPacketRowDomainValid(source_count, precode_count, mix_count)
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        || !IsActivePacketMixPairDomainValid(precode_count, mix_count)
+#endif
+        )
     {
         *this = PacketRowRuntime();
         return false;
@@ -2912,7 +2980,11 @@ bool PacketRowRuntime::IsValidFor(
 {
     return SourcePrimeValue != 0u && PrecodePrimeValue != 0u &&
         SourceCount == source_count && PrecodeCount == precode_count &&
-        MixCount == mix_count;
+        MixCount == mix_count
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        && IsActivePacketMixPairDomainValid(precode_count, mix_count)
+#endif
+        ;
 }
 
 std::vector<uint32_t> GeneratePacketMatrixRowWithRuntime(
@@ -3049,7 +3121,9 @@ static WH2_PACKET_NOINLINE void EvaluatePacketTailPaired(
             params, (uint16_t)precode_count, runtime.PrecodePrime());
         for (uint32_t i = 0u; i < config.MixCount; ++i) {
             consume(intermediate_blocks +
-                (size_t)(source_count + mix.Columns[i]) * block_bytes);
+                (size_t)(source_count +
+                    WH2_PACKET_MIX_COLUMN(mix, config.MixCount, i)) *
+                    block_bytes);
         }
     }
     if (pending) {
@@ -3090,7 +3164,9 @@ static WH2_PACKET_NOINLINE void EvaluatePacketSetXor(
             params, (uint16_t)precode_count, runtime.PrecodePrime());
         for (uint32_t i = 0u; i < config.MixCount; ++i) {
             sources[count++] = intermediate_blocks +
-                (size_t)(source_count + mix.Columns[i]) * block_bytes;
+                (size_t)(source_count +
+                    WH2_PACKET_MIX_COLUMN(mix, config.MixCount, i)) *
+                    block_bytes;
         }
     }
     gf256_addset_multi_mem(block_out, sources, (int)count, (int)block_bytes);
@@ -3281,9 +3357,15 @@ static bool EvaluatePacketBlockImpl(
             gf256_add2_mem(
                 block_out,
                 intermediate_blocks +
-                    (size_t)(K + mix.Columns[0]) * block_bytes,
+                    (size_t)(K +
+                        WH2_PACKET_MIX_COLUMN(
+                            mix, config.MixCount, 0u)) *
+                        block_bytes,
                 intermediate_blocks +
-                    (size_t)(K + mix.Columns[1]) * block_bytes,
+                    (size_t)(K +
+                        WH2_PACKET_MIX_COLUMN(
+                            mix, config.MixCount, 1u)) *
+                        block_bytes,
                 (int)block_bytes);
             operations += 2u;
         }
@@ -3293,13 +3375,19 @@ static bool EvaluatePacketBlockImpl(
                 block_out,
                 first_source,
                 intermediate_blocks +
-                    (size_t)(K + mix.Columns[0]) * block_bytes,
+                    (size_t)(K +
+                        WH2_PACKET_MIX_COLUMN(
+                            mix, config.MixCount, 0u)) *
+                        block_bytes,
                 (int)block_bytes);
             ++operations;
             gf256_add_mem(
                 block_out,
                 intermediate_blocks +
-                    (size_t)(K + mix.Columns[1]) * block_bytes,
+                    (size_t)(K +
+                        WH2_PACKET_MIX_COLUMN(
+                            mix, config.MixCount, 1u)) *
+                        block_bytes,
                 (int)block_bytes);
             ++operations;
         }

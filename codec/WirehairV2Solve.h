@@ -50,10 +50,11 @@ struct PacketRowConfig
     Process-local controls that participate in the packet equation mapping.
 
     Production builds always use the canonical {1, 0, 0} identity.  Test-hook
-    builds snapshot the calling thread's experimental block-id multiplier,
-    avalanche toggle, and odd-id peel-seed XOR.  Fixed-width integers keep the
-    checkpoint layout independent of the compiler's bool representation and
-    make the identity available even when test hooks are compiled out.
+    builds additionally snapshot the calling thread's experimental block-id
+    multiplier, avalanche toggle, odd-id peel-seed XOR, and fixed MIX2 iterator
+    pair.  The avalanche word's low bit is its toggle; test-hook builds use bits
+    one and two for the MIX2 pair mode.  Packing the test-only tag into an
+    existing word keeps this shared type's layout identical in every archive.
 */
 struct PacketRowEquationIdentity
 {
@@ -144,6 +145,14 @@ void SetPacketRowSeedAvalancheForTesting(bool enabled);
     production equation mapping.
 */
 void SetOddPacketPeelSeedXorForTesting(uint32_t seed_xor);
+
+/**
+    Select the two RowMixIterator outputs used by MIX2 packet rows in the
+    calling thread: mode zero selects {0,1}, one selects {0,2}, and two selects
+    {1,2}.  Other values are rejected without changing the active mode.
+*/
+bool SetPacketMixPairModeForTesting(uint32_t mode);
+uint32_t PacketMixPairModeForTesting();
 
 /**
     Enable exact comparisons among direct-key, legacy-rank, and row-scan
