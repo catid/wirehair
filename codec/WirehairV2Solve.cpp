@@ -421,22 +421,15 @@ private:
     size_t NextRow = 0u;
 };
 
-#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-GF256_FORCE_INLINE uint32_t Avalanche32(uint32_t value) noexcept
-{
-    value = (value ^ (value >> 16u)) * UINT32_C(0x7feb352d);
-    value = (value ^ (value >> 15u)) * UINT32_C(0x846ca68b);
-    return value ^ (value >> 16u);
-}
-#endif
-
 inline uint32_t PacketRowSeedForBlockId(uint32_t block_id)
 {
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     uint32_t seed = block_id * PacketRowSeedMultiplier;
     if (PacketRowSeedAvalanche)
     {
-        seed = Avalanche32(seed);
+        seed = (seed ^ (seed >> 16)) * UINT32_C(0x7feb352d);
+        seed = (seed ^ (seed >> 15)) * UINT32_C(0x846ca68b);
+        seed ^= seed >> 16;
     }
     return seed;
 #else
@@ -459,33 +452,18 @@ inline uint32_t PacketPeelSeedForBlockId(
 }
 
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-GF256_FORCE_INLINE uint32_t PacketMixPairModeForRow(
-    uint32_t block_id,
-    const PacketRowConfig& config) noexcept
-{
-    CAT_DEBUG_ASSERT(PacketMixPairMode < 4u);
-    if (PacketMixPairMode != 3u) {
-        return PacketMixPairMode;
-    }
-    const uint32_t mixed = Avalanche32(
-        block_id ^ config.PeelSeed ^ UINT32_C(0x4d495832));
-    return (uint32_t)(
-        (uint64_t)mixed * UINT64_C(3) >> 32u);
-}
-
 GF256_FORCE_INLINE uint32_t PacketMixColumnOrdinal(
     uint32_t mix_count,
-    uint32_t pair_mode,
     uint32_t ordinal)
 {
     if (mix_count == 2u)
     {
         CAT_DEBUG_ASSERT(ordinal < 2u);
-        CAT_DEBUG_ASSERT(pair_mode < 3u);
-        if (pair_mode == 1u) {
+        CAT_DEBUG_ASSERT(PacketMixPairMode < 3u);
+        if (PacketMixPairMode == 1u) {
             return ordinal == 0u ? 0u : 2u;
         }
-        if (pair_mode == 2u) {
+        if (PacketMixPairMode == 2u) {
             return ordinal + 1u;
         }
     }
@@ -495,20 +473,13 @@ GF256_FORCE_INLINE uint32_t PacketMixColumnOrdinal(
 GF256_FORCE_INLINE uint16_t PacketMixColumn(
     const wirehair::RowMixIterator& mix,
     uint32_t mix_count,
-    uint32_t pair_mode,
     uint32_t ordinal)
 {
-    return mix.Columns[
-        PacketMixColumnOrdinal(mix_count, pair_mode, ordinal)];
+    return mix.Columns[PacketMixColumnOrdinal(mix_count, ordinal)];
 }
 
-#define WH2_PACKET_MIX_PAIR_CONTEXT(name, block_id, config) \
-    const uint32_t name = (config).MixCount == 2u ? \
-        PacketMixPairModeForRow(block_id, config) : 0u
-#define WH2_PACKET_MIX_PAIR_PARAMETER(name) , uint32_t name
-#define WH2_PACKET_MIX_PAIR_ARGUMENT(name) , name
-#define WH2_PACKET_MIX_COLUMN(mix, mix_count, pair_mode, ordinal) \
-    PacketMixColumn(mix, mix_count, pair_mode, ordinal)
+#define WH2_PACKET_MIX_COLUMN(mix, mix_count, ordinal) \
+    PacketMixColumn(mix, mix_count, ordinal)
 
 GF256_FORCE_INLINE bool IsActivePacketMixPairDomainValid(
     uint32_t precode_count,
@@ -524,11 +495,7 @@ GF256_FORCE_INLINE bool IsActivePacketMixPairDomainValid(
     return true;
 }
 #else
-#define WH2_PACKET_MIX_PAIR_CONTEXT(name, block_id, config)
-#define WH2_PACKET_MIX_PAIR_PARAMETER(name)
-#define WH2_PACKET_MIX_PAIR_ARGUMENT(name)
-#define WH2_PACKET_MIX_COLUMN(mix, mix_count, pair_mode, ordinal) \
-    mix.Columns[ordinal]
+#define WH2_PACKET_MIX_COLUMN(mix, mix_count, ordinal) mix.Columns[ordinal]
 #endif
 
 bool InitializePacketRowParameters(
@@ -568,8 +535,6 @@ bool ForEachPacketMatrixColumn(
     {
         return false;
     }
-    WH2_PACKET_MIX_PAIR_CONTEXT(
-        packet_mix_pair_mode, block_id, config);
     prepare((size_t)params.PeelCount + config.MixCount);
     wirehair::PeelRowIterator source(
         params, (uint16_t)source_count, runtime.SourcePrime());
@@ -587,8 +552,7 @@ bool ForEachPacketMatrixColumn(
         params, (uint16_t)precode_count, runtime.PrecodePrime());
     for (uint32_t i = 0; i < config.MixCount; ++i) {
         append(source_count +
-            WH2_PACKET_MIX_COLUMN(
-                mix, config.MixCount, packet_mix_pair_mode, i));
+            WH2_PACKET_MIX_COLUMN(mix, config.MixCount, i));
     }
     return true;
 }
@@ -2430,7 +2394,7 @@ void SetOddPacketPeelSeedXorForTesting(uint32_t seed_xor)
 
 bool SetPacketMixPairModeForTesting(uint32_t mode)
 {
-    if (mode >= 4u) {
+    if (mode >= 3u) {
         return false;
     }
     PacketMixPairMode = mode;
@@ -2440,13 +2404,6 @@ bool SetPacketMixPairModeForTesting(uint32_t mode)
 uint32_t PacketMixPairModeForTesting()
 {
     return PacketMixPairMode;
-}
-
-uint32_t PacketMixPairModeForRowForTesting(
-    uint32_t block_id,
-    const PacketRowConfig& config)
-{
-    return PacketMixPairModeForRow(block_id, config);
 }
 
 void SetBinaryPeelOracleForTesting(bool enabled)
@@ -3125,8 +3082,7 @@ static WH2_PACKET_NOINLINE void EvaluatePacketTailPaired(
     const PacketRowRuntime& runtime,
     const uint8_t* intermediate_blocks,
     uint32_t block_bytes,
-    uint8_t* block_out
-    WH2_PACKET_MIX_PAIR_PARAMETER(packet_mix_pair_mode))
+    uint8_t* block_out)
 {
     wirehair::PeelRowIterator source(
         params, (uint16_t)source_count, runtime.SourcePrime());
@@ -3166,9 +3122,7 @@ static WH2_PACKET_NOINLINE void EvaluatePacketTailPaired(
         for (uint32_t i = 0u; i < config.MixCount; ++i) {
             consume(intermediate_blocks +
                 (size_t)(source_count +
-                    WH2_PACKET_MIX_COLUMN(
-                        mix, config.MixCount,
-                        packet_mix_pair_mode, i)) *
+                    WH2_PACKET_MIX_COLUMN(mix, config.MixCount, i)) *
                     block_bytes);
         }
     }
@@ -3188,8 +3142,7 @@ static WH2_PACKET_NOINLINE void EvaluatePacketSetXor(
     const PacketRowRuntime& runtime,
     const uint8_t* intermediate_blocks,
     uint32_t block_bytes,
-    uint8_t* block_out
-    WH2_PACKET_MIX_PAIR_PARAMETER(packet_mix_pair_mode))
+    uint8_t* block_out)
 {
     wirehair::PeelRowIterator source(
         params, (uint16_t)source_count, runtime.SourcePrime());
@@ -3212,9 +3165,7 @@ static WH2_PACKET_NOINLINE void EvaluatePacketSetXor(
         for (uint32_t i = 0u; i < config.MixCount; ++i) {
             sources[count++] = intermediate_blocks +
                 (size_t)(source_count +
-                    WH2_PACKET_MIX_COLUMN(
-                        mix, config.MixCount,
-                        packet_mix_pair_mode, i)) *
+                    WH2_PACKET_MIX_COLUMN(mix, config.MixCount, i)) *
                     block_bytes;
         }
     }
@@ -3294,8 +3245,6 @@ static bool EvaluatePacketBlockImpl(
         PacketPeelSeedForBlockId(block_id, config),
         (uint16_t)K,
         (uint16_t)P);
-    WH2_PACKET_MIX_PAIR_CONTEXT(
-        packet_mix_pair_mode, block_id, config);
     uint64_t operations = 1u;
     // The existing schedules are already optimal until the row contains six
     // total terms.  Above that crossover, pairing the complete tail removes
@@ -3310,14 +3259,12 @@ static bool EvaluatePacketBlockImpl(
         {
             EvaluatePacketSetXor(
                 params, K, P, config, runtime, intermediate_blocks,
-                block_bytes, block_out
-                WH2_PACKET_MIX_PAIR_ARGUMENT(packet_mix_pair_mode));
+                block_bytes, block_out);
         }
         else {
             EvaluatePacketTailPaired(
                 params, K, P, config, runtime, intermediate_blocks,
-                block_bytes, block_out
-                WH2_PACKET_MIX_PAIR_ARGUMENT(packet_mix_pair_mode));
+                block_bytes, block_out);
         }
         if (block_ops_out) {
             *block_ops_out = packet_terms;
@@ -3412,14 +3359,12 @@ static bool EvaluatePacketBlockImpl(
                 intermediate_blocks +
                     (size_t)(K +
                         WH2_PACKET_MIX_COLUMN(
-                            mix, config.MixCount,
-                            packet_mix_pair_mode, 0u)) *
+                            mix, config.MixCount, 0u)) *
                         block_bytes,
                 intermediate_blocks +
                     (size_t)(K +
                         WH2_PACKET_MIX_COLUMN(
-                            mix, config.MixCount,
-                            packet_mix_pair_mode, 1u)) *
+                            mix, config.MixCount, 1u)) *
                         block_bytes,
                 (int)block_bytes);
             operations += 2u;
@@ -3432,8 +3377,7 @@ static bool EvaluatePacketBlockImpl(
                 intermediate_blocks +
                     (size_t)(K +
                         WH2_PACKET_MIX_COLUMN(
-                            mix, config.MixCount,
-                            packet_mix_pair_mode, 0u)) *
+                            mix, config.MixCount, 0u)) *
                         block_bytes,
                 (int)block_bytes);
             ++operations;
@@ -3442,8 +3386,7 @@ static bool EvaluatePacketBlockImpl(
                 intermediate_blocks +
                     (size_t)(K +
                         WH2_PACKET_MIX_COLUMN(
-                            mix, config.MixCount,
-                            packet_mix_pair_mode, 1u)) *
+                            mix, config.MixCount, 1u)) *
                         block_bytes,
                 (int)block_bytes);
             ++operations;

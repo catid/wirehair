@@ -149,15 +149,10 @@ void SetOddPacketPeelSeedXorForTesting(uint32_t seed_xor);
 /**
     Select the two RowMixIterator outputs used by MIX2 packet rows in the
     calling thread: mode zero selects {0,1}, one selects {0,2}, and two selects
-    {1,2}.  Mode three selects one of those pairs per row from a domain-
-    separated avalanche of the packet id and PacketRowConfig::PeelSeed.
-    Other values are rejected without changing the active mode.
+    {1,2}.  Other values are rejected without changing the active mode.
 */
 bool SetPacketMixPairModeForTesting(uint32_t mode);
 uint32_t PacketMixPairModeForTesting();
-uint32_t PacketMixPairModeForRowForTesting(
-    uint32_t block_id,
-    const PacketRowConfig& config);
 
 /**
     Enable exact comparisons among direct-key, legacy-rank, and row-scan
