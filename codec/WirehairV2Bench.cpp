@@ -27,6 +27,11 @@
 #include <utility>
 #include <vector>
 
+#if defined(_WIN32)
+#include <fcntl.h>
+#include <io.h>
+#endif
+
 #if defined(__unix__) || defined(__APPLE__)
 #include <sys/resource.h>
 #endif
@@ -4510,10 +4515,35 @@ int CmdSelfTest()
     return 0;
 }
 
+int CmdDescribe()
+{
+#if defined(_WIN32)
+    if (_setmode(_fileno(stdout), _O_BINARY) == -1) {
+        std::fprintf(stderr, "--describe cannot make stdout binary\n");
+        return 2;
+    }
+#endif
+    std::printf(
+        "{\"schema\":\"wirehair.wh2.v2-bench-description.v1\","
+        "\"source_git_commit\":\"%s\"}\n",
+        WIREHAIR_V2_STRINGIFY(WIREHAIR_V2_BENCH_SOURCE_GIT_COMMIT));
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv)
 {
+    // This identity probe must remain metadata-only: campaign controllers use
+    // it before initialization, worker derivation, or any holdout-root solve.
+    if (argc >= 2 && !std::strcmp(argv[1], "--describe")) {
+        if (argc != 2) {
+            std::fprintf(stderr, "--describe takes no options\n");
+            return 1;
+        }
+        return CmdDescribe();
+    }
+
     if (wirehair_init() != Wirehair_Success) {
         std::fprintf(stderr, "wirehair_init failed\n");
         return 2;
@@ -4521,7 +4551,7 @@ int main(int argc, char** argv)
 
     if (argc < 2) {
         std::fprintf(stderr,
-            "usage: wirehair_v2_bench compare|precodecheck|seedtable|"
+            "usage: wirehair_v2_bench --describe|compare|precodecheck|seedtable|"
             "peelcost|densecheck|densetune|densecount|densegrid|precodefail|"
             "selftest [opts]\n");
         return 1;

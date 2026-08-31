@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bounded v7 native-worker/controller compatibility test at K=2."""
+"""Bounded v8 native-worker/controller compatibility test at K=2."""
 
 from __future__ import annotations
 

@@ -300,6 +300,7 @@ if(BUILD_TESTS AND WIREHAIR_BUILD_BENCHMARKS)
         NAME wirehair_v2_bench_cli_test
         COMMAND ${CMAKE_COMMAND}
             -DBENCH=$<TARGET_FILE:wirehair_v2_bench>
+            -DEXPECTED_SOURCE_COMMIT=${WIREHAIR_WH2_SOURCE_GIT_COMMIT}
             -DSKIP_CONSTRAINED=${_wirehair_v2_sanitized}
             -P ${CMAKE_CURRENT_SOURCE_DIR}/V2BenchCliTest.cmake)
     set_tests_properties(wirehair_v2_bench_cli_test PROPERTIES TIMEOUT 120)

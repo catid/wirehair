@@ -44,11 +44,11 @@ static const char kDerivationSchema[] =
 static const char kValidationSchema[] =
     "wirehair.wh2.mix2-seed-repair-validation-record.v3";
 static const char kContractSchema[] =
-    "wirehair.wh2.mix2-seed-repair-contract.v7";
+    "wirehair.wh2.mix2-seed-repair-contract.v8";
 static const char kValidationRosterSchema[] =
     "wirehair.wh2.mix2-seed-repair-validation-roster.v1";
 static const char kValidationRosterSha256[] =
-    "030bb1c51e21777266edd4c2349d4a81ccf6e79e2fe4ed9eb75856e16f3387c7";
+    "f2f495663f9c29f5b37e55f37e5d299270c75d2cf7d30ceffd6692e7c010d1d3";
 static const char kProfileSchema[] =
     "wirehair.wh2.mix2-production-profile.v1";
 static const char kCandidateArm[] =
@@ -88,10 +88,10 @@ static const uint64_t kSelectionRoots[kSelectionRootCount] = {
     UINT64_C(0x9216d5d98979fb1b)
 };
 static const uint64_t kValidationRoots[kValidationRootCount] = {
-    // Fresh v7 all-K holdout.  Ordinary worker tests must not execute V.
-    UINT64_C(0xb501025fdce63900),
-    UINT64_C(0x7fb960494dece7de),
-    UINT64_C(0x6ad0017d0069e483)
+    // Fresh v8 all-K holdout.  Ordinary worker tests must not execute V.
+    UINT64_C(0xcaaf509f857ba891),
+    UINT64_C(0x63d1496709b6a34d),
+    UINT64_C(0xede354579ef6042a)
 };
 static const FrozenSchedule kSchedules[kScheduleCount] = {
     FrozenSchedule::Burst,

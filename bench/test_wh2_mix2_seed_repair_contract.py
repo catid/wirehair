@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Focused pure tests for the isolated Two07/mix2 v7 repair contract."""
+"""Focused pure tests for the isolated Two07/mix2 v8 repair contract."""
 
 from __future__ import annotations
 
@@ -115,7 +115,7 @@ class ContractIdentityTests(unittest.TestCase):
     def setUp(self):
         self.contract = subject.load_contract()
 
-    def test_closed_v7_identity_and_cardinality(self):
+    def test_closed_v8_identity_and_cardinality(self):
         self.assertEqual(self.contract["schema"], subject.CONTRACT_SCHEMA)
         self.assertEqual(subject.MAP_BYTES, 63999)
         self.assertEqual(
@@ -147,7 +147,7 @@ class ContractIdentityTests(unittest.TestCase):
         self.assertEqual(subject.SELECTION_CELL_COUNT, 18)
         self.assertEqual(subject.VALIDATION_CELL_COUNT, 9)
 
-    def test_v7_final_roots_recompute_from_full_frozen_digests(self):
+    def test_v8_final_roots_recompute_from_full_frozen_digests(self):
         derived = []
         for index, expected in enumerate(subject.VALIDATION_ROOT_FULL_SHA256):
             digest = hashlib.sha256(
@@ -158,7 +158,7 @@ class ContractIdentityTests(unittest.TestCase):
         self.assertEqual(tuple(derived), subject.VALIDATION_ROOTS)
         self.assertEqual(
             subject.VALIDATION_ROOT_NAMESPACE,
-            "wirehair2-two07-mix2-graph-b2-all-k-v7:holdout-root:")
+            "wirehair2-two07-mix2-graph-b2-all-k-v8:holdout-root:")
         self.assertEqual(len(set(subject.SELECTION_ROOTS)), 6)
         self.assertEqual(len(set(subject.VALIDATION_ROOTS)), 3)
         self.assertTrue(
@@ -250,12 +250,13 @@ class ContractIdentityTests(unittest.TestCase):
                     subject._validate_worker_description_identity(
                         broken, worker_sha256, source_commit, self.contract)
 
-    def test_v5_contract_and_artifact_schemas_fail_closed(self):
-        v5 = Path(subject.__file__).with_name(
-            "wh2_mix2_seed_repair_contract_v5.json")
-        with self.assertRaises(subject.ContractError):
-            subject.load_contract(v5)
-        self.assertTrue(subject.CONTRACT_SCHEMA.endswith(".v7"))
+    def test_retired_contracts_and_artifact_schemas_fail_closed(self):
+        for name in ("wh2_mix2_seed_repair_contract_v5.json",
+                     "wh2_mix2_seed_repair_contract_v7.json"):
+            with self.subTest(name=name), self.assertRaises(
+                    subject.ContractError):
+                subject.load_contract(Path(subject.__file__).with_name(name))
+        self.assertTrue(subject.CONTRACT_SCHEMA.endswith(".v8"))
         for schema in (
                 subject.DESCRIPTION_SCHEMA, subject.WORKER_SCHEMA,
                 subject.DERIVATION_RECORD_SCHEMA,
@@ -269,7 +270,7 @@ class ContractIdentityTests(unittest.TestCase):
                 subject.SEMANTIC_REPLAY_SCHEMA):
             self.assertTrue(schema.endswith(".v2"))
 
-    def test_short_screen_contract_is_the_frozen_v7_prerequisite(self):
+    def test_short_screen_contract_is_the_frozen_v8_prerequisite(self):
         screen = short_subject.contract_description()
         self.assertEqual(
             screen["contract_sha256"], subject.SHORT_SCREEN_CONTRACT_SHA256)

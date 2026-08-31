@@ -1,6 +1,12 @@
 if(NOT DEFINED BENCH)
     message(FATAL_ERROR "BENCH is required")
 endif()
+string(LENGTH "${EXPECTED_SOURCE_COMMIT}" expected_source_commit_length)
+if(NOT DEFINED EXPECTED_SOURCE_COMMIT OR
+   NOT expected_source_commit_length EQUAL 40 OR
+   NOT EXPECTED_SOURCE_COMMIT MATCHES "^[0-9a-f]+$")
+    message(FATAL_ERROR "EXPECTED_SOURCE_COMMIT must be a lowercase commit")
+endif()
 
 function(run_bench result_var out_var err_var)
     execute_process(
@@ -97,6 +103,19 @@ function(expect_precodefail_attempt_csv expected_seed expected_precode
     reject_sanitizer("${out}${err}" "attempt CSV: ${ARGN}")
     cmake_policy(POP)
 endfunction()
+
+run_bench(describe_result describe_out describe_err --describe)
+set(expected_description
+    "{\"schema\":\"wirehair.wh2.v2-bench-description.v1\",\"source_git_commit\":\"${EXPECTED_SOURCE_COMMIT}\"}\n")
+if(NOT describe_result MATCHES "^-?[0-9]+$" OR
+   NOT describe_result EQUAL 0 OR
+   NOT "${describe_out}" STREQUAL "${expected_description}" OR
+   NOT "${describe_err}" STREQUAL "")
+    message(FATAL_ERROR
+        "benchmark description differs from its exact identity\n"
+        "result=${describe_result}\nstdout=${describe_out}\nstderr=${describe_err}")
+endif()
+expect_failure("takes no options" --describe extra)
 
 # Trial count boundaries, including the old uint16 narrowing boundary.
 expect_failure("trials must be" seedtable --N 2 --bb-list 1

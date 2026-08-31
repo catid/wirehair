@@ -89,6 +89,13 @@ def worker_description() -> dict:
     }
 
 
+def bench_description() -> dict:
+    return {
+        "schema": subject.BENCH_DESCRIPTION_SCHEMA,
+        "source_git_commit": SOURCE_COMMIT,
+    }
+
+
 def metadata(invocation: subject.Invocation) -> str:
     candidate = invocation.arm == "candidate_two07_mix2"
     values = {
@@ -273,9 +280,9 @@ class ContractTests(unittest.TestCase):
             "0x9216d5d98979fb1b",
         )
         expected_roots = (
-            "0x22ef7f82b3d08e8d",
-            "0x9e5241defc95255c",
-            "0xdd0a4e8205da8ed0",
+            "0xb889883a79549774",
+            "0xb5666de0987896af",
+            "0x8bfca269b0bc01e0",
         )
         self.assertEqual(subject.K_VALUES, expected_K)
         self.assertEqual(subject.ROOTS, expected_roots)
@@ -297,6 +304,7 @@ class ContractTests(unittest.TestCase):
         frozen_root_sets = (
             set(subject.SELECTION_ROOTS), set(subject.ROOTS),
             set(subject.DISCARDED_V6_ROOTS),
+            set(subject.RETIRED_V7_ROOTS),
             set(subject.FINAL_VALIDATION_ROOTS),
         )
         for left in range(len(frozen_root_sets)):
@@ -333,7 +341,7 @@ class ContractTests(unittest.TestCase):
                 "dense_anchor_layout": "two07",
                 "mix_count": 2,
                 "construction_attempt":
-                    "exact v7 18-cell-selected uint8 attempt indexed by K",
+                    "exact v8 18-cell-selected uint8 attempt indexed by K",
             })
         self.assertEqual(
             contract["complexity"], {
@@ -351,6 +359,14 @@ class ContractTests(unittest.TestCase):
         self.assertIn("no packet IDs or trace hash",
                       semantics["benchmark_loss_trace"])
         self.assertIn("not invoked", semantics["final_validation_holdout"])
+        self.assertEqual(semantics["benchmark_identity_preflight"], {
+            "command": "--describe",
+            "schema": subject.BENCH_DESCRIPTION_SCHEMA,
+            "rule":
+                "the pinned benchmark must report the exact frozen source "
+                "commit before worker description, any D command, or any "
+                "holdout-root invocation",
+        })
         self.assertEqual(contract["timing_protocol"]["orders"],
                          ["ABBA", "BAAB"])
         self.assertFalse(
@@ -359,6 +375,7 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(root_derivation["full_sha256"],
                          list(subject.BENCHMARK_ROOT_FULL_SHA256))
         self.assertTrue(root_derivation["discarded_v6_roots_excluded"])
+        self.assertTrue(root_derivation["retired_v7_roots_excluded"])
 
     def test_candidate_profile_and_description_are_exact(self) -> None:
         expected = hashlib.sha256(subject.canonical_json(
@@ -455,6 +472,88 @@ class ExecutablePinningTests(unittest.TestCase):
             self.assertEqual(pinned.descriptor, -1)
             with self.assertRaises(OSError):
                 os.fstat(original_fd)
+
+
+class BenchDescriptionTests(unittest.TestCase):
+    def test_exact_canonical_description_uses_pinned_descriptor(self) -> None:
+        stream = (subject.canonical_json(bench_description()) + "\n").encode(
+            "ascii")
+        with mock.patch.object(
+                subject, "_run_process", return_value=(stream, b"")) as run:
+            actual = subject.read_bench_description(
+                Path("bench"), SOURCE_COMMIT, 17)
+        self.assertEqual(actual, bench_description())
+        self.assertEqual(run.call_args.args[0], ["bench", "--describe"])
+        self.assertEqual(run.call_args.args[-1], 17)
+
+    def test_description_rejects_identity_and_framing_drift(self) -> None:
+        wrong_commit = bench_description()
+        wrong_commit["source_git_commit"] = "2" * 40
+        wrong_schema = bench_description()
+        wrong_schema["schema"] = "wirehair.wh2.v2-bench-description.v0"
+        extra = bench_description()
+        extra["extra"] = 1
+        valid = subject.canonical_json(bench_description()).encode("ascii")
+        cases = (
+            (subject.canonical_json(wrong_commit).encode("ascii") + b"\n",
+             b""),
+            (subject.canonical_json(wrong_schema).encode("ascii") + b"\n",
+             b""),
+            (subject.canonical_json(extra).encode("ascii") + b"\n", b""),
+            (b'{"source_git_commit":"' + SOURCE_COMMIT.encode("ascii") +
+             b'"}\n', b""),
+            (b'{ "schema": "wirehair.wh2.v2-bench-description.v1", '
+             b'"source_git_commit": "' + SOURCE_COMMIT.encode("ascii") +
+             b'" }\n', b""),
+            (valid, b""),
+            (valid + b"\r\n", b""),
+            (valid + b"\n" + valid + b"\n", b""),
+            (valid + b"\n", b"unexpected"),
+        )
+        for stdout, stderr in cases:
+            with self.subTest(stdout=stdout, stderr=stderr), \
+                    mock.patch.object(
+                        subject, "_run_process",
+                        return_value=(stdout, stderr)), \
+                    self.assertRaises(subject.ShortScreenError):
+                subject.read_bench_description(
+                    Path("bench"), SOURCE_COMMIT, 17)
+
+    def test_stale_benchmark_stops_before_worker_or_holdout_work(self) -> None:
+        pinned_bench = mock.Mock()
+        pinned_bench.path = Path("/unused/bench")
+        pinned_bench.descriptor = 11
+        pinned_bench.receipt.return_value = {
+            "path": "/unused/bench", "sha256": BENCH_SHA, "size": 1,
+        }
+        pinned_worker = mock.Mock()
+        pinned_worker.path = Path("/unused/worker")
+        pinned_worker.descriptor = 12
+        pinned_worker.receipt.return_value = {
+            "path": "/unused/worker", "sha256": WORKER_SHA, "size": 1,
+        }
+        source = {
+            "source_git_commit": SOURCE_COMMIT,
+            "source_receipt_sha256": SOURCE_SHA,
+        }
+        with mock.patch.object(subject, "_source_receipt",
+                               return_value=source), \
+                mock.patch.object(
+                    subject, "read_bench_description",
+                    side_effect=subject.ShortScreenError("stale")) as preflight, \
+                mock.patch.object(
+                    subject, "read_worker_description") as worker_description_call, \
+                mock.patch.object(subject, "derive_attempts") as derive, \
+                mock.patch.object(subject, "run_bench_cell") as bench_cell, \
+                self.assertRaisesRegex(subject.ShortScreenError, "stale"):
+            subject._run_screen_pinned(
+                pinned_bench, pinned_worker, Path("/unused/output"),
+                Path("/unused"), 0.0)
+        preflight.assert_called_once_with(
+            Path("/unused/bench"), SOURCE_COMMIT, 11)
+        worker_description_call.assert_not_called()
+        derive.assert_not_called()
+        bench_cell.assert_not_called()
 
 
 class WorkerProtocolTests(unittest.TestCase):

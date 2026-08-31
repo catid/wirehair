@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Run the frozen v7 production-basis MIX2 bounded promotion screen.
+"""Run the frozen v8 production-basis MIX2 bounded promotion screen.
 
 This is deliberately a short screen, not the all-K recovery census and not
-the final Wirehair1 timing gate.  The v7 repair worker first selects one uint8
+the final Wirehair1 timing gate.  The v8 repair worker first selects one uint8
 construction attempt per preregistered K on the 18 frozen selection cells.
 The ``precodefail`` test hook then byte-verifies overhead-zero recovery and
 measures deterministic work on three fresh roots.  Each benchmark coordinate
@@ -53,9 +53,10 @@ WORKER_DERIVATION_SCHEMA = \
     "wirehair.wh2.mix2-seed-repair-derivation-record.v3"
 WORKER_VALIDATION_SCHEMA = \
     "wirehair.wh2.mix2-seed-repair-validation-record.v3"
-WORKER_CONTRACT_SCHEMA = "wirehair.wh2.mix2-seed-repair-contract.v7"
+WORKER_CONTRACT_SCHEMA = "wirehair.wh2.mix2-seed-repair-contract.v8"
 WORKER_SCHEMA = "wirehair.wh2.mix2-seed-repair-worker.v3"
 CANDIDATE_PROFILE_SCHEMA = "wirehair.wh2.mix2-production-profile.v1"
+BENCH_DESCRIPTION_SCHEMA = "wirehair.wh2.v2-bench-description.v1"
 
 RESULT_NAME = "promotion-short-screen-results.jsonl"
 SUMMARY_NAME = "promotion-short-screen-summary.json"
@@ -76,32 +77,40 @@ SELECTION_ROOTS = (
     "0x9216d5d98979fb1b",
 )
 ROOTS = (
-    "0x22ef7f82b3d08e8d",
-    "0x9e5241defc95255c",
-    "0xdd0a4e8205da8ed0",
+    "0xb889883a79549774",
+    "0xb5666de0987896af",
+    "0x8bfca269b0bc01e0",
 )
 BENCHMARK_ROOT_NAMESPACE_TEMPLATE = \
-    "wirehair2-two07-mix2-graph-b2-short-v7:holdout-root:{i}"
+    "wirehair2-two07-mix2-graph-b2-short-v8:holdout-root:{i}"
 BENCHMARK_ROOT_FULL_SHA256 = (
-    "22ef7f82b3d08e8da867549574a58821f6992e1ec57f6aa8b1015a65b0b1eb6f",
-    "9e5241defc95255cc27fcabfa4485097fd25e4f7f44e47daaa1d2b80a21d51f7",
-    "dd0a4e8205da8ed04035547611843b364b52d969c7b00bf87b87230cb8c98695",
+    "b889883a795497742dc9b1caa1fa8e4d9897a366c83071bdc1c593c0c6b5ffe1",
+    "b5666de0987896af7a273820d353b17e3597ca1afaacbc172e58bd243f063bf0",
+    "8bfca269b0bc01e0766dddafb5f13e4fa88cc8f51cd3bcfcbe20699ba9b3a26a",
 )
 DISCARDED_V6_ROOTS = (
     "0x343c26b8a0a06468",
     "0x5b6e50735153e7db",
     "0x738c94f4e3310746",
 )
-FINAL_VALIDATION_ROOTS = (
+RETIRED_V7_ROOTS = (
+    "0x22ef7f82b3d08e8d",
+    "0x9e5241defc95255c",
+    "0xdd0a4e8205da8ed0",
     "0xb501025fdce63900",
     "0x7fb960494dece7de",
     "0x6ad0017d0069e483",
+)
+FINAL_VALIDATION_ROOTS = (
+    "0xcaaf509f857ba891",
+    "0x63d1496709b6a34d",
+    "0xede354579ef6042a",
 )
 SCHEDULES = ("burst", "adversarial", "repair-only")
 VALIDATION_ROSTER_SCHEMA = \
     "wirehair.wh2.mix2-seed-repair-validation-roster.v1"
 VALIDATION_ROSTER_SHA256 = \
-    "030bb1c51e21777266edd4c2349d4a81ccf6e79e2fe4ed9eb75856e16f3387c7"
+    "f2f495663f9c29f5b37e55f37e5d299270c75d2cf7d30ceffd6692e7c010d1d3"
 ARMS = ("current_disabled_mix3", "candidate_two07_mix2")
 TIMING_ORDERS = ("ABBA", "BAAB")
 OBSERVATIONS_PER_ARM = 2
@@ -136,7 +145,7 @@ EXPECTED_CANDIDATE_PROFILE_SHA256 = (
 # changes.  Keeping the digest literal prevents a silent roster/gate edit from
 # merely blessing itself with a newly computed hash.
 EXPECTED_CONTRACT_SHA256 = (
-    "574bef7638a51e34c48b118613833df554e3276ae0cea952db787ed0d301af8e"
+    "023e8d18f692855766ad0d5fda3a8ece453da30c9eb455e14eab80a110b1d6ad"
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -233,6 +242,9 @@ DESCRIPTION_FIELDS = frozenset((
     "contract_schema", "derivation_schema", "protocol", "schema",
     "source_git_commit", "validation_roster_schema",
     "validation_roster_sha256", "validation_schema", "worker_schema",
+))
+BENCH_DESCRIPTION_FIELDS = frozenset((
+    "schema", "source_git_commit",
 ))
 
 CSV_HEADER = (
@@ -549,25 +561,25 @@ def _validate_benchmark_root_derivation() -> None:
                 index))
     root_sets = (
         set(ROOTS), set(SELECTION_ROOTS), set(DISCARDED_V6_ROOTS),
-        set(FINAL_VALIDATION_ROOTS),
+        set(RETIRED_V7_ROOTS), set(FINAL_VALIDATION_ROOTS),
     )
     if any(len(values) != len(tuple_values) for values, tuple_values in zip(
             root_sets,
             (ROOTS, SELECTION_ROOTS, DISCARDED_V6_ROOTS,
-             FINAL_VALIDATION_ROOTS))):
+             RETIRED_V7_ROOTS, FINAL_VALIDATION_ROOTS))):
         fail("a frozen root roster contains duplicates")
     for left in range(len(root_sets)):
         for right in range(left + 1, len(root_sets)):
             if root_sets[left] & root_sets[right]:
-                fail("frozen selection, short-screen, discarded-v6, and "
-                     "final-validation roots are not pairwise disjoint")
+                fail("frozen selection, short-screen, retired, and final-"
+                     "validation roots are not pairwise disjoint")
 
 
 def _contract_body() -> Mapping[str, Any]:
     _validate_benchmark_root_derivation()
     return {
         "schema": SCREEN_SCHEMA,
-        "preregistration": "wirehair-sxvz.16.1.20.38@2026-08-30T22:23Z",
+        "preregistration": "wirehair-sxvz.16.1.20.38@2026-08-30T23:41Z",
         "K": list(K_VALUES),
         "block_bytes": BLOCK_BYTES,
         "loss_ppm": LOSS_PPM,
@@ -587,6 +599,8 @@ def _contract_body() -> Mapping[str, Any]:
             "disjoint_from_final_validation_roots": True,
             "discarded_v6_roots": list(DISCARDED_V6_ROOTS),
             "discarded_v6_roots_excluded": True,
+            "retired_v7_roots": list(RETIRED_V7_ROOTS),
+            "retired_v7_roots_excluded": True,
         },
         "schedules": list(SCHEDULES),
         "arms": list(ARMS),
@@ -603,7 +617,7 @@ def _contract_body() -> Mapping[str, Any]:
                 "dense_anchor_layout": "two07",
                 "mix_count": 2,
                 "construction_attempt":
-                    "exact v7 18-cell-selected uint8 attempt indexed by K",
+                    "exact v8 18-cell-selected uint8 attempt indexed by K",
             },
         },
         "candidate_profile": dict(CANDIDATE_PROFILE),
@@ -631,9 +645,17 @@ def _contract_body() -> Mapping[str, Any]:
             "benchmark solve byte-verifies overhead-zero recovery",
         "evidence_semantics": {
             "attempt_selection_provenance":
-                "the v7 worker's 18 selection-cell receipts are selection "
+                "the v8 worker's 18 selection-cell receipts are selection "
                 "provenance only and contribute no promotion recovery or "
                 "work evidence",
+            "benchmark_identity_preflight": {
+                "command": "--describe",
+                "schema": BENCH_DESCRIPTION_SCHEMA,
+                "rule":
+                    "the pinned benchmark must report the exact frozen "
+                    "source commit before worker description, any D command, "
+                    "or any holdout-root invocation",
+            },
             "benchmark_loss_trace":
                 "precodefail emits no packet IDs or trace hash; benchmark "
                 "arms are paired by identical fresh requested coordinates, "
@@ -691,6 +713,42 @@ def contract_description() -> Mapping[str, Any]:
     return value
 
 
+def read_bench_description(
+        bench: Path, source_commit: str,
+        executable_fd: Optional[int] = None) -> Mapping[str, Any]:
+    stdout, stderr = _run_process(
+        [str(bench), "--describe"], None, BENCH_TIMEOUT_SECONDS,
+        MAX_DESCRIPTION_BYTES, "benchmark description", executable_fd)
+    if stderr:
+        fail("benchmark description wrote stderr")
+    try:
+        text = stdout.decode("utf-8")
+    except UnicodeDecodeError:
+        fail("benchmark description is not UTF-8")
+    lines = text.splitlines()
+    if len(lines) != 1 or not lines[0]:
+        fail("benchmark description must contain exactly one JSON line")
+    if not text.endswith("\n") or "\r" in text:
+        fail("benchmark description is not newline-canonical")
+    try:
+        value = json.loads(lines[0])
+    except (TypeError, ValueError) as exc:
+        fail("benchmark description is invalid JSON: {}".format(exc))
+    if type(value) is not dict:
+        fail("benchmark description is not an object")
+    _exact_fields(value, BENCH_DESCRIPTION_FIELDS, "benchmark description")
+    if lines[0] != canonical_json(value):
+        fail("benchmark description is not canonical JSON")
+    if value["schema"] != BENCH_DESCRIPTION_SCHEMA:
+        fail("benchmark description schema differs from v8")
+    if type(value["source_git_commit"]) is not str or \
+            not COMMIT_TOKEN.fullmatch(value["source_git_commit"]):
+        fail("benchmark description source commit is malformed")
+    if value["source_git_commit"] != source_commit:
+        fail("benchmark description source commit differs from frozen source")
+    return value
+
+
 def _validate_description(value: Any, binary_sha256: str,
                           source_commit: str) -> Mapping[str, Any]:
     if type(value) is not dict:
@@ -706,7 +764,7 @@ def _validate_description(value: Any, binary_sha256: str,
             validation_roster_sha256() != VALIDATION_ROSTER_SHA256 or \
             value["worker_schema"] != WORKER_SCHEMA or \
             value["protocol"] != "D ordinal K | V ordinal K attempt | Q":
-        fail("repair-worker description protocol differs from v7")
+        fail("repair-worker description protocol differs from v8")
     if value["binary_sha256"] != binary_sha256:
         fail("repair-worker self hash differs from the executable hash")
     if value["source_git_commit"] != source_commit:
@@ -1222,7 +1280,7 @@ def parse_bench_stdout(stdout: bytes, invocation: Invocation,
                       derivation["effective_precode_seed"] or
                       row["effective_packet_seed"] !=
                       derivation["effective_packet_seed"]):
-        fail("{} effective seeds differ from the v7-derived attempt".format(
+        fail("{} effective seeds differ from the v8-derived attempt".format(
             context))
 
     _sha(attempt_stream_sha256, context + " attempt stream hash")
@@ -1389,7 +1447,7 @@ def adjudicate(records: Sequence[Mapping[str, Any]],
                             record.get("timing_slot") != timing_slot or
                             record.get("observation_index") !=
                             observation_index):
-                        fail("result stream is not in canonical v7 ABBA/BAAB "
+                        fail("result stream is not in canonical v8 ABBA/BAAB "
                              "roster order")
                     stream_sha = _sha(
                         record.get("attempt_selection_stream_sha256"),
@@ -1676,6 +1734,10 @@ def _run_screen_pinned(
     source = _source_receipt()
     source_commit = source["source_git_commit"]
     source_receipt_sha = source["source_receipt_sha256"]
+    # Fail before worker selection or holdout-root work if an EXCLUDE_FROM_ALL
+    # benchmark was not rebuilt after the source commit changed.
+    read_bench_description(
+        bench, source_commit, pinned_bench.descriptor)
     description = read_worker_description(
         worker, worker_receipt["sha256"], source_commit,
         pinned_worker.descriptor)
@@ -1755,7 +1817,7 @@ def _run_screen_pinned(
             "candidate_profile_sha256": candidate_profile_sha256(),
             "architecture_selection_performed": False,
             "offline_attempt_derivation_performed": True,
-            "official_scope": "v7 production-basis bounded promotion screen",
+            "official_scope": "v8 production-basis bounded promotion screen",
             "all_K_recovery_claimed": False,
             "wirehair1_timing_claimed": False,
             **verdict,
