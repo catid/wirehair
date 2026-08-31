@@ -342,7 +342,7 @@ bool SetPacketRowEquationIdentityForTesting(
 {
     const uint32_t mix_pair_mode = identity.BlockIdAvalanche >> 1u;
     if ((identity.BlockIdAvalanche & ~UINT32_C(7)) != 0u ||
-        mix_pair_mode >= 3u)
+        mix_pair_mode >= 4u)
     {
         return false;
     }
@@ -578,6 +578,24 @@ bool CheckLowestBitIndex()
     return true;
 }
 
+uint32_t ReferencePacketMixPairMode(
+    uint32_t block_id,
+    const wirehair_v2::PacketRowConfig& config,
+    uint32_t requested_mode)
+{
+    if (requested_mode == 3u)
+    {
+        uint32_t mixed = block_id ^ config.PeelSeed ^
+            UINT32_C(0x4d495832);
+        mixed = (mixed ^ (mixed >> 16u)) * UINT32_C(0x7feb352d);
+        mixed = (mixed ^ (mixed >> 15u)) * UINT32_C(0x846ca68b);
+        mixed ^= mixed >> 16u;
+        return (uint32_t)(
+            (uint64_t)mixed * UINT64_C(3) >> 32u);
+    }
+    return requested_mode;
+}
+
 std::vector<uint32_t> ReferencePacketRow(
     uint32_t K,
     uint32_t P,
@@ -597,6 +615,8 @@ std::vector<uint32_t> ReferencePacketRow(
     } while (source.Iterate());
     const wirehair::RowMixIterator mix(
         params, (uint16_t)P, wirehair::NextPrime16((uint16_t)P));
+    mix_pair_mode = ReferencePacketMixPairMode(
+        block_id, config, mix_pair_mode);
     for (uint32_t i = 0u; i < config.MixCount; ++i) {
         uint32_t ordinal = i;
         if (config.MixCount == 2u)
@@ -1318,14 +1338,90 @@ bool CheckPacketMixPairSelection()
         uint32_t Mode;
     } restore;
 
-    if (!wirehair_v2::SetPacketMixPairModeForTesting(1u) ||
-        wirehair_v2::SetPacketMixPairModeForTesting(3u) ||
+    if (!wirehair_v2::SetPacketMixPairModeForTesting(3u) ||
+        wirehair_v2::SetPacketMixPairModeForTesting(4u) ||
         wirehair_v2::SetPacketMixPairModeForTesting(UINT32_MAX) ||
-        wirehair_v2::PacketMixPairModeForTesting() != 1u ||
+        wirehair_v2::PacketMixPairModeForTesting() != 3u ||
         !wirehair_v2::SetPacketMixPairModeForTesting(0u))
     {
         std::fprintf(stderr,
             "solve: MIX2 pair setter accepted/mutated an invalid mode\n");
+        return false;
+    }
+
+    struct HashedPairVector
+    {
+        uint32_t PeelSeed;
+        uint32_t BlockId;
+        uint32_t ExpectedMode;
+    };
+    static const HashedPairVector kHashedPairVectors[] = {
+        { 0u, 0u, 2u },
+        { 0u, UINT32_MAX, 1u },
+        { UINT32_C(0x4d241359), 0u, 2u },
+        { UINT32_C(0x4d241359), 1u, 2u },
+        { UINT32_C(0x4d241359), 17u, 1u },
+        { UINT32_C(0x4d241359), UINT32_C(0xf1234567), 1u },
+        { UINT32_C(0x4d241359), UINT32_MAX, 1u },
+        { UINT32_C(0xeb5b8d12), 0u, 2u },
+        { UINT32_C(0xeb5b8d12), 1u, 1u },
+        { UINT32_MAX, 1u, 0u }
+    };
+    wirehair_v2::PacketRowConfig vector_config;
+    vector_config.MixCount = 2u;
+    if (!wirehair_v2::SetPacketMixPairModeForTesting(3u)) {
+        return false;
+    }
+    uint32_t observed_modes = 0u;
+    for (const HashedPairVector& vector : kHashedPairVectors)
+    {
+        vector_config.PeelSeed = vector.PeelSeed;
+        const uint32_t actual =
+            wirehair_v2::PacketMixPairModeForRowForTesting(
+                vector.BlockId, vector_config);
+        if (actual != vector.ExpectedMode)
+        {
+            std::fprintf(stderr,
+                "solve: hashed MIX2 selector vector mismatch "
+                "seed=%08x id=%08x actual=%u expected=%u\n",
+                vector.PeelSeed, vector.BlockId,
+                actual, vector.ExpectedMode);
+            return false;
+        }
+        observed_modes |= 1u << actual;
+    }
+    const uint64_t id_domain = UINT64_C(1) << 32u;
+    const uint64_t pair_floor = id_domain / 3u;
+    const uint64_t pair01_count = pair_floor + 1u;
+    const uint64_t pair02_count = pair_floor;
+    const uint64_t pair12_count = pair_floor;
+    if (observed_modes != 7u ||
+        pair01_count != UINT64_C(1431655766) ||
+        pair02_count != UINT64_C(1431655765) ||
+        pair12_count != UINT64_C(1431655765) ||
+        pair01_count + pair02_count + pair12_count != id_domain)
+    {
+        std::fprintf(stderr,
+            "solve: hashed MIX2 selector balance arithmetic mismatch\n");
+        return false;
+    }
+    vector_config.PeelSeed = UINT32_C(0x4d241359);
+    const uint32_t base_mode =
+        wirehair_v2::PacketMixPairModeForRowForTesting(
+            1u, vector_config);
+    const wirehair_v2::PacketRowConfig attempt_one =
+        wirehair_v2::PacketConfigForAttempt(vector_config, 1u);
+    if (base_mode != 2u ||
+        attempt_one.PeelSeed != UINT32_C(0xeb5b8d12) ||
+        wirehair_v2::PacketMixPairModeForRowForTesting(
+            1u, attempt_one) != 1u)
+    {
+        std::fprintf(stderr,
+            "solve: hashed MIX2 selector ignored attempt-selected "
+            "PacketRowConfig::PeelSeed\n");
+        return false;
+    }
+    if (!wirehair_v2::SetPacketMixPairModeForTesting(0u)) {
         return false;
     }
 
@@ -1349,7 +1445,7 @@ bool CheckPacketMixPairSelection()
     tiny_system.Params.Staircase = 2u;
     std::vector<uint8_t> tiny_intermediate(4u, 0x3cu);
     std::vector<uint8_t> tiny_output(1u, 0xa5u);
-    for (uint32_t mode = 1u; mode < 3u; ++mode)
+    for (uint32_t mode = 1u; mode < 4u; ++mode)
     {
         if (!wirehair_v2::SetPacketMixPairModeForTesting(mode)) {
             return false;
@@ -1421,7 +1517,7 @@ bool CheckPacketMixPairSelection()
     static const uint32_t kRowIds[] = {
         0u, 1u, 17u, UINT32_C(0xf1234567), UINT32_MAX
     };
-    for (uint32_t mode = 0u; mode < 3u; ++mode)
+    for (uint32_t mode = 0u; mode < 4u; ++mode)
     {
         if (!wirehair_v2::SetPacketMixPairModeForTesting(mode)) {
             return false;
@@ -1441,14 +1537,18 @@ bool CheckPacketMixPairSelection()
                 wirehair_v2::GeneratePacketMatrixRowWithRuntime(
                     K, P, id, config, runtime);
             const size_t source_terms = expected.size() - 2u;
+            const uint32_t selected_mode = ReferencePacketMixPairMode(
+                id, config, mode);
             if (expected.size() < 3u || generated != expected ||
                 baseline.size() != expected.size() ||
                 !std::equal(
                     expected.begin(), expected.begin() + source_terms,
                     baseline.begin()) ||
-                expected[source_terms] != K + mix.Columns[kPairs[mode][0]] ||
+                selected_mode >= 3u ||
+                expected[source_terms] !=
+                    K + mix.Columns[kPairs[selected_mode][0]] ||
                 expected[source_terms + 1u] !=
-                    K + mix.Columns[kPairs[mode][1]] ||
+                    K + mix.Columns[kPairs[selected_mode][1]] ||
                 expected[source_terms] == expected[source_terms + 1u])
             {
                 std::fprintf(stderr,
@@ -1488,7 +1588,8 @@ bool CheckPacketMixPairSelection()
         }
     }
 
-    // Exercise the one-pass set-XOR evaluator under every fixed pair.
+    // Exercise the one-pass set-XOR evaluator under every fixed pair and the
+    // row-varying hashed selector.
     static const uint32_t set_xor_K = 10000u;
     wirehair_v2::PrecodeSystem set_xor_system;
     if (!wirehair_v2::BuildPrecodeSystem(
@@ -1516,7 +1617,7 @@ bool CheckPacketMixPairSelection()
     if (set_xor_id == UINT32_MAX) {
         return false;
     }
-    for (uint32_t mode = 0u; mode < 3u; ++mode)
+    for (uint32_t mode = 0u; mode < 4u; ++mode)
     {
         if (!wirehair_v2::SetPacketMixPairModeForTesting(mode) ||
             !CheckPacketEvaluationCase(
@@ -1575,7 +1676,7 @@ bool CheckPacketMixPairSelection()
     wirehair_v2::PrecodeSolveStats rejected_stats = checkpoint.Stats;
     const wirehair_v2::PrecodeSolveStats rejected_stats_before =
         rejected_stats;
-    if (!wirehair_v2::SetPacketMixPairModeForTesting(1u) ||
+    if (!wirehair_v2::SetPacketMixPairModeForTesting(3u) ||
         wirehair_v2::ResumePrecodeSystem(
             system, config, 1u, message.data() + block_bytes, block_bytes,
             rejected, rejected_output, &rejected_stats, true) !=
@@ -1605,7 +1706,7 @@ bool CheckPacketMixPairSelection()
         return false;
     }
 
-    if (!wirehair_v2::SetPacketMixPairModeForTesting(2u)) {
+    if (!wirehair_v2::SetPacketMixPairModeForTesting(3u)) {
         return false;
     }
     wirehair_v2::PrecodeSolveResumeState nondefault_checkpoint;
@@ -1615,7 +1716,7 @@ bool CheckPacketMixPairSelection()
             nondefault_output, nullptr, &nondefault_checkpoint) !=
             Wirehair_NeedMore ||
         !nondefault_checkpoint.Active || nondefault_output != sentinel ||
-        nondefault_checkpoint.PacketEquation.BlockIdAvalanche != 4u)
+        nondefault_checkpoint.PacketEquation.BlockIdAvalanche != 6u)
     {
         std::fprintf(stderr,
             "solve: nondefault MIX2 pair identity was not published\n");
@@ -1626,7 +1727,7 @@ bool CheckPacketMixPairSelection()
             system, config, 1u, message.data() + block_bytes, block_bytes,
             nondefault_checkpoint, nondefault_output, nullptr, true);
     if (nondefault_resume == Wirehair_InvalidInput ||
-        nondefault_checkpoint.PacketEquation.BlockIdAvalanche != 4u)
+        nondefault_checkpoint.PacketEquation.BlockIdAvalanche != 6u)
     {
         std::fprintf(stderr,
             "solve: unchanged nondefault MIX2 pair identity was rejected\n");
@@ -1636,7 +1737,8 @@ bool CheckPacketMixPairSelection()
         return false;
     }
 
-    std::printf("MIX2 fixed iterator pairs/oracle/resume identity: PASS\n");
+    std::printf(
+        "MIX2 fixed/hashed iterator pairs/oracle/resume identity: PASS\n");
     return true;
 }
 #endif

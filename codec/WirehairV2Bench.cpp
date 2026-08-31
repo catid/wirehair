@@ -3690,7 +3690,7 @@ int CmdPrecodeFail(int argc, char** argv)
             {
                 std::fprintf(stderr,
                     "precodefail --mix-pair may be specified once and "
-                    "expects 01, 02, or 12\n");
+                    "expects 01, 02, 12, or hashed\n");
                 return 1;
             }
             if (!std::strcmp(value, "01")) {
@@ -3705,10 +3705,14 @@ int CmdPrecodeFail(int argc, char** argv)
                 packet_mix_pair_mode = 2u;
                 packet_mix_pair_name = "12";
             }
+            else if (!std::strcmp(value, "hashed")) {
+                packet_mix_pair_mode = 3u;
+                packet_mix_pair_name = "hashed";
+            }
             else
             {
                 std::fprintf(stderr,
-                    "precodefail --mix-pair expects 01, 02, or 12\n");
+                    "precodefail --mix-pair expects 01, 02, 12, or hashed\n");
                 return 1;
             }
             packet_mix_pair_explicit = true;
