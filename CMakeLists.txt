@@ -1495,6 +1495,16 @@ if(BUILD_TESTS)
             TIMEOUT 120
             LABELS "wh2;benchmark;contract;recovery;precodefail;runner")
         add_test(
+            NAME wh2_mix2_attempt_crossfit_test
+            COMMAND ${Python3_EXECUTABLE} -B -m unittest -v
+                bench/test_wh2_mix2_attempt_crossfit.py)
+        set_tests_properties(wh2_mix2_attempt_crossfit_test PROPERTIES
+            WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+            ENVIRONMENT "PYTHONWARNINGS=error"
+            TIMEOUT 120
+            LABELS
+                "wh2;benchmark;contract;recovery;precodefail;mix2;selection")
+        add_test(
             NAME wh2_mix2_seed_repair_contract_test
             COMMAND ${Python3_EXECUTABLE} -B -m unittest -v
                 bench/test_wh2_mix2_seed_repair_contract.py)
