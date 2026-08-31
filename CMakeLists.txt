@@ -1432,12 +1432,6 @@ if(BUILD_TESTS)
             Threads::Threads)
         wirehair_apply_project_options(wirehair_wh2_contract_worker)
         if(CMAKE_NM)
-            set(_wirehair_wh2_count5_packet_audit_argument)
-            if(WIREHAIR_BUILD_BENCHMARKS)
-                list(APPEND _wirehair_wh2_count5_packet_audit_argument
-                    "-DCOUNT5_POLICY=$<TARGET_FILE:wirehair_v2_count5_timing_policy>"
-                    "-DCOUNT5_PACKET_EVAL=$<TARGET_FILE:wirehair_v2_packet_eval_bench>")
-            endif()
             add_test(
                 NAME wirehair_wh2_timing_policy_symbol_audit
                 COMMAND ${CMAKE_COMMAND}
@@ -1446,7 +1440,6 @@ if(BUILD_TESTS)
                     "-DSYSTEM_NAME=${CMAKE_SYSTEM_NAME}"
                     "-DLTO_MODE=${WH_LTO}"
                     "-DTIMING_POLICY=$<TARGET_FILE:wirehair_v2_timing_policy>"
-                    ${_wirehair_wh2_count5_packet_audit_argument}
                     "-DCONTRACT_WORKER=$<TARGET_FILE:wirehair_wh2_contract_worker>"
                     "-DPHASE_TIMING=$<TARGET_FILE:wirehair_wh2_phase_attribution_test>"
                     "-DSYSTEMATIC_EMISSION=$<TARGET_FILE:wirehair_wh2_systematic_emission_screen>"

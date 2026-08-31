@@ -153,42 +153,6 @@ void SetOddPacketPeelSeedXorForTesting(uint32_t seed_xor);
 */
 bool SetPacketMixPairModeForTesting(uint32_t mode);
 uint32_t PacketMixPairModeForTesting();
-#endif
-
-#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-/**
-    Select the evaluator schedule for production-eligible five-term MIX3 rows
-    in the calling thread.  -1 forces the prior fused schedule, zero restores
-    production dispatch, and +1 forces the one-pass set-XOR schedule.  Forced
-    modes never widen the production K/block-size/term-count eligibility law.
-*/
-bool SetPacketMix3FiveTermSetXorModeForTesting(int mode);
-int PacketMix3FiveTermSetXorModeForTesting();
-#endif
-
-#if defined(WIREHAIR_V2_ENABLE_COUNT5_BENCHMARK)
-/** Counter-free same-binary override for the bounded timing screen. */
-bool SetPacketMix3FiveTermSetXorModeForBenchmark(int mode);
-#endif
-
-#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-/** Apply the exact production domain and active mode without evaluating data. */
-bool PacketMix3FiveTermSetXorSelectedForTesting(
-    uint32_t source_count,
-    uint32_t block_bytes,
-    uint32_t mix_count,
-    uint32_t packet_terms);
-
-enum class PacketEvaluatorRouteForTesting : uint8_t
-{
-    Unobserved,
-    Fused,
-    TailPaired,
-    SetXor
-};
-
-/** Last route that reached an evaluator implementation in this thread. */
-PacketEvaluatorRouteForTesting LastPacketEvaluatorRouteForTesting();
 
 /**
     Enable exact comparisons among direct-key, legacy-rank, and row-scan

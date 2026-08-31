@@ -57,13 +57,6 @@ thread_local bool TinyPeriodicHeavyTimingEnabled = false;
 thread_local uint64_t TinyPeriodicHeavyTimedCalls = 0u;
 thread_local uint64_t TinyPeriodicHeavyTimedNanoseconds = 0u;
 thread_local uint64_t TinyPeriodicHeavyTimedDataRows = 0u;
-thread_local PacketEvaluatorRouteForTesting LastPacketEvaluatorRoute =
-    PacketEvaluatorRouteForTesting::Unobserved;
-#endif
-
-#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS) || \
-    defined(WIREHAIR_V2_ENABLE_COUNT5_BENCHMARK)
-thread_local int PacketMix3FiveTermSetXorMode = 0;
 #endif
 
 class ScopedColdSolveWideXorSelection
@@ -147,47 +140,6 @@ bool SamePacketRowEquationIdentity(
     return a.BlockIdMultiplier == b.BlockIdMultiplier &&
         a.BlockIdAvalanche == b.BlockIdAvalanche &&
         a.OddPeelSeedXor == b.OddPeelSeedXor;
-}
-
-static GF256_FORCE_INLINE uint32_t PacketTailMinTerms(
-    uint32_t source_count,
-    uint32_t block_bytes,
-    uint32_t mix_count)
-{
-    if (mix_count != 3u || source_count < 10000u || block_bytes < 1280u)
-    {
-        return 6u;
-    }
-#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS) || \
-    defined(WIREHAIR_V2_ENABLE_COUNT5_BENCHMARK)
-    if (PacketMix3FiveTermSetXorMode < 0) {
-        return 6u;
-    }
-#endif
-    return 5u;
-}
-
-#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS) || \
-    defined(WIREHAIR_V2_ENABLE_COUNT5_BENCHMARK)
-static bool SetPacketMix3FiveTermSetXorMode(int mode)
-{
-    if (mode < -1 || mode > 1) {
-        return false;
-    }
-    PacketMix3FiveTermSetXorMode = mode;
-    return true;
-}
-#endif
-
-static GF256_FORCE_INLINE bool SelectPacketMix3FiveTermSetXor(
-    uint32_t source_count,
-    uint32_t block_bytes,
-    uint32_t mix_count,
-    uint32_t packet_terms)
-{
-    return block_bytes <= 32768u &&
-        packet_terms == 5u &&
-        PacketTailMinTerms(source_count, block_bytes, mix_count) == 5u;
 }
 
 constexpr uint32_t PackedWordCount(uint32_t bit_count)
@@ -2453,42 +2405,6 @@ uint32_t PacketMixPairModeForTesting()
 {
     return PacketMixPairMode;
 }
-#endif
-
-#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-bool SetPacketMix3FiveTermSetXorModeForTesting(int mode)
-{
-    return SetPacketMix3FiveTermSetXorMode(mode);
-}
-
-int PacketMix3FiveTermSetXorModeForTesting()
-{
-    return PacketMix3FiveTermSetXorMode;
-}
-#endif
-
-#if defined(WIREHAIR_V2_ENABLE_COUNT5_BENCHMARK)
-bool SetPacketMix3FiveTermSetXorModeForBenchmark(int mode)
-{
-    return SetPacketMix3FiveTermSetXorMode(mode);
-}
-#endif
-
-#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-bool PacketMix3FiveTermSetXorSelectedForTesting(
-    uint32_t source_count,
-    uint32_t block_bytes,
-    uint32_t mix_count,
-    uint32_t packet_terms)
-{
-    return SelectPacketMix3FiveTermSetXor(
-        source_count, block_bytes, mix_count, packet_terms);
-}
-
-PacketEvaluatorRouteForTesting LastPacketEvaluatorRouteForTesting()
-{
-    return LastPacketEvaluatorRoute;
-}
 
 void SetBinaryPeelOracleForTesting(bool enabled)
 {
@@ -3330,32 +3246,22 @@ static bool EvaluatePacketBlockImpl(
         (uint16_t)K,
         (uint16_t)P);
     uint64_t operations = 1u;
-    // The generic crossover remains six terms.  Large certified MIX3 rows use
-    // the existing one-pass set-XOR kernel at five terms as well; the dynamic
-    // threshold keeps every other row on its prior schedule.
+    // The existing schedules are already optimal until the row contains six
+    // total terms.  Above that crossover, pairing the complete tail removes
+    // at least one destination read/write pass.
     const uint32_t packet_terms =
         (uint32_t)params.PeelCount + config.MixCount;
-    const uint32_t min_tail_terms =
-        PacketTailMinTerms(K, block_bytes, config.MixCount);
     if (block_bytes <= kPacketTailPairMaxBlockBytes &&
-        packet_terms >= min_tail_terms)
+        packet_terms >= kPacketTailPairMinTerms)
     {
         if (K >= 10000u && block_bytes >= 1280u &&
             packet_terms <= kPacketSetXorMaxTerms)
         {
-#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-            LastPacketEvaluatorRoute =
-                PacketEvaluatorRouteForTesting::SetXor;
-#endif
             EvaluatePacketSetXor(
                 params, K, P, config, runtime, intermediate_blocks,
                 block_bytes, block_out);
         }
         else {
-#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-            LastPacketEvaluatorRoute =
-                PacketEvaluatorRouteForTesting::TailPaired;
-#endif
             EvaluatePacketTailPaired(
                 params, K, P, config, runtime, intermediate_blocks,
                 block_bytes, block_out);
@@ -3365,9 +3271,6 @@ static bool EvaluatePacketBlockImpl(
         }
         return true;
     }
-#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-    LastPacketEvaluatorRoute = PacketEvaluatorRouteForTesting::Fused;
-#endif
     wirehair::PeelRowIterator source(
         params, (uint16_t)K, runtime.SourcePrime());
     const uint8_t* first_source =

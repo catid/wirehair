@@ -2,19 +2,9 @@ if(NOT DEFINED NM OR NM STREQUAL "")
     message(FATAL_ERROR "timing-policy symbol audit requires CMAKE_NM")
 endif()
 
-set(_canonical_timing_artifacts
-    TIMING_POLICY CONTRACT_WORKER PHASE_TIMING SYSTEMATIC_EMISSION
-    BROAD_SYSTEMATIC_EMISSION DIRECT_SYSTEMATIC_COMPLEMENT)
-set(_count5_timing_artifacts)
-if(DEFINED COUNT5_POLICY AND NOT COUNT5_POLICY STREQUAL "")
-    list(APPEND _count5_timing_artifacts COUNT5_POLICY)
-endif()
-if(DEFINED COUNT5_PACKET_EVAL AND NOT COUNT5_PACKET_EVAL STREQUAL "")
-    list(APPEND _count5_timing_artifacts COUNT5_PACKET_EVAL)
-endif()
-
-foreach(_artifact_var IN LISTS
-        _canonical_timing_artifacts _count5_timing_artifacts)
+foreach(_artifact_var IN ITEMS
+        TIMING_POLICY CONTRACT_WORKER PHASE_TIMING SYSTEMATIC_EMISSION
+        BROAD_SYSTEMATIC_EMISSION DIRECT_SYSTEMATIC_COMPLEMENT)
     if(NOT DEFINED ${_artifact_var} OR
        NOT EXISTS "${${_artifact_var}}")
         message(FATAL_ERROR
@@ -39,9 +29,7 @@ foreach(_artifact_var IN LISTS
     # legacy second dereference to the literal TIMING_POLICY variable name.
     string(COMPARE EQUAL "${_artifact_var}" "TIMING_POLICY"
         _is_timing_policy)
-    string(COMPARE EQUAL "${_artifact_var}" "COUNT5_POLICY"
-        _is_count5_policy)
-    if(NOT _is_timing_policy AND NOT _is_count5_policy)
+    if(NOT _is_timing_policy)
         string(REGEX MATCH "[ \t][Tt][ \t]+_?main([\r\n]|$)"
             _main_symbol "${_symbols}")
         if(_main_symbol STREQUAL "")
@@ -95,10 +83,11 @@ set(_forbidden_symbols
     "TinyPeriodicHeavyTimedDataRows"
     "PackedBinaryResidualTestMode"
     "PackedBinaryResidualUseCount"
-    "ResumeSystemFingerprintChecks"
-    "PacketMix3FiveTermSetXorMode")
+    "ResumeSystemFingerprintChecks")
 
-foreach(_artifact_var IN LISTS _canonical_timing_artifacts)
+foreach(_artifact_var IN ITEMS
+        TIMING_POLICY CONTRACT_WORKER PHASE_TIMING SYSTEMATIC_EMISSION
+        BROAD_SYSTEMATIC_EMISSION DIRECT_SYSTEMATIC_COMPLEMENT)
     foreach(_forbidden IN LISTS _forbidden_symbols)
         string(FIND "${${_artifact_var}_SYMBOLS}" "${_forbidden}"
             _forbidden_offset)
@@ -108,35 +97,6 @@ foreach(_artifact_var IN LISTS _canonical_timing_artifacts)
         endif()
     endforeach()
 endforeach()
-
-# The dedicated count5 archive permits exactly its selector state/API while
-# retaining every other counter-free timing-policy prohibition.
-foreach(_artifact_var IN LISTS _count5_timing_artifacts)
-    foreach(_forbidden IN LISTS _forbidden_symbols)
-        if(_forbidden STREQUAL "PacketMix3FiveTermSetXorMode")
-            continue()
-        endif()
-        string(FIND "${${_artifact_var}_SYMBOLS}" "${_forbidden}"
-            _forbidden_offset)
-        if(NOT _forbidden_offset EQUAL -1)
-            message(FATAL_ERROR
-                "${_artifact_var} contains test-only symbol ${_forbidden}")
-        endif()
-    endforeach()
-endforeach()
-
-# Require the dedicated selector only in its defining archive.  Optimizing
-# linkers may inline or internalize it in the optional final benchmark.
-if(DEFINED COUNT5_POLICY_SYMBOLS)
-    string(FIND "${COUNT5_POLICY_SYMBOLS}"
-        "SetPacketMix3FiveTermSetXorModeForBenchmark" _count5_setter_offset)
-    string(FIND "${COUNT5_POLICY_SYMBOLS}"
-        "PacketMix3FiveTermSetXorMode" _count5_mode_offset)
-    if(_count5_setter_offset EQUAL -1 OR _count5_mode_offset EQUAL -1)
-        message(FATAL_ERROR
-            "COUNT5_POLICY lacks the count5 benchmark selector")
-    endif()
-endif()
 
 # Require the capability in its defining archive.  Optimizing linkers may
 # legitimately inline and internalize this wrapper in final executables; the
@@ -146,14 +106,6 @@ string(FIND "${TIMING_POLICY_SYMBOLS}"
 if(_benchmark_offset EQUAL -1)
     message(FATAL_ERROR
         "TIMING_POLICY lacks the exact benchmark-system initializer")
-endif()
-if(DEFINED COUNT5_POLICY_SYMBOLS)
-    string(FIND "${COUNT5_POLICY_SYMBOLS}"
-        "InitializeForValidatedSystemForBenchmark" _count5_initializer_offset)
-    if(_count5_initializer_offset EQUAL -1)
-        message(FATAL_ERROR
-            "COUNT5_POLICY lacks the exact benchmark-system initializer")
-    endif()
 endif()
 
 # The small-rank specialization is deliberately isolated from the generic
