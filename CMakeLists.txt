@@ -998,6 +998,43 @@ if(BUILD_TESTS)
             PROPERTIES TIMEOUT 30
             LABELS "wh2;benchmark;contract;public-api;aa-calibration;symbols")
     endif()
+    # Small page-layout A/A mechanism screen; public APIs only.
+    add_executable(wirehair_wh2_public_page_aa_r0
+        bench/Wh2PublicPageAaR0.cpp
+        bench/Wh2FrozenTrace.cpp
+        bench/Wh2NativePanel.cpp
+        bench/Wh2PublicBorrowedTargetIdentity.cpp
+        bench/Wh2RdpruTargetIdentityV2.cpp)
+    target_link_libraries(wirehair_wh2_public_page_aa_r0 PRIVATE
+        wirehair ${CMAKE_DL_LIBS})
+    target_compile_definitions(wirehair_wh2_public_page_aa_r0 PRIVATE
+        ${_wh2_aa_calibration_definitions})
+    wirehair_apply_project_options(wirehair_wh2_public_page_aa_r0)
+    add_test(NAME wirehair_wh2_public_page_aa_r0_selftest
+        COMMAND wirehair_wh2_public_page_aa_r0 --selftest)
+    add_test(NAME wirehair_wh2_public_page_aa_r0_python_selftest
+        COMMAND ${Python3_EXECUTABLE} -I -B -S
+            ${PROJECT_SOURCE_DIR}/bench/Wh2PublicPageAaR0.py --selftest)
+    add_test(NAME wirehair_wh2_public_page_aa_r0_python_test
+        COMMAND ${Python3_EXECUTABLE} -I -B -S
+            ${PROJECT_SOURCE_DIR}/bench/test_Wh2PublicPageAaR0.py)
+    set_tests_properties(
+        wirehair_wh2_public_page_aa_r0_selftest
+        wirehair_wh2_public_page_aa_r0_python_selftest
+        wirehair_wh2_public_page_aa_r0_python_test
+        PROPERTIES TIMEOUT 120 WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+        ENVIRONMENT "PYTHONWARNINGS=error"
+        LABELS "wh2;benchmark;contract;public-api;page-aa")
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND
+       NOT CMAKE_CROSSCOMPILING AND BUILD_SHARED_LIBS)
+        add_test(NAME wirehair_wh2_public_page_aa_r0_symbol_audit
+            COMMAND ${CMAKE_COMMAND}
+                "-DNM=${CMAKE_NM}"
+                "-DPUBLIC_BORROWED_R1=$<TARGET_FILE:wirehair_wh2_public_page_aa_r0>"
+                -P ${PROJECT_SOURCE_DIR}/cmake/Wh2PublicBorrowedCurrentVsWh1R1SymbolAudit.cmake)
+        set_tests_properties(wirehair_wh2_public_page_aa_r0_symbol_audit
+            PROPERTIES TIMEOUT 30 LABELS "wh2;benchmark;public-api;page-aa;symbols")
+    endif()
     if(BUILD_CODEC_V2)
         # These native experiment targets execute test-hook-only equation
         # transforms.  The production library intentionally rejects them.
