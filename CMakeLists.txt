@@ -50,6 +50,8 @@ option(WIREHAIR_BUILD_BENCHMARKS
     "Include benchmark executables in the default build" OFF)
 option(WIREHAIR_ENABLE_SCHEDULED_TESTS
     "Register resource-bounded scheduled large-message profiles" OFF)
+option(WIREHAIR_ENABLE_PUBLIC_BORROWED_R1_NATIVE_CONFIG
+    "Register the host-specific public borrowed r1 oracle test on CPU 120" OFF)
 option(WIREHAIR_ENABLE_LIBFUZZER
     "Build V2 fuzz entry points with Clang libFuzzer main/coverage" OFF)
 option(WIREHAIR_ENABLE_TRI_BMQ4_SCHUR_FALSIFIER
@@ -847,6 +849,110 @@ if(BUILD_TESTS)
     set_tests_properties(wirehair_wh2_native_panel_test PROPERTIES
         TIMEOUT 120
         LABELS "wh2;benchmark;contract;native;timing;affinity")
+    add_executable(wirehair_wh2_public_borrowed_current_vs_wh1_r1
+        bench/Wh2PublicBorrowedCurrentVsWh1R1.cpp
+        bench/Wh2FrozenTrace.cpp
+        bench/Wh2FrozenTrace.h
+        bench/Wh2NativePanel.cpp
+        bench/Wh2NativePanel.h
+        bench/Wh2PublicBorrowedTargetIdentity.cpp
+        bench/Wh2PublicBorrowedTargetIdentity.h
+        bench/Wh2RdpruTargetIdentityV2.cpp
+        bench/Wh2RdpruTargetIdentityV2.h)
+    get_filename_component(
+        WIREHAIR_WH2_CXX_COMPILER_REALPATH
+        "${CMAKE_CXX_COMPILER}" REALPATH)
+    file(SHA256 "${WIREHAIR_WH2_CXX_COMPILER_REALPATH}"
+        WIREHAIR_WH2_CXX_COMPILER_SHA256)
+    target_link_libraries(
+        wirehair_wh2_public_borrowed_current_vs_wh1_r1 PRIVATE
+        wirehair
+        ${CMAKE_DL_LIBS})
+    target_compile_definitions(
+        wirehair_wh2_public_borrowed_current_vs_wh1_r1 PRIVATE
+        "WIREHAIR_WH2_SOURCE_GIT_COMMIT=\"${WIREHAIR_WH2_SOURCE_GIT_COMMIT}\""
+        "WIREHAIR_WH2_CXX_COMPILER_PATH=\"${WIREHAIR_WH2_CXX_COMPILER_REALPATH}\""
+        "WIREHAIR_WH2_CXX_COMPILER_SHA256=\"${WIREHAIR_WH2_CXX_COMPILER_SHA256}\""
+        "WIREHAIR_WH2_CMAKE_CXX_COMPILER_ID=\"${CMAKE_CXX_COMPILER_ID}\""
+        "WIREHAIR_WH2_CMAKE_CXX_COMPILER_VERSION=\"${CMAKE_CXX_COMPILER_VERSION}\"")
+    wirehair_apply_project_options(
+        wirehair_wh2_public_borrowed_current_vs_wh1_r1)
+    add_test(
+        NAME wirehair_wh2_public_borrowed_current_vs_wh1_r1_selftest
+        COMMAND wirehair_wh2_public_borrowed_current_vs_wh1_r1 --selftest)
+    set_tests_properties(
+        wirehair_wh2_public_borrowed_current_vs_wh1_r1_selftest PROPERTIES
+            TIMEOUT 120
+            LABELS
+                "wh2;benchmark;contract;public-api;encoder;facade;timing;r1")
+    add_test(
+        NAME wirehair_wh2_public_borrowed_current_vs_wh1_r1_python_selftest
+        COMMAND ${Python3_EXECUTABLE} -I -B -S
+            ${PROJECT_SOURCE_DIR}/bench/Wh2PublicBorrowedCurrentVsWh1R1.py
+            --selftest)
+    set_tests_properties(
+        wirehair_wh2_public_borrowed_current_vs_wh1_r1_python_selftest
+        PROPERTIES
+            WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+            ENVIRONMENT "PYTHONWARNINGS=error"
+            TIMEOUT 60
+            LABELS
+                "wh2;benchmark;contract;public-api;encoder;facade;timing;r1")
+    add_test(
+        NAME wirehair_wh2_public_borrowed_current_vs_wh1_r1_python_test
+        COMMAND ${Python3_EXECUTABLE} -I -B -S
+            ${PROJECT_SOURCE_DIR}/bench/test_Wh2PublicBorrowedCurrentVsWh1R1.py)
+    set_tests_properties(
+        wirehair_wh2_public_borrowed_current_vs_wh1_r1_python_test
+        PROPERTIES
+            WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+            ENVIRONMENT "PYTHONWARNINGS=error"
+            TIMEOUT 120
+            LABELS
+                "wh2;benchmark;contract;public-api;encoder;facade;timing;r1")
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND
+       NOT CMAKE_CROSSCOMPILING AND BUILD_SHARED_LIBS)
+        if(NOT CMAKE_NM)
+            message(FATAL_ERROR
+                "native Linux shared public-borrowed r1 contract requires CMAKE_NM")
+        endif()
+        add_test(
+            NAME wirehair_wh2_public_borrowed_current_vs_wh1_r1_symbol_audit
+            COMMAND ${CMAKE_COMMAND}
+                "-DNM=${CMAKE_NM}"
+                "-DPUBLIC_BORROWED_R1=$<TARGET_FILE:wirehair_wh2_public_borrowed_current_vs_wh1_r1>"
+                -P ${PROJECT_SOURCE_DIR}/cmake/Wh2PublicBorrowedCurrentVsWh1R1SymbolAudit.cmake)
+        set_tests_properties(
+            wirehair_wh2_public_borrowed_current_vs_wh1_r1_symbol_audit
+            PROPERTIES
+                TIMEOUT 30
+                LABELS
+                    "wh2;benchmark;contract;public-api;encoder;facade;timing;r1;symbols")
+        # This oracle pins the preregistered CPU and captures its exact
+        # capabilities. Generic CI hosts need not have CPU 120 or GCC 13.
+        # The real controller always runs the oracle during preflight,
+        # independently of whether it is also registered with CTest.
+        if(WIREHAIR_ENABLE_PUBLIC_BORROWED_R1_NATIVE_CONFIG)
+            add_test(
+                NAME wirehair_wh2_public_borrowed_current_vs_wh1_r1_native_config
+                COMMAND ${Python3_EXECUTABLE} -I -B -S
+                    ${PROJECT_SOURCE_DIR}/bench/Wh2PublicBorrowedCurrentVsWh1R1.py
+                    --native-config-selftest
+                    --worker $<TARGET_FILE:wirehair_wh2_public_borrowed_current_vs_wh1_r1>
+                    --library $<TARGET_FILE:wirehair>
+                    --compiler ${WIREHAIR_WH2_CXX_COMPILER_REALPATH}
+                    --expected-source-commit ${WIREHAIR_WH2_SOURCE_GIT_COMMIT})
+            set_tests_properties(
+                wirehair_wh2_public_borrowed_current_vs_wh1_r1_native_config
+                PROPERTIES
+                    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+                    ENVIRONMENT "PYTHONWARNINGS=error"
+                    RUN_SERIAL TRUE
+                    TIMEOUT 360
+                    LABELS
+                        "wh2;benchmark;contract;public-api;encoder;facade;r1;native-config")
+        endif()
+    endif()
     if(BUILD_CODEC_V2)
         # These native experiment targets execute test-hook-only equation
         # transforms.  The production library intentionally rejects them.
