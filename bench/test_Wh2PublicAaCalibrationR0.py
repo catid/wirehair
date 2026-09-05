@@ -220,10 +220,13 @@ class CalibrationTest(unittest.TestCase):
         p = fixture["provenance.json"]
         published = []
         original_publish = c.h.publish_json
+        clock = [1000.0]
 
         def publish_json(fd, name, value):
             published.append(name)
             original_publish(fd, name, value)
+            if name == "summary.json" and mode == "late_finalization":
+                clock[0] += 121.0
 
         with tempfile.TemporaryDirectory(prefix="wh2-aa-producer-") as parent:
             root = Path(parent) / "bundle"
@@ -252,6 +255,18 @@ class CalibrationTest(unittest.TestCase):
                                           (c.h, "publish_json", publish_json)):
                     stack.enter_context(mock.patch.object(owner, key, value))
                 stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+                if mode == "late_finalization":
+                    stack.enter_context(mock.patch.object(c.time, "monotonic", lambda: clock[0]))
+                    with self.assertRaisesRegex(c.h.ValidationError, "prevented COMPLETE publication"):
+                        c.run_once(SimpleNamespace())
+                    self.assertTrue((root / "CLAIM").exists())
+                    self.assertFalse((root / "COMPLETE").exists())
+                    self.assertNotIn("COMPLETE", published)
+                    with self.assertRaisesRegex(c.h.ValidationError, "bundle roster differs"):
+                        c.replay(root)
+                    with self.assertRaisesRegex(c.h.ValidationError, "namespace already exists"):
+                        c.run_once(SimpleNamespace())
+                    return
                 result = c.run_once(SimpleNamespace())
                 self.assertEqual(published[-1], "COMPLETE")
                 self.assertEqual(c.replay(root), result)
@@ -263,6 +278,9 @@ class CalibrationTest(unittest.TestCase):
         for mode in ("success", "launch_failure", "bad_raw", "bad_marker"):
             with self.subTest(mode=mode):
                 self.run_mock_once(mode)
+
+    def test_finalization_deadline_cannot_seal_or_repeat_attempt(self):
+        self.run_mock_once("late_finalization")
 
 
 if __name__ == "__main__":

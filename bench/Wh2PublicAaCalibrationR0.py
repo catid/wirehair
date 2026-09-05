@@ -549,6 +549,10 @@ def run_once(args):
                               for name in CORE_FILES if name != "COMPLETE"}}
         if marker_path.exists():
             complete["files"]["WORKER_STARTED"] = p["marker_sha256"]
+        # Hashing and summary publication also consume the outer budget. Never
+        # seal a previously passing summary after that budget has expired.
+        if time.monotonic() >= started + 120:
+            fail("outer deadline prevented COMPLETE publication; attempt remains spent")
         h.publish_json(directory, "COMPLETE", complete)
         os.fsync(directory)
         print(canonical(summary).decode("ascii"))
