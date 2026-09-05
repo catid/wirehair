@@ -729,7 +729,7 @@ class PublicBorrowedR1Test(unittest.TestCase):
             for _ in range(100):
                 try:
                     status = status_path.read_text(encoding="ascii")
-                except FileNotFoundError:
+                except (FileNotFoundError, ProcessLookupError):
                     break
                 if "State:\tZ" in status:
                     break
