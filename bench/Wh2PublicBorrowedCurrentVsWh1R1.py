@@ -273,10 +273,10 @@ def parse_canonical_line(data: bytes, where: str) -> Dict[str, Any]:
             data[:-1].decode("ascii"), object_pairs_hook=unique_object,
             parse_constant=reject_constant,
         )
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        if type(value) is not dict or canonical_bytes(value) + b"\n" != data:
+            fail("{} is not a canonical JSON object".format(where))
+    except (ValueError, RecursionError) as exc:
         fail("{} is malformed: {}".format(where, exc))
-    if type(value) is not dict or canonical_bytes(value) + b"\n" != data:
-        fail("{} is not a canonical JSON object".format(where))
     return value
 
 
@@ -2252,6 +2252,8 @@ def preflight(
     library = exact_absolute_file(args.library, "--library")
     compiler_path = exact_absolute_file(args.compiler, "--compiler")
     controller = Path(__file__).resolve()
+    if controller != source_root / "bench/Wh2PublicBorrowedCurrentVsWh1R1.py":
+        fail("controller must be the exact source-tree entrypoint used by replay")
     if file_sha256(controller) != args.expected_controller_sha256:
         fail("controller SHA-256 differs from its exact argument")
     if file_sha256(worker) != args.expected_worker_sha256:

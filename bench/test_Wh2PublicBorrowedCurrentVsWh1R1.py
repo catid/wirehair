@@ -365,6 +365,24 @@ class PublicBorrowedR1Test(unittest.TestCase):
         with self.assertRaises(screen.ValidationError):
             self.parse(altered, expected, maps_hash)
 
+    def test_json_overflow_and_recursion_are_validation_failures(self):
+        cases = {
+            "overflowed JSON number": b'{"a":1e400}\n',
+        }
+        digit_limit = getattr(sys, "get_int_max_str_digits", lambda: 0)()
+        if digit_limit:
+            cases["oversized JSON integer"] = (
+                b'{"a":' + b'1' * max(4400, digit_limit + 1) + b'}\n')
+        for label, data in cases.items():
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(screen.ValidationError, "is malformed"):
+                    screen.parse_canonical_line(data, label)
+        for target, name in ((screen.json, "loads"), (screen, "canonical_bytes")):
+            with self.subTest(recursion_stage=name):
+                with mock.patch.object(target, name, side_effect=RecursionError("synthetic recursion")):
+                    with self.assertRaisesRegex(screen.ValidationError, "is malformed: synthetic recursion"):
+                        screen.parse_canonical_line(b'{"a":0}\n', "deep JSON")
+
     def test_partial_final_and_maps_receipts_are_mandatory(self):
         raw, expected, maps_hash = screen.synthetic_transcript()
         records = [json.loads(line) for line in raw.splitlines()]
@@ -483,6 +501,24 @@ class PublicBorrowedR1Test(unittest.TestCase):
     def test_selftest_cli_rejects_workload_arguments(self):
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             screen.parse_args(["--selftest", "--worker", "/tmp/nope"])
+
+    def test_preflight_rejects_copied_controller_before_probes(self):
+        args = SimpleNamespace(
+            source_root="/synthetic/source", build_root="/synthetic/build",
+            worker="/synthetic/build/worker", library="/synthetic/build/library",
+            compiler="/synthetic/compiler")
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(
+                screen, "__file__", "/synthetic/copied-controller.py"))
+            for name in ("exact_absolute_directory", "exact_absolute_file"):
+                stack.enter_context(mock.patch.object(
+                    screen, name, side_effect=lambda text, where: Path(text)))
+            probes = [stack.enter_context(mock.patch.object(screen, name)) for name in
+                      ("file_sha256", "compiler_receipt", "native_config_receipt")]
+            with self.assertRaisesRegex(screen.ValidationError, "exact source-tree entrypoint"):
+                screen.preflight(args, {})
+            for probe in probes:
+                probe.assert_not_called()
 
     def replay_fixture(self, fixture):
         with tempfile.TemporaryDirectory(prefix="wh2-r1-replay-") as temporary:
