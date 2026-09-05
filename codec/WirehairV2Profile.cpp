@@ -1197,15 +1197,18 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encode(
 {
     PublicCodec* impl = FromHandle(codec);
     const bool valid_encoder = impl && impl->Mode == CodecMode::Encoder;
-    uint64_t block_count = 0u;
+    uint64_t source_offset = 0u;
     uint32_t required = 0u;
     if (valid_encoder) {
-        block_count = BlockCountWide(
-            impl->MessageBytes, impl->BlockBytes);
+        // Widen before multiplying: repair IDs may exceed the source range
+        // even when their byte offset would wrap a 32-bit size_t.
+        source_offset = (uint64_t)blockId * impl->BlockBytes;
         required = impl->BlockBytes;
-        if (block_count != 0u && blockId == block_count - 1u) {
-            required = (uint32_t)(impl->MessageBytes -
-                (block_count - 1u) * impl->BlockBytes);
+        if (source_offset < impl->MessageBytes) {
+            const uint64_t remaining = impl->MessageBytes - source_offset;
+            if (remaining < required) {
+                required = (uint32_t)remaining;
+            }
         }
     }
 
@@ -1242,11 +1245,10 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encode(
     if (outputCapacity < required) {
         return WirehairV2_BufferTooSmall;
     }
-    if (borrowed && blockId < block_count) {
-        const size_t source_offset =
-            (size_t)blockId * (size_t)impl->BlockBytes;
+    if (borrowed && source_offset < impl->MessageBytes) {
+        // Creation checked MessageBytes <= SIZE_MAX and the source range.
         std::memcpy(
-            blockDataOut, impl->BorrowedSource + source_offset, required);
+            blockDataOut, impl->BorrowedSource + (size_t)source_offset, required);
         return WirehairV2_Success;
     }
     return MapResult(impl->Impl.Encode(

@@ -42,7 +42,7 @@ enum : uint32_t
     BlockBytes = 16u,
     BlockCount = 9u,
     ProfileBytes = WIREHAIR_V2_PROFILE_SERIALIZED_BYTES,
-    RepairProbeCount = 4u,
+    RepairProbeCount = 6u,
     ProbeCount = BlockCount + RepairProbeCount
 };
 
@@ -75,6 +75,8 @@ const uint32_t PacketIds[ProbeCount] = {
     BlockCount,
     BlockCount + 7u,
     2u * BlockCount - 1u,
+    65536u + BlockCount - 1u,
+    UINT32_C(0x10000000), // B=16: byte offset is 2^32, not source block 0.
     UINT32_MAX
 };
 
@@ -283,9 +285,28 @@ bool ReplayPackets(
         uint8_t guarded[BlockBytes + 2u];
         std::memset(guarded, Guard, sizeof(guarded));
         uint32_t bytes = UINT32_C(0xa5a5a5a5);
+        // Exercise the public length calculation before delegated encoding,
+        // including a one-byte tail (zero capacity) and high repair IDs.
+        const WirehairV2Result short_result = wirehair_v2_encode(
+            codec, expected[probe].Id,
+            guarded + 1u, expected[probe].Bytes - 1u, &bytes);
+        const bool untouched = std::all_of(
+            guarded, guarded + sizeof(guarded),
+            [](uint8_t byte) { return byte == Guard; });
+        if (short_result != WirehairV2_BufferTooSmall ||
+            bytes != expected[probe].Bytes || !untouched)
+        {
+            std::fprintf(stderr,
+                "V2 borrowed-source short packet failed: %s "
+                "probe=%u id=%u result=%d bytes=%u expected=%u\n",
+                what, probe, expected[probe].Id,
+                static_cast<int>(short_result), bytes, expected[probe].Bytes);
+            return false;
+        }
+        bytes = UINT32_C(0xa5a5a5a5);
         const WirehairV2Result result = wirehair_v2_encode(
             codec, expected[probe].Id,
-            guarded + 1u, BlockBytes, &bytes);
+            guarded + 1u, expected[probe].Bytes, &bytes);
         bool bounds_ok = guarded[0] == Guard &&
             guarded[sizeof(guarded) - 1u] == Guard;
         for (uint32_t i = bytes; bounds_ok && i < BlockBytes; ++i) {
@@ -401,6 +422,9 @@ bool CheckConstructorAndLifetimeMatrix()
                         owner.Handle, message_bytes, original,
                         attached_packets, "attached") ||
                     !PacketSetsEqual(attached_packets, expected_packets) ||
+                    !ReplayPackets(
+                        owner.Handle, expected_packets,
+                        "attached exact/short capacity") ||
                     source != original)
                 {
                     std::fprintf(stderr,
