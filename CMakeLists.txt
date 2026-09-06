@@ -52,6 +52,8 @@ option(WIREHAIR_ENABLE_SCHEDULED_TESTS
     "Register resource-bounded scheduled large-message profiles" OFF)
 option(WIREHAIR_ENABLE_PUBLIC_BORROWED_R1_NATIVE_CONFIG
     "Register the host-specific public borrowed r1 oracle test on CPU 120" OFF)
+option(WIREHAIR_ENABLE_THUE_MORSE_NATIVE_R0
+    "Build the frozen benchmark-only K6 Thue-Morse native R0 screen" OFF)
 option(WIREHAIR_ENABLE_LIBFUZZER
     "Build V2 fuzz entry points with Clang libFuzzer main/coverage" OFF)
 option(WIREHAIR_ENABLE_TRI_BMQ4_SCHUR_FALSIFIER
@@ -316,6 +318,16 @@ function(wirehair_configure_library target variant)
     wirehair_apply_project_options(${target})
 endfunction()
 
+if(WIREHAIR_ENABLE_THUE_MORSE_NATIVE_R0)
+    if(BUILD_SHARED_LIBS OR WIREHAIR_BUILD_BOTH OR BUILD_CODEC_V2)
+        message(FATAL_ERROR
+            "Thue-Morse native R0 requires static-only wirehair and BUILD_CODEC_V2=OFF")
+    endif()
+    if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_CROSSCOMPILING)
+        message(FATAL_ERROR "Thue-Morse native R0 requires a native Linux build")
+    endif()
+endif()
+
 if(BUILD_SHARED_LIBS)
     set(WIREHAIR_PRIMARY_VARIANT SHARED)
 else()
@@ -374,6 +386,69 @@ else()
     endif()
 endif()
 add_library(wirehair::wirehair ALIAS wirehair)
+
+if(WIREHAIR_ENABLE_THUE_MORSE_NATIVE_R0)
+    find_package(Python3 3.8 COMPONENTS Interpreter REQUIRED)
+    set(WH2_THUE_NATIVE_HEADER
+        "${CMAKE_CURRENT_BINARY_DIR}/Wh2ThueMorseNativeDataR0.h")
+    set(WH2_THUE_NATIVE_RECEIPT
+        "${CMAKE_CURRENT_BINARY_DIR}/Wh2ThueMorseNativeDataR0.json")
+    add_custom_command(
+        OUTPUT "${WH2_THUE_NATIVE_HEADER}" "${WH2_THUE_NATIVE_RECEIPT}"
+        COMMAND "${Python3_EXECUTABLE}" -I -B -S
+            "${PROJECT_SOURCE_DIR}/bench/Wh2ThueMorseNativeDataR0.py"
+            --generate "${WH2_THUE_NATIVE_HEADER}"
+            --receipt "${WH2_THUE_NATIVE_RECEIPT}"
+        DEPENDS
+            bench/Wh2ThueMorseNativeDataR0.py
+            bench/Wh2ThueMorseRecoveryHistoryR0.py
+            bench/Wh2ThueMorseR0.py
+            bench/Wh2NoncommutingRadixR0.py
+            bench/Wh2NoncommutingRadixRunR0.py
+            /var/tmp/wh2-thue-morse-recovery-r0/COMPLETE.json
+            /var/tmp/wh2-thue-morse-recovery-r0/raw.json
+            /var/tmp/wh2-thue-morse-r0/COMPLETE.json
+            /var/tmp/wh2-thue-morse-r0/raw.json
+        COMMENT "Generating immutable fixed-pair data from authenticated recorded evidence"
+        VERBATIM)
+    add_executable(wh2_thue_morse_native_r0 EXCLUDE_FROM_ALL
+        bench/Wh2ThueMorseNativeCodec.cpp
+        bench/Wh2ThueMorseNativeCodec.h
+        bench/Wh2ThueMorseNativeR0.cpp
+        bench/Wh2NativePanel.cpp
+        bench/Wh2NativePanel.h
+        bench/Wh2FrozenTrace.cpp
+        bench/Wh2FrozenTrace.h
+        bench/Wh2RdpruTargetIdentityV2.cpp
+        bench/Wh2RdpruTargetIdentityV2.h
+        bench/Wh2PublicBorrowedTargetIdentity.cpp
+        bench/Wh2PublicBorrowedTargetIdentity.h
+        "${WH2_THUE_NATIVE_HEADER}"
+        "${WH2_THUE_NATIVE_RECEIPT}")
+    target_include_directories(wh2_thue_morse_native_r0 PRIVATE
+        "${PROJECT_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}")
+    target_link_libraries(wh2_thue_morse_native_r0 PRIVATE wirehair)
+    target_compile_definitions(wh2_thue_morse_native_r0 PRIVATE
+        "WIREHAIR_WH2_SOURCE_GIT_COMMIT=\"${WIREHAIR_WH2_SOURCE_GIT_COMMIT}\"")
+    wirehair_apply_project_options(wh2_thue_morse_native_r0)
+
+    # This target deliberately has no generated-data/header dependency and
+    # executes only the unrelated neutral companion fixtures in its source.
+    add_executable(wh2_thue_morse_native_r0_test EXCLUDE_FROM_ALL
+        bench/Wh2ThueMorseNativeCodec.cpp
+        bench/Wh2ThueMorseNativeCodec.h
+        bench/Wh2ThueMorseNativeCodecTest.cpp)
+    target_include_directories(wh2_thue_morse_native_r0_test PRIVATE
+        "${PROJECT_SOURCE_DIR}")
+    target_link_libraries(wh2_thue_morse_native_r0_test PRIVATE wirehair)
+    wirehair_apply_project_options(wh2_thue_morse_native_r0_test)
+    if(BUILD_TESTS)
+        enable_testing()
+        add_test(NAME wh2_thue_morse_native_r0_test COMMAND wh2_thue_morse_native_r0_test)
+        set_tests_properties(wh2_thue_morse_native_r0_test PROPERTIES
+            TIMEOUT 60 LABELS "wh2;native;neutral;thue-morse")
+    endif()
+endif()
 
 if (BUILD_TESTS)
     enable_testing()
