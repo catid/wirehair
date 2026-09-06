@@ -253,6 +253,25 @@ class CostTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 M.read_regular(fifo, 3)
 
+    def test_runtime_identity_ignores_only_aslr_addresses(self):
+        with tempfile.TemporaryDirectory(prefix="wh2-cost-ldd-") as temporary:
+            root = Path(temporary)
+            for name in ("lib.so", "loader", "other.so"):
+                M.publish(root/name, b"neutral ELF stand-in")
+            listing = ("linux-vdso.so.1 (0x1000)\n"
+                       "libneutral.so => " + str(root/"lib.so") + " (0x2000)\n" +
+                       str(root/"loader") + " (0x3000)\n")
+            reference = M.runtime_libraries(listing)
+            self.assertEqual(reference, M.runtime_libraries(listing.replace("0x1000", "0xabcdef")
+                .replace("0x2000", "0x111111").replace("0x3000", "0x999999")))
+            self.assertNotEqual(reference, M.runtime_libraries(listing.replace("/lib.so", "/other.so")))
+            for invalid in (listing + listing.splitlines()[1] + "\n",
+                    listing.replace(str(root/"lib.so") + " (0x2000)", "not found"),
+                    listing.replace("linux-vdso.so.1 (0x1000)\n", ""),
+                    listing + "unexpected diagnostic\n"):
+                with self.assertRaises(ValueError):
+                    M.runtime_libraries(invalid)
+
 
 class FakeChild:
     """Local pipes only; no subprocess is created by any lifecycle test."""

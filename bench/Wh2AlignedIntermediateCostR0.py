@@ -11,6 +11,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import selectors
 import shlex
 import signal
@@ -209,6 +210,30 @@ def statistics(records):
     return dict(outcome=outcome, statistics=results, failed_controls=failed_controls,
                 failed_treatments=failed_treatments, all_K_claimed=False,
                 production_promotion_claimed=False)
+
+
+def runtime_libraries(linked):
+    """Bind every ldd entry, excluding only its process-random load address."""
+    entries = {}
+    for line in linked.splitlines():
+        match = re.fullmatch(r"\s*(.*?)\s+\(0x[0-9a-fA-F]+\)\s*", line)
+        require(match is not None, "malformed/missing dynamic library")
+        descriptor = match.group(1)
+        if descriptor == "linux-vdso.so.1":
+            name, path = descriptor, None
+        else:
+            if " => " in descriptor:
+                name, path = descriptor.split(" => ", 1)
+                require(re.fullmatch(r"[A-Za-z0-9_.+-]+", name) is not None, "dynamic library soname")
+            else:
+                name, path = "dynamic_loader", descriptor
+            require(path.startswith("/") and not any(char.isspace() for char in path), "absolute resolved library path")
+            path = str(Path(path).resolve(strict=True))
+        require(name not in entries, "duplicate dynamic library soname")
+        entries[name] = path
+    require("linux-vdso.so.1" in entries and "dynamic_loader" in entries and len(entries) >= 3,
+            "incomplete runtime library listing")
+    return [{"soname": name, "path": entries[name]} for name in sorted(entries)]
 
 
 def hex_bytes(value, size):
@@ -525,10 +550,8 @@ def current_receipt(build, deadline):
         installed.add(Path(program).resolve(strict=True))
     for name in ("cc1plus", "collect2"):
         installed.add(Path(checked(["g++", "-print-prog-name=" + name], deadline).decode().strip()).resolve(strict=True))
-    linked = checked(["ldd", build / TARGET], deadline).decode()
-    for word in linked.split():
-        if word.startswith("/"):
-            installed.add(Path(word).resolve(strict=True))
+    linked = runtime_libraries(checked(["ldd", build / TARGET], deadline).decode())
+    installed.update(Path(entry["path"]) for entry in linked if entry["path"] is not None)
     require(any(path.name.startswith("libc.so") or path.name.startswith("libc-") for path in installed),
             "libc runtime closure missing")
     dependency_pins = []
