@@ -14,6 +14,15 @@ WIREHAIR_2.0 {
         wirehair_encoder_detach_input;
         wirehair_free;
         wirehair_init_;
+        wirehair_k6_decode;
+        wirehair_k6_decoder_create;
+        wirehair_k6_encode;
+        wirehair_k6_encoder_create;
+        wirehair_k6_encoder_create_profile;
+        wirehair_k6_encoder_detach_input;
+        wirehair_k6_free;
+        wirehair_k6_profile_validate;
+        wirehair_k6_recover;
         wirehair_recover;
         wirehair_recover_block;
         wirehair_recover_block_ex;

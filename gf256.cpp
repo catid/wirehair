@@ -3990,3 +3990,6 @@ gf256_try_addset_multi_mem_avx512_target(
 #undef GF256_WH2_AVX512_SECTION
 
 #endif
+
+// K6 shares the existing initialized field tables and runtime ISA gates.
+#include "codec/WirehairK6Payload.inc"

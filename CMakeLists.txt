@@ -129,6 +129,13 @@ set(LIB_SOURCE_FILES
         wirehair.cpp
         include/wirehair/wirehair.h
         include/wirehair/wirehair.hpp
+        include/wirehair/wirehair_k6.h
+        codec/WirehairK6.cpp
+        codec/WirehairK6Core.cpp
+        codec/WirehairK6Core.h
+        codec/WirehairK6Lookup.inc
+        codec/WirehairK6Payload.h
+        codec/WirehairK6Payload.inc
         gf256.cpp
         gf256.h
         WirehairCodec.cpp
@@ -484,6 +491,43 @@ if (BUILD_TESTS)
     set_target_properties(wirehair_test_support PROPERTIES
         POSITION_INDEPENDENT_CODE ${WIREHAIR_STATIC_PIC})
     wirehair_apply_project_options(wirehair_test_support)
+
+    add_executable(k6_codec_test test/K6CodecTest.cpp)
+    wirehair_apply_project_options(k6_codec_test)
+    if(WIREHAIR_PRIMARY_VARIANT STREQUAL "STATIC")
+        target_link_libraries(k6_codec_test PRIVATE wirehair)
+    else()
+        # Allocation injection must reside in the same link image, including
+        # Windows where an EXE cannot replace a DLL's operator new.
+        target_link_libraries(k6_codec_test PRIVATE wirehair_test_support)
+    endif()
+    add_test(NAME k6_codec_test COMMAND k6_codec_test)
+    set_tests_properties(k6_codec_test PROPERTIES
+        LABELS "k6;recovery;ownership;allocation" TIMEOUT 60)
+
+    add_executable(k6_c_consumer test/K6CConsumer.c)
+    set_target_properties(k6_c_consumer PROPERTIES LINKER_LANGUAGE CXX)
+    wirehair_apply_project_options(k6_c_consumer)
+    target_link_libraries(k6_c_consumer PRIVATE wirehair)
+    add_test(NAME k6_c_consumer COMMAND k6_c_consumer)
+    set_tests_properties(k6_c_consumer PROPERTIES LABELS "k6;abi" TIMEOUT 60)
+    if(TARGET wirehair_shared)
+        add_executable(k6_c_consumer_shared test/K6CConsumer.c)
+        set_target_properties(k6_c_consumer_shared PROPERTIES LINKER_LANGUAGE CXX)
+        wirehair_apply_project_options(k6_c_consumer_shared)
+        target_link_libraries(k6_c_consumer_shared PRIVATE wirehair_shared)
+        add_test(NAME k6_c_consumer_shared COMMAND k6_c_consumer_shared)
+        set_tests_properties(k6_c_consumer_shared PROPERTIES
+            LABELS "k6;abi;shared" TIMEOUT 60)
+    endif()
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        add_executable(k6_payload_test test/K6PayloadTest.cpp)
+        wirehair_apply_project_options(k6_payload_test)
+        target_link_libraries(k6_payload_test PRIVATE wirehair_test_support)
+        add_test(NAME k6_payload_test COMMAND k6_payload_test)
+        set_tests_properties(k6_payload_test PROPERTIES
+            LABELS "k6;gf256;simd" TIMEOUT 60)
+    endif()
 
     add_executable(v2_borrowed_facade_fault_test
         test/V2BorrowedFacadeFaultTest.cpp)
@@ -864,6 +908,7 @@ install(FILES LICENSE
 install(FILES
     LEGACY_WIRE_PROFILES.md
     V2_WIRE_PROFILE.md
+    K6_WIRE_PROFILE.md
     DESTINATION "${CMAKE_INSTALL_DATADIR}/doc/wirehair")
 
 if(BUILD_TESTS)
