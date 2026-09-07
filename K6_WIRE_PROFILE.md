@@ -15,14 +15,30 @@ recovery experiment, with feedback vectors `(124,127,152,84,241,63)` and
 search. The immutable 39,936-byte lookup is included in the library; building
 or consuming the package requires neither Python nor a live encoder.
 
-The predecessor serialized implementation passed full encoder/decoder timing
-comparisons with WH1 and existing public WH2 at block sizes 2, 64 and 1280 on
-one GFNI-capable host. Its equation family had 8 zero-overhead failures in
-6,144 frozen recovery traces; all eight recovered with one additional packet.
-Those are scoped experimental results, not all-K, all-host, or universal
-recovery guarantees. This production-source integration requires its own
-full-lifecycle timing gate before inheriting a speed claim. It is not a new
-default profile.
+The integrated static library passed its own full-lifecycle timing screen,
+`wirehair.wh2.k6-production-cost-r0`, at source `0487537`. All 54 same-code
+timing controls and all 36 comparisons with WH1/current public WH2 passed.
+The run retained 2,488,320 fresh codec lifecycles and checked every output.
+Observed time reductions versus WH1, spanning the two measurement orders:
+
+| Block bytes | Encoder | Low-ID decoder | Distant-ID decoder |
+|---|---|---|---|
+| 2 | 74.3% | 90.0% | 81.5% |
+| 64 | 74.8-75.0% | 89.3-89.4% | 82.4% |
+| 1280 | 77.2% | 88.5% | 85.5% |
+
+These measurements use borrowed immutable input on one GFNI-capable host.
+Encoder time includes create, descriptor output, 18 packets and free; decoder
+time includes create, feed through first success, recover and free. They are
+fresh-handle measurements after process initialization, not process cold-start,
+shared-library call-overhead, non-GFNI, or all-K performance claims.
+
+The unchanged equation family had 8 zero-overhead failures in 6,144 frozen
+recovery traces; all eight recovered with one additional packet. The selected
+lookup and receiver body are preserved in this integration, with independent
+packet/selector and ownership/recovery tests. The timing screen is not a new
+failure-rate sample. Neither result is a universal recovery guarantee, and
+this codec is not a new default profile.
 
 ## Input ownership
 
