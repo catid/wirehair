@@ -24,6 +24,14 @@ SOURCE_NAMES = ("bench/Wh2DecoderAllocationR0.cpp", "bench/Wh2DecoderAllocationR
 REUSED = Path("/tmp/wh2-decoder-cost-neutral.utKXCA/native")
 
 
+def pin_input(path):
+    # Installed tools/headers may legitimately have multiple hard links. Keep
+    # the stricter single-link rule for repository and temporary artifacts.
+    path = Path(path)
+    owned = any(base == path or base in path.parents for base in (ROOT, Path("/tmp"), Path("/var/tmp")))
+    return A.pin(path, installed=not owned)
+
+
 def build_commands(build):
     return [
         ["/usr/bin/g++", "-std=c++11", "-O3", "-g1", "-fPIC", "-fno-lto",
@@ -153,7 +161,7 @@ def pins_current(receipt):
     A.exact(subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
             receipt["source_head"], "source HEAD")
     for pin in receipt["pins"]:
-        A.exact(A.pin(Path(pin["path"])), pin, "unchanged input/build/helper")
+        A.exact(pin_input(Path(pin["path"])), pin, "unchanged input/build/helper")
 
 
 def make_receipt(build):
@@ -183,7 +191,7 @@ def make_receipt(build):
         A.exact((ROOT / name).read_bytes(), subprocess.check_output(["git", "cat-file", "blob", head+":"+name], cwd=ROOT),
                 "committed diagnostic source")
     return dict(protocol=PROTOCOL, source_head=head, build=str(build), build_commands=commands,
-                pins=[A.pin(path) for path in sorted(paths)])
+                pins=[pin_input(path) for path in sorted(paths)])
 
 
 def run(receipt_path):
@@ -249,6 +257,11 @@ def selftest():
     import io
     import tempfile
     from unittest import mock
+    with mock.patch.object(A, "pin", return_value={}) as pinned:
+        for path, installed in ((Path("/usr/bin/bash"), True), (ROOT / SOURCE_NAMES[0], False),
+                                (Path("/tmp/worker"), False), (Path("/var/tmp/raw"), False)):
+            pin_input(path)
+            pinned.assert_called_with(path, installed=installed)
     claim = "a" * 64
     rows = [dict(type="header", protocol=PROTOCOL, claim_sha256=claim, pid=1, speed_claimed=False)]
     original = dict(fixtures=[])
