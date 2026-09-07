@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.20)
 project(Wh2ThueMorseMatvecCostR0 LANGUAGES CXX)
 
 option(WH2_MATVEC_COST_SANITIZERS "Use ASan/UBSan; scientific worker is disabled" OFF)
@@ -141,6 +141,19 @@ set(WIREHAIR_STRICT_WARNINGS ON CACHE BOOL "" FORCE)
 set(WH_LTO OFF CACHE STRING "" FORCE)
 set(WH_PGO_MODE OFF CACHE STRING "" FORCE)
 add_subdirectory("${_root}" "${_binary}/production" EXCLUDE_FROM_ALL)
+# The unchanged project defines these five offline generators even with tools
+# disabled. They are not built here and must not enter the actual-TU receipt.
+# This target-scoped property requires CMake 3.20; no compile/link flag changes.
+foreach(_generator IN ITEMS gen_small_dseeds gen_peel_seeds gen_most_dseeds gen_dcounts gen_tables)
+    if(NOT TARGET ${_generator})
+        message(FATAL_ERROR "Expected unbuilt offline generator is absent")
+    endif()
+    get_target_property(_excluded ${_generator} EXCLUDE_FROM_ALL)
+    if(NOT _excluded)
+        message(FATAL_ERROR "Offline generator unexpectedly participates in the build")
+    endif()
+    set_target_properties(${_generator} PROPERTIES EXPORT_COMPILE_COMMANDS OFF)
+endforeach()
 
 # Reconstruction is confined to the already selected lookup. It is not a codec
 # run, a parameter selection, or a correctness/performance campaign.
