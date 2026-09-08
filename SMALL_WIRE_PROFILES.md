@@ -50,9 +50,46 @@ SHA-256 is `5bed150f33d02e7b8cf0db08225d695637284002f4adb4ad3ec64c961201b6c6`.
 A Python 3.8 full replay verified all 602 receipt pins; a separately written
 raw chronology, API-ledger and confidence-interval audit reproduced all 90
 decisions. The namespace is spent: no rerun, filtering or rescoring.
-The timing run adds no recovery-rate sample. A paired WH1/current WH2 recovery
-comparison on the retained K3 cohort is still pending; universal recovery is
-not claimed.
+The timing run adds no recovery-rate sample.
+
+## Retained-cohort recovery comparison
+
+At source `1861689`, `wirehair.wh2.k3-recovery-controls-r0` replayed the same
+6,144 frozen loss traces through the integrated K3, WH1 and current public WH2
+APIs. Observed failures with zero extra packets:
+
+| Codec | Failures / traces | Failure rate |
+|---|---|---|
+| Integrated K3 | 0 / 6144 | 0% |
+| WH1 | 14 / 6144 | 0.23% |
+| Current public WH2 | 269 / 6144 | 4.38% |
+
+K3 introduced no failures against either control in this cohort. All 14 WH1
+failures recovered with one extra packet. Current WH2 had 5 failures after
+one extra packet, 1 after two, and none after three. Each of the twelve
+block-width/loss-schedule cells retained all 512 traces; K3 had no failures
+in any cell. These are observed results on the retained sample, not a new
+independent holdout or a universal recovery guarantee.
+
+The 72 hard traces and 53 historical cases at their original block widths
+are separate from that denominator. K3 passed all 72 hard traces at zero
+overhead, versus 1 WH1 and 5 current-WH2 failures. K3 and WH1 recovered all
+53 historical prefixes; current WH2 remained unresolved on 43. No packets
+were appended to rescue those prefixes.
+
+Every encoder was freed before creating its receiver. Every K3 packet matched
+an independent polynomial payload oracle; every successful decode recovered
+the original message twice with buffer guards. Native, portable-backend and
+ASan/UBSan builds agreed on all 6,269 cases, including every descriptor,
+packet hash, feed status and first-success count. Backend replays do not
+increase the sample size or establish portable-backend speed.
+
+The immutable bundle is `/var/tmp/wh2-k3-recovery-controls-r0`; native raw
+SHA-256 is `60a5f0d502d2fe4b49917d47e5ad75d7be80580d878ebdf588bff0fb1fcb613c`.
+A Python 3.8 replay verified all 636 input pins and all backend records;
+a separately written raw-count and paired-outcome audit reproduced the
+results. This namespace is also spent. All-K construction-seed validation
+and broader performance/recovery coverage remain outstanding.
 
 ## Ownership and operations
 
