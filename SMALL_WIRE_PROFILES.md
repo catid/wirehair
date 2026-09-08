@@ -25,12 +25,34 @@ builds. Those replays are not fresh failure-rate samples or paired WH1
 recovery-rate comparisons. Installed C consumers, ownership/error tests and
 package relocation are checked separately from performance.
 
-The separate serialized prototype passed its encoder and low/distant decoder
-timing gate against WH1/current WH2 at 2-, 64- and 1,280-byte blocks on one
-GFNI-capable host. **Those speed results do not qualify this integrated
-library.** Actual-library performance qualification is still pending. Neither
-the retained recovery screen nor prototype timing establishes all-K,
-shared-call, cold-start or non-GFNI performance or universal recovery.
+The integrated static library passed its own full-lifecycle timing gate,
+`wirehair.wh2.k3-production-cost-r0`, at source `ffa7739`. All 54 same-code
+timing controls and all 36 comparisons with actual WH1/current public WH2
+passed. The run retained 2,488,320 fresh codec lifecycles and checked every
+output. Observed time reductions versus WH1, spanning both measurement orders:
+
+| Block bytes | Encoder | Low-ID decoder | Distant-ID decoder |
+|---|---|---|---|
+| 2 | 64.4-64.7% | 95.2% | 90.6-90.7% |
+| 64 | 72.4% | 94.9% | 91.0-91.1% |
+| 1280 | 75.3-75.6% | 93.8% | 92.2% |
+
+These are borrowed-immutable, full-three-block measurements on one GFNI-capable
+host. Encoder time includes create, descriptor output, 18 packets and free;
+decoder time includes create, feed through first success, recover and free.
+Both decoder streams needed three packets for every arm. This is separate
+evidence from the earlier serialized-prototype timing result, not an inherited
+qualification. It does not establish partial-tail, all-K, shared-call,
+cold-start or non-GFNI speed, and does not change the default profile.
+
+The immutable outcome is `/var/tmp/wh2-k3-production-cost-r0`; its raw stream
+SHA-256 is `5bed150f33d02e7b8cf0db08225d695637284002f4adb4ad3ec64c961201b6c6`.
+A Python 3.8 full replay verified all 602 receipt pins; a separately written
+raw chronology, API-ledger and confidence-interval audit reproduced all 90
+decisions. The namespace is spent: no rerun, filtering or rescoring.
+The timing run adds no recovery-rate sample. A paired WH1/current WH2 recovery
+comparison on the retained K3 cohort is still pending; universal recovery is
+not claimed.
 
 ## Ownership and operations
 

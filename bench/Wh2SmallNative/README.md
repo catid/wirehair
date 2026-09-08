@@ -83,8 +83,11 @@ recovery-rate comparison. Production integration must preserve the sealed
 equations and explicit descriptor, then qualify the actual library separately.
 
 The later opt-in integration is documented in
-[`SMALL_WIRE_PROFILES.md`](../../SMALL_WIRE_PROFILES.md); its performance gate
-is separate. `Wh2SmallProductionParity.cpp` reuses this correctness corpus
+[`SMALL_WIRE_PROFILES.md`](../../SMALL_WIRE_PROFILES.md). Its separately frozen
+`Wh2K3ProductionCostR0.py` actual-library gate at `ffa7739` also passed all
+54 same-code controls and 36 WH1/current WH2 comparisons; see that document
+for its distinct measurements and scope. `Wh2SmallProductionParity.cpp` reuses
+this correctness corpus
 through both the old serialized prototype archive and the new library,
 comparing descriptors, packet bytes, prefix status and recovered bytes. It is
 an engineering replay, not a timing or fresh recovery experiment, and does
