@@ -28,3 +28,20 @@ untouched original core. `--corpus` checks all 7,774 retained K3 payload cases,
 including the 6,144 fresh and 72 hard traces, historical original-width
 prefixes, and every triple in the development/seam windows. Neither mode
 compares speed with WH1 or establishes a new failure-rate sample.
+
+The build also produces a separate, non-LTO serialized K3 C boundary and five
+additional tests. Its shared `Facade<K,Traits>` implementation retains K6's
+independent/borrowed input, transactional allocating detach, descriptor
+validation and permanent conflict-poison behavior. Only the benchmark K3
+wrapper instantiates that boundary for external callers; the installed K6
+implementation remains untouched. K3 uses `WHK3` and profile ID
+`0x5748324b33544d31`, not an existing or retired WH2/K6 identity.
+
+`small_serialized` tests K3 ownership/error/byte behavior; `small_serialized_k6`
+instantiates the same template at K6 and checks installed K6 descriptor,
+packet, feed, recovery and detach parity. `small_serialized_c` verifies the C
+ABI, including decoder creation before any encoder exists. The remaining two
+tests replay the neutral and retained K3 corpus through the external serialized
+functions. All seven tests are correctness checks, not speed measurements.
+When enabling sanitizers, instrument both C and C++ compile flags and the link
+flags; the supplied archive must use the same sanitizers/backend configuration.

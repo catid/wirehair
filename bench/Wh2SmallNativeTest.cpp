@@ -2,6 +2,9 @@
 #include "../codec/WirehairK6Core.h"
 #include "Wh2FrozenTrace.h"
 #include "Wh2K3NativeData.inc"
+#ifdef WH2_SMALL_TEST_SERIALIZED
+#include "Wh2SmallSerialized.h"
+#endif
 #include <algorithm>
 #include <array>
 #include <cstdlib>
@@ -54,6 +57,9 @@ alignas(64) const Byte kK6Lookup[] = {
 #include "../codec/WirehairK6Lookup.inc"
 };
 std::uint64_t packet_checks = 0, feed_checks = 0, recover_checks = 0, row_checks = 0, cases = 0;
+#ifdef WH2_SMALL_TEST_SERIALIZED
+std::uint64_t serialized_cases = 0, serialized_packets = 0;
+#endif
 
 void Check(bool ok, const char* message)
 {
@@ -184,6 +190,21 @@ template<unsigned K> void Exercise(S::Lookup lookup, const Oracle<K>& oracle, un
     std::unique_ptr<Decoder> decoder;
     Check(Encoder::Create(lookup, source.data(), source.size(), B, encoder) == S::Status::Success, "encoder create");
     Check(Decoder::Create(lookup, source.size(), B, decoder) == S::Status::Success, "decoder create");
+#ifdef WH2_SMALL_TEST_SERIALIZED
+    std::unique_ptr<void, decltype(&wh2_small_free)> serialized_encoder(nullptr, wh2_small_free);
+    std::unique_ptr<void, decltype(&wh2_small_free)> serialized_decoder(nullptr, wh2_small_free);
+    if (K == 3) {
+        std::array<Byte, 32> profile = {};
+        const auto created = wh2_small_encoder_create(source.data(), source.size(), B,
+            Wh2Small_BorrowedImmutable, profile.data(), profile.size());
+        Check(created.status == Wh2Small_Success && created.codec, "serialized corpus encoder");
+        serialized_encoder.reset(created.codec);
+        const auto receiver = wh2_small_decoder_create(profile.data(), profile.size());
+        Check(receiver.status == Wh2Small_Success && receiver.codec, "serialized corpus decoder");
+        serialized_decoder.reset(receiver.codec);
+        ++serialized_cases;
+    }
+#endif
     std::unique_ptr<Old::Encoder> old_encoder;
     std::unique_ptr<Old::Decoder> old_decoder;
     if (K == 6) {
@@ -210,6 +231,16 @@ template<unsigned K> void Exercise(S::Lookup lookup, const Oracle<K>& oracle, un
             encoded.bytes_written == packet.size() && std::equal(packet.begin(), packet.end(), generated.begin() + 1) &&
             generated.front() == 0xa5 && generated.back() == 0xa5, "independent packet bytes/guards");
         ++packet_checks;
+#ifdef WH2_SMALL_TEST_SERIALIZED
+        if (K == 3) {
+            std::vector<Byte> bytes(packet.size() + 2, 0xa5);
+            const auto r = NoAlloc([&] { return wh2_small_encode(serialized_encoder.get(), ids[i],
+                bytes.data() + 1, packet.size()); });
+            Check(r.status == Wh2Small_Success && r.bytes_written == packet.size() &&
+                r.bytes_required == packet.size() && bytes == generated, "serialized packet oracle");
+            ++serialized_packets;
+        }
+#endif
         if (K == 6) {
             Match(encoded, NoAlloc([&] { return old_encoder->Encode(ids[i], old_packet.data() + 1, packet.size()); }));
             Check(old_packet == generated, "original K6 packet bytes");
@@ -221,6 +252,13 @@ template<unsigned K> void Exercise(S::Lookup lookup, const Oracle<K>& oracle, un
         Check(fed.status == (rank == K ? S::Status::Success : S::Status::NeedMore) && decoder->Rank() == rank,
               "native rank/status");
         ++feed_checks;
+#ifdef WH2_SMALL_TEST_SERIALIZED
+        if (K == 3) {
+            const auto r = NoAlloc([&] { return wh2_small_decode(serialized_decoder.get(), ids[i],
+                packet.data(), packet.size()); });
+            Check(r == (rank == K ? Wh2Small_Success : Wh2Small_NeedMore), "serialized prefix rank status");
+        }
+#endif
         if (K == 6) {
             Match(fed, NoAlloc([&] { return old_decoder->Feed(ids[i], generated.data() + 1, packet.size()); }));
             Check(old_decoder->Rank() == rank, "original K6 rank");
@@ -245,6 +283,16 @@ template<unsigned K> void Exercise(S::Lookup lookup, const Oracle<K>& oracle, un
         else Check(std::count(output.begin(), output.end(), 0xa5) == static_cast<std::ptrdiff_t>(output.size()),
                    "NeedMore leaves output unchanged");
         Check(output.front() == 0xa5 && output.back() == 0xa5, "recovery guards");
+#ifdef WH2_SMALL_TEST_SERIALIZED
+        if (K == 3) {
+            std::vector<Byte> bytes(source.size() + 2, 0xa5);
+            const auto r = NoAlloc([&] { return wh2_small_recover(serialized_decoder.get(),
+                bytes.data() + 1, source.size()); });
+            Check(r.status == (rank == K ? Wh2Small_Success : Wh2Small_NeedMore) &&
+                r.bytes_required == source.size() && r.bytes_written == (rank == K ? source.size() : 0) &&
+                bytes == output, "serialized recovery bytes/guards/status");
+        }
+#endif
         if (K == 6) {
             Match(recovered, NoAlloc([&] { return old_decoder->Recover(old_output.data() + 1, source.size()); }));
             Check(old_output == output, "original K6 recovery parity");
@@ -463,5 +511,11 @@ int main(int argc, char** argv)
     std::cout << "PASS " << argv[1] << " cases=" << cases << " packet_oracles=" << packet_checks
               << " feeds=" << feed_checks << " recoveries=" << recover_checks << " rows=" << row_checks
               << " raw=" << wh2_k3_data::kRawSha << " GFNI=" << wirehair_k6_payload::Available() << '\n';
+#ifdef WH2_SMALL_TEST_SERIALIZED
+    const bool neutral = !std::strcmp(argv[1], "--neutral");
+    Check(serialized_cases == (neutral ? 162 : 7774) && serialized_packets == (neutral ? 1944 : 48187),
+          "serialized corpus count accounting");
+    std::cout << "PASS serialized cases=" << serialized_cases << " packets=" << serialized_packets << '\n';
+#endif
     return 0;
 }
