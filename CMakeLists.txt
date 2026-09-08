@@ -130,6 +130,11 @@ set(LIB_SOURCE_FILES
         include/wirehair/wirehair.h
         include/wirehair/wirehair.hpp
         include/wirehair/wirehair_k6.h
+        include/wirehair/wirehair_small.h
+        codec/WirehairSmall.cpp
+        codec/WirehairSmallCore.h
+        codec/WirehairSmallFacade.h
+        codec/WirehairSmallK3Lookup.inc
         codec/WirehairK6.cpp
         codec/WirehairK6Core.cpp
         codec/WirehairK6Core.h
@@ -491,6 +496,35 @@ if (BUILD_TESTS)
     set_target_properties(wirehair_test_support PROPERTIES
         POSITION_INDEPENDENT_CODE ${WIREHAIR_STATIC_PIC})
     wirehair_apply_project_options(wirehair_test_support)
+
+    add_executable(small_codec_test test/SmallCodecTest.cpp)
+    wirehair_apply_project_options(small_codec_test)
+    if(WIREHAIR_PRIMARY_VARIANT STREQUAL "STATIC")
+        target_link_libraries(small_codec_test PRIVATE wirehair)
+    else()
+        # As for K6, allocation injection must share the library link image.
+        target_link_libraries(small_codec_test PRIVATE wirehair_test_support)
+    endif()
+    add_test(NAME small_codec_test COMMAND small_codec_test)
+    set_tests_properties(small_codec_test PROPERTIES
+        LABELS "small;k3;recovery;ownership;allocation" TIMEOUT 60)
+
+    add_executable(small_c_consumer test/SmallCConsumer.c)
+    set_target_properties(small_c_consumer PROPERTIES
+        LINKER_LANGUAGE CXX C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
+    wirehair_apply_project_options(small_c_consumer)
+    target_link_libraries(small_c_consumer PRIVATE wirehair)
+    add_test(NAME small_c_consumer COMMAND small_c_consumer)
+    set_tests_properties(small_c_consumer PROPERTIES LABELS "small;k3;abi" TIMEOUT 60)
+    if(TARGET wirehair_shared)
+        add_executable(small_c_consumer_shared test/SmallCConsumer.c)
+        set_target_properties(small_c_consumer_shared PROPERTIES
+            LINKER_LANGUAGE CXX C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
+        wirehair_apply_project_options(small_c_consumer_shared)
+        target_link_libraries(small_c_consumer_shared PRIVATE wirehair_shared)
+        add_test(NAME small_c_consumer_shared COMMAND small_c_consumer_shared)
+        set_tests_properties(small_c_consumer_shared PROPERTIES LABELS "small;k3;abi;shared" TIMEOUT 60)
+    endif()
 
     add_executable(k6_codec_test test/K6CodecTest.cpp)
     wirehair_apply_project_options(k6_codec_test)
@@ -909,6 +943,7 @@ install(FILES
     LEGACY_WIRE_PROFILES.md
     V2_WIRE_PROFILE.md
     K6_WIRE_PROFILE.md
+    SMALL_WIRE_PROFILES.md
     DESTINATION "${CMAKE_INSTALL_DATADIR}/doc/wirehair")
 
 if(BUILD_TESTS)

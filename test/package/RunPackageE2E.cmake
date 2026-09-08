@@ -80,6 +80,9 @@ function(assert_install_manifest prefix label)
     if(NOT EXISTS "${prefix}/include/wirehair/wirehair_k6.h")
         message(FATAL_ERROR "${label}: public K6 header was not installed")
     endif()
+    if(NOT EXISTS "${prefix}/include/wirehair/wirehair_small.h")
+        message(FATAL_ERROR "${label}: public small-block header was not installed")
+    endif()
     set(pc_file "${prefix}/${custom_libdir}/pkgconfig/wirehair.pc")
     if(NOT EXISTS "${pc_file}")
         message(FATAL_ERROR "${label}: relocatable wirehair.pc was not installed")
@@ -98,7 +101,7 @@ function(assert_install_manifest prefix label)
     if(NOT installed_license_text STREQUAL source_license_text)
         message(FATAL_ERROR "${label}: installed license text was altered")
     endif()
-    foreach(contract IN ITEMS LEGACY_WIRE_PROFILES.md V2_WIRE_PROFILE.md K6_WIRE_PROFILE.md)
+    foreach(contract IN ITEMS LEGACY_WIRE_PROFILES.md V2_WIRE_PROFILE.md K6_WIRE_PROFILE.md SMALL_WIRE_PROFILES.md)
         set(installed_contract
             "${prefix}/share/doc/wirehair/${contract}")
         if(NOT EXISTS "${installed_contract}")
@@ -188,6 +191,8 @@ function(assert_metadata_in_install_manifest prefix label)
         "${prefix}/share/doc/wirehair/LEGACY_WIRE_PROFILES.md"
         "${prefix}/share/doc/wirehair/V2_WIRE_PROFILE.md"
         "${prefix}/include/wirehair/wirehair.h"
+        "${prefix}/include/wirehair/wirehair_small.h"
+        "${prefix}/share/doc/wirehair/SMALL_WIRE_PROFILES.md"
         "${prefix}/include/wirehair/wirehair.hpp")
     if(expect_shared)
         list(APPEND expected

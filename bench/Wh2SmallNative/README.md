@@ -65,7 +65,7 @@ includes creation, descriptor output, 18 packets and free; decoder work
 includes creation, feed through first success, recovery and free. Both decoder
 streams reached success after three packets for every arm. This is not an
 integrated-library, cold-start, shared-call, partial-tail, non-GFNI or all-K
-speed result. The normal library and existing defaults remain unchanged.
+speed result. This prototype gate did not change the normal library or defaults.
 
 The immutable outcome is `/var/tmp/wh2-k3-serialized-cost-r1`. Its raw stream
 SHA-256 is `35d3ce567924ae21418f0b16986e6cf89a02a162e0b2c64bab6d89036a250604`.
@@ -81,3 +81,11 @@ and passed all 72 hard traces. Native and serialized payload replay confirmed
 those same cases; this timing run adds no recovery-rate sample or paired WH1
 recovery-rate comparison. Production integration must preserve the sealed
 equations and explicit descriptor, then qualify the actual library separately.
+
+The later opt-in integration is documented in
+[`SMALL_WIRE_PROFILES.md`](../../SMALL_WIRE_PROFILES.md); its performance gate
+is separate. `Wh2SmallProductionParity.cpp` reuses this correctness corpus
+through both the old serialized prototype archive and the new library,
+comparing descriptors, packet bytes, prefix status and recovered bytes. It is
+an engineering replay, not a timing or fresh recovery experiment, and does
+not alter the frozen source harness or old outcome bundles.

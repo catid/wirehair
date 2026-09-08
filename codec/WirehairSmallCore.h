@@ -1,8 +1,8 @@
 #ifndef WIREHAIR_SMALL_CORE_H
 #define WIREHAIR_SMALL_CORE_H
 
-// Private compile-time small-block core. Currently benchmark-only: the public
-// K6 facade and its qualified implementation do not include this file.
+// Private compile-time small-block core, shared by the opt-in K3 library path
+// and correctness harness. Existing K6 does not include this file.
 // Initialize the existing shared GF256 runtime before using these classes.
 #include "WirehairK6Payload.h"
 #include <climits>

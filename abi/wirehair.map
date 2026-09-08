@@ -27,6 +27,15 @@ WIREHAIR_2.0 {
         wirehair_recover_block;
         wirehair_recover_block_ex;
         wirehair_result_string;
+        wirehair_small_decode;
+        wirehair_small_decoder_create;
+        wirehair_small_encode;
+        wirehair_small_encoder_create;
+        wirehair_small_encoder_create_profile;
+        wirehair_small_encoder_detach_input;
+        wirehair_small_free;
+        wirehair_small_profile_validate;
+        wirehair_small_recover;
         wirehair_v2_decode;
         wirehair_v2_decoder_create;
         wirehair_v2_encode;
