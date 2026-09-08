@@ -45,3 +45,39 @@ tests replay the neutral and retained K3 corpus through the external serialized
 functions. All seven tests are correctness checks, not speed measurements.
 When enabling sanitizers, instrument both C and C++ compile flags and the link
 flags; the supplied archive must use the same sanitizers/backend configuration.
+
+## Separate K3 serialized performance qualification
+
+At source `5caa4a9`, the separate `Wh2K3SerializedCostR1.py` gate passed all
+54 same-code timing controls and all 36 comparisons against actual WH1 and
+current public WH2. It retained 2,488,320 fresh codec lifecycles, checking every
+output. Time reductions versus WH1, spanning both measurement orders:
+
+| Block bytes | Encoder | Low-ID decoder | Distant-ID decoder |
+|---|---|---|---|
+| 2 | 65.8-65.9% | 95.4% | 91.0% |
+| 64 | 72.7% | 95.1% | 91.3% |
+| 1280 | 75.2-75.5% | 93.9% | 92.2% |
+
+These are serialized-prototype, static-call results on one GFNI-capable host,
+using borrowed immutable input and three full source blocks. Encoder work
+includes creation, descriptor output, 18 packets and free; decoder work
+includes creation, feed through first success, recovery and free. Both decoder
+streams reached success after three packets for every arm. This is not an
+integrated-library, cold-start, shared-call, partial-tail, non-GFNI or all-K
+speed result. The normal library and existing defaults remain unchanged.
+
+The immutable outcome is `/var/tmp/wh2-k3-serialized-cost-r1`. Its raw stream
+SHA-256 is `35d3ce567924ae21418f0b16986e6cf89a02a162e0b2c64bab6d89036a250604`.
+A Python 3.8 full replay verified all 601 receipt pins; a separately written
+raw chronology, API ledger and confidence-interval audit reproduced all 90
+decisions. The R0 run remains invalid because its neutral diagnostic truncated
+the binary CPU identity at an embedded NUL. R1 corrected that transport and
+added prelaunch validation without changing the candidate or performance gate.
+Neither namespace may be rerun or its observations filtered or rescored.
+
+The retained K3 recovery screen had no zero-overhead failures in 6,144 traces
+and passed all 72 hard traces. Native and serialized payload replay confirmed
+those same cases; this timing run adds no recovery-rate sample or paired WH1
+recovery-rate comparison. Production integration must preserve the sealed
+equations and explicit descriptor, then qualify the actual library separately.
