@@ -5,6 +5,7 @@ Closed historical library provenance, bounded one-cohort controller and replay.
 Native DSO code is never claimed to be sanitizer-instrumented.
 """
 import argparse
+from collections import namedtuple
 import importlib.util
 import json
 import math
@@ -58,9 +59,17 @@ def command(args):
     return subprocess.check_output(list(map(str,args)), cwd=ROOT, timeout=60)
 
 
-def metadata():
+def runtime_dependencies(target):
+    # ldd interprets $ORIGIN relative to the path it receives. Resolve launcher
+    # symlinks first, notably relocatable Python installations under ~/.local.
+    target = Path(target).resolve(strict=True)
+    return {Path(w).resolve(strict=True) for w in command(['/usr/bin/ldd',target]).decode().split()
+            if w.startswith('/')}
+
+
+def metadata(libraries=None):
     result = []
-    for path, digest in N.LIBRARIES:
+    for path, digest in N.LIBRARIES if libraries is None else libraries:
         raw = A.read_regular(path,4*1024**2)
         A.exact(A.sha(raw),digest,'qualified versioned DSO')
         elf = N.Elf(raw)
@@ -207,11 +216,11 @@ def verify_bindings(bindings, meta):
     A.require(x+meta[0]['context_bytes']<=y or y+meta[1]['context_bytes']<=x,'distinct GF storage')
 
 
-def verify_header(header, order, claim, meta):
+def verify_header(header, order, claim, meta, protocol=PROTOCOL):
     A.exact(set(header),{'type','protocol','claim','load_order','identity_hex','prelude','bindings','fixtures'},
             'header schema')
     A.exact((header['type'],header['protocol'],header['claim'],header['load_order']),
-            ('header',PROTOCOL,claim,order),'header identity')
+            ('header',protocol,claim,order),'header identity')
     encoded = header['identity_hex']
     A.require(type(encoded) is str and len(encoded)==2*O.TARGET_BYTES and
               re.fullmatch('[0-9a-f]+',encoded) is not None,'binary target identity')
@@ -241,10 +250,10 @@ def verify_header(header, order, claim, meta):
 
 
 
-def verify_rows(rows, claim, order, meta):
+def verify_rows(rows, claim, order, meta, protocol=PROTOCOL):
     A.exact(len(rows),CALLBACKS+2,'whole raw cohort')
     header,footer = rows[0],rows[-1]
-    verify_header(header,order,claim,meta)
+    verify_header(header,order,claim,meta,protocol)
     previous = header['prelude']; work = 0
     for row,coordinate in zip(rows[1:-1],roster()):
         A.exact(set(row),{'type','coordinate','ready','target','wait','observation','counts',
@@ -280,17 +289,17 @@ def verify_rows(rows, claim, order, meta):
     return statistics(rows[1:-1])
 
 
-def verify(raw, claim, order, meta):
+def verify(raw, claim, order, meta, protocol=PROTOCOL):
     A.require(0<len(raw)<=RAW_CAP and raw.endswith(b'\n'),'complete bounded raw stream')
-    return verify_rows([A.decode(line) for line in raw.splitlines()],claim,order,meta)
+    return verify_rows([A.decode(line) for line in raw.splitlines()],claim,order,meta,protocol)
 
 
-def combine(results):
+def combine(results, protocol=PROTOCOL):
     A.exact(len(results),2,'both separate load orders')
     outcomes = [r['outcome'] for r in results]
     A.require(all(o in ('PASS','CONTROL_FAIL','REGRESSION','INCONCLUSIVE') for o in outcomes),'terminal screen outcomes')
     outcome = next((o for o in ('CONTROL_FAIL','REGRESSION','INCONCLUSIVE') if o in outcomes),'PASS')
-    return dict(protocol=PROTOCOL,outcome=outcome,load_orders=results,
+    return dict(protocol=protocol,outcome=outcome,load_orders=results,
                 shared_preserved_path_screen_pass=outcome=='PASS',
                 WH1_speed_qualified=False,static_speed_qualified=False,all_K_claimed=False,
                 recovery_rate_claimed=False,production_promotion_claimed=False)
@@ -304,7 +313,7 @@ HISTORICAL = (
      '9e0c2e60792799f0f1910bd7b66f383e2d9c491dcd6c4e891ddf74aa93364ddd'))
 
 
-def historical_claim(path, digest):
+def historical_claim(path, digest, diagnostic_exclusions=()):
     raw = A.read_regular(path,1024*1024)
     A.exact(A.sha(raw),digest,'historical producing-library receipt')
     claim = A.decode(raw)
@@ -315,6 +324,11 @@ def historical_claim(path, digest):
     source_blobs, dependencies = [], {path}
     for p in claim['pins']:
         path = Path(p['path'])
+        if str(path) in diagnostic_exclusions:
+            A.require(ROOT not in path.parents and path.parts[-3:]==('Testing','Temporary','LastTest.log'),
+                      'only explicitly recorded non-producing CTest diagnostic may be excluded')
+            A.exact(p,diagnostic_exclusions[str(path)],'original excluded diagnostic identity')
+            continue
         if ROOT in path.parents:
             blob = command(['git','cat-file','blob',claim['head']+':'+str(path.relative_to(ROOT))])
             A.exact(dict(path=str(path),bytes=len(blob),sha256=A.sha(blob)),p,'historical Git source bytes')
@@ -325,7 +339,7 @@ def historical_claim(path, digest):
     return claim,source_blobs,dependencies
 
 
-def library_provenance(proof_dir=None):
+def library_provenance(proof_dir=None, diagnostic_exclusions=()):
     """Historical sources + actual objects + exact DSO relink proof; no codec runs.
 
     With proof_dir=None this is read-only. Proof DSOs are never loaded, and
@@ -333,7 +347,7 @@ def library_provenance(proof_dir=None):
     """
     reports,dependencies = [],set()
     for index,((claim_path,digest),(dso,dso_sha)) in enumerate(zip(HISTORICAL,N.LIBRARIES)):
-        claim,source_blobs,inputs = historical_claim(claim_path,digest)
+        claim,source_blobs,inputs = historical_claim(claim_path,digest,diagnostic_exclusions)
         dependencies.update(inputs)
         declared = {p['path']:p for p in claim['pins']}
         base = dso.parent; archive = base/'libwirehair.a'
@@ -383,6 +397,7 @@ def library_provenance(proof_dir=None):
         for obj,paths in dep_roster.items():
             source = str(ROOT/obj[len(prefix):-2])
             A.require(source in paths and all(p in declared for p in paths),'source and every compiler dependency historically pinned')
+            A.require(not any(p in diagnostic_exclusions for p in paths),'no producing dependency may be excluded')
         start = ['/usr/bin/c++','-fPIC','-O3','-DNDEBUG','-Wl,--version-script='+str(ROOT/'abi/wirehair.map'),
                  '-shared','-Wl,-soname,libwirehair.so.2','-o',dso.name]
         A.exact(shared[:len(start)],start,'recorded native shared linker options')
@@ -413,7 +428,17 @@ def library_provenance(proof_dir=None):
 
 
 
-def build(mode, output):
+# Only library/protocol identity and its producing-source proof vary. Work,
+# chronology, controls, decision thresholds and bounds remain the frozen R0.
+Configuration = namedtuple('Configuration', 'protocol output libraries sources provenance')
+
+
+def configuration(value):
+    return value if value is not None else Configuration(PROTOCOL,OUTPUT,N.LIBRARIES,NEW,library_provenance)
+
+
+def build(mode, output, settings=None):
+    cfg = configuration(settings)
     A.require(mode in ('native','asan-driver'),'explicit native or instrumented driver build')
     A.require(output.is_absolute(),'absolute external build')
     output = output.parent.resolve(strict=True)/output.name
@@ -424,9 +449,9 @@ def build(mode, output):
     if mode=='asan-driver':
         A.exact(os.environ.get('ASAN_OPTIONS'),'detect_leaks=1:detect_stack_use_after_return=1','instrumented-driver ASAN policy')
         A.exact(os.environ.get('UBSAN_OPTIONS'),'halt_on_error=1','instrumented-driver UBSAN policy')
-    meta = metadata()
+    meta = metadata(cfg.libraries)
     output.mkdir(mode=0o700)
-    provenance,library_inputs = library_provenance(output)
+    provenance,library_inputs = cfg.provenance(output)
     A.publish(output/'library-provenance.json',A.canonical(provenance))
     A.publish(output/'AdmissionLibraryBindings.h',bindings_header(meta))
     A.publish(output/'library-metadata.json',A.canonical(meta))
@@ -434,13 +459,15 @@ def build(mode, output):
              '-DWIREHAIR_STATIC=1','-DWH2_ADMISSION_REGRESSION_NEUTRAL='+str(int(mode!='native')),
              '-I'+str(ROOT),'-I'+str(ROOT/'bench'),'-I'+str(ROOT/'include'),'-I'+str(output)]
     flags += ['-O1','-g','-fsanitize=address,undefined','-fno-omit-frame-pointer'] if mode=='asan-driver' else ['-O3','-g1']
+    if cfg.protocol != PROTOCOL:
+        flags += ['-DWH2_ADMISSION_PROTOCOL='+json.dumps(cfg.protocol)]
     sources = [ROOT/NEW[0]]+[ROOT/'bench'/n for n in
               ('Wh2FrozenTrace.cpp','Wh2PublicBorrowedTargetIdentity.cpp','Wh2RdpruTargetIdentityV2.cpp')]
-    dependencies = {ROOT/n for n in NEW}
+    dependencies = {ROOT/n for n in cfg.sources}
     dependencies.update(library_inputs)
     dependencies.update((ROOT/'bench/Wh2AdmissionRegressionNeutral.py', ROOT/'bench/Wh2K3OrdinaryCostR0.py',
                          ROOT/'bench/Wh2AlignedIntermediateCostR0.py'))
-    dependencies.update(p for p,_ in N.LIBRARIES)
+    dependencies.update(p for p,_ in cfg.libraries)
     dependencies.update(NEUTRAL_DIR/('qualified-'+o+'.json') for o in ('old-new','new-old'))
     objects, commands = [], []
     for source in sources:
@@ -462,14 +489,13 @@ def build(mode, output):
         dependencies.add((Path('/usr/bin')/name).resolve(strict=True))
     for name in ('cc1','cc1plus','collect2'):
         dependencies.add(Path(command(['/usr/bin/c++','-print-prog-name='+name]).decode().strip()).resolve(strict=True))
-    for target in [exe,Path(sys.executable)]+[p for p,_ in N.LIBRARIES]:
-        dependencies.update(Path(w).resolve(strict=True) for w in command(['/usr/bin/ldd',target]).decode().split()
-                            if w.startswith('/'))
+    for target in [exe,Path(sys.executable)]+[p for p,_ in cfg.libraries]:
+        dependencies.update(runtime_dependencies(target))
     dependencies.add(Path(sys.executable).resolve(strict=True))
     for order,name in enumerate(('old-new','new-old')):
         A.publish(output/('neutral-'+name+'.txt'),command([exe,'--neutral',name]))
         raw = command([exe,'--neutral-fixtures',name])
-        verify_header(A.decode(raw),order,'0'*64,meta)
+        verify_header(A.decode(raw),order,'0'*64,meta,cfg.protocol)
         A.publish(output/('fixtures-'+name+'.json'),raw)
     rejections = []
     for tail in ([],['--worker'],['--worker','0'*64,'bad-order'],['--worker','0'*64,'old-new'],
@@ -480,7 +506,7 @@ def build(mode, output):
         A.require(result.returncode==1 and result.stdout==b'' and result.stderr.startswith(b'INVALID:'),'negative worker CLI')
         rejections.append(dict(arguments=tail,returncode=result.returncode,stderr=result.stderr.decode()))
     A.publish(output/'negative-cli.json',A.canonical(rejections))
-    manifest = dict(protocol=PROTOCOL,mode=mode,commands=commands,
+    manifest = dict(protocol=cfg.protocol,mode=mode,commands=commands,
                     environment={k:os.environ.get(k) for k in ENV_KEYS+('ASAN_OPTIONS','UBSAN_OPTIONS')},
                     inputs=[O.pin(p) for p in sorted(dependencies)],
                     artifacts=[O.pin(p) for p in sorted(output.iterdir())],
@@ -492,9 +518,10 @@ def build(mode, output):
 
 
 
-def current(frozen):
+def current(frozen, settings=None):
+    cfg = configuration(settings)
     A.exact(set(frozen),{'protocol','head','executable','environment','pins'},'receipt schema')
-    A.exact(frozen['protocol'],PROTOCOL,'receipt protocol')
+    A.exact(frozen['protocol'],cfg.protocol,'receipt protocol')
     A.exact(frozen['environment'],{k:os.environ.get(k) for k in ENV_KEYS},'current loader/allocator environment')
     A.exact(frozen['environment'],{k:None for k in ENV_KEYS},'ordinary allocator policy')
     A.exact(command(['git','rev-parse','HEAD']).decode().strip(),frozen['head'],'exact source HEAD')
@@ -514,7 +541,7 @@ def current(frozen):
     manifest = A.decode(A.read_regular(manifest_path,1024*1024))
     A.exact((manifest['protocol'],manifest['mode'],manifest['scientific_launch'],
              manifest['library_source_provenance_closed'],manifest['sanitized_library_code']),
-            (PROTOCOL,'native',False,True,False),'qualified native build')
+            (cfg.protocol,'native',False,True,False),'qualified native build')
     A.exact(manifest['environment'],{k:None for k in ENV_KEYS+('ASAN_OPTIONS','UBSAN_OPTIONS')},
             'native build environment')
     closure = {}
@@ -524,26 +551,32 @@ def current(frozen):
         closure[p['path']] = p
     A.exact(frozen['pins'],sorted(closure.values(),key=lambda p:p['path']),'whole build manifest closure')
     A.require(str(executable) in {p['path'] for p in manifest['artifacts']},'built executable')
-    for name in NEW:
+    for name in cfg.sources:
         A.require(str(ROOT/name) in declared,'mandatory committed harness source')
     for name in ('AdmissionLibraryBindings.h','library-metadata.json','library-provenance.json',
                  'proof-old.so','proof-new.so','fixtures-old-new.json','fixtures-new-old.json',
                  'negative-cli.json','link.map'):
         A.require(str(folder/name) in declared,'mandatory build qualification artifact')
-    meta = metadata()
+    meta = metadata(cfg.libraries)
     A.exact(A.read_regular(folder/'AdmissionLibraryBindings.h',65536),bindings_header(meta),'actual compiled ELF binding header')
     A.exact(A.decode(A.read_regular(folder/'library-metadata.json',65536)),meta,'closed native ELF metadata')
-    provenance,inputs = library_provenance()
+    provenance,inputs = cfg.provenance()
     A.exact(A.decode(A.read_regular(folder/'library-provenance.json',1024*1024)),provenance,'complete historical producer chain')
     A.require(all(str(p) in declared for p in inputs),'complete historical external dependency closure')
     for lib in provenance:
         A.exact(O.pin(folder/lib['proof_name'])['sha256'],lib['original']['sha256'],'exact producer relink proof')
+        if 'proof_object' in lib:
+            proof = lib['proof_object']
+            path = folder/proof['name']
+            A.require(path.parent==folder and str(path) in declared,'mandatory recompiled producer proof')
+            A.exact(O.pin(path)['sha256'],proof['sha256'],'byte-identical recompiled producer')
     for order,name in enumerate(('old-new','new-old')):
-        verify_header(A.decode(A.read_regular(folder/('fixtures-'+name+'.json'),4*1024*1024)),order,'0'*64,meta)
+        verify_header(A.decode(A.read_regular(folder/('fixtures-'+name+'.json'),4*1024*1024)),order,'0'*64,meta,cfg.protocol)
     return meta
 
 
-def receipt(folder):
+def receipt(folder, settings=None):
+    cfg = configuration(settings)
     A.require(folder.is_absolute() and folder.resolve(strict=True)==folder,'real native build directory')
     manifest = A.decode(A.read_regular(folder/'manifest.json',1024*1024))
     pins = {}
@@ -556,10 +589,10 @@ def receipt(folder):
         if ROOT in path.parents:
             A.exact(A.read_regular(path,16*1024*1024),
                     command(['git','cat-file','blob','HEAD:'+str(path.relative_to(ROOT))]),'committed current source')
-    frozen = dict(protocol=PROTOCOL,head=command(['git','rev-parse','HEAD']).decode().strip(),
+    frozen = dict(protocol=cfg.protocol,head=command(['git','rev-parse','HEAD']).decode().strip(),
                   executable=str(folder/'cost_worker'),environment={k:os.environ.get(k) for k in ENV_KEYS},
                   pins=sorted(pins.values(),key=lambda p:p['path']))
-    current(frozen)
+    current(frozen,cfg)
     return frozen
 
 
@@ -613,78 +646,80 @@ def capture(executable, claim, order, deadline, spools):
     return bytes(buffers[0]), bytes(buffers[1]), None if child is None else child.returncode, failure
 
 
-def run(receipt_path):
+def run(receipt_path, settings=None):
+    cfg = configuration(settings); output = cfg.output
     begin = time.monotonic(); deadline = begin+600
     raw_receipt = A.read_regular(receipt_path,1024*1024); frozen = A.decode(raw_receipt)
-    A.exact(raw_receipt,A.canonical(frozen),'canonical claim'); meta = current(frozen)
-    os.mkdir(str(OUTPUT),0o700)
-    A.publish(OUTPUT/'CLAIM.json',raw_receipt)
+    A.exact(raw_receipt,A.canonical(frozen),'canonical claim'); meta = current(frozen,cfg)
+    os.mkdir(str(output),0o700)
+    A.publish(output/'CLAIM.json',raw_receipt)
     processes,results,failures = [],[],[]
     try:
         for order,name in enumerate(('old-new','new-old')):
-            A.time_left(deadline); current(frozen)
+            A.time_left(deadline); current(frozen,cfg)
             start = time.monotonic()
             raw,error,code,failure = capture(frozen['executable'],A.sha(raw_receipt),order,
-                min(deadline,start+240),[OUTPUT/(name+'.raw.jsonl'),OUTPUT/(name+'.stderr.txt')])
+                min(deadline,start+240),[output/(name+'.raw.jsonl'),output/(name+'.stderr.txt')])
             processes.append(dict(load_order=name,returncode=code,observer_failure=failure,
                                   elapsed_seconds=time.monotonic()-start,stdout_bytes=len(raw),stderr_bytes=len(error)))
             try:
                 A.require(failure is None and code==0 and error==b'','worker/observer failure: '+str(failure))
-                result = verify(raw,A.sha(raw_receipt),order,meta)
+                result = verify(raw,A.sha(raw_receipt),order,meta,cfg.protocol)
                 results.append(result)
             except Exception as problem:
                 failures.append(dict(load_order=name,failure=str(problem)))
                 results.append(None)
             del raw,error
-        current(frozen); A.time_left(deadline)
+        current(frozen,cfg); A.time_left(deadline)
     except Exception as error:
         failures.append(dict(load_order='controller',failure=str(error)))
     if failures:
-        analysis = dict(protocol=PROTOCOL,outcome='INVALID',failures=failures,load_orders=results,
+        analysis = dict(protocol=cfg.protocol,outcome='INVALID',failures=failures,load_orders=results,
                         shared_preserved_path_screen_pass=False,WH1_speed_qualified=False,
                         static_speed_qualified=False,all_K_claimed=False,recovery_rate_claimed=False,
                         production_promotion_claimed=False)
     else:
-        analysis = combine(results)
+        analysis = combine(results,cfg.protocol)
     analysis.update(elapsed_seconds=time.monotonic()-begin,load_order_names=['old-new','new-old'])
-    A.publish(OUTPUT/'processes.json',A.canonical(processes))
-    A.publish(OUTPUT/'analysis.json',A.canonical(analysis))
-    members = [O.pin(p) for p in sorted(OUTPUT.iterdir())]
+    A.publish(output/'processes.json',A.canonical(processes))
+    A.publish(output/'analysis.json',A.canonical(analysis))
+    members = [O.pin(p) for p in sorted(output.iterdir())]
     A.require(sum(p['bytes'] for p in members)<448*1024**2-65536,'sealed bundle cap')
-    A.publish(OUTPUT/'COMPLETE.json',A.canonical(dict(protocol=PROTOCOL,outcome=analysis['outcome'],files=members)))
+    A.publish(output/'COMPLETE.json',A.canonical(dict(protocol=cfg.protocol,outcome=analysis['outcome'],files=members)))
     print(json.dumps(dict(outcome=analysis['outcome'],elapsed_seconds=analysis['elapsed_seconds'],
                           failures=failures,load_order_outcomes=[r['outcome'] if r else 'INVALID' for r in results])))
 
 
-def replay():
-    complete = A.decode(A.read_regular(OUTPUT/'COMPLETE.json',65536))
+def replay(settings=None):
+    cfg = configuration(settings); output = cfg.output
+    complete = A.decode(A.read_regular(output/'COMPLETE.json',65536))
     A.exact(set(complete),{'protocol','outcome','files'},'terminal schema')
-    A.exact(complete['protocol'],PROTOCOL,'terminal protocol')
+    A.exact(complete['protocol'],cfg.protocol,'terminal protocol')
     expected = {'CLAIM.json','analysis.json','processes.json','old-new.raw.jsonl','old-new.stderr.txt',
                 'new-old.raw.jsonl','new-old.stderr.txt'}
     A.exact({Path(p['path']).name for p in complete['files']},expected,'whole successful bundle membership')
     A.exact(len(complete['files']),len(expected),'unique bundle members')
-    A.exact({p.name for p in OUTPUT.iterdir()},expected|{'COMPLETE.json'},'exact bundle directory')
+    A.exact({p.name for p in output.iterdir()},expected|{'COMPLETE.json'},'exact bundle directory')
     for p in complete['files']:
-        A.require(Path(p['path']).parent==OUTPUT,'bundle paths')
+        A.require(Path(p['path']).parent==output,'bundle paths')
         A.exact(Path(p['path']).stat().st_mode&0o777,0o400,'sealed member mode')
         A.exact(O.pin(Path(p['path'])),p,'immutable bundle member')
-    raw_receipt = A.read_regular(OUTPUT/'CLAIM.json',1024*1024); frozen = A.decode(raw_receipt)
-    A.exact(raw_receipt,A.canonical(frozen),'canonical frozen receipt'); meta = current(frozen)
+    raw_receipt = A.read_regular(output/'CLAIM.json',1024*1024); frozen = A.decode(raw_receipt)
+    A.exact(raw_receipt,A.canonical(frozen),'canonical frozen receipt'); meta = current(frozen,cfg)
     result = []
-    processes = A.decode(A.read_regular(OUTPUT/'processes.json',65536))
+    processes = A.decode(A.read_regular(output/'processes.json',65536))
     A.exact(len(processes),2,'both launched processes')
     for order,name in enumerate(('old-new','new-old')):
-        raw = A.read_regular(OUTPUT/(name+'.raw.jsonl'),RAW_CAP)
-        A.exact(A.read_regular(OUTPUT/(name+'.stderr.txt'),ERR_CAP),b'','empty successful worker stderr')
+        raw = A.read_regular(output/(name+'.raw.jsonl'),RAW_CAP)
+        A.exact(A.read_regular(output/(name+'.stderr.txt'),ERR_CAP),b'','empty successful worker stderr')
         p = processes[order]
         A.exact(set(p),{'load_order','returncode','observer_failure','elapsed_seconds','stdout_bytes','stderr_bytes'},'process fields')
         A.exact((p['load_order'],p['returncode'],p['observer_failure'],p['stdout_bytes'],p['stderr_bytes']),
                 (name,0,None,len(raw),0),'successful observer record')
         A.require(type(p['elapsed_seconds']) in (int,float) and 0<p['elapsed_seconds']<240,'observer deadline')
-        result.append(verify(raw,A.sha(raw_receipt),order,meta))
-    expected_analysis = combine(result)
-    stored = A.decode(A.read_regular(OUTPUT/'analysis.json',1024*1024))
+        result.append(verify(raw,A.sha(raw_receipt),order,meta,cfg.protocol))
+    expected_analysis = combine(result,cfg.protocol)
+    stored = A.decode(A.read_regular(output/'analysis.json',1024*1024))
     elapsed = stored['elapsed_seconds']
     A.require(type(elapsed) in (int,float) and 0<elapsed<600,'controller deadline')
     expected_analysis.update(elapsed_seconds=elapsed,load_order_names=['old-new','new-old'])

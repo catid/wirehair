@@ -229,6 +229,13 @@ and 480 statistical decisions. The spent immutable bundle is
 `4bd1c590a36e677655524e04215959ef26fe3342ca01d4453b089d965ee15ada`.
 These regressions remain an unmet ordinary-admission qualification requirement.
 
+Subsequently, a `ctest -N` listing overwrote the pre-isolation build's
+`Testing/Temporary/LastTest.log`, a non-producing diagnostic pinned by an older
+receipt. The library objects and sealed measurement bundles are unchanged,
+but that historical receipt's full artifact closure is no longer intact.
+The follow-on screen records the lost log explicitly and proves all producing
+inputs separately; the original strict verifier still rejects the mismatch.
+
 The follow-on implementation moves K3-only owning pointers to a private
 derived handle and keeps its operation bodies out of the common dispatch
 functions. The immutable type tag uses existing header padding on the tested

@@ -26,8 +26,11 @@
 #error "Explicit unmodified native/neutral build required"
 #endif
 #define NOINLINE __attribute__((noinline, noipa))
+#ifndef WH2_ADMISSION_PROTOCOL
+#define WH2_ADMISSION_PROTOCOL "wirehair.wh2.admission-regression-cost-r0"
+#endif
 namespace {
-const char protocol[]="wirehair.wh2.admission-regression-cost-r0";
+const char protocol[]=WH2_ADMISSION_PROTOCOL;
 const unsigned case_count=20,max_batch=128,callbacks=51840;
 const unsigned pairs[3][2]={{0,0},{1,1},{0,1}};
 const unsigned sides[18]={0,1,0,1,1,0,1,0,0,1,1,0,0,1,0,1,1,0};
