@@ -735,6 +735,68 @@ replay matches all 2,180,292 output bytes across 48 cases, SHA-256
 These are engineering checks, not a new loss cohort, comparative recovery
 qualification, or evidence that the earlier performance regression is fixed.
 
+### Installed K5 lifecycle speed: controls remain unqualified
+
+At source `1cc38ba`, `wirehair.wh2.k5-public-cost-r0` completed
+**CONTROL_FAIL**. The explicit installed WHV2 K5 profile, certified WH2 and
+WH1 used one qualified default-flags static archive, both ownership policies,
+full K5 messages, three block widths and full encoder/low-ID/distant-ID
+decoder lifecycles. The worker completed normally with empty stderr and no
+codec, oracle, guard, ledger or publication error.
+
+Three of 108 same-code controls failed the frozen equivalence bounds. All
+three concern 1,280-byte K5 decoders, and every interval includes one:
+
+| Same-code K5 control | Order | Estimated time ratio | 95% interval |
+|---|---:|---:|---:|
+| Independent, low-ID decoder | 1 | 1.00500 | 0.98600–1.02438 |
+| Independent, distant-ID decoder | 0 | 0.99273 | 0.97753–1.00816 |
+| Borrowed, distant-ID decoder | 1 | 1.00640 | 0.98860–1.02452 |
+
+These are failed precision/equivalence checks, not established directional
+bias. All 72 candidate comparisons nominally meet their speed threshold,
+but cannot override the failed controls. This run supplies **no qualified
+installed K5 speed or default-promotion result**. No samples were discarded,
+orders pooled, pauses subtracted or measurements repeated.
+
+All 38,880 records, 4,976,640 fresh lifecycles and 59,719,680 attempted API
+calls remain retained. Timed WORK was 22.120847526 seconds; the complete
+controller took 69.612015 seconds. Native, portable-arithmetic and ASan/UBSan
+neutral qualification passed all 108 WORK cells, the full roster, independent
+packet/rank fixtures, five deferred-publication streams and output-device
+failures. All 32 reader tests pass under Python 3.8 and 3.12. Both exact
+replays and a separately written standard-library matrix/payload/rank,
+chronology, ledger, phase, statistical and provenance audit reproduced all
+180 decisions and 735 receipt pins before HEAD or pinned documentation
+advanced. The independent audit also agrees under both Python versions.
+
+Retained-raw inspection finds an involuntary context switch in the largest
+pair excursion of two failed replicates; the third has increased thread CPU
+work without a recorded switch. Across all captures there are 1,699
+involuntary switches and 2,247,239 minor faults, with no major faults or
+voluntary switches. All minor faults occur in wide certified-WH2/WH1 decoder
+callbacks, not K5 callbacks. This does not establish why K5 controls failed.
+
+A separate bounded syscall trace of the existing neutral worker passes all
+108 WORK cells and records 8,228 `brk` calls, including repeated heap growth
+and shrinkage. Its 22 `mmap` calls and single `munmap` belong to startup;
+there is no repeated mapping/unmapping or `madvise` stream. Thus heap
+growth/trimming is an observed allocation mechanism in this neutral workload,
+not proof of a particular allocation call site's responsibility or of the
+scientific control failures' cause. Allocation-path attribution remains a
+separate diagnostic; allocator settings and codec code are unchanged.
+
+The immutable, permanently spent bundle is
+`/var/tmp/wh2-k5-public-cost-r0`, raw SHA-256
+`7537c8aa1610c8d6df47875a4d5455a18553b84a9c496fd1c8e5fb39823768ac`,
+COMPLETE SHA-256
+`113d5d9630c6a4f8bf7548ed2b0f15fc41ef9e81fd858a711c22839ebbd1f11a`.
+Qualification and independent audit artifacts are retained at
+`/tmp/wh2-k5-public-cost-neutral.IR0xrEBi`.
+See the [installed gate contract](bench/Wh2K5PublicCostR0.md).
+Installed retained recovery, valid installed speed, preserved-path regressions
+and ordinary K3 speed retention all remain required before default promotion.
+
 ## Retired equation profile identifiers
 
 The identifiers `e161ce5d456f9bb7` and `20a4f27a870612a2` are permanently
