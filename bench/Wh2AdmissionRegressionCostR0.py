@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Prospectively frozen admission pre/post DSO screen.
 
-Build/neutral qualification and raw verifier only at this stage. No scientific
-launch command: closed library provenance, receipt and controller are required.
+Closed historical library provenance, bounded one-cohort controller and replay.
 Native DSO code is never claimed to be sanitizer-instrumented.
 """
 import argparse
@@ -12,10 +11,12 @@ import math
 import os
 from pathlib import Path
 import re
+import selectors
 import shlex
 import struct
 import subprocess
 import sys
+import time
 
 
 def sibling(name, filename):
@@ -295,6 +296,123 @@ def combine(results):
                 recovery_rate_claimed=False,production_promotion_claimed=False)
 
 
+
+HISTORICAL = (
+    (Path('/var/tmp/wh2-k3-production-cost-r0/CLAIM.json'),
+     'a4b25b5711d737f3a83191d4e08d3211cb1a6b62834ddee07bb8b9dc1d57bab3'),
+    (Path('/var/tmp/wh2-k3-ordinary-cost-r0/CLAIM.json'),
+     '9e0c2e60792799f0f1910bd7b66f383e2d9c491dcd6c4e891ddf74aa93364ddd'))
+
+
+def historical_claim(path, digest):
+    raw = A.read_regular(path,1024*1024)
+    A.exact(A.sha(raw),digest,'historical producing-library receipt')
+    claim = A.decode(raw)
+    A.exact(raw,A.canonical(claim),'canonical historical receipt')
+    A.require(re.fullmatch('[0-9a-f]{40}',claim['head']) is not None,'historical source commit')
+    declared = {p['path']:p for p in claim['pins']}
+    A.exact(len(declared),len(claim['pins']),'unique historical closure')
+    source_blobs, dependencies = [], {path}
+    for p in claim['pins']:
+        path = Path(p['path'])
+        if ROOT in path.parents:
+            blob = command(['git','cat-file','blob',claim['head']+':'+str(path.relative_to(ROOT))])
+            A.exact(dict(path=str(path),bytes=len(blob),sha256=A.sha(blob)),p,'historical Git source bytes')
+            source_blobs.append(p)
+        else:
+            A.exact(O.pin(path),p,'preserved historical artifact/header/tool')
+            dependencies.add(path)
+    return claim,source_blobs,dependencies
+
+
+def library_provenance(proof_dir=None):
+    """Historical sources + actual objects + exact DSO relink proof; no codec runs.
+
+    With proof_dir=None this is read-only. Proof DSOs are never loaded, and
+    timing always uses the original hash-qualified versioned library paths.
+    """
+    reports,dependencies = [],set()
+    for index,((claim_path,digest),(dso,dso_sha)) in enumerate(zip(HISTORICAL,N.LIBRARIES)):
+        claim,source_blobs,inputs = historical_claim(claim_path,digest)
+        dependencies.update(inputs)
+        declared = {p['path']:p for p in claim['pins']}
+        base = dso.parent; archive = base/'libwirehair.a'
+        A.require(str(archive) in declared,'historically pinned archive')
+        members = command(['/usr/bin/ar','t',archive]).decode().splitlines()
+        A.exact(len(members),17,'complete producing archive')
+        A.exact(len(set(members)),17,'unique archive members')
+        prefix = 'CMakeFiles/wirehair_objects.dir/'
+        actual = sorted((base/prefix).rglob('*.o'))
+        A.exact({p.name for p in actual},set(members),'exact producer object roster')
+        A.exact(len(actual),17,'one object per archive member')
+        objects,dep_roster = [],{}
+        for obj in actual:
+            A.require(str(obj) in declared,'historically pinned producer object')
+            A.exact(A.sha(command(['/usr/bin/ar','p',archive,obj.name])),declared[str(obj)]['sha256'],'archive member bytes')
+            objects.append(declared[str(obj)])
+        if index==0:
+            recorded = command(['/usr/bin/ninja','-C',base,'-t','deps']).decode()
+            for block in recorded.strip().split('\n\n'):
+                lines = block.splitlines()
+                if not lines or not lines[0].startswith(prefix):
+                    continue
+                match = re.fullmatch(r'(.+): #deps ([0-9]+), deps mtime [0-9]+ \(VALID\)',lines[0])
+                A.require(match is not None and match[1] not in dep_roster,'valid unique producer dependency record')
+                paths = [str(Path(line.strip()).resolve(strict=True)) for line in lines[1:]]
+                A.exact(len(paths),int(match[2]),'complete recorded compiler dependencies')
+                dep_roster[match[1]] = paths
+            recorded_commands = command(['/usr/bin/ninja','-C',base,'-t','commands',dso.name]).decode().splitlines()
+            A.exact(len(recorded_commands),18,'17 producing compiles and one shared link')
+            shared = shlex.split(recorded_commands[-1])
+            A.exact(shared[:2],[':','&&'],'recorded pre-link no-op')
+            A.exact(shared[-2:],['&&',':'],'recorded post-link no-op')
+            shared = shared[2:-2]
+        else:
+            recorded_commands = []
+            for obj in actual:
+                dep = obj.with_suffix(obj.suffix+'.d')
+                A.require(str(dep) in declared,'historically pinned depfile')
+                text = A.read_regular(dep,1024*1024).decode().replace('\\\n','')
+                target,paths = text.split(':',1)
+                A.exact(target.strip(),str(obj.relative_to(base)),'actual Make dependency target')
+                dep_roster[target.strip()] = [str(Path(p).resolve(strict=True)) for p in shlex.split(paths)]
+            link_file = base/'CMakeFiles/wirehair_shared.dir/link.txt'
+            dependencies.add(link_file)
+            shared = shlex.split(A.read_regular(link_file,65536).decode())
+        A.exact(set(dep_roster),{str(p.relative_to(base)) for p in actual},'all 17 producing dependency records')
+        for obj,paths in dep_roster.items():
+            source = str(ROOT/obj[len(prefix):-2])
+            A.require(source in paths and all(p in declared for p in paths),'source and every compiler dependency historically pinned')
+        start = ['/usr/bin/c++','-fPIC','-O3','-DNDEBUG','-Wl,--version-script='+str(ROOT/'abi/wirehair.map'),
+                 '-shared','-Wl,-soname,libwirehair.so.2','-o',dso.name]
+        A.exact(shared[:len(start)],start,'recorded native shared linker options')
+        A.exact(shared[-1],'-lm','recorded link library')
+        linked_objects = shared[len(start):-1]
+        A.exact(len(linked_objects),17,'complete shared-link object count')
+        A.exact(set(linked_objects),set(dep_roster),'shared library uses exact archive-producing objects')
+        A.exact(O.pin(ROOT/'abi/wirehair.map'),declared[str(ROOT/'abi/wirehair.map')],'unchanged actual export map')
+        A.exact(O.pin(dso)['sha256'],dso_sha,'original qualified DSO')
+        dependencies.update((dso,ROOT/'abi/wirehair.map'))
+        proof_name = 'proof-'+('old' if index==0 else 'new')+'.so'
+        if proof_dir is not None:
+            proof = proof_dir/proof_name
+            A.require(not proof.exists() and not proof.is_symlink(),'fresh external relink proof')
+            args = start[:-1]+[str(proof)]+[str(base/p) for p in linked_objects]+['-lm']
+            command(args)
+            A.exact(A.read_regular(proof,4*1024**2),A.read_regular(dso,4*1024**2),'byte-identical DSO producer relink')
+            proof.chmod(0o400)
+        reports.append(dict(historical_claim=O.pin(claim_path),source_head=claim['head'],
+                            historical_source_blobs=source_blobs,archive=declared[str(archive)],
+                            objects=objects,dependencies=dep_roster,compile_commands=recorded_commands[:-1],
+                            shared_link=shared,original=O.pin(dso),proof_name=proof_name,proof_sha256=dso_sha))
+    changed = [a['path'].split('/')[-1] for a,b in zip(reports[0]['objects'],reports[1]['objects'])
+               if a['sha256']!=b['sha256']]
+    A.exact(changed,['WirehairSmall.cpp.o','WirehairV2Profile.cpp.o'],'only two changed producer objects')
+    dependencies.update((Path('/usr/bin')/name).resolve(strict=True) for name in ('ar','ninja'))
+    return reports,dependencies
+
+
+
 def build(mode, output):
     A.require(mode in ('native','asan-driver'),'explicit native or instrumented driver build')
     A.require(output.is_absolute(),'absolute external build')
@@ -308,6 +426,8 @@ def build(mode, output):
         A.exact(os.environ.get('UBSAN_OPTIONS'),'halt_on_error=1','instrumented-driver UBSAN policy')
     meta = metadata()
     output.mkdir(mode=0o700)
+    provenance,library_inputs = library_provenance(output)
+    A.publish(output/'library-provenance.json',A.canonical(provenance))
     A.publish(output/'AdmissionLibraryBindings.h',bindings_header(meta))
     A.publish(output/'library-metadata.json',A.canonical(meta))
     flags = ['-std=c++11','-Wall','-Wextra','-Wpedantic','-Werror','-fno-lto','-fPIC',
@@ -317,6 +437,7 @@ def build(mode, output):
     sources = [ROOT/NEW[0]]+[ROOT/'bench'/n for n in
               ('Wh2FrozenTrace.cpp','Wh2PublicBorrowedTargetIdentity.cpp','Wh2RdpruTargetIdentityV2.cpp')]
     dependencies = {ROOT/n for n in NEW}
+    dependencies.update(library_inputs)
     dependencies.update((ROOT/'bench/Wh2AdmissionRegressionNeutral.py', ROOT/'bench/Wh2K3OrdinaryCostR0.py',
                          ROOT/'bench/Wh2AlignedIntermediateCostR0.py'))
     dependencies.update(p for p,_ in N.LIBRARIES)
@@ -363,11 +484,215 @@ def build(mode, output):
                     environment={k:os.environ.get(k) for k in ENV_KEYS+('ASAN_OPTIONS','UBSAN_OPTIONS')},
                     inputs=[O.pin(p) for p in sorted(dependencies)],
                     artifacts=[O.pin(p) for p in sorted(output.iterdir())],
-                    scientific_launch=False,library_source_provenance_closed=False,
+                    scientific_launch=False,library_source_provenance_closed=True,
                     sanitized_library_code=False)
     A.publish(output/'manifest.json',A.canonical(manifest))
     print(json.dumps(dict(mode=mode,executable=str(exe),scientific_launch=False,
-                          library_source_provenance_closed=False)))
+                          library_source_provenance_closed=True)))
+
+
+
+def current(frozen):
+    A.exact(set(frozen),{'protocol','head','executable','environment','pins'},'receipt schema')
+    A.exact(frozen['protocol'],PROTOCOL,'receipt protocol')
+    A.exact(frozen['environment'],{k:os.environ.get(k) for k in ENV_KEYS},'current loader/allocator environment')
+    A.exact(frozen['environment'],{k:None for k in ENV_KEYS},'ordinary allocator policy')
+    A.exact(command(['git','rev-parse','HEAD']).decode().strip(),frozen['head'],'exact source HEAD')
+    declared = {p['path']:p for p in frozen['pins']}
+    A.exact(len(declared),len(frozen['pins']),'unique receipt pins')
+    for p in frozen['pins']:
+        path = Path(p['path'])
+        A.exact(O.pin(path),p,'current receipt pin')
+        if ROOT in path.parents:
+            blob = command(['git','cat-file','blob',frozen['head']+':'+str(path.relative_to(ROOT))])
+            A.exact(dict(path=str(path),bytes=len(blob),sha256=A.sha(blob)),p,'receipt source commit binding')
+    executable = Path(frozen['executable']); folder = executable.parent
+    A.require(executable.is_absolute() and executable.name=='cost_worker' and folder.name=='native' and
+              str(executable) in declared,'bound native worker')
+    manifest_path = folder/'manifest.json'
+    A.require(str(manifest_path) in declared,'pinned build manifest')
+    manifest = A.decode(A.read_regular(manifest_path,1024*1024))
+    A.exact((manifest['protocol'],manifest['mode'],manifest['scientific_launch'],
+             manifest['library_source_provenance_closed'],manifest['sanitized_library_code']),
+            (PROTOCOL,'native',False,True,False),'qualified native build')
+    A.exact(manifest['environment'],{k:None for k in ENV_KEYS+('ASAN_OPTIONS','UBSAN_OPTIONS')},
+            'native build environment')
+    closure = {}
+    for p in manifest['inputs']+manifest['artifacts']+[declared[str(manifest_path)]]:
+        if p['path'] in closure:
+            A.exact(closure[p['path']],p,'identical shared manifest pin')
+        closure[p['path']] = p
+    A.exact(frozen['pins'],sorted(closure.values(),key=lambda p:p['path']),'whole build manifest closure')
+    A.require(str(executable) in {p['path'] for p in manifest['artifacts']},'built executable')
+    for name in NEW:
+        A.require(str(ROOT/name) in declared,'mandatory committed harness source')
+    for name in ('AdmissionLibraryBindings.h','library-metadata.json','library-provenance.json',
+                 'proof-old.so','proof-new.so','fixtures-old-new.json','fixtures-new-old.json',
+                 'negative-cli.json','link.map'):
+        A.require(str(folder/name) in declared,'mandatory build qualification artifact')
+    meta = metadata()
+    A.exact(A.read_regular(folder/'AdmissionLibraryBindings.h',65536),bindings_header(meta),'actual compiled ELF binding header')
+    A.exact(A.decode(A.read_regular(folder/'library-metadata.json',65536)),meta,'closed native ELF metadata')
+    provenance,inputs = library_provenance()
+    A.exact(A.decode(A.read_regular(folder/'library-provenance.json',1024*1024)),provenance,'complete historical producer chain')
+    A.require(all(str(p) in declared for p in inputs),'complete historical external dependency closure')
+    for lib in provenance:
+        A.exact(O.pin(folder/lib['proof_name'])['sha256'],lib['original']['sha256'],'exact producer relink proof')
+    for order,name in enumerate(('old-new','new-old')):
+        verify_header(A.decode(A.read_regular(folder/('fixtures-'+name+'.json'),4*1024*1024)),order,'0'*64,meta)
+    return meta
+
+
+def receipt(folder):
+    A.require(folder.is_absolute() and folder.resolve(strict=True)==folder,'real native build directory')
+    manifest = A.decode(A.read_regular(folder/'manifest.json',1024*1024))
+    pins = {}
+    for p in manifest['inputs']+manifest['artifacts']+[O.pin(folder/'manifest.json')]:
+        if p['path'] in pins:
+            A.exact(pins[p['path']],p,'shared manifest input')
+        pins[p['path']] = p
+        A.exact(O.pin(Path(p['path'])),p,'current built input')
+        path = Path(p['path'])
+        if ROOT in path.parents:
+            A.exact(A.read_regular(path,16*1024*1024),
+                    command(['git','cat-file','blob','HEAD:'+str(path.relative_to(ROOT))]),'committed current source')
+    frozen = dict(protocol=PROTOCOL,head=command(['git','rev-parse','HEAD']).decode().strip(),
+                  executable=str(folder/'cost_worker'),environment={k:os.environ.get(k) for k in ENV_KEYS},
+                  pins=sorted(pins.values(),key=lambda p:p['path']))
+    current(frozen)
+    return frozen
+
+
+def capture(executable, claim, order, deadline, spools):
+    buffers = [bytearray(), bytearray()]; files = []; child = None; failure = None
+    selector = selectors.DefaultSelector()
+    try:
+        for p in spools:
+            files.append(os.open(str(p), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600))
+        child = subprocess.Popen([str(executable), '--worker', claim, ('old-new','new-old')[order]], stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, close_fds=True)
+        for i, stream in enumerate((child.stdout, child.stderr)):
+            os.set_blocking(stream.fileno(), False); selector.register(stream, selectors.EVENT_READ, i)
+        while selector.get_map():
+            for key, _ in selector.select(min(.05, A.time_left(deadline))):
+                block = os.read(key.fileobj.fileno(), 65536)
+                if not block:
+                    selector.unregister(key.fileobj); continue
+                i = key.data; available = (RAW_CAP, ERR_CAP)[i]-len(buffers[i])
+                pending = memoryview(block[:available])
+                while pending:
+                    n = os.write(files[i], pending); A.require(n > 0, 'spool progress')
+                    buffers[i].extend(pending[:n]); pending = pending[n:]
+                A.require(len(block) <= available, 'worker output cap')
+        child.wait(timeout=A.time_left(deadline))
+    except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+        failure = str(error)
+    finally:
+        if child is not None:
+            if child.poll() is None:
+                try:
+                    child.kill()
+                except ProcessLookupError:
+                    pass
+            child.wait()
+            for stream in (child.stdout, child.stderr):
+                try:
+                    stream.close()
+                except OSError as error:
+                    failure = failure or 'pipe cleanup: '+str(error)
+        for fd in files:
+            for action in (lambda: os.fsync(fd), lambda: os.fchmod(fd, 0o400), lambda: os.close(fd)):
+                try:
+                    action()
+                except OSError as error:
+                    failure = failure or 'spool cleanup: '+str(error)
+        try:
+            selector.close()
+        except OSError as error:
+            failure = failure or 'selector cleanup: '+str(error)
+    return bytes(buffers[0]), bytes(buffers[1]), None if child is None else child.returncode, failure
+
+
+def run(receipt_path):
+    begin = time.monotonic(); deadline = begin+600
+    raw_receipt = A.read_regular(receipt_path,1024*1024); frozen = A.decode(raw_receipt)
+    A.exact(raw_receipt,A.canonical(frozen),'canonical claim'); meta = current(frozen)
+    os.mkdir(str(OUTPUT),0o700)
+    A.publish(OUTPUT/'CLAIM.json',raw_receipt)
+    processes,results,failures = [],[],[]
+    try:
+        for order,name in enumerate(('old-new','new-old')):
+            A.time_left(deadline); current(frozen)
+            start = time.monotonic()
+            raw,error,code,failure = capture(frozen['executable'],A.sha(raw_receipt),order,
+                min(deadline,start+240),[OUTPUT/(name+'.raw.jsonl'),OUTPUT/(name+'.stderr.txt')])
+            processes.append(dict(load_order=name,returncode=code,observer_failure=failure,
+                                  elapsed_seconds=time.monotonic()-start,stdout_bytes=len(raw),stderr_bytes=len(error)))
+            try:
+                A.require(failure is None and code==0 and error==b'','worker/observer failure: '+str(failure))
+                result = verify(raw,A.sha(raw_receipt),order,meta)
+                results.append(result)
+            except Exception as problem:
+                failures.append(dict(load_order=name,failure=str(problem)))
+                results.append(None)
+            del raw,error
+        current(frozen); A.time_left(deadline)
+    except Exception as error:
+        failures.append(dict(load_order='controller',failure=str(error)))
+    if failures:
+        analysis = dict(protocol=PROTOCOL,outcome='INVALID',failures=failures,load_orders=results,
+                        shared_preserved_path_screen_pass=False,WH1_speed_qualified=False,
+                        static_speed_qualified=False,all_K_claimed=False,recovery_rate_claimed=False,
+                        production_promotion_claimed=False)
+    else:
+        analysis = combine(results)
+    analysis.update(elapsed_seconds=time.monotonic()-begin,load_order_names=['old-new','new-old'])
+    A.publish(OUTPUT/'processes.json',A.canonical(processes))
+    A.publish(OUTPUT/'analysis.json',A.canonical(analysis))
+    members = [O.pin(p) for p in sorted(OUTPUT.iterdir())]
+    A.require(sum(p['bytes'] for p in members)<448*1024**2-65536,'sealed bundle cap')
+    A.publish(OUTPUT/'COMPLETE.json',A.canonical(dict(protocol=PROTOCOL,outcome=analysis['outcome'],files=members)))
+    print(json.dumps(dict(outcome=analysis['outcome'],elapsed_seconds=analysis['elapsed_seconds'],
+                          failures=failures,load_order_outcomes=[r['outcome'] if r else 'INVALID' for r in results])))
+
+
+def replay():
+    complete = A.decode(A.read_regular(OUTPUT/'COMPLETE.json',65536))
+    A.exact(set(complete),{'protocol','outcome','files'},'terminal schema')
+    A.exact(complete['protocol'],PROTOCOL,'terminal protocol')
+    expected = {'CLAIM.json','analysis.json','processes.json','old-new.raw.jsonl','old-new.stderr.txt',
+                'new-old.raw.jsonl','new-old.stderr.txt'}
+    A.exact({Path(p['path']).name for p in complete['files']},expected,'whole successful bundle membership')
+    A.exact(len(complete['files']),len(expected),'unique bundle members')
+    A.exact({p.name for p in OUTPUT.iterdir()},expected|{'COMPLETE.json'},'exact bundle directory')
+    for p in complete['files']:
+        A.require(Path(p['path']).parent==OUTPUT,'bundle paths')
+        A.exact(Path(p['path']).stat().st_mode&0o777,0o400,'sealed member mode')
+        A.exact(O.pin(Path(p['path'])),p,'immutable bundle member')
+    raw_receipt = A.read_regular(OUTPUT/'CLAIM.json',1024*1024); frozen = A.decode(raw_receipt)
+    A.exact(raw_receipt,A.canonical(frozen),'canonical frozen receipt'); meta = current(frozen)
+    result = []
+    processes = A.decode(A.read_regular(OUTPUT/'processes.json',65536))
+    A.exact(len(processes),2,'both launched processes')
+    for order,name in enumerate(('old-new','new-old')):
+        raw = A.read_regular(OUTPUT/(name+'.raw.jsonl'),RAW_CAP)
+        A.exact(A.read_regular(OUTPUT/(name+'.stderr.txt'),ERR_CAP),b'','empty successful worker stderr')
+        p = processes[order]
+        A.exact(set(p),{'load_order','returncode','observer_failure','elapsed_seconds','stdout_bytes','stderr_bytes'},'process fields')
+        A.exact((p['load_order'],p['returncode'],p['observer_failure'],p['stdout_bytes'],p['stderr_bytes']),
+                (name,0,None,len(raw),0),'successful observer record')
+        A.require(type(p['elapsed_seconds']) in (int,float) and 0<p['elapsed_seconds']<240,'observer deadline')
+        result.append(verify(raw,A.sha(raw_receipt),order,meta))
+    expected_analysis = combine(result)
+    stored = A.decode(A.read_regular(OUTPUT/'analysis.json',1024*1024))
+    elapsed = stored['elapsed_seconds']
+    A.require(type(elapsed) in (int,float) and 0<elapsed<600,'controller deadline')
+    expected_analysis.update(elapsed_seconds=elapsed,load_order_names=['old-new','new-old'])
+    A.exact(stored,expected_analysis,'exact complete statistical replay')
+    A.exact(complete['outcome'],stored['outcome'],'terminal outcome binding')
+    return stored
+
+
 
 
 if __name__=='__main__':
@@ -375,5 +700,12 @@ if __name__=='__main__':
     sub = parser.add_subparsers(dest='command',required=True)
     b = sub.add_parser('build')
     b.add_argument('mode',choices=('native','asan-driver')); b.add_argument('output',type=Path)
+    r = sub.add_parser('receipt'); r.add_argument('build_dir',type=Path); r.add_argument('output',type=Path)
+    r = sub.add_parser('run'); r.add_argument('receipt',type=Path)
+    sub.add_parser('replay')
     args = parser.parse_args()
-    build(args.mode,args.output)
+    if args.command=='build': build(args.mode,args.output)
+    elif args.command=='receipt': A.publish(args.output,A.canonical(receipt(args.build_dir)))
+    elif args.command=='run': run(args.receipt)
+    else:
+        result = replay(); print(json.dumps(dict(outcome=result['outcome'],exact_replay=True)))

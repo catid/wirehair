@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
 """Neutral protocol/schema/decision tests. Never launch a scientific cohort."""
 import copy
+import contextlib
+import io
 import importlib.util
+import os
 from pathlib import Path
 import unittest
+import subprocess
+import tempfile
+import time
 from unittest import mock
 
 SPEC = importlib.util.spec_from_file_location('admission_cost_tested',Path(__file__).with_name('Wh2AdmissionRegressionCostR0.py'))
@@ -174,6 +180,124 @@ class Tests(unittest.TestCase):
         prior = M.prior_records()
         for family,k,b,p in M.CASES:
             self.assertIn((M.FAMILIES[family],k,b,b,p),prior)
+
+
+
+    def test_historical_sources_and_artifacts(self):
+        old,blobs,inputs = M.historical_claim(*M.HISTORICAL[0])
+        by_path = {p['path']:p for p in blobs}
+        source = M.ROOT/'codec/WirehairV2Profile.cpp'
+        self.assertNotEqual(by_path[str(source)]['sha256'],M.O.pin(source)['sha256'])
+        self.assertEqual(old['head'],'ffa7739f40a5d5796eb7cb056d2e82e7139da02d')
+        self.assertGreater(len(inputs),500)
+        with mock.patch.object(M,'command') as command:
+            with self.assertRaises(ValueError): M.historical_claim(M.HISTORICAL[0][0],'0'*64)
+            command.assert_not_called()
+
+    def test_partial_spool_preserves_existing_file(self):
+        with tempfile.TemporaryDirectory(prefix='wh2-admission-spool-') as directory:
+            paths = [Path(directory)/'raw',Path(directory)/'error']
+            paths[1].write_bytes(b'preserved')
+            raw,error,code,failure = M.capture('/not-a-worker','0'*64,0,time.monotonic()+1,paths)
+            self.assertEqual((raw,error,code),(b'',b'',None))
+            self.assertIsNotNone(failure)
+            self.assertEqual(paths[0].stat().st_mode&0o777,0o400)
+            self.assertEqual(paths[1].read_bytes(),b'preserved')
+
+    def test_observer_timeout_and_caps(self):
+        real = subprocess.Popen
+        for lane in ('timeout','stdout','stderr'):
+            code = ('import time; print("prefix",flush=True); time.sleep(2)' if lane=='timeout' else
+                    'import sys; print("x"*100,file=sys.'+('stdout' if lane=='stdout' else 'stderr')+',flush=True)')
+            helper = ['/usr/bin/python3','-c',code]; children=[]
+            def spawn(args,**kwargs):
+                self.assertEqual(args[1:],['--worker','0'*64,'new-old'])
+                child = real(helper,**kwargs); children.append(child); return child
+            with tempfile.TemporaryDirectory(prefix='wh2-admission-observer-') as directory:
+                paths = [Path(directory)/'raw',Path(directory)/'error']
+                with mock.patch.object(M.subprocess,'Popen',side_effect=spawn), \
+                     mock.patch.object(M,'RAW_CAP',32),mock.patch.object(M,'ERR_CAP',32):
+                    raw,error,status,failure = M.capture('/not-a-codec','0'*64,1,time.monotonic()+(.3 if lane=='timeout' else 2),paths)
+                self.assertIsNotNone(failure); self.assertIsNotNone(children[0].poll())
+                self.assertEqual(paths[0].read_bytes(),raw); self.assertEqual(paths[1].read_bytes(),error)
+                self.assertTrue(all(p.stat().st_mode&0o777==0o400 for p in paths))
+                if lane=='timeout': self.assertEqual((raw,error,status),(b'prefix\n',b'',-9))
+                elif lane=='stdout': self.assertEqual(raw,b'x'*32)
+                else: self.assertEqual(error,b'x'*32)
+
+    def test_controller_failure_keeps_both_orders_and_seals(self):
+        with tempfile.TemporaryDirectory(prefix='wh2-admission-controller-') as directory:
+            root = Path(directory); receipt=root/'receipt'
+            receipt.write_bytes(M.A.canonical(dict(executable='/not-a-codec')))
+            output=root/'bundle'; launched=[]
+            def capture(executable,claim,order,deadline,spools):
+                launched.append(order)
+                M.A.publish(spools[0],b'prefix\n'); M.A.publish(spools[1],b'')
+                return b'prefix\n',b'',0,None
+            with mock.patch.object(M,'OUTPUT',output),mock.patch.object(M,'current',return_value=[]), \
+                 mock.patch.object(M,'capture',side_effect=capture), \
+                 mock.patch.object(M,'verify',side_effect=[ValueError('invalid first order'),dict(outcome='PASS')]), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                M.run(receipt)
+                self.assertEqual(launched,[0,1])
+                complete=M.A.decode((output/'COMPLETE.json').read_bytes())
+                self.assertEqual(complete['outcome'],'INVALID')
+                self.assertEqual(len(M.A.decode((output/'processes.json').read_bytes())),2)
+                before=list(launched)
+                with self.assertRaises(FileExistsError): M.run(receipt)
+                self.assertEqual(launched,before)
+
+    def test_controller_and_replay_bind_terminal_files(self):
+        with tempfile.TemporaryDirectory(prefix='wh2-admission-replay-') as directory:
+            root=Path(directory); receipt=root/'receipt'; output=root/'bundle'
+            receipt.write_bytes(M.A.canonical(dict(executable='/not-a-codec')))
+            def capture(executable,claim,order,deadline,spools):
+                M.A.publish(spools[0],b'raw\n'); M.A.publish(spools[1],b'')
+                return b'raw\n',b'',0,None
+            with mock.patch.object(M,'OUTPUT',output),mock.patch.object(M,'current',return_value=[]), \
+                 mock.patch.object(M,'capture',side_effect=capture), \
+                 mock.patch.object(M,'verify',return_value=dict(outcome='PASS')),contextlib.redirect_stdout(io.StringIO()):
+                M.run(receipt)
+                self.assertEqual(M.replay()['outcome'],'PASS')
+                (output/'extra').write_bytes(b'extra')
+                with self.assertRaises(ValueError): M.replay()
+
+    def test_receipt_cannot_drop_pins_or_rebind(self):
+        files={}
+        def add(path,data):
+            files[str(path)]=data
+            return dict(path=str(path),bytes=len(data),sha256=M.A.sha(data))
+        folder=Path('/synthetic/native'); exe=folder/'cost_worker'
+        inputs=[add(M.ROOT/name,b'source') for name in M.NEW]
+        inputs.append(add('/synthetic/historical-header',b'history'))
+        provenance=[dict(proof_name='proof-old.so',original=dict(sha256=M.A.sha(b'old'))),
+                    dict(proof_name='proof-new.so',original=dict(sha256=M.A.sha(b'new')))]
+        payloads={'cost_worker':b'worker','AdmissionLibraryBindings.h':b'bindings','library-metadata.json':b'[]',
+                  'library-provenance.json':M.A.canonical(provenance),'proof-old.so':b'old','proof-new.so':b'new',
+                  'fixtures-old-new.json':b'{}','fixtures-new-old.json':b'{}','negative-cli.json':b'[]','link.map':b'link'}
+        artifacts=[add(folder/name,data) for name,data in payloads.items()]
+        manifest=dict(protocol=M.PROTOCOL,mode='native',scientific_launch=False,library_source_provenance_closed=True,
+                      sanitized_library_code=False,environment={k:None for k in M.ENV_KEYS+('ASAN_OPTIONS','UBSAN_OPTIONS')},
+                      inputs=inputs,artifacts=artifacts)
+        manifest_pin=add(folder/'manifest.json',M.A.canonical(manifest))
+        frozen=dict(protocol=M.PROTOCOL,head='a'*40,executable=str(exe),environment={k:None for k in M.ENV_KEYS},
+                    pins=sorted(inputs+artifacts+[manifest_pin],key=lambda p:p['path']))
+        def pin(path):
+            data=files[str(path)];return dict(path=str(path),bytes=len(data),sha256=M.A.sha(data))
+        with mock.patch.dict(os.environ,{},clear=True),mock.patch.object(M,'command',side_effect=lambda args:b'a'*40+b'\n' if args[1]=='rev-parse' else b'source'), \
+             mock.patch.object(M.O,'pin',side_effect=pin),mock.patch.object(M.A,'read_regular',side_effect=lambda p,cap:files[str(p)]), \
+             mock.patch.object(M,'metadata',return_value=[]),mock.patch.object(M,'bindings_header',return_value=b'bindings'), \
+             mock.patch.object(M,'library_provenance',return_value=(provenance,{Path('/synthetic/historical-header')})), \
+             mock.patch.object(M,'verify_header'):
+            M.current(frozen)
+            for i in range(len(frozen['pins'])):
+                bad=copy.deepcopy(frozen);del bad['pins'][i]
+                with self.assertRaises(ValueError): M.current(bad)
+            bad=copy.deepcopy(frozen);bad['pins'].append(bad['pins'][0])
+            with self.assertRaises(ValueError): M.current(bad)
+            for value in ('/synthetic/asan-driver/cost_worker',str(folder/'proof-old.so'),'/unbound/native/cost_worker'):
+                bad=copy.deepcopy(frozen);bad['executable']=value
+                with self.assertRaises(ValueError): M.current(bad)
 
 
 if __name__=='__main__':
