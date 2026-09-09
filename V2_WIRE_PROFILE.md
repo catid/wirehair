@@ -244,8 +244,29 @@ is introduced. Certified handle allocation returns from 296 to 272 bytes on
 the native host. Allocation/OOM tests cover correct concrete-type destruction
 and unchanged small-profile allocation counts. These are structural and
 correctness checks, **not evidence that the timing regressions are fixed**;
-a fresh bounded timing gate is still required, including preservation of the
+performance qualification remains unmet, including preservation of the
 ordinary K3 speed gain.
+
+At source `6245943`, the follow-on
+`wirehair.wh2.small-isolation-preserved-cost-r1` completed **CONTROL_FAIL**.
+Both native workers completed normally with empty stderr and no codec or
+observer errors. Two of 320 same-code controls failed the frozen equivalence
+bounds, one in each library load order. Both were old-library opt-in K3
+two-byte decoders; both confidence intervals included one. The complete run
+therefore provides no qualified speed-restoration or regression result, even
+though individual treatment comparisons have directional estimates.
+
+The exact Python 3.8 replay and a separate standard-library audit reproduced
+all 103,680 records and 480 statistical decisions and verified all 721 current
+receipt pins before source advancement. The historical diagnostic-log loss
+above remained explicitly disclosed and checked, not silently repaired.
+The spent immutable bundle is `/var/tmp/wh2-small-isolation-preserved-cost-r1`,
+analysis SHA-256
+`a0970624f8b624498048f1af7c9c5647d3d58d96a9f5c015509970aa68b04933`.
+No samples were discarded, pooled to rescue a failed control, or remeasured.
+The preceding isolation R0 namespace is separately spent **INVALID**: its
+worker read a stale claim-file path and stopped before any codec work. R1
+fixed and positively tested that launch binding without changing the workload.
 
 ## Retired equation profile identifiers
 
