@@ -52,3 +52,60 @@ publication and HEAD advancement.
 This gate tests candidate-versus-current cost/retention. It does not qualify
 pre-admission restoration, strict WH1 speed, recovery, static builds, defaults
 or all K.
+
+## Terminal result — CONTROL_FAIL
+
+The sole cohort completed at source
+`71951444cda62ee8ffe0fed65fefacd73e624630`. The candidate is **not retained**.
+Production and defaults are unchanged. Five failed same-code controls prevent
+a qualifying cost result; neither nominal improvements nor nominal slowdowns
+override that verdict.
+
+| Load order | Failed AA controls | Nominal treatment slowdowns | Uncertainty failures |
+| --- | ---: | ---: | ---: |
+| Current then candidate | 2 / 256 | 25 / 128 | 18 / 128 |
+| Candidate then current | 3 / 256 | 19 / 128 | 19 / 128 |
+
+Slowdown and uncertainty counts may overlap. All five failed controls are
+decoder cells and their CIs include equality: ordinary K3/B2 borrowed and
+explicit K5/B64 independent in the first load order; opt-in K3/B2 independent
+in both AA comparisons and ordinary K3/B64 independent in the second.
+Seven certified case+metric combinations meet the nominal four-cell benefit
+test, but failed controls prevent retention or a performance claim. No
+subset rescue, rerun, resize or rescore is permitted.
+
+Both workers exited 0 with empty stderr: 82,944 records each, 165,888 total.
+Worker wall times were 153.082607 and 152.424456 seconds; accumulated WORK
+was 38.098190447 and 38.251430868 seconds. The controller finished in
+319.934364 seconds, within every frozen resource cap.
+
+Before HEAD or report advancement, exact replay and a separately written full
+raw/fixture/GF256-rank/ledger/phase/statistical/provenance audit passed under
+Python 3.8 and 3.12. The independent audit checked all 768 score cells and
+834 receipt pins; largest arithmetic difference was below 1.1e-15. Both
+interpreters produced byte-identical audit reports. Its first attempt exposed
+an audit-only path-normalization omission (`codec/../gf256.h` versus the
+canonical pinned path); the omission was reproduced and fixed, its failure
+output preserved, and all audits completed. The scientific reader, source,
+cohort and decisions were never changed.
+
+The final native/ASAN-driver neutral builds and default-20-case compatibility
+build are in `/tmp/wh2-fallthrough-cost-qualified.W18dsJfG`. All 38 reader
+tests passed on both Python versions. These are instrumented-driver checks
+against native DSOs; the prior isolated codec correctness tests provide the
+separate full-code sanitizer evidence.
+
+Evidence identifiers:
+
+- Sole bundle: `/var/tmp/wh2-certified-fallthrough-cost-r0`.
+- COMPLETE SHA256: `520edf821e2f183c82807d52953d834bd148b9f302f8c679eef6404db327691c`.
+- Current/candidate raw SHA256: `b9aeaacc707548b0c5d57e231e7aa5c1d11ac6bfefb8d654de000454932a3e61`.
+- Candidate/current raw SHA256: `b838f63b90cc8e8d025627b7d2af206ccf03b8a6b3adb17b019f29fd642b4bd9`.
+- Receipt SHA256: `28c5c59416a6e0ed03b0e9a53bf35c020cb0c6308110d7ea30e86767101950d3`.
+- Independent audit source SHA256: `557079b5ff13163ef652bfc3d69820918d4abf2e7a400b98e67c2ec18b0cc36f`.
+- Independent final report SHA256: `8713af1a0756cada8ee5539eff5c37ba4fd9f1b4acd8751051d7740fc18bee96`.
+
+This namespace is permanently spent. Installed K5 speed, ordinary K3
+post-isolation retention, and pre-admission preserved-path restoration remain
+unqualified. Further performance work needs a new mechanism, not another
+attempt at this cohort; uncovered-K structural recovery work remains separate.
