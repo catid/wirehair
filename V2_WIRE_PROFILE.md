@@ -430,6 +430,67 @@ No installed/default, recovery-rate or all-K claim follows from this timing
 screen. The separate paired recovery comparison is reported below; another
 speed screen needs new evidence addressing the measurement failure, not a blind retry.
 
+### K5 timing-excursion diagnosis: millisecond-boundary association
+
+A read-only audit at source `b3037aa` inspected all 38,880 retained timing
+records, including warm positions, without executing a codec or changing the
+spent gate. Descriptive medians keep width, metric, comparison, order, logical
+side and warm/measured position separate: 720 classes. Multiples of these
+medians label observations for inspection; they are not new acceptance bounds
+or rules for excluding samples.
+
+Thirty callbacks exceed 1.5 times their respective wall-time median. Twenty-two
+record an involuntary context switch. The remaining eight exceed 1.5 times
+both their wall and thread-CPU-envelope medians with all four recorded counter
+deltas zero:
+
+| Path | Retained callback indices |
+|---|---|
+| K5 two-byte borrowed encoder | 4321 (warm), 5402 |
+| WH1 two-byte borrowed encoder | 5431 |
+| K5 1280-byte low-ID decoder | 2600, 13933 (warm), 14960 |
+| K5 1280-byte distant-ID decoder | 9272, 19068 |
+
+All eight start at absolute monotonic-clock phases 950,192–997,008 ns modulo
+one millisecond and end 93,348–237,082 ns into the next millisecond. This
+post-hoc temporal association uses the gate's existing one-millisecond phase
+period; it is not a causal finding, a significance test, or permission to
+avoid those phases in later speed measurements.
+
+There are also eighteen codec-free waiting intervals exceeding their target
+by more than 50 microseconds with no intervening recorded counter change.
+Their overshoots span 56,964–272,985 ns, while wait wall time exceeds its
+thread-CPU interval by only 130–432 ns. The waiting loop allocates no codec
+and runs no codec operation. Thus similar charged-CPU delays do not require
+K5 work, although these observations do not prove that every WORK excursion
+has the same cause. Clock-read latency, interrupted computation, and internal
+allocation effects are not separately observed by the existing envelope.
+
+Source and exact measured-executable inspection also confirm that the recorded
+outer handle omits a separate 88-byte K5 Encoder allocation, or a 136-byte
+Decoder plus its six-block slab. The full-message borrowed encoder has two
+allocations; a decoder has three. Equality of outer addresses cannot establish
+equality of internal storage. Both decoder source-policy labels call the same
+decoder. The thread-CPU envelope includes monotonic reads excluded from the
+wall WORK interval, so a small positive CPU-minus-wall difference is expected
+and is not evidence of extra codec instructions.
+
+Python 3.8 and 3.12 produce byte-identical complete descriptive reports. A
+separate raw traversal, nested-roster reconstruction and median calculation
+reproduce every event index, all thirty wall excursions, all eighteen waiting
+events, complete counter totals and the 22.452193143-second WORK ledger. Original
+bundle hashes are unchanged before and after analysis. The audit is retained
+under `/tmp/wh2-k5-excursion-audit.RlGLbm`; `report.json` SHA-256 is
+`383750e4487173d0039dd5ceb7d79c4947330b5231449deef3a4524a6db8af15`.
+
+The resulting next question is clock-read stalls versus interrupted fixed-count
+computation, first in a separately frozen codec-free diagnostic with all phases
+and observations retained. No allocator rewrite, speed qualification, or
+production change follows from this audit. The unprivileged `perf` probe is
+denied on this host; no host settings were changed. The latest Fable invocation
+returned a usage-limit error and no report, so none of these findings is
+attributed to Fable. K5 cost R0 remains **CONTROL_FAIL**.
+
 ### K5 paired retained recovery comparison
 
 At source `3b82f35`, `wirehair.wh2.k5-serialized-recovery-r0` passed its
