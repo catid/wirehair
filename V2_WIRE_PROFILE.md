@@ -598,9 +598,66 @@ code and archives are unchanged. The immutable bundle is
 `d6951f2594434c739776d0c37e1e4ed3b44317d91a49819dc832c28fee837303`.
 
 This is a retained cohort, not a new independent holdout. Source-policy and
-backend replays do not multiply its sample size. The namespace is spent; the
-K5 speed-control failure, installed admission, preserved-path regressions and
-full all-K speed/recovery/construction objective remain unresolved.
+backend replays do not multiply its sample size. The namespace is spent. The
+original K5 timing result remains CONTROL_FAIL; a separately qualified new
+instrument provides the scoped speed result below. Installed admission,
+preserved-path regressions and the all-K objective remain unresolved.
+
+### K5 deferred-output lifecycle speed: qualified benchmark boundary
+
+At source `4046600`, `wirehair.wh2.k5-deferred-cost-r0` completed **PASS**.
+All 108 same-code equivalence controls and all 72 candidate comparisons pass,
+separately for each width, lifecycle, source policy and measurement order.
+Every candidate comparison's upper 95% time-ratio bound is below one against
+its ownership-matched actual WH1 or explicitly selected certified-WH2 control.
+
+Elapsed-time reductions versus WH1, spanning both source policies and orders:
+
+| Block bytes | Full encoder | Low-ID decoder | Distant-ID decoder |
+|---|---:|---:|---:|
+| 2 | 67.31–67.65% | 91.85–91.95% | 85.45–85.50% |
+| 64 | 76.12–76.55% | 91.39–91.42% | 86.03–86.20% |
+| 1280 | 73.57–75.24% | 90.18–90.24% | 88.04–88.24% |
+
+This is the actual benchmark K5 C boundary, not an installed ordinary-WH2 K5
+profile. Full five-block messages use 2-, 64-, and 1,280-byte blocks on the
+frozen native GFNI-capable CPU50 host. Encoder time includes create, descriptor
+output, 18 packets and free; decoder time includes create, feed through its own
+first success, recover and free. Both decoder streams require five packets
+for every arm. These measurements do not establish partial-tail, other-width,
+shared-library, cold-start, non-GFNI or all-K speed.
+
+The new instrument defers all result formatting/output until measurement ends,
+using the existing full static record array. The sealed K5 core, qualified
+archives, WORK body, 38,880-callback roster, batch 128, 48 phase offsets and all
+acceptance thresholds are unchanged. No new logging queue, thread or allocation
+is introduced. No observations are dropped or rescored, no clock/wake-up cost
+is subtracted, and the original spent CONTROL_FAIL remains unchanged. The new
+PASS does not prove a unique cause for all old timing excursions.
+
+All 4,976,640 fresh lifecycles and 59,719,680 attempted API calls passed their
+packet, descriptor, recovery, buffer-guard and ownership checks. Timed WORK
+totaled 18.361103009 seconds; the complete controller took 68.680927 seconds
+and worker stderr was empty. All 249 involuntary context switches and the one
+minor fault observed in/between captures remain in the data; no voluntary
+switch was recorded there.
+
+Native, portable-arithmetic and ASan/UBSan neutral qualification covered 108
+WORK cells per backend, the full roster, late errors/exceptions, partial final
+clock capture, source-corruption detection and output-device failures.
+Twenty-eight reader tests pass under each Python 3.8 and 3.12. Exact replays
+and an independently written standard-library packet/rank, chronology, ledger,
+phase-coverage and statistical audit agree on all 38,880 records, 180 decisions
+and 783 receipt pins before HEAD or pinned documentation advances.
+
+The immutable bundle is `/var/tmp/wh2-k5-deferred-cost-r0`; raw SHA-256 is
+`bfd61a30307f11bd28101dabdcd0249b5d751ad2ba35a3dd78d57a79a74dc18b`,
+COMPLETE SHA-256
+`2c10634555ad447b1c2264c854fd170b57550fe66426b4b6874a6d910b3e804e`.
+See the [instrument contract](bench/Wh2K5DeferredCostR0.md). This namespace is
+spent. The next requirement is installed/ordinary K5 admission with its own
+actual-path speed, retained recovery and preserved-path regression gates;
+benchmark timings cannot be inherited by a different owning public facade.
 
 ## Retired equation profile identifiers
 
