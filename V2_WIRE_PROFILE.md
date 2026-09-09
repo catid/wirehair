@@ -426,9 +426,63 @@ all 691 receipt pins before source advancement. The controller completed in
 The immutable bundle is `/var/tmp/wh2-k5-serialized-cost-r0`, raw SHA-256
 `59c5e626f8c6dffd6176e932d0753d2e5ee67d9ccd3daf54be6c8d53ae527019`.
 This namespace is spent: no rerun, sample removal, resizing or subset rescue.
-No installed/default, recovery-rate or all-K claim follows. The separate
-paired retained-trace WH1 recovery comparison remains required; another speed
-screen needs new evidence addressing the measurement failure, not a blind retry.
+No installed/default, recovery-rate or all-K claim follows from this timing
+screen. The separate paired recovery comparison is reported below; another
+speed screen needs new evidence addressing the measurement failure, not a blind retry.
+
+### K5 paired retained recovery comparison
+
+At source `3b82f35`, `wirehair.wh2.k5-serialized-recovery-r0` passed its
+actual-codec retained-cohort comparison. The benchmark K5 boundary, actual WH1
+and explicitly selected certified WH2 were tested separately with independent
+and borrowed input. Failures after receiving exactly five packets:
+
+| Codec, either source policy | Failures / retained traces | Observed failure rate |
+|---|---:|---:|
+| K5 candidate | 11 / 6144 | 0.179% |
+| WH1 | 122 / 6144 | 1.986% |
+| Certified WH2 | 439 / 6144 | 7.145% |
+
+K5 has about 91.0% fewer zero-extra-packet failures than WH1 on this cohort.
+It fixes all 122 WH1 failures but introduces 11 different failures. Against
+certified WH2 it fixes 438 and introduces ten; one failure is shared. Thus this
+is an aggregate recovery improvement, not per-trace dominance. All eleven K5
+failures recover with one extra packet. WH1 still has two failures after one
+extra packet and certified WH2 has ten; both have none after two.
+
+All twelve width/schedule cells retain 512 traces and meet the candidate's
+frozen 1% bound; the worst K5 cell has four failures (0.78125%). K5 is not
+better in every individual cell: the 64-byte adversarial cell has two failures
+versus WH1's one, and the 1,280-byte adversarial cell has four versus three.
+These counts do not establish population-level or universal guarantees.
+
+All 72 separate hard cases recover without extra packets for K5 and WH1,
+versus nine certified-WH2 failures. K5 recovers all 57 historical original-width
+cases from 54 distinct prefixes; WH1 remains unresolved on twelve and certified
+WH2 on 45. Each historical prefix retains its original length; none is extended
+to rescue an unresolved decode. Hard and historical cases are outside the
+6,144-trace rate denominator.
+
+Native, portable-arithmetic and ASan/UBSan runs agree on all 6,273 cases and
+six API routes. Each backend uses 263,466 fresh handles, checks 337,404 real
+packets plus their five basis probes, and performs 75,048 guarded successful
+recoveries. Independent polynomial arithmetic verifies every arm's packet
+bytes and first-success source-equation rank; candidate rows are also derived
+from the fixed companion pair. All real and basis encoders are freed before
+any receiver, and independent inputs are destroyed before encoding.
+
+Exact Python 3.8 and 3.12 replays and a separate standard-library arithmetic,
+chronology, ledger and paired-count audit agree, including all 657 receipt pins
+before source advancement. The original qualification document is retained
+at its exact Git version and the current report is pinned separately; producing
+code and archives are unchanged. The immutable bundle is
+`/var/tmp/wh2-k5-serialized-recovery-r0`, native raw SHA-256
+`d6951f2594434c739776d0c37e1e4ed3b44317d91a49819dc832c28fee837303`.
+
+This is a retained cohort, not a new independent holdout. Source-policy and
+backend replays do not multiply its sample size. The namespace is spent; the
+K5 speed-control failure, installed admission, preserved-path regressions and
+full all-K speed/recovery/construction objective remain unresolved.
 
 ## Retired equation profile identifiers
 
