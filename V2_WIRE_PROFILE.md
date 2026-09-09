@@ -117,8 +117,9 @@ changing the retained decoder basis; recovery does not authenticate data.
 On this development branch, ordinary constructors select this profile for its
 supported K3 shapes. Other shapes, including K3 above the small-profile block
 bound, continue to select the certified profile. Correctness and compatibility
-checks and the scoped ordinary-path speed gate below pass. Paired recovery
-qualification and old-path/opt-in performance regression checks remain open.
+checks, the scoped ordinary-path speed gate and retained paired recovery
+qualification below pass. Old-path/opt-in performance regression checks remain
+open.
 The published WHK3 opt-in timings do **not** qualify this owned-basis path.
 This is not an all-K performance or construction-seed claim.
 
@@ -163,6 +164,51 @@ The immutable outcome is `/var/tmp/wh2-k3-ordinary-cost-r0`, raw SHA-256
 `03ad310ea6d44e7a98ece8ba27c96ab8284741df38c43b14715be4f7c66503d2`.
 This namespace is spent. No recovery-rate sample or full promotion claim is
 made by this timing result.
+
+### Ordinary K3 retained recovery comparison
+
+At source `734150a`, `wirehair.wh2.k3-ordinary-recovery-r0` replayed the
+retained cohort through actual ordinary WH2, separately for independent and
+borrowed creation, alongside actual WH1 and explicitly selected certified
+WH2. Failures with zero extra packets on the 6,144 retained loss traces:
+
+| Codec | Failures / traces | Observed failure rate |
+|---|---:|---:|
+| Ordinary WH2 K3, each source policy | 0 / 6144 | 0% |
+| WH1 | 14 / 6144 | 0.23% |
+| Certified WH2 | 269 / 6144 | 4.38% |
+
+Both ordinary policies fixed all 14 WH1 and 269 certified-WH2 failures,
+introducing none against either control in this cohort. Each of the twelve
+width/loss-schedule cells retained 512 traces and had no K3 failures. WH1
+recovered all failures with one extra packet; certified WH2 still had five
+failures after one extra packet, one after two, and none after three.
+
+The separate 72 hard cases also had no K3 failures at zero overhead, versus
+one WH1 and five certified-WH2 failures. K3 and WH1 recovered all 53 historical
+prefixes at their original widths; certified WH2 remained unresolved on 43.
+Those prefixes were never extended to rescue an unresolved decode. Hard and
+historical cases are not included in the 6,144-trace denominator.
+
+Every encoder was freed before receiver creation. Both ordinary policies
+produced identical descriptors, packet hashes, feed statuses and first-success
+counts. Each K3 packet matched an independent polynomial-GF(256) payload
+oracle; first success matched independently computed rank, and each successful
+decode recovered the original message twice with guarded buffers. Native,
+portable-arithmetic and ASan/UBSan builds agreed on every one of the 6,269
+cases and all four API routes, with 50,152 fresh codec handles per backend.
+
+Python 3.8 independently replayed all 647 receipt pins and the complete raw
+results. A separately written standard-library audit rebuilt the GF(256)
+payload/rank oracle and reproduced the full chronology, all group/cell counts
+and every paired fix/introduction list before HEAD or pinned files changed.
+The immutable bundle is `/var/tmp/wh2-k3-ordinary-recovery-r0`; native raw
+SHA-256 is `1beaa881fb2a8ce1f13b58fd463271dc0f31b6dc7179cb1bddbce0bb6a370f86`.
+
+This namespace is spent. The cohort is retained, not a fresh independent
+holdout; source-policy and backend replays do not multiply its sample size.
+The result is not a universal recovery guarantee, all-K construction-seed
+validation or an old-path performance regression check.
 
 ## Retired equation profile identifiers
 

@@ -6,10 +6,10 @@ Currently only exactly three source blocks (K3) are supported. WH1 and K6 never
 select this facade. The development-branch ordinary WH2 K3 admission reuses
 these equations through a distinct WHV2 descriptor and owned prepared basis;
 see `V2_WIRE_PROFILE.md`. It preserves WH2's different ownership/detach rules
-and requires its own speed/recovery gates. Its scoped ordinary-path speed
-result is recorded separately in `V2_WIRE_PROFILE.md`; paired recovery remains
-open. The results below qualify this opt-in WHK3 facade only. Handles from
-different APIs are not interchangeable.
+and requires its own speed/recovery gates. Its scoped ordinary-path speed and
+retained paired recovery results are recorded separately in
+`V2_WIRE_PROFILE.md`. The results below qualify this opt-in WHK3 facade only.
+Handles from different APIs are not interchangeable.
 
 ## K3 identity and qualification
 

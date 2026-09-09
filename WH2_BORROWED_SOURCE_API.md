@@ -8,7 +8,8 @@ and borrowed constructors; borrowing adds no allocation or source copy beyond
 that basis. Its separate [ordinary K3 lifecycle gate](V2_WIRE_PROFILE.md#ordinary-k3-full-lifecycle-speed)
 passes for both source policies at the three declared widths on the native
 GFNI host. It does not inherit the historical systematic-emission screen or
-WHK3 opt-in timings; paired recovery and performance regression gates remain
+WHK3 opt-in timings. Its separate retained paired recovery comparison also
+passes for both policies; preserved-path performance regression gates remain
 open.
 
 Status: implemented and functionally validated by
