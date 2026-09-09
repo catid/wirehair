@@ -140,6 +140,7 @@ class Tests(unittest.TestCase):
                      proof_object=dict(name='proof-profile.o',sha256=R.A.sha(b'object')))]
         cfg = M.SETTINGS._replace(provenance=lambda: (report,set()))
         payloads={'cost_worker':b'worker','AdmissionLibraryBindings.h':b'bindings','library-metadata.json':b'[]',
+                  'claim-binding.json':R.A.canonical(R.claim_binding(cfg)),'neutral-claim.json':b'neutral',
                   'library-provenance.json':R.A.canonical(report),'proof-old.so':b'old','proof-new.so':b'new',
                   'proof-profile.o':b'object','fixtures-old-new.json':b'{}','fixtures-new-old.json':b'{}',
                   'negative-cli.json':b'[]','link.map':b'link'}

@@ -437,6 +437,10 @@ def configuration(value):
     return value if value is not None else Configuration(PROTOCOL,OUTPUT,N.LIBRARIES,NEW,library_provenance)
 
 
+def claim_binding(cfg):
+    return dict(protocol=cfg.protocol,claim_path=str(cfg.output/'CLAIM.json'),positive_returncode=0,negative_returncode=1)
+
+
 def build(mode, output, settings=None):
     cfg = configuration(settings)
     A.require(mode in ('native','asan-driver'),'explicit native or instrumented driver build')
@@ -461,6 +465,7 @@ def build(mode, output, settings=None):
     flags += ['-O1','-g','-fsanitize=address,undefined','-fno-omit-frame-pointer'] if mode=='asan-driver' else ['-O3','-g1']
     if cfg.protocol != PROTOCOL:
         flags += ['-DWH2_ADMISSION_PROTOCOL='+json.dumps(cfg.protocol)]
+    flags += ['-DWH2_ADMISSION_CLAIM_PATH='+json.dumps(str(cfg.output/'CLAIM.json'))]
     sources = [ROOT/NEW[0]]+[ROOT/'bench'/n for n in
               ('Wh2FrozenTrace.cpp','Wh2PublicBorrowedTargetIdentity.cpp','Wh2RdpruTargetIdentityV2.cpp')]
     dependencies = {ROOT/n for n in cfg.sources}
@@ -492,6 +497,17 @@ def build(mode, output, settings=None):
     for target in [exe,Path(sys.executable)]+[p for p,_ in cfg.libraries]:
         dependencies.update(runtime_dependencies(target))
     dependencies.add(Path(sys.executable).resolve(strict=True))
+    A.exact(command([exe,'--binding']),(cfg.protocol+'\n'+str(cfg.output/'CLAIM.json')+'\n').encode(),
+            'compiled protocol and actual worker claim path')
+    neutral_claim = A.canonical(dict(protocol=cfg.protocol,purpose='neutral claim authentication only'))
+    neutral_path = output/'neutral-claim.json'
+    A.publish(neutral_path,neutral_claim)
+    A.exact(command([exe,'--neutral-claim',A.sha(neutral_claim),neutral_path]),b'','positive shared claim validation')
+    rejected = subprocess.run([str(exe),'--neutral-claim','0'*64,str(neutral_path)],stdin=subprocess.DEVNULL,
+                              stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=10)
+    A.exact((rejected.returncode,rejected.stdout,rejected.stderr),(1,b'',b'INVALID: claim bytes\n'),
+            'negative shared claim validation')
+    A.publish(output/'claim-binding.json',A.canonical(claim_binding(cfg)))
     for order,name in enumerate(('old-new','new-old')):
         A.publish(output/('neutral-'+name+'.txt'),command([exe,'--neutral',name]))
         raw = command([exe,'--neutral-fixtures',name])
@@ -555,8 +571,9 @@ def current(frozen, settings=None):
         A.require(str(ROOT/name) in declared,'mandatory committed harness source')
     for name in ('AdmissionLibraryBindings.h','library-metadata.json','library-provenance.json',
                  'proof-old.so','proof-new.so','fixtures-old-new.json','fixtures-new-old.json',
-                 'negative-cli.json','link.map'):
+                 'negative-cli.json','link.map','claim-binding.json','neutral-claim.json'):
         A.require(str(folder/name) in declared,'mandatory build qualification artifact')
+    A.exact(A.decode(A.read_regular(folder/'claim-binding.json',65536)),claim_binding(cfg),'positive qualified claim binding')
     meta = metadata(cfg.libraries)
     A.exact(A.read_regular(folder/'AdmissionLibraryBindings.h',65536),bindings_header(meta),'actual compiled ELF binding header')
     A.exact(A.decode(A.read_regular(folder/'library-metadata.json',65536)),meta,'closed native ELF metadata')

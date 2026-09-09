@@ -165,7 +165,7 @@ def provenance(proof_dir=None):
 SETTINGS = R.Configuration(PROTOCOL,OUTPUT,LIBRARIES,NEW,provenance)
 
 
-if __name__ == '__main__':
+def main(settings=SETTINGS):
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='command',required=True)
     b = sub.add_parser('build'); b.add_argument('mode',choices=('native','asan-driver')); b.add_argument('output',type=Path)
@@ -173,9 +173,12 @@ if __name__ == '__main__':
     r = sub.add_parser('run'); r.add_argument('receipt',type=Path)
     sub.add_parser('replay')
     args = parser.parse_args()
-    if args.command == 'build': R.build(args.mode,args.output,SETTINGS)
-    elif args.command == 'receipt': A.publish(args.output,A.canonical(R.receipt(args.build_dir,SETTINGS)))
-    elif args.command == 'run': R.run(args.receipt,SETTINGS)
+    if args.command == 'build': R.build(args.mode,args.output,settings)
+    elif args.command == 'receipt': A.publish(args.output,A.canonical(R.receipt(args.build_dir,settings)))
+    elif args.command == 'run': R.run(args.receipt,settings)
     else:
-        result = R.replay(SETTINGS)
+        result = R.replay(settings)
         print(json.dumps(dict(outcome=result['outcome'],exact_replay=True)))
+
+
+if __name__ == '__main__': main()

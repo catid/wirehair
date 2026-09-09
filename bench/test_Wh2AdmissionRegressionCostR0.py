@@ -274,6 +274,7 @@ class Tests(unittest.TestCase):
                     dict(proof_name='proof-new.so',original=dict(sha256=M.A.sha(b'new')))]
         payloads={'cost_worker':b'worker','AdmissionLibraryBindings.h':b'bindings','library-metadata.json':b'[]',
                   'library-provenance.json':M.A.canonical(provenance),'proof-old.so':b'old','proof-new.so':b'new',
+                  'claim-binding.json':M.A.canonical(M.claim_binding(M.configuration(None))),'neutral-claim.json':b'neutral',
                   'fixtures-old-new.json':b'{}','fixtures-new-old.json':b'{}','negative-cli.json':b'[]','link.map':b'link'}
         artifacts=[add(folder/name,data) for name,data in payloads.items()]
         manifest=dict(protocol=M.PROTOCOL,mode='native',scientific_launch=False,library_source_provenance_closed=True,

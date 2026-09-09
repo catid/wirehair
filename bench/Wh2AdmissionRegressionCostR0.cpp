@@ -29,8 +29,12 @@
 #ifndef WH2_ADMISSION_PROTOCOL
 #define WH2_ADMISSION_PROTOCOL "wirehair.wh2.admission-regression-cost-r0"
 #endif
+#ifndef WH2_ADMISSION_CLAIM_PATH
+#define WH2_ADMISSION_CLAIM_PATH "/var/tmp/wh2-admission-regression-cost-r0/CLAIM.json"
+#endif
 namespace {
 const char protocol[]=WH2_ADMISSION_PROTOCOL;
+const char claim_path[]=WH2_ADMISSION_CLAIM_PATH;
 const unsigned case_count=20,max_batch=128,callbacks=51840;
 const unsigned pairs[3][2]={{0,0},{1,1},{0,1}};
 const unsigned sides[18]={0,1,0,1,1,0,1,0,0,1,1,0,0,1,0,1,1,0};
@@ -438,10 +442,13 @@ void FooterJson(bool failed,uint64_t work) {
         failed?"false":"true",retained,static_cast<unsigned long long>(work)); Flush();
 }
 
+void ValidateClaim(const std::string& claim,const char* path) {
+    Check(claim.size()==64 && claim.find_first_not_of("0123456789abcdef")==std::string::npos,"claim hex");
+    Check(wirehair::wh2_benchmark::Sha256Hex(ReadFile(path,1024*1024))==claim,"claim bytes");
+}
 int Worker(const std::string& claim,unsigned order) {
     Check(!WH2_ADMISSION_REGRESSION_NEUTRAL,"neutral scientific worker disabled");
-    Check(claim.size()==64 && claim.find_first_not_of("0123456789abcdef")==std::string::npos,"claim hex");
-    Check(wirehair::wh2_benchmark::Sha256Hex(ReadFile("/var/tmp/wh2-admission-regression-cost-r0/CLAIM.json",1024*1024))==claim,"claim bytes");
+    ValidateClaim(claim,claim_path);
     const rlimit cpu={180,180},memory={512u*1024u*1024u,512u*1024u*1024u},core={0,0};
     Check(!setrlimit(RLIMIT_CPU,&cpu) && !setrlimit(RLIMIT_AS,&memory) && !setrlimit(RLIMIT_CORE,&core),"worker limits");
     Reader reader; const uint64_t start=reader.Mono(),cpu_start=reader.Cpu();
@@ -571,6 +578,10 @@ int main(int argc,char** argv) {
         for(const char* name:{"MALLOC_TRIM_THRESHOLD_","MALLOC_MMAP_THRESHOLD_","MALLOC_TOP_PAD_","MALLOC_PERTURB_",
                              "GLIBC_TUNABLES","LD_PRELOAD","LD_LIBRARY_PATH","LD_AUDIT","LD_DEBUG"})
             Check(!getenv(name),"clean allocator/loader environment");
+        if(argc==2 && !strcmp(argv[1],"--binding")) {
+            printf("%s\n%s\n",protocol,claim_path); Flush(); return 0;
+        }
+        if(argc==4 && !strcmp(argv[1],"--neutral-claim")) { ValidateClaim(argv[2],argv[3]); return 0; }
         if(argc==3 && !strcmp(argv[1],"--neutral")) return Neutral(Order(argv[2]),false);
         if(argc==3 && !strcmp(argv[1],"--neutral-fixtures")) return Neutral(Order(argv[2]),true);
         Check(argc==4 && !strcmp(argv[1],"--worker"),"explicit mode required");
