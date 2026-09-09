@@ -14,10 +14,10 @@ option(WH2_SMALL_PORTABLE "Match an ANDROID-selected portable GF256 library layo
 if(NOT EXISTS "${WH2_SMALL_LIBRARY}")
     message(FATAL_ERROR "WH2_SMALL_LIBRARY must name an existing qualified library")
 endif()
-set(WH2_SMALL_TEST_DIMENSION "3" CACHE STRING "Sealed benchmark dimension: 3 or 5")
-set_property(CACHE WH2_SMALL_TEST_DIMENSION PROPERTY STRINGS 3 5)
-if(NOT WH2_SMALL_TEST_DIMENSION MATCHES "^(3|5)$")
-    message(FATAL_ERROR "Only sealed benchmark dimensions 3 and 5 are supported")
+set(WH2_SMALL_TEST_DIMENSION "3" CACHE STRING "Sealed benchmark dimension: 2, 3 or 5")
+set_property(CACHE WH2_SMALL_TEST_DIMENSION PROPERTY STRINGS 2 3 5)
+if(NOT WH2_SMALL_TEST_DIMENSION MATCHES "^(2|3|5)$")
+    message(FATAL_ERROR "Only sealed benchmark dimensions 2, 3 and 5 are supported")
 endif()
 set(WH2_SMALL_DATA "Wh2K${WH2_SMALL_TEST_DIMENSION}NativeData")
 find_package(Python3 3.8 REQUIRED COMPONENTS Interpreter)
@@ -49,6 +49,12 @@ enable_testing()
 add_test(NAME small_neutral COMMAND wh2_small_native_test --neutral)
 add_test(NAME small_corpus COMMAND wh2_small_native_test --corpus)
 set_tests_properties(small_neutral small_corpus PROPERTIES TIMEOUT 120)
+
+# K2 currently qualifies only the direct private core. No K2 serialized wire
+# identity or public profile is introduced by this build option.
+if(WH2_SMALL_TEST_DIMENSION STREQUAL "2")
+    return()
+endif()
 
 # Keep the complete serialized C boundary in a separate, non-LTO translation
 # unit. The installed library and its qualified K6 implementation are inputs,

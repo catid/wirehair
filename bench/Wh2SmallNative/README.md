@@ -1,4 +1,4 @@
-# K3/K5/K6 native correctness harness
+# K2/K3/K5/K6 native correctness harness
 
 This standalone build tests the private compile-time small-block core. It does
 not change the public library, select a wire profile, or measure performance.
@@ -16,8 +16,11 @@ Use a fresh, task-owned build directory. This harness needs the original local
 `/var/tmp/wh2-k3-thue-morse-r0` evidence; missing or changed evidence fails closed.
 The ordinary library and installed package do not depend on this directory.
 Pass `-DWH2_SMALL_TEST_DIMENSION=5` to select the separately sealed K5 evidence
-at `/var/tmp/wh2-k5-thue-morse-r0` instead. Other dimensions are rejected. K3
-remains the default build; this option never changes the installed library.
+at `/var/tmp/wh2-k5-thue-morse-r0` instead. Dimension 2 selects the separately
+sealed `/var/tmp/wh2-k2-thue-morse-r0` evidence and builds only the two direct
+core tests; it does not introduce a K2 serialized boundary or profile.
+Other dimensions are rejected. K3 remains the default build; this option never
+changes the installed library.
 
 The private `gf256.h` compilation settings must match the linked library's
 settings. For an `ANDROID`-selected portable-GF library, pass
@@ -38,8 +41,58 @@ prefix rank and recovery, plus 2,270 recorded coefficient rows. Every encoder
 is freed before creating any receiver; repeated recovery uses reset output
 buffers and every actual packet is checked against a polynomial-field oracle.
 
+At K2 the corpus has 15,956 cases and 56,776 packets: all 6,216 retained
+hard/fresh traces; all 56 historical origins without deduplication or changes
+to their original widths, tails or prefix lengths; 450 seam subsets; and the
+three legacy plus 1,536 stride pairs at all three widths with full and one-byte
+tails. It also checks all 5,274 recorded coefficient rows. Five retained stride
+pairs are deficient, giving 30 shape replays that must stay at rank one and
+leave recovery buffers unchanged. These cases are not extended with rescue
+packets. All other cases must recover exactly. Neutral coverage additionally
+includes 19 selected widths spanning 1 to 4,096, partial tails, every packed selector, aliases,
+OOM, conflict preservation and allocation-free packet operations.
+
+## K2 native qualification
+
+The fixed `(2,3)` / `(3,3)` companion pair now works through the existing
+native core without a new decoder, payload kernel or runtime branch. The only
+core edits admit dimension two in its three compile-time assertions.
+The lookup remains a benchmark-generated, 7,168-byte fixture; no installed
+lookup, public profile, defaults or exported API change.
+
+Qualification artifacts are retained at `/tmp/wh2-k2-native.jtQp2mfD`.
+The final `QUALIFIED.json` SHA256 is
+`e5df706707e92698368aa464cbe318d2d21eda528521d641369feb50a958ed0c`.
+All 48 tests passed: K2 direct neutral/corpus checks and all seven existing
+K3 and K5 direct/serialized/K6-parity checks, each under native, portable
+arithmetic and ASan+UBSan+leak/fake-stack configurations. The fixture and
+source identities, complete generated values, reported counts, build flags
+and mode agreement passed a separate artifact audit on Python 3.8 and 3.12.
+All 19 K2/K3/K5 fixture-generator tests also passed on both interpreters.
+Repeated source-reading passes found no core or harness bugs. The artifact
+auditor initially needed dependency paths containing `..` normalized; this
+was corrected before both complete audits passed, without changing codec
+or test outcomes.
+
+The generated K2 fixture SHA256 is
+`3c7000ed80af9f7f15cdb51dabb1a016cf24afe12988aa355605387c6f855cba`.
+For every production translation unit that includes the core (`Small`,
+`SmallK5`, `V2Profile`), baseline-forced, candidate-forced and normal builds
+produced identical object bytes under both static and shared Release flags:
+18 compilations, six identical three-way comparisons. The retained
+`object-identity.json` SHA256 is
+`539349f52389f7d30521a9b2d8f6d353938b4a4816038715fa281239ad899115`.
+This is code-generation identity, not a new timing result or restoration
+of previously measured regressions.
+
+Native replay confirms the already retained recovery cases; it does not add
+a fresh sample or a paired WH1 recovery-rate comparison. Full lifecycle speed
+and an ownership-matched external boundary require separate qualification.
+
+## Serialized correctness for K3 and K5
+
 The build also produces a separate, non-LTO serialized C boundary and five
-additional tests. Its shared `Facade<K,Traits>` implementation retains K6's
+additional tests for K3 and K5. Its shared `Facade<K,Traits>` implementation retains K6's
 independent/borrowed input, transactional allocating detach, descriptor
 validation and permanent conflict-poison behavior. Only the selected benchmark
 wrapper instantiates that boundary for external callers; the installed K6

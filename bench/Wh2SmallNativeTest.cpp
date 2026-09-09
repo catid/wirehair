@@ -4,7 +4,10 @@
 #ifndef WH2_SMALL_CODEC_K
 #define WH2_SMALL_CODEC_K 3
 #endif
-#if WH2_SMALL_CODEC_K == 5
+#if WH2_SMALL_CODEC_K == 2
+#include "Wh2K2NativeData.inc"
+namespace Data = wh2_k2_data;
+#elif WH2_SMALL_CODEC_K == 5
 #include "Wh2K5NativeData.inc"
 namespace Data = wh2_k5_data;
 #elif WH2_SMALL_CODEC_K == 3
@@ -65,13 +68,14 @@ namespace S = wirehair_small_core;
 namespace Old = wirehair_k6_core;
 using Byte = std::uint8_t;
 constexpr unsigned SelectedK = WH2_SMALL_CODEC_K;
-constexpr unsigned CorpusCases = SelectedK == 5 ? 10053 : 7774;
-constexpr unsigned CorpusPackets = SelectedK == 5 ? 75134 : 48187;
-constexpr unsigned RecordedRows = SelectedK == 5 ? 2270 : 2226;
+constexpr unsigned CorpusCases = SelectedK == 2 ? 15956 : SelectedK == 5 ? 10053 : 7774;
+constexpr unsigned CorpusPackets = SelectedK == 2 ? 56776 : SelectedK == 5 ? 75134 : 48187;
+constexpr unsigned RecordedRows = SelectedK == 2 ? 5274 : SelectedK == 5 ? 2270 : 2226;
 alignas(64) const Byte kK6Lookup[] = {
 #include "../codec/WirehairK6Lookup.inc"
 };
 std::uint64_t packet_checks = 0, feed_checks = 0, recover_checks = 0, row_checks = 0, cases = 0;
+std::uint64_t deficient_cases = 0;
 #ifdef WH2_SMALL_TEST_SERIALIZED
 std::uint64_t serialized_cases = 0, serialized_packets = 0;
 #endif
@@ -123,11 +127,13 @@ template<unsigned K> struct Oracle {
         const Byte small[6] = {8, 14, 7, 0, 0, 0};
         const Byte six[6] = {124, 127, 152, 84, 241, 63};
         const Byte five[5] = {121, 110, 207, 198, 31};
+        const Byte two[2] = {2, 3};
         for (unsigned phase = 0; phase < 2; ++phase) {
             powers[phase][0].fill(0);
             for (unsigned i = 0; i + 1 < K; ++i) powers[phase][0][(i + 1) * K + i] = 1;
             for (unsigned i = 0; i < K; ++i)
-                powers[phase][0][i * K + K - 1] = (K == 3 ? small[i] : K == 5 ? five[i] : six[i]) ^ (i == 0 ? phase : 0);
+                powers[phase][0][i * K + K - 1] = static_cast<Byte>(
+                    (K == 2 ? two[i] : K == 3 ? small[i] : K == 5 ? five[i] : six[i]) ^ (i == 0 ? phase : 0));
         }
         for (unsigned level = 1; level < 32; ++level) {
             powers[0][level] = Product(powers[0][level - 1], powers[1][level - 1]);
@@ -186,9 +192,13 @@ std::vector<Byte> Message(std::size_t n)
 S::Lookup LookupSelected() { return S::Lookup{Data::kLookup, sizeof(Data::kLookup)}; }
 S::Lookup Lookup6() { return S::Lookup{kK6Lookup, sizeof(kK6Lookup)}; }
 static_assert(sizeof(Data::kTraces) / sizeof(Data::kTraces[0]) == 6216, "trace roster");
-static_assert(sizeof(Data::kHistory) / sizeof(Data::kHistory[0]) == (SelectedK == 5 ? 54 : 45), "history roster");
-static_assert(sizeof(Data::kWindows) / sizeof(Data::kWindows[0]) == (SelectedK == 5 ? 30 : 43), "window roster");
+static_assert(sizeof(Data::kHistory) / sizeof(Data::kHistory[0]) == (SelectedK == 2 ? 56 : SelectedK == 5 ? 54 : 45), "history roster");
+static_assert(sizeof(Data::kWindows) / sizeof(Data::kWindows[0]) == (SelectedK == 3 ? 43 : 30), "window roster");
 static_assert(sizeof(Data::kRows) / sizeof(Data::kRows[0]) == RecordedRows, "row roster");
+#if WH2_SMALL_CODEC_K == 2
+static_assert(sizeof(Data::kPairs) / sizeof(Data::kPairs[0]) == 1539, "legacy and stride pair roster");
+static_assert(sizeof(Data::kLookup) == 7168, "K2 packed geometry");
+#endif
 void Match(S::Result result, Old::Result old)
 {
     Check(static_cast<unsigned>(result.status) == static_cast<unsigned>(old.status) &&
@@ -197,7 +207,7 @@ void Match(S::Result result, Old::Result old)
 
 template<unsigned K> void Exercise(S::Lookup lookup, const Oracle<K>& oracle, unsigned B, unsigned tail,
                                    const std::vector<std::uint32_t>& ids, const unsigned* expected = nullptr,
-                                   bool stress = false)
+                                   bool stress = false, unsigned terminal_rank = K)
 {
     typedef S::Encoder<K> Encoder;
     typedef S::Decoder<K> Decoder;
@@ -340,12 +350,16 @@ template<unsigned K> void Exercise(S::Lookup lookup, const Oracle<K>& oracle, un
         Check(generated.front() == 0xa5 && generated.back() == 0xa5 &&
               std::equal(reference.begin(), reference.end(), packet), "feeds preserve packet bytes/guards");
     }
-    Check(decoder->Rank() == K, "fixture eventually recovers");
+    Check(terminal_rank <= K && decoder->Rank() == terminal_rank, "fixture terminal rank");
+    if (terminal_rank < K) ++deficient_cases;
     std::fill(output.begin(), output.end(), 0xa5);
     const auto repeated = NoAlloc([&] { return decoder->Recover(output.data() + 1, source.size()); });
-    Check(repeated.status == S::Status::Success && repeated.bytes_written == source.size() &&
+    Check(repeated.status == (terminal_rank == K ? S::Status::Success : S::Status::NeedMore) &&
+          repeated.bytes_written == (terminal_rank == K ? source.size() : 0) &&
           repeated.bytes_required == source.size() && output.front() == 0xa5 && output.back() == 0xa5 &&
-          std::equal(source.begin(), source.end(), output.begin() + 1), "repeat exact recovery/guards");
+          (terminal_rank == K ? std::equal(source.begin(), source.end(), output.begin() + 1) :
+              std::count(output.begin(), output.end(), 0xa5) == static_cast<std::ptrdiff_t>(output.size())),
+          "repeat recovery or deficient output preservation/guards");
 #ifdef WH2_SMALL_TEST_SERIALIZED
     if (K == SelectedK) for (auto& handle : serialized_decoders) {
         std::vector<Byte> actual(source.size() + 2, 0xa5);
@@ -529,8 +543,19 @@ void Corpus(const Oracle<SelectedK>& oracle)
     for (const auto& trace : Data::kTraces)
         Exercise<SelectedK>(LookupSelected(), oracle, trace.B, trace.B, std::vector<std::uint32_t>(trace.ids, trace.ids + SelectedK + 4), trace.ranks);
     const unsigned widths[] = {2,64,1280};
+#if WH2_SMALL_CODEC_K == 2
+    for (const auto& prefix : Data::kHistory)
+        Exercise<SelectedK>(LookupSelected(), oracle, prefix.B, prefix.tail,
+            std::vector<std::uint32_t>(prefix.ids, prefix.ids + prefix.count));
+    for (const auto& pair : Data::kPairs) for (unsigned B : widths) for (unsigned tail : {B, 1u}) {
+        const unsigned expected[] = {pair.rank};
+        Exercise<SelectedK>(LookupSelected(), oracle, B, tail,
+            std::vector<std::uint32_t>(pair.ids, pair.ids + 2), expected, false, pair.rank);
+    }
+#else
     for (const auto& prefix : Data::kHistory) for (unsigned bit = 0; bit < 3; ++bit) if (prefix.widths & (1u << bit))
         Exercise<SelectedK>(LookupSelected(), oracle, widths[bit], widths[bit], std::vector<std::uint32_t>(prefix.ids, prefix.ids + prefix.count));
+#endif
     for (const auto& window : Data::kWindows) {
         std::array<unsigned, SelectedK> chosen;
         for (unsigned i = 0; i < SelectedK; ++i) chosen[i] = i;
@@ -574,6 +599,8 @@ int main(int argc, char** argv)
         Check(cases == CorpusCases && packet_checks == CorpusPackets && row_checks == RecordedRows, "corpus count accounting");
     }
     Check(feed_checks == packet_checks && recover_checks == packet_checks, "feed/recovery accounting");
+    Check(deficient_cases == (SelectedK == 2 && !std::strcmp(argv[1], "--corpus") ? 30u : 0u),
+          "deficient shape replay accounting");
     std::cout << "PASS K" << SelectedK << " " << argv[1] << " cases=" << cases << " packet_oracles=" << packet_checks
               << " feeds=" << feed_checks << " recoveries=" << recover_checks << " rows=" << row_checks
               << " raw=" << Data::kRawSha << " GFNI=" << wirehair_k6_payload::Available() << '\n';
