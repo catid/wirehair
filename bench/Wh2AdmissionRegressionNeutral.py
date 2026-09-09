@@ -115,8 +115,8 @@ def address(function):
 
 
 class Library:
-    def __init__(self, index):
-        self.path, digest = LIBRARIES[index]
+    def __init__(self, index, libraries=None):
+        self.path, digest = (LIBRARIES if libraries is None else libraries)[index]
         raw = A.read_regular(self.path, 4*1024**2)
         A.exact(A.sha(raw), digest, 'exact qualified DSO')
         self.elf = Elf(raw)
