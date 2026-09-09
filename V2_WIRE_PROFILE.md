@@ -116,10 +116,53 @@ changing the retained decoder basis; recovery does not authenticate data.
 
 On this development branch, ordinary constructors select this profile for its
 supported K3 shapes. Other shapes, including K3 above the small-profile block
-bound, continue to select the certified profile. The ordinary-path integration
-is undergoing its own correctness, recovery and performance qualification:
-the published WHK3 opt-in timings do **not** qualify this owned-basis path.
+bound, continue to select the certified profile. Correctness and compatibility
+checks and the scoped ordinary-path speed gate below pass. Paired recovery
+qualification and old-path/opt-in performance regression checks remain open.
+The published WHK3 opt-in timings do **not** qualify this owned-basis path.
 This is not an all-K performance or construction-seed claim.
+
+### Ordinary K3 full-lifecycle speed
+
+At source `d77a9db`, `wirehair.wh2.k3-ordinary-cost-r0` measured the actual
+ordinary source-independent constructor and ordinary borrowed constructor
+against actual WH1 and explicitly selected certified WH2. All 72 same-code
+timing controls and all 72 candidate comparisons passed. Every candidate
+comparison's upper 95% time-ratio bound was strictly below one; there was no 5% minimum
+gain, treatment regression tolerance, sample filtering or order pooling.
+
+Observed elapsed-time reductions versus WH1, spanning both measurement orders:
+
+| Source policy | Block bytes | Encoder | Low-ID decoder | Distant-ID decoder |
+|---|---:|---:|---:|---:|
+| Independent | 2 | 62.55–62.59% | 94.35% | 89.85–89.92% |
+| Independent | 64 | 70.11–70.16% | 94.07–94.24% | 90.53–90.57% |
+| Independent | 1280 | 71.38–72.14% | 93.29–93.40% | 91.90–92.09% |
+| Borrowed | 2 | 61.58–61.68% | 94.31–94.33% | 89.88–89.90% |
+| Borrowed | 64 | 69.11–69.19% | 94.14–94.22% | 90.58% |
+| Borrowed | 1280 | 70.71–71.84% | 93.29–93.36% | 91.90–92.03% |
+
+The run used full three-block messages in the static library on one
+GFNI-capable host. Encoder time includes create, descriptor output, 18 packets
+and free. Decoder time includes create, feed through its own first success,
+recover and free; both frozen streams needed three packets for every arm.
+The two source policies share the decoder: its repeated observations are not
+extra recovery samples. This screen does not establish partial-tail,
+additional-width, shared-call, cold-start, non-GFNI or all-K performance, nor
+does it isolate regressions in the preserved old profile or opt-in facade.
+
+All 31,104 callbacks, 3,981,312 fresh codec lifecycles and 42,467,328 API calls
+were retained, with every output, descriptor, endpoint and buffer guard
+checked. Native, portable-arithmetic and sanitizer neutral fixtures agree;
+portable and sanitizer builds were not scientific timing arms. Python 3.8
+replayed the complete result and all 582 receipt pins exactly. A separately
+written standard-library chronology, ledger and statistical audit reproduced
+all 144 decisions before source HEAD or pinned documentation changed.
+
+The immutable outcome is `/var/tmp/wh2-k3-ordinary-cost-r0`, raw SHA-256
+`03ad310ea6d44e7a98ece8ba27c96ab8284741df38c43b14715be4f7c66503d2`.
+This namespace is spent. No recovery-rate sample or full promotion claim is
+made by this timing result.
 
 ## Retired equation profile identifiers
 
