@@ -2,9 +2,12 @@
 
 `wirehair/wirehair_small.h` provides the opt-in `wirehair_small_*` C API in
 the normal static and shared libraries. Initialize with `wirehair_init()`.
-Currently only exactly three source blocks (K3) are supported. Existing WH1,
-WH2 and K6 APIs never select this path; their profiles, defaults and source
-guarantees are unchanged. Handles from different APIs are not interchangeable.
+Currently only exactly three source blocks (K3) are supported. WH1 and K6 never
+select this facade. The development-branch ordinary WH2 K3 admission reuses
+these equations through a distinct WHV2 descriptor and owned prepared basis;
+see `V2_WIRE_PROFILE.md`. It preserves WH2's different ownership/detach rules
+and requires its own speed/recovery gates. The results below qualify this
+opt-in WHK3 facade only. Handles from different APIs are not interchangeable.
 
 ## K3 identity and qualification
 

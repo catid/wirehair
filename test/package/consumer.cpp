@@ -124,10 +124,41 @@ int CppV2RoundTrip()
     return 0;
 }
 
+int CppSmallRoundTrip()
+{
+    const std::array<std::uint8_t, 5> expected{{0, 1, 2, 3, 4}};
+    auto source = expected;
+    wirehair::v2::Encoder encoder;
+    wirehair::v2::SerializedProfile profile;
+    if (encoder.CreateBorrowed(source.data(), source.size(), 2, profile) != WirehairV2_Success)
+        return 10;
+    WirehairV2Profile parsed{};
+    if (profile.Deserialize(parsed) != WirehairV2_Success ||
+        parsed.profile_id != WIREHAIR_V2_PROFILE_SMALL_K3_2026_09) return 11;
+    wirehair::v2::Encoder moved(std::move(encoder));
+    if (encoder || moved.DetachInput() != WirehairV2_Success) return 12;
+    source.fill(0xcc);
+    wirehair::v2::Decoder decoder;
+    if (decoder.Create(profile) != WirehairV2_Success) return 13;
+    std::array<std::uint8_t, 2> packet{};
+    for (std::uint32_t id = 3; id < 6; ++id) {
+        std::uint32_t bytes = 0;
+        if (moved.Encode(id, packet.data(), packet.size(), bytes) != WirehairV2_Success ||
+            decoder.Decode(id, packet.data(), bytes) !=
+                (id == 5 ? WirehairV2_Success : WirehairV2_NeedMore)) return 14;
+    }
+    std::array<std::uint8_t, 5> recovered{};
+    std::uint64_t bytes = 0;
+    return decoder.Recover(recovered.data(), recovered.size(), bytes) == WirehairV2_Success &&
+        bytes == recovered.size() && recovered == expected ? 0 : 15;
+}
+
 } // namespace
 
 int main()
 {
     const int c_result = wirehair_package_round_trip();
-    return c_result == 0 ? CppV2RoundTrip() : c_result;
+    if (c_result) return c_result;
+    const int v2_result = CppV2RoundTrip();
+    return v2_result == 0 ? CppSmallRoundTrip() : v2_result;
 }

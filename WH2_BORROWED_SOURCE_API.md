@@ -1,5 +1,13 @@
 # WH2 borrowed-source encoder design
 
+The design and performance-screen scope below describe the original certified
+profile. The subsequent K3 admission in `V2_WIRE_PROFILE.md` preserves these
+source-lifetime, alias, error-priority and allocation-free detach guarantees.
+Its identity-equation basis is owned and prepared identically by independent
+and borrowed constructors; borrowing adds no allocation or source copy beyond
+that basis. K3 ordinary-path speed must be qualified separately and cannot
+inherit the historical systematic-emission screen or WHK3 opt-in timings.
+
 Status: implemented and functionally validated by
 `wirehair-sxvz.16.1.20.23.1.3`.  The API remains explicit opt-in and does not
 change the default V2 behavior or authorize production performance promotion.

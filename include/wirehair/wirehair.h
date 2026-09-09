@@ -231,7 +231,14 @@ WIREHAIR_EXPORT WirehairResult wirehair_wire_profile_init(
 #define WIREHAIR_V2_PROFILE_CERTIFIED_2026_07 \
     UINT64_C(0x4b295bbb47f4f9c9)
 
-/** Current serialized V2 equation profile. */
+/**
+    Fixed K3 GF(256) equations; exactly three source blocks, block bytes at most
+    67108864, and seed_attempt zero. See V2_WIRE_PROFILE.md for the identity.
+*/
+#define WIREHAIR_V2_PROFILE_SMALL_K3_2026_09 \
+    UINT64_C(0x67c1043ecaa9e184)
+
+/** Stable alias for the original certified profile, not a dispatch policy. */
 #define WIREHAIR_V2_PROFILE_CURRENT \
     WIREHAIR_V2_PROFILE_CERTIFIED_2026_07
 
@@ -264,8 +271,9 @@ typedef enum WirehairV2Result_t
     This structure is exactly 32 bytes in ABI version 2.  It is not itself a
     wire image: use wirehair_v2_profile_serialize() and
     wirehair_v2_profile_deserialize() at persistence or transport boundaries.
-    All reserved fields must be zero.  seed_attempt is the selected
-    deterministic equation-seed attempt in [0, 255].
+    All reserved fields must be zero. seed_attempt is the selected deterministic
+    equation-seed attempt in [0, 255] for CERTIFIED_2026_07 and must be zero for
+    SMALL_K3_2026_09.
 */
 typedef struct WirehairV2Profile_t
 {
@@ -365,7 +373,11 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_profile_validate(
     uint32_t serializedBytes);
 
 /**
-    Select the current certified V2 equation profile and create an encoder.
+    Select a supported V2 equation profile and create an encoder.
+
+    Three-block messages with blockBytes <= 67108864 select SMALL_K3_2026_09;
+    other shapes select CERTIFIED_2026_07. Use an explicit profile ID to pin
+    equations. WIREHAIR_V2_PROFILE_CURRENT remains the original certified ID.
 
     The message is copied before return.  On success serializedProfileOut
     receives the selected descriptor, including its seed attempt.  A short or
@@ -391,7 +403,7 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create(
     WirehairV2Codec* codecOut);
 
 /**
-    Select the current certified profile and create an encoder with an explicit
+    Select the same profile as wirehair_v2_encoder_create(), with an explicit
     source-storage policy.
 
     options is required and its complete 16-byte record is read only during
@@ -405,8 +417,10 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create(
     as wirehair_v2_encoder_create().  WirehairV2EncoderSource_BorrowedImmutable
     completes the same eager solve, then retains the exact caller-owned message
     range for direct systematic packets without taking ownership or adding a
-    full-message allocation or copy.  Existing private padding of a partial
-    final block remains permitted.  An attached borrowed encoder copies only
+    full-message allocation or copy beyond independent construction. For K3,
+    the owned three-block identity basis is the fully prepared equation state
+    for both policies, not an additional systematic cache. Private padding of
+    a partial final block remains permitted. An attached borrowed encoder copies only
     meaningful source bytes for packet IDs below K and never reads beyond
     messageBytes; every ID at or above K, including UINT32_MAX, uses the existing
     solved-intermediate evaluator without reading the source.  The complete

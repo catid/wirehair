@@ -4,6 +4,7 @@
 #include "WirehairV2Plan.h"
 #include "WirehairV2PrecodeEncode.h"
 #include "WirehairV2Solve.h"
+#include "WirehairSmallLookup.h"
 
 #include "../WirehairEnvironment.h"
 #include "../WirehairTools.h"
@@ -66,6 +67,11 @@ struct PublicCodec
     bool Decoded = false;
     EncoderSourceState SourceState = EncoderSourceState::Invalid;
     const uint8_t* BorrowedSource = nullptr;
+    // Same prepared identity basis for both source policies. Declare it before
+    // its evaluator so the evaluator is destroyed before its backing storage.
+    std::unique_ptr<uint8_t[]> SmallBasis;
+    std::unique_ptr<wirehair_small_core::Encoder<3>> SmallEncoder;
+    std::unique_ptr<wirehair_small_core::Decoder<3>> SmallDecoder;
 };
 
 struct StagedEncoderOptions
@@ -102,7 +108,15 @@ bool NamedV2ProfileAvailable()
 
 bool IsSupportedProfileId(uint64_t profile_id)
 {
-    return profile_id == WIREHAIR_V2_PROFILE_CERTIFIED_2026_07;
+    return profile_id == WIREHAIR_V2_PROFILE_CERTIFIED_2026_07 ||
+        profile_id == WIREHAIR_V2_PROFILE_SMALL_K3_2026_09;
+}
+
+bool SmallK3Shape(uint64_t message_bytes, uint32_t block_bytes)
+{
+    return block_bytes != 0u && block_bytes <= UINT32_C(67108864) &&
+        message_bytes > uint64_t(block_bytes) * 2u &&
+        message_bytes <= uint64_t(block_bytes) * 3u;
 }
 
 bool OptionsForProfileId(
@@ -215,7 +229,29 @@ WirehairV2Result ValidateHostProfile(const WirehairV2Profile& profile)
     if (dimensions != WirehairV2_Success) {
         return dimensions;
     }
+    if (profile.profile_id == WIREHAIR_V2_PROFILE_SMALL_K3_2026_09) {
+        if (!SmallK3Shape(profile.message_bytes, profile.block_bytes)) {
+            return WirehairV2_InvalidDimensions;
+        }
+        if (profile.seed_attempt != 0u) {
+            return WirehairV2_BadSeed;
+        }
+    }
     return WirehairV2_Success;
+}
+
+WirehairV2Result MapSmallResult(wirehair_small_core::Status result)
+{
+    using wirehair_small_core::Status;
+    switch (result) {
+    case Status::Success: return WirehairV2_Success;
+    case Status::NeedMore: return WirehairV2_NeedMore;
+    case Status::InvalidInput: return WirehairV2_InvalidInput;
+    case Status::BufferTooSmall: return WirehairV2_BufferTooSmall;
+    case Status::OutOfMemory: return WirehairV2_OOM;
+    case Status::Conflict: return WirehairV2_Error;
+    default: return WirehairV2_Error;
+    }
 }
 
 WirehairV2Result MapResult(WirehairResult result)
@@ -581,6 +617,37 @@ WirehairV2Result CreateEncoderForProfile(
         return WirehairV2_UnsupportedPlatform;
     }
 
+    if (profile.profile_id == WIREHAIR_V2_PROFILE_SMALL_K3_2026_09) {
+        if (!CompleteMessageRangeRepresentable(message, profile.message_bytes)) {
+            return WirehairV2_InvalidInput;
+        }
+        std::unique_ptr<PublicCodec> codec(AllocatePublicCodec());
+        if (!codec) {
+            return WirehairV2_OOM;
+        }
+        if (gf256_init() != 0) {
+            return WirehairV2_UnsupportedPlatform;
+        }
+        codec->SmallBasis.reset(new (std::nothrow)
+            uint8_t[(size_t)profile.message_bytes]);
+        if (!codec->SmallBasis) {
+            return WirehairV2_OOM;
+        }
+        std::memcpy(codec->SmallBasis.get(), message, (size_t)profile.message_bytes);
+        const WirehairV2Result result = MapSmallResult(
+            wirehair_small_core::Encoder<3>::Create(
+                wirehair_small_core::K3Lookup(), codec->SmallBasis.get(),
+                profile.message_bytes, profile.block_bytes, codec->SmallEncoder));
+        if (result != WirehairV2_Success) {
+            return result;
+        }
+        codec->MessageBytes = profile.message_bytes;
+        codec->BlockBytes = profile.block_bytes;
+        codec->SourceState = EncoderSourceState::Independent;
+        codec_out = codec.release();
+        return WirehairV2_Success;
+    }
+
     PublicCodec* codec = AllocatePublicCodec();
     if (!codec) {
         return WirehairV2_OOM;
@@ -753,6 +820,12 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create(
     uint32_t* serializedProfileBytesOut,
     WirehairV2Codec* codecOut)
 {
+    if (SmallK3Shape(messageBytes, blockBytes)) {
+        return wirehair_v2_encoder_create_profile_id(
+            WIREHAIR_V2_PROFILE_SMALL_K3_2026_09, message, messageBytes,
+            blockBytes, serializedProfileOut, serializedProfileCapacity,
+            serializedProfileBytesOut, codecOut);
+    }
     if (EncoderConstructorRangesOverlap(
             message, messageBytes,
             serializedProfileOut, serializedProfileBytesOut, codecOut))
@@ -878,6 +951,26 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create_profile_id(
     const WirehairV2Result dimensions = ValidateHostProfile(requested);
     if (dimensions != WirehairV2_Success) {
         return dimensions;
+    }
+    if (profileId == WIREHAIR_V2_PROFILE_SMALL_K3_2026_09) {
+        PublicCodec* codec = nullptr;
+        WirehairV2Result result = CreateEncoderForProfile(message, requested, codec);
+        if (result != WirehairV2_Success) {
+            return result;
+        }
+        // Source has been fully prepared before publishing an overlapping
+        // descriptor, as required by the independent constructor contract.
+        uint8_t encoded[WIREHAIR_V2_PROFILE_SERIALIZED_BYTES];
+        uint32_t encoded_bytes = 0u;
+        result = wirehair_v2_profile_serialize(
+            &requested, encoded, sizeof(encoded), &encoded_bytes);
+        if (result != WirehairV2_Success || encoded_bytes != sizeof(encoded)) {
+            delete codec;
+            return result == WirehairV2_Success ? WirehairV2_Error : result;
+        }
+        std::memcpy(serializedProfileOut, encoded, sizeof(encoded));
+        *codecOut = ToHandle(codec);
+        return WirehairV2_Success;
     }
     if (!message) {
         return WirehairV2_InvalidInput;
@@ -1173,6 +1266,25 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_decoder_create(
     if (!codec) {
         return WirehairV2_OOM;
     }
+    if (profile.profile_id == WIREHAIR_V2_PROFILE_SMALL_K3_2026_09) {
+        if (gf256_init() != 0) {
+            delete codec;
+            return WirehairV2_UnsupportedPlatform;
+        }
+        const WirehairV2Result result = MapSmallResult(
+            wirehair_small_core::Decoder<3>::Create(
+                wirehair_small_core::K3Lookup(), profile.message_bytes,
+                profile.block_bytes, codec->SmallDecoder));
+        if (result != WirehairV2_Success) {
+            delete codec;
+            return result;
+        }
+        codec->MessageBytes = profile.message_bytes;
+        codec->BlockBytes = profile.block_bytes;
+        codec->Mode = CodecMode::Decoder;
+        *codecOut = ToHandle(codec);
+        return WirehairV2_Success;
+    }
     const wirehair_v2::SeedProfile expanded = ExpandProfile(profile);
     const WirehairResult result = codec->Impl.InitializePrecodeDecoder(
         profile.message_bytes, profile.block_bytes, &expanded);
@@ -1249,6 +1361,10 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encode(
             blockDataOut, impl->BorrowedSource + source_offset, required);
         return WirehairV2_Success;
     }
+    if (impl->SmallEncoder) {
+        return MapSmallResult(impl->SmallEncoder->Encode(
+            blockId, blockDataOut, outputCapacity).status);
+    }
     return MapResult(impl->Impl.Encode(
         blockId, blockDataOut, outputCapacity, dataBytesOut));
 }
@@ -1277,8 +1393,9 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_decode(
     if (!impl || impl->Mode != CodecMode::Decoder || !blockData) {
         return WirehairV2_InvalidInput;
     }
-    const WirehairV2Result result = MapResult(
-        impl->Impl.Decode(blockId, blockData, dataBytes));
+    const WirehairV2Result result = impl->SmallDecoder ?
+        MapSmallResult(impl->SmallDecoder->Feed(blockId, blockData, dataBytes).status) :
+        MapResult(impl->Impl.Decode(blockId, blockData, dataBytes));
     if (result == WirehairV2_Success) {
         impl->Decoded = true;
     }
@@ -1320,6 +1437,10 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_recover(
     }
     if (!impl->Decoded) {
         return WirehairV2_NeedMore;
+    }
+    if (impl->SmallDecoder) {
+        return MapSmallResult(impl->SmallDecoder->Recover(
+            messageOut, (size_t)impl->MessageBytes).status);
     }
 
     try

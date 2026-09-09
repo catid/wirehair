@@ -1,4 +1,5 @@
 #include "WirehairSmallFacade.h"
+#include "WirehairSmallLookup.h"
 
 namespace {
 alignas(64) const uint8_t kLookup[] = {
@@ -14,6 +15,9 @@ using F = wirehair_small_facade::Facade<3, K3>;
 static_assert(F::ProfileId == WIREHAIR_SMALL_K3_PROFILE_ID, "K3 descriptor identity");
 static_assert(F::MaxBlockBytes == WIREHAIR_SMALL_K3_MAX_BLOCK_BYTES, "K3 slab bound");
 }
+
+wirehair_small_core::Lookup wirehair_small_core::K3Lookup()
+{ return {kLookup, sizeof(kLookup)}; }
 
 extern "C" WirehairSmallStatus wirehair_small_profile_validate(const void* p, size_t n) noexcept
 { return F::ProfileValidate(p, n); }

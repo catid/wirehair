@@ -24,7 +24,7 @@ meaningful.
 | 8 | 8 | equation profile ID | a supported `WIREHAIR_V2_PROFILE_*` value |
 | 16 | 8 | message bytes | exact nonzero original length |
 | 24 | 4 | block bytes | `1..2^31-1` |
-| 28 | 1 | seed attempt | deterministic attempt `0..255` |
+| 28 | 1 | seed attempt | certified: `0..255`; small K3: `0` |
 | 29 | 3 | reserved | all zero |
 
 The derived block count is `ceil(message_bytes / block_bytes)` and must be in
@@ -45,7 +45,7 @@ this byte encoding and the host-native `WirehairV2Profile` ABI structure.
 host representation is not needed. Copying that C structure directly to the
 wire is not portable.
 
-## Supported equation profile
+## Supported certified equation profile
 
 `WIREHAIR_V2_PROFILE_CERTIFIED_2026_07` has numeric ID
 `4b295bbb47f4f9c9`. The ID is the first 64 bits of SHA-256 over this exact
@@ -87,6 +87,40 @@ diagnostics, and tuning statistics are derived under the named profile and are
 not duplicated on the wire. Publishing the current ID after changing a frozen
 rule is a compatibility bug.
 
+## Small K3 equation profile
+
+`WIREHAIR_V2_PROFILE_SMALL_K3_2026_09` has ID `67c1043ecaa9e184`, the first
+64 bits of SHA-256 over the exact name (no newline):
+
+```text
+wirehair:v2:small-k3:thue-morse-8-14-7:gf256-14d:2026-09
+```
+
+The full digest is
+`67c1043ecaa9e1847ffb885eaf845b3af93ce52df8493bb1c6cf5428e863bdb9`.
+It freezes the same GF(256), polynomial `0x14d`, Thue-Morse companion pair
+`(8,14,7)` / `(9,14,7)`, packet-ID map, systematic identity rows and zero
+tail padding as the qualified [WHK3 equations](SMALL_WIRE_PROFILES.md).
+The two facades share one immutable 13,056-byte lookup; WHV2 framing and
+source-ownership rules remain distinct from WHK3.
+
+This profile requires exactly three source blocks, block bytes at most
+67,108,864 and seed attempt zero. Other shapes return `InvalidDimensions`;
+a nonzero attempt on a valid shape returns `BadSeed`. There is no seed search.
+The prepared encoder basis is the original three source blocks, with private
+padding for a partial final block. It is owned for both storage policies:
+borrowing adds no second full-message cache, no extra construction allocation,
+and no extra copy. Repair packets never read borrowed input; detach remains
+allocation-free. Dependent contradictory packets report `Error` without
+changing the retained decoder basis; recovery does not authenticate data.
+
+On this development branch, ordinary constructors select this profile for its
+supported K3 shapes. Other shapes, including K3 above the small-profile block
+bound, continue to select the certified profile. The ordinary-path integration
+is undergoing its own correctness, recovery and performance qualification:
+the published WHK3 opt-in timings do **not** qualify this owned-basis path.
+This is not an all-K performance or construction-seed claim.
+
 ## Retired equation profile identifiers
 
 The identifiers `e161ce5d456f9bb7` and `20a4f27a870612a2` are permanently
@@ -99,8 +133,9 @@ writing a descriptor or publishing a codec handle.
 
 ## APIs and errors
 
-`wirehair_v2_encoder_create()` copies the message, chooses the deterministic
-seed attempt, and returns the serialized descriptor. A null or short descriptor
+`wirehair_v2_encoder_create()` prepares owned equation state, chooses the
+profile (and deterministic seed attempt where applicable), and returns the
+serialized descriptor. A null or short descriptor
 buffer returns `WirehairV2_BufferTooSmall`, reports the required 32 bytes, and
 does not create a codec. Its descriptor-size output pointer is required.
 `wirehair_v2_encoder_create_profile()` recreates an encoder under an existing
@@ -110,9 +145,10 @@ implementation copies those bytes before returning.
 
 `wirehair_v2_encoder_create_profile_id()` performs the same operation for an
 explicit supported profile ID. `WIREHAIR_V2_PROFILE_CURRENT` deliberately
-remains an alias for `WIREHAIR_V2_PROFILE_CERTIFIED_2026_07`; existing callers
-and `wirehair_v2_encoder_create()` continue to emit the original GF(256)-only
-equations byte-for-byte. The corresponding C++
+remains an alias for `WIREHAIR_V2_PROFILE_CERTIFIED_2026_07`; explicitly selecting
+either name continues to emit the original GF(256)-only equations byte-for-byte,
+including at K3. The ordinary selector is a dispatch policy, not this constant.
+The corresponding C++
 `Encoder::Create(profileId, ...)` overload provides the same explicit
 selection. Unknown or retired IDs return `WirehairV2_UnsupportedProfile`
 without falling back to the current profile.
@@ -126,8 +162,9 @@ policy and is rejected, as are unknown policy values.
 
 `WirehairV2EncoderSource_BorrowedImmutable` is an explicit opt-in local storage
 policy. Construction still completes the same eager full solve before success,
-but the encoder then retains the caller's exact message range without owning or
-copying the complete message. The caller must keep that range readable,
+but the encoder then retains the caller's exact message range without owning it
+or adding a copy beyond the independent constructor's prepared state. The
+caller must keep that range readable,
 allocated, and byte-for-byte immutable from constructor entry throughout the
 call. Failure retains nothing and ends that obligation; after success it
 continues until successful `wirehair_v2_encoder_detach_input()` or encoder
@@ -140,7 +177,7 @@ source mutation must not race, including with another codec operation.
 
 Source-storage policy is not serialized, does not change the profile ID or any
 descriptor byte, and is not visible to a decoder. Independent and borrowed
-encoders therefore use the same certified GF(256)-only equations, selected seed
+encoders therefore use the same selected GF(256)-only equations, selected seed
 attempt, solved intermediate state, systematic bytes, and repair bytes. Unknown
 or retired equation profiles remain rejected for every storage policy.
 

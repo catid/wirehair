@@ -146,8 +146,15 @@ WirehairV2Result CreateBorrowed(
             &output_bytes, codec_out);
     }
     if (route == 1u) {
+        // Compare source policies under the same equation identity. CURRENT
+        // is a stable certified ID, whereas the ordinary selector can choose
+        // the small K3 profile. The baseline descriptor is a validated fixture.
+        WirehairV2Profile selected = {};
+        const WirehairV2Result parsed = wirehair_v2_profile_deserialize(
+            profile.data(), (uint32_t)profile.size(), &selected);
+        if (parsed != WirehairV2_Success) return parsed;
         return wirehair_v2_encoder_create_profile_id_with_options(
-            WIREHAIR_V2_PROFILE_CURRENT,
+            selected.profile_id,
             fixture.Message(), fixture.MessageBytes, fixture.BlockBytes,
             options, output_profile.data(), (uint32_t)output_profile.size(),
             &output_bytes, codec_out);

@@ -134,6 +134,7 @@ set(LIB_SOURCE_FILES
         codec/WirehairSmall.cpp
         codec/WirehairSmallCore.h
         codec/WirehairSmallFacade.h
+        codec/WirehairSmallLookup.h
         codec/WirehairSmallK3Lookup.inc
         codec/WirehairK6.cpp
         codec/WirehairK6Core.cpp
@@ -508,6 +509,34 @@ if (BUILD_TESTS)
     add_test(NAME small_codec_test COMMAND small_codec_test)
     set_tests_properties(small_codec_test PROPERTIES
         LABELS "small;k3;recovery;ownership;allocation" TIMEOUT 60)
+
+    add_executable(v2_small_codec_test test/V2SmallCodecTest.cpp)
+    wirehair_apply_project_options(v2_small_codec_test)
+    if(WIREHAIR_PRIMARY_VARIANT STREQUAL "STATIC")
+        target_link_libraries(v2_small_codec_test PRIVATE wirehair)
+    else()
+        target_link_libraries(v2_small_codec_test PRIVATE wirehair_test_support)
+    endif()
+    add_test(NAME v2_small_codec_test COMMAND v2_small_codec_test)
+    set_tests_properties(v2_small_codec_test PROPERTIES
+        LABELS "v2;k3;recovery;ownership;allocation" TIMEOUT 120)
+
+    add_executable(v2_small_c_consumer test/V2SmallCConsumer.c)
+    set_target_properties(v2_small_c_consumer PROPERTIES
+        LINKER_LANGUAGE CXX C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
+    wirehair_apply_project_options(v2_small_c_consumer)
+    target_link_libraries(v2_small_c_consumer PRIVATE wirehair)
+    add_test(NAME v2_small_c_consumer COMMAND v2_small_c_consumer)
+    set_tests_properties(v2_small_c_consumer PROPERTIES LABELS "v2;k3;abi" TIMEOUT 60)
+    if(TARGET wirehair_shared)
+        add_executable(v2_small_c_consumer_shared test/V2SmallCConsumer.c)
+        set_target_properties(v2_small_c_consumer_shared PROPERTIES
+            LINKER_LANGUAGE CXX C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
+        wirehair_apply_project_options(v2_small_c_consumer_shared)
+        target_link_libraries(v2_small_c_consumer_shared PRIVATE wirehair_shared)
+        add_test(NAME v2_small_c_consumer_shared COMMAND v2_small_c_consumer_shared)
+        set_tests_properties(v2_small_c_consumer_shared PROPERTIES LABELS "v2;k3;abi;shared" TIMEOUT 60)
+    endif()
 
     add_executable(small_c_consumer test/SmallCConsumer.c)
     set_target_properties(small_c_consumer PROPERTIES

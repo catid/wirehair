@@ -41,6 +41,12 @@ set_target_properties(package_small_consumer PROPERTIES
 target_link_libraries(package_small_consumer PRIVATE wirehair::wirehair)
 add_test(NAME package_small_consumer COMMAND package_small_consumer)
 
+add_executable(package_v2_small_consumer ../V2SmallCConsumer.c)
+set_target_properties(package_v2_small_consumer PROPERTIES
+    LINKER_LANGUAGE CXX C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
+target_link_libraries(package_v2_small_consumer PRIVATE wirehair::wirehair)
+add_test(NAME package_v2_small_consumer COMMAND package_v2_small_consumer)
+
 add_executable(package_cpp_consumer consumer.cpp roundtrip.c)
 set_target_properties(package_cpp_consumer PROPERTIES
     CXX_STANDARD 98
@@ -59,7 +65,7 @@ add_test(NAME package_plugin_round_trip
     COMMAND package_plugin_host $<TARGET_FILE:package_plugin>)
 
 if(WIREHAIR_STRICT_WARNINGS)
-    foreach(target IN ITEMS package_c_consumer package_k6_consumer package_small_consumer package_cpp_consumer
+    foreach(target IN ITEMS package_c_consumer package_k6_consumer package_small_consumer package_v2_small_consumer package_cpp_consumer
             package_plugin package_plugin_host)
         if(MSVC)
             target_compile_options(${target} PRIVATE /W4 /WX)
@@ -75,7 +81,7 @@ if(WIN32)
     if(wirehair_imported_type STREQUAL "SHARED_LIBRARY")
         # The relocated install is the source of the DLL.  Stage it beside the
         # test hosts, matching normal application deployment on Windows.
-        foreach(host IN ITEMS package_c_consumer package_k6_consumer package_small_consumer package_cpp_consumer
+        foreach(host IN ITEMS package_c_consumer package_k6_consumer package_small_consumer package_v2_small_consumer package_cpp_consumer
                 package_plugin_host)
             add_custom_command(TARGET ${host} POST_BUILD
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different
