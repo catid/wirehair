@@ -53,7 +53,16 @@ SMALL_TEST_NOINLINE void operator delete[](void* p, size_t) noexcept { std::free
 
 namespace {
 using Byte = uint8_t;
-constexpr unsigned K = 3;
+#ifndef WIREHAIR_V2_SMALL_TEST_K
+#define WIREHAIR_V2_SMALL_TEST_K 3
+#endif
+constexpr unsigned K = WIREHAIR_V2_SMALL_TEST_K;
+static_assert(K == 3 || K == 5, "Installed small WHV2 profiles only");
+constexpr uint64_t ProfileId = K == 3 ? WIREHAIR_V2_PROFILE_SMALL_K3_2026_09 :
+    WIREHAIR_V2_PROFILE_SMALL_K5_2026_09;
+constexpr uint32_t MaxBlockBytes = UINT32_C(268435456) / (K + 1);
+// K5 is explicit-only until ordinary-path performance/recovery gates pass.
+constexpr unsigned FirstRoute = K == 3 ? 0 : 1;
 using Matrix = std::array<Byte, K * K>;
 using Row = std::array<Byte, K>;
 using Profile = std::array<Byte, 32>;
@@ -83,10 +92,12 @@ struct Oracle {
     Oracle()
     {
         const Byte three[3] = {8, 14, 7};
+        const Byte five[5] = {121, 110, 207, 198, 31};
+        const Byte* feedback = K == 3 ? three : five;
         for (unsigned phase = 0; phase < 2; ++phase) {
             powers[phase][0].fill(0);
             for (unsigned i = 0; i < K - 1; ++i) powers[phase][0][(i + 1) * K + i] = 1;
-            for (unsigned i = 0; i < K; ++i) powers[phase][0][i * K + K - 1] = static_cast<Byte>(three[i] ^ (i == 0 ? phase : 0));
+            for (unsigned i = 0; i < K; ++i) powers[phase][0][i * K + K - 1] = static_cast<Byte>(feedback[i] ^ (i == 0 ? phase : 0));
         }
         for (unsigned level = 1; level < 32; ++level) {
             powers[0][level] = Product(powers[0][level - 1], powers[1][level - 1]);
@@ -123,7 +134,7 @@ Profile Descriptor(uint64_t message, uint32_t block)
     WirehairV2Profile host = {};
     host.struct_bytes = sizeof(host);
     host.profile_version = WIREHAIR_V2_PROFILE_VERSION;
-    host.profile_id = WIREHAIR_V2_PROFILE_SMALL_K3_2026_09;
+    host.profile_id = ProfileId;
     host.message_bytes = message;
     host.block_bytes = block;
     Profile p = {};
@@ -148,9 +159,9 @@ WirehairV2Result Create(unsigned route, unsigned policy, const void* source,
     WirehairV2Result result;
     if (route == 1) {
         result = policy ? wirehair_v2_encoder_create_profile_id_with_options(
-            WIREHAIR_V2_PROFILE_SMALL_K3_2026_09, source, message, block, &options,
+            ProfileId, source, message, block, &options,
             p.data(), static_cast<uint32_t>(p.size()), &bytes, codec) :
-            wirehair_v2_encoder_create_profile_id(WIREHAIR_V2_PROFILE_SMALL_K3_2026_09,
+            wirehair_v2_encoder_create_profile_id(ProfileId,
                 source, message, block, p.data(), static_cast<uint32_t>(p.size()), &bytes, codec);
     } else {
         result = policy ? wirehair_v2_encoder_create_with_options(
@@ -189,6 +200,68 @@ void Recover(WirehairV2Codec h, const std::vector<Byte>& expected)
     Check(bytes == expected.size() && out.front() == 0xa5 && out.back() == 0xa5 &&
         std::equal(expected.begin(), expected.end(), out.begin() + 1), "recovery bytes and guards");
 }
+void LookupCoverage(const Oracle& oracle)
+{
+    // Each systematic block is a unit vector, so an encoded packet exposes
+    // the complete coefficient row. Cover every packed chunk index/phase,
+    // plus mixed chunk values, without using the implementation's lookup.
+    std::vector<Byte> identity(K * K, 0);
+    for (unsigned i = 0; i < K; ++i) identity[i * K + i] = 1;
+    Profile p = Descriptor(identity.size(), K);
+    WirehairV2Codec h = nullptr;
+    Check(Create(FirstRoute, 0, identity.data(), identity.size(), K, p, &h) ==
+        WirehairV2_Success, "lookup coverage encoder");
+    size_t count = 0;
+    const auto check = [&](uint32_t id) {
+        const Row expected = oracle.Coefficients(id);
+        Packet(h, id, std::vector<Byte>(expected.begin(), expected.end()));
+        ++count;
+    };
+    for (uint32_t low = 0; low < 1024; ++low) {
+        check(low);
+        check(low | (1u << 10));
+    }
+    for (unsigned shift : {10u, 17u}) for (uint32_t index = 0; index < 128; ++index)
+        for (unsigned phase = 0; phase < 2; ++phase) for (unsigned column = 0; column < K; ++column)
+            check((index << shift) | (phase << (shift + 7)) | column);
+    for (uint32_t high = 0; high < 256; ++high) for (unsigned column = 0; column < K; ++column)
+        check((high << 24) | column);
+    uint32_t state = 0x52d397a1u;
+    for (unsigned i = 0; i < 512; ++i) {
+        state ^= state << 13; state ^= state >> 17; state ^= state << 5;
+        check(state);
+    }
+    wirehair_v2_free(h);
+    std::cout << "K" << K << " packed lookup oracle: " << count << " packets\n";
+}
+void DecoderErrors(const Oracle& oracle)
+{
+    const auto original = Message(K * 64 - 1);
+    const Profile p = Descriptor(original.size(), 64);
+    WirehairV2Codec h = nullptr;
+    Check(wirehair_v2_decoder_create(p.data(), 32, &h) == WirehairV2_Success, "error fixture decoder");
+    auto good = oracle.Packet(original, 64, 0);
+    auto bad = good; bad[0] ^= 1;
+    Check(wirehair_v2_decode(h, 0, good.data(), 64) == WirehairV2_NeedMore, "first pivot");
+    Check(wirehair_v2_decode(h, 0, bad.data(), 64) == WirehairV2_Error, "conflict before full rank");
+    std::vector<Byte> untouched(original.size(), 0xa5);
+    const auto before = untouched;
+    Check(wirehair_v2_recover(h, untouched.data(), untouched.size(), nullptr) == WirehairV2_NeedMore &&
+        untouched == before, "conflict preserves incomplete recovery");
+    Check(wirehair_v2_decode(h, 1, good.data(), 63) == WirehairV2_InvalidInput &&
+        wirehair_v2_decode(h, 1, good.data(), 65) == WirehairV2_InvalidInput &&
+        wirehair_v2_decode(h, 1, nullptr, 64) == WirehairV2_InvalidInput, "invalid packets do not advance rank");
+    Check(wirehair_v2_decode(h, 0, good.data(), 64) == WirehairV2_NeedMore, "good duplicate after conflict");
+    for (unsigned id = 1; id < K; ++id) {
+        const auto packet = oracle.Packet(original, 64, id);
+        Check(wirehair_v2_decode(h, id, packet.data(), static_cast<uint32_t>(packet.size())) ==
+            (id == K - 1 ? WirehairV2_Success : WirehairV2_NeedMore), "resume after conflict");
+    }
+    Check(wirehair_v2_decode(h, 0, bad.data(), 64) == WirehairV2_Error, "full-rank conflict before recover");
+    Recover(h, original);
+    Recover(h, original);
+    wirehair_v2_free(h);
+}
 void Lifecycle(const Oracle& oracle)
 {
     const uint32_t ids[] = {0,1,2,3,4,5,6,7,8,1023,1024,1025,131071,131072,
@@ -200,10 +273,10 @@ void Lifecycle(const Oracle& oracle)
         tails.erase(std::unique(tails.begin(), tails.end()), tails.end());
         for (uint32_t tail : tails) {
             ++shapes;
-            const auto original = Message(size_t(block) * 2 + tail);
+            const auto original = Message(size_t(block) * (K - 1) + tail);
             const Profile canonical = Descriptor(original.size(), block);
             size_t independent_count = 0;
-            for (unsigned route = 0; route < 3; ++route) for (unsigned policy = 0; policy < 3; ++policy) {
+            for (unsigned route = FirstRoute; route < 3; ++route) for (unsigned policy = 0; policy < 3; ++policy) {
                 auto source = original;
                 Profile p = canonical;
                 WirehairV2Codec h = nullptr;
@@ -232,16 +305,15 @@ void Lifecycle(const Oracle& oracle)
                 Byte untouched = 0x5a;
                 Check(wirehair_v2_recover(decoder, &untouched, 0, nullptr) ==
                     WirehairV2_BufferTooSmall && untouched == 0x5a, "short recovery unchanged");
-                const uint32_t streams[3][3] = {{0,1,2},{3,4,5},{UINT32_MAX,UINT32_MAX-2,UINT32_MAX-4}};
-                for (unsigned i = 0; i < 3; ++i) {
-                    const uint32_t id = streams[stream][i];
+                for (unsigned i = 0; i < K; ++i) {
+                    const uint32_t id = stream == 0 ? i : stream == 1 ? K + i : UINT32_MAX - 2 * i;
                     const auto packet = oracle.Packet(original, block, id);
                     Start(0);
                     auto result = wirehair_v2_decode(decoder, id, packet.data(), static_cast<uint32_t>(packet.size()));
                     Check(wirehair_v2_decode(decoder, id, packet.data(), static_cast<uint32_t>(packet.size())) == result,
                         "duplicate packet");
                     size_t count = Stop();
-                    Check(count == 0 && result == (i == 2 ? WirehairV2_Success : WirehairV2_NeedMore),
+                    Check(count == 0 && result == (i == K - 1 ? WirehairV2_Success : WirehairV2_NeedMore),
                         "first-success / allocation-free feed");
                 }
                 Recover(decoder, original);
@@ -259,13 +331,14 @@ void Lifecycle(const Oracle& oracle)
             }
         }
     }
-    std::cout << "K3 ordinary lifecycles: " << shapes << " width/tail shapes x 9 constructors\n";
+    std::cout << "K" << K << " WHV2 lifecycles: " << shapes << " width/tail shapes x "
+              << (3 - FirstRoute) * 3 << " constructors\n";
 }
 void AllocationFailures()
 {
-    for (uint32_t tail : {1u, 64u}) for (unsigned route = 0; route < 3; ++route)
+    for (uint32_t tail : {1u, 64u}) for (unsigned route = FirstRoute; route < 3; ++route)
         for (unsigned policy = 0; policy < 3; ++policy) {
-            const auto source = Message(128 + tail);
+            const auto source = Message(64 * (K - 1) + tail);
             const Profile canonical = Descriptor(source.size(), 64);
             Profile p = canonical;
             WirehairV2Codec h = nullptr;
@@ -286,7 +359,7 @@ void AllocationFailures()
                 Check(result == WirehairV2_OOM && !h && p == before, "every constructor OOM transactional");
             }
         }
-    const Profile p = Descriptor(191, 64);
+    const Profile p = Descriptor(64 * K - 1, 64);
     WirehairV2Codec h = nullptr;
     Start();
     auto result = wirehair_v2_decoder_create(p.data(), static_cast<uint32_t>(p.size()), &h);
@@ -340,18 +413,36 @@ void HandleAllocationIsolation()
             "certified decoder retains pre-admission handle size");
         wirehair_v2_free(h);
     }
+    for (unsigned k : {3u, 5u}) {
+        const auto source = Message(size_t(k) * 64 - 1);
+        Profile p = {};
+        WirehairV2Codec h = nullptr;
+        uint32_t bytes = 0;
+        Start();
+        const auto result = wirehair_v2_encoder_create_profile_id(
+            k == 3 ? WIREHAIR_V2_PROFILE_SMALL_K3_2026_09 : WIREHAIR_V2_PROFILE_SMALL_K5_2026_09,
+            source.data(), source.size(), 64, p.data(), 32, &bytes, &h);
+        Stop();
+        Check(result == WirehairV2_Success && h &&
+            first_allocation_bytes == sizeof(PriorCertifiedLayout) + 3 * sizeof(void*),
+            "small handles retain isolated K3 size");
+        wirehair_v2_free(h);
+    }
     wirehair_v2_free(nullptr);
 }
 void Contracts(const Oracle& oracle)
 {
-    auto source = Message(192);
+    auto source = Message(64 * K);
     const auto original = source;
     Profile p = Descriptor(source.size(), 64);
     WirehairV2Codec h = nullptr;
     uint32_t bytes = 777;
     // Independent descriptor/message overlap is still supported.
-    Check(wirehair_v2_encoder_create(source.data(), source.size(), 64, source.data(), 32,
-        &bytes, &h) == WirehairV2_Success, "staged descriptor/message alias");
+    const auto alias_result = K == 3 ?
+        wirehair_v2_encoder_create(source.data(), source.size(), 64, source.data(), 32, &bytes, &h) :
+        wirehair_v2_encoder_create_profile_id(ProfileId, source.data(), source.size(), 64,
+            source.data(), 32, &bytes, &h);
+    Check(alias_result == WirehairV2_Success, "staged descriptor/message alias");
     Check(std::equal(p.begin(), p.end(), source.begin()), "overlapping descriptor output");
     Packet(h, UINT32_MAX, oracle.Packet(original, 64, UINT32_MAX));
     wirehair_v2_free(h);
@@ -364,9 +455,9 @@ void Contracts(const Oracle& oracle)
         source == original && bytes == 777 && h == reinterpret_cast<WirehairV2Codec>(uintptr_t(1)),
         "borrowed descriptor alias before capacity, no writes");
     h = nullptr;
-    Check(Create(0, 2, source.data(), source.size(), 64, p, &h) == WirehairV2_Success, "borrowed alias fixture");
+    Check(Create(FirstRoute, 2, source.data(), source.size(), 64, p, &h) == WirehairV2_Success, "borrowed alias fixture");
     Byte out[64] = {};
-    for (uint32_t id : {0u, 2u, UINT32_MAX}) {
+    for (uint32_t id : {0u, K - 1, UINT32_MAX}) {
         bytes = 777;
         Check(wirehair_v2_encode(h, id, source.data() + 80, 0, &bytes) == WirehairV2_InvalidInput &&
             bytes == 777 && source == original, "packet/source alias before capacity");
@@ -385,14 +476,15 @@ void Contracts(const Oracle& oracle)
     wirehair_v2_free(h);
     // Validation priority and exact profile geometry/seed domain.
     WirehairV2Profile host = {};
-    Check(wirehair_v2_profile_deserialize(p.data(), static_cast<uint32_t>(p.size()), &host) == WirehairV2_Success, "parse K3");
+    Check(wirehair_v2_profile_deserialize(p.data(), static_cast<uint32_t>(p.size()), &host) == WirehairV2_Success, "parse small profile");
     host.seed_attempt = 1;
     Check(wirehair_v2_profile_serialize(&host, out, sizeof(out), nullptr) == WirehairV2_BadSeed,
-        "K3 nonzero seed rejected");
+        "small nonzero seed rejected");
     host.block_bytes = 63;
     Check(wirehair_v2_profile_serialize(&host, out, sizeof(out), nullptr) == WirehairV2_InvalidDimensions,
         "geometry precedes seed");
-    for (uint64_t retired : {UINT64_C(0xe161ce5d456f9bb7), UINT64_C(0x20a4f27a870612a2), UINT64_MAX}) {
+    for (uint64_t retired : {UINT64_C(0xe161ce5d456f9bb7), UINT64_C(0x20a4f27a870612a2),
+            UINT64_C(0x5748324b35544d31), UINT64_MAX}) {
         host.profile_id = retired;
         Check(wirehair_v2_profile_serialize(&host, out, sizeof(out), nullptr) ==
             WirehairV2_UnsupportedProfile, "retired profile never reinterpreted");
@@ -406,28 +498,40 @@ void Contracts(const Oracle& oracle)
     Check(wirehair_v2_encoder_create_with_options(source.data(), source.size(), 64, &opt,
         out, 0, &bytes, &h) == WirehairV2_UnsupportedVersion && bytes == 32 && !h,
         "options error before capacity");
-    // Explicit CURRENT remains the certified equation ID, even at K3.
+    // Explicit CURRENT remains the certified equation ID at every K.
     Check(WIREHAIR_V2_PROFILE_CURRENT == WIREHAIR_V2_PROFILE_CERTIFIED_2026_07, "stable current alias");
     Check(wirehair_v2_encoder_create_profile_id(WIREHAIR_V2_PROFILE_CURRENT, original.data(),
         original.size(), 64, p.data(), static_cast<uint32_t>(p.size()), &bytes, &h) == WirehairV2_Success, "explicit old K3");
     Check(wirehair_v2_profile_deserialize(p.data(), static_cast<uint32_t>(p.size()), &host) == WirehairV2_Success &&
         host.profile_id == WIREHAIR_V2_PROFILE_CURRENT, "explicit old descriptor unchanged");
     wirehair_v2_free(h);
+    // Explicit K5 must not silently alter either ordinary selector.
+    for (unsigned policy : {0u, 1u, 2u}) {
+        const auto ordinary_source = Message(5 * 64 - 1);
+        Profile ordinary = {};
+        h = nullptr;
+        Check(Create(0, policy, ordinary_source.data(), ordinary_source.size(), 64,
+            ordinary, &h) == WirehairV2_Success, "ordinary K5 still constructs");
+        Check(wirehair_v2_profile_deserialize(ordinary.data(), 32, &host) == WirehairV2_Success &&
+            host.profile_id == WIREHAIR_V2_PROFILE_CERTIFIED_2026_07,
+            "K5 default stays certified until admission gates pass");
+        wirehair_v2_free(h);
+    }
 }
 void ProtectedSource(const Oracle& oracle)
 {
 #if defined(__unix__)
     const long page_size = sysconf(_SC_PAGESIZE);
     Check(page_size > 0, "page size");
-    const size_t n = static_cast<size_t>(page_size);
-    Check(n >= 3840, "protected source capacity");
+    const size_t page = static_cast<size_t>(page_size);
+    const size_t n = (K * 1280 + page - 1) / page * page;
     void* memory = mmap(nullptr, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     Check(memory != MAP_FAILED, "protected source mmap");
-    const auto original = Message(3839);
+    const auto original = Message(K * 1280 - 1);
     std::memcpy(memory, original.data(), original.size());
     auto p = Descriptor(original.size(), 1280);
     WirehairV2Codec h = nullptr;
-    Check(Create(0, 2, memory, original.size(), 1280, p, &h) == WirehairV2_Success, "protected source create");
+    Check(Create(FirstRoute, 2, memory, original.size(), 1280, p, &h) == WirehairV2_Success, "protected source create");
     // Deliberate white-box contract test: public callers must keep input readable
     // until detach. The protection detects any hidden repair or detach read.
     Check(mprotect(memory, n, PROT_NONE) == 0, "protect borrowed source");
@@ -437,7 +541,8 @@ void ProtectedSource(const Oracle& oracle)
     size_t count = Stop();
     Check(result == WirehairV2_Success && count == 0, "unreadable-source allocation-free detach");
     Check(munmap(memory, n) == 0, "release source");
-    for (uint32_t id : {0u,1u,2u,3u,UINT32_MAX}) Packet(h, id, oracle.Packet(original, 1280, id));
+    for (uint32_t id = 0; id <= K; ++id) Packet(h, id, oracle.Packet(original, 1280, id));
+    Packet(h, UINT32_MAX, oracle.Packet(original, 1280, UINT32_MAX));
     wirehair_v2_free(h);
 #else
     (void)oracle;
@@ -446,19 +551,20 @@ void ProtectedSource(const Oracle& oracle)
 void CppOwnership()
 {
     using namespace wirehair::v2;
-    const auto expected = Message(191);
+    const auto expected = Message(64 * K - 1);
     auto source = expected;
     SerializedProfile profile;
     Encoder encoder;
-    Check(encoder.CreateBorrowed(source.data(), source.size(), 64, profile) ==
-        WirehairV2_Success, "C++ ordinary borrowed create");
+    const auto created = K == 3 ? encoder.CreateBorrowed(source.data(), source.size(), 64, profile) :
+        encoder.CreateBorrowed(ProfileId, source.data(), source.size(), 64, profile);
+    Check(created == WirehairV2_Success, "C++ borrowed create");
     Encoder moved(std::move(encoder));
     Check(!encoder && moved, "C++ move transfers lifetime obligation");
-    const auto replacement = Message(192);
+    const auto replacement = Message(64 * K);
     SerializedProfile next;
     Start(0);
-    const auto failed = moved.CreateBorrowed(
-        replacement.data(), replacement.size(), 64, next);
+    const auto failed = K == 3 ? moved.CreateBorrowed(replacement.data(), replacement.size(), 64, next) :
+        moved.CreateBorrowed(ProfileId, replacement.data(), replacement.size(), 64, next);
     Stop();
     Check(failed == WirehairV2_OOM && moved, "C++ failed replacement retains old handle");
     Start(0);
@@ -471,11 +577,11 @@ void CppOwnership()
     Decoder decoder;
     Check(decoder.Create(profile) == WirehairV2_Success, "C++ decoder");
     Byte packet[64];
-    for (uint32_t id = 3; id < 6; ++id) {
+    for (uint32_t id = K; id < 2 * K; ++id) {
         uint32_t bytes = 0;
         Check(assigned.Encode(id, packet, sizeof(packet), bytes) == WirehairV2_Success,
             "C++ repair after source release");
-        Check(decoder.Decode(id, packet, bytes) == (id == 5 ? WirehairV2_Success : WirehairV2_NeedMore),
+        Check(decoder.Decode(id, packet, bytes) == (id == 2 * K - 1 ? WirehairV2_Success : WirehairV2_NeedMore),
             "C++ first success");
     }
     std::vector<Byte> output(expected.size());
@@ -485,7 +591,7 @@ void CppOwnership()
 }
 void ProfileBounds()
 {
-    const Profile valid = Descriptor(5, 2);
+    const Profile valid = Descriptor(2 * K - 1, 2);
     for (unsigned attempt = 1; attempt < 256; ++attempt) {
         Profile p = valid;
         p[28] = static_cast<Byte>(attempt);
@@ -495,27 +601,27 @@ void ProfileBounds()
         const auto create = wirehair_v2_decoder_create(p.data(), 32, &decoder);
         const size_t count = Stop();
         Check(validation == WirehairV2_BadSeed && create == validation && !decoder && count == 0,
-            "all nonzero K3 attempts rejected before allocation");
+            "all nonzero small attempts rejected before allocation");
     }
-    for (uint32_t block : {0u, 1u, 67108864u, 67108865u, UINT32_MAX}) {
+    for (uint32_t block : {0u, 1u, MaxBlockBytes, MaxBlockBytes + 1, UINT32_MAX}) {
         WirehairV2Profile host = {};
         host.struct_bytes = sizeof(host);
         host.profile_version = WIREHAIR_V2_PROFILE_VERSION;
-        host.profile_id = WIREHAIR_V2_PROFILE_SMALL_K3_2026_09;
+        host.profile_id = ProfileId;
         host.block_bytes = block;
-        host.message_bytes = uint64_t(block) * 3;
+        host.message_bytes = uint64_t(block) * K;
         Profile p = {};
         Start(0);
         const auto result = wirehair_v2_profile_serialize(&host, p.data(), 32, nullptr);
         const size_t count = Stop();
-        Check(result == (block == 1 || block == 67108864 ? WirehairV2_Success : WirehairV2_InvalidDimensions)
-            && count == 0, "exact K3 block-size bound without allocation");
+        Check(result == (block == 1 || block == MaxBlockBytes ? WirehairV2_Success : WirehairV2_InvalidDimensions)
+            && count == 0, "exact small block-size bound without allocation");
     }
     auto p = valid;
     auto* wrapped = reinterpret_cast<const void*>(UINTPTR_MAX - 3);
     WirehairV2Codec encoder = nullptr;
     Start(0);
-    const auto result = Create(0, 0, wrapped, 5, 2, p, &encoder);
+    const auto result = Create(FirstRoute, 0, wrapped, 2 * K - 1, 2, p, &encoder);
     const size_t count = Stop();
     Check(result == WirehairV2_InvalidInput && !encoder && count == 0,
         "independent wrapped input rejected before allocation/read");
@@ -526,11 +632,13 @@ int main()
     Check(wirehair_init() == Wirehair_Success, "GF256 initialization");
     Oracle oracle;
     HandleAllocationIsolation();
+    LookupCoverage(oracle);
+    DecoderErrors(oracle);
     Lifecycle(oracle);
     AllocationFailures();
     Contracts(oracle);
     ProtectedSource(oracle);
     CppOwnership();
     ProfileBounds();
-    std::cout << "Ordinary WH2 K3 correctness passed (not a speed or recovery-rate gate)\n";
+    std::cout << "WHV2 K" << K << " correctness passed (not a speed or recovery-rate gate)\n";
 }

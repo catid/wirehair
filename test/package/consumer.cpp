@@ -124,30 +124,35 @@ int CppV2RoundTrip()
     return 0;
 }
 
-int CppSmallRoundTrip()
+template<unsigned K> int CppSmallRoundTrip()
 {
-    const std::array<std::uint8_t, 5> expected{{0, 1, 2, 3, 4}};
+    std::array<std::uint8_t, K * 2 - 1> expected{};
+    for (unsigned i = 0; i < expected.size(); ++i) expected[i] = static_cast<std::uint8_t>(i);
+    const uint64_t profile_id = K == 3 ? WIREHAIR_V2_PROFILE_SMALL_K3_2026_09 :
+        WIREHAIR_V2_PROFILE_SMALL_K5_2026_09;
     auto source = expected;
     wirehair::v2::Encoder encoder;
     wirehair::v2::SerializedProfile profile;
-    if (encoder.CreateBorrowed(source.data(), source.size(), 2, profile) != WirehairV2_Success)
+    const auto created = K == 3 ? encoder.CreateBorrowed(source.data(), source.size(), 2, profile) :
+        encoder.CreateBorrowed(profile_id, source.data(), source.size(), 2, profile);
+    if (created != WirehairV2_Success)
         return 10;
     WirehairV2Profile parsed{};
     if (profile.Deserialize(parsed) != WirehairV2_Success ||
-        parsed.profile_id != WIREHAIR_V2_PROFILE_SMALL_K3_2026_09) return 11;
+        parsed.profile_id != profile_id) return 11;
     wirehair::v2::Encoder moved(std::move(encoder));
     if (encoder || moved.DetachInput() != WirehairV2_Success) return 12;
     source.fill(0xcc);
     wirehair::v2::Decoder decoder;
     if (decoder.Create(profile) != WirehairV2_Success) return 13;
     std::array<std::uint8_t, 2> packet{};
-    for (std::uint32_t id = 3; id < 6; ++id) {
+    for (std::uint32_t id = K; id < 2 * K; ++id) {
         std::uint32_t bytes = 0;
         if (moved.Encode(id, packet.data(), packet.size(), bytes) != WirehairV2_Success ||
             decoder.Decode(id, packet.data(), bytes) !=
-                (id == 5 ? WirehairV2_Success : WirehairV2_NeedMore)) return 14;
+                (id == 2 * K - 1 ? WirehairV2_Success : WirehairV2_NeedMore)) return 14;
     }
-    std::array<std::uint8_t, 5> recovered{};
+    std::array<std::uint8_t, K * 2 - 1> recovered{};
     std::uint64_t bytes = 0;
     return decoder.Recover(recovered.data(), recovered.size(), bytes) == WirehairV2_Success &&
         bytes == recovered.size() && recovered == expected ? 0 : 15;
@@ -160,5 +165,7 @@ int main()
     const int c_result = wirehair_package_round_trip();
     if (c_result) return c_result;
     const int v2_result = CppV2RoundTrip();
-    return v2_result == 0 ? CppSmallRoundTrip() : v2_result;
+    if (v2_result) return v2_result;
+    const int k3_result = CppSmallRoundTrip<3>();
+    return k3_result == 0 ? CppSmallRoundTrip<5>() : k3_result;
 }

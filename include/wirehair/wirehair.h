@@ -238,6 +238,15 @@ WIREHAIR_EXPORT WirehairResult wirehair_wire_profile_init(
 #define WIREHAIR_V2_PROFILE_SMALL_K3_2026_09 \
     UINT64_C(0x67c1043ecaa9e184)
 
+/**
+    Explicit-only fixed K5 GF(256) equations; exactly five source blocks,
+    block bytes at most 44739242, and seed_attempt zero. Not selected by the
+    ordinary constructors pending public-path speed and recovery qualification.
+    See V2_WIRE_PROFILE.md for the immutable equation identity.
+*/
+#define WIREHAIR_V2_PROFILE_SMALL_K5_2026_09 \
+    UINT64_C(0x80070c81bfe375f1)
+
 /** Stable alias for the original certified profile, not a dispatch policy. */
 #define WIREHAIR_V2_PROFILE_CURRENT \
     WIREHAIR_V2_PROFILE_CERTIFIED_2026_07
@@ -417,8 +426,8 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create(
     as wirehair_v2_encoder_create().  WirehairV2EncoderSource_BorrowedImmutable
     completes the same eager solve, then retains the exact caller-owned message
     range for direct systematic packets without taking ownership or adding a
-    full-message allocation or copy beyond independent construction. For K3,
-    the owned three-block identity basis is the fully prepared equation state
+    full-message allocation or copy beyond independent construction. For small
+    profiles, the owned K-block identity basis is the fully prepared equation state
     for both policies, not an additional systematic cache. Private padding of
     a partial final block remains permitted. An attached borrowed encoder copies only
     meaningful source bytes for packet IDs below K and never reads beyond

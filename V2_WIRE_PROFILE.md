@@ -659,6 +659,82 @@ spent. The next requirement is installed/ordinary K5 admission with its own
 actual-path speed, retained recovery and preserved-path regression gates;
 benchmark timings cannot be inherited by a different owning public facade.
 
+## Small K5 equation profile: explicit admission candidate
+
+`WIREHAIR_V2_PROFILE_SMALL_K5_2026_09` has ID `80070c81bfe375f1`, the first
+64 bits of SHA-256 over this exact name (no newline):
+
+```text
+wirehair:v2:small-k5:thue-morse-121-110-207-198-31:gf256-14d:2026-09
+```
+
+The full digest is
+`80070c81bfe375f17b654786a037aa26fa1a3630417e0a3d6a5562199d8fc355`.
+It freezes the sealed K5 GF(256) equations described above: polynomial `0x14d`,
+companion feedbacks `(121,110,207,198,31)` / `(120,110,207,198,31)`,
+right-product Thue-Morse packet-ID map, identity systematic rows, and zero tail
+padding. The exact 29,440-byte lookup has SHA-256
+`4ac8059aba3b5797c8789c4258a1bda52e5fdb005592d601591705940cfe76c9`.
+Its packed layout and generic evaluator are the same as the qualified benchmark
+core; a separate production translation unit owns the table, with no build-time
+dependency on benchmark artifacts or Python.
+
+The profile requires `4 * block_bytes < message_bytes <= 5 * block_bytes`,
+`1 <= block_bytes <= 44739242`, and seed attempt zero. The bound keeps the six
+decoder slab blocks at or below 256 MiB. Invalid shapes return
+`InvalidDimensions`; nonzero attempts on valid shapes return `BadSeed`.
+There is no construction seed search.
+
+Use `wirehair_v2_encoder_create_profile_id()` (or its options/C++ counterpart)
+to select it, or recreate from its serialized WHV2 descriptor. The ordinary
+constructors still select the certified profile at K5; **defaults are unchanged**.
+The benchmark WHK5 descriptor/ID is not accepted as a WHV2 descriptor and is
+not reinterpreted as this profile.
+
+K3 and K5 reuse the typed small-core ownership and dispatch code. Both storage
+policies prepare one owned source basis; repair packets do not read borrowed
+input and detach is allocation-free. An immutable byte-sized dimension tag
+occupies existing common-header padding. Only small handles contain the three
+small-state pointers; certified handles do not grow. Dependent contradictions
+return `Error` without poisoning the retained decoder basis, matching ordinary
+K3 semantics, not the separate benchmark facade's permanent-poison policy.
+
+This is explicit public-path integration, **not performance promotion**.
+Benchmark speed/recovery results above cannot qualify the different owning
+facade. Actual-public-path speed, retained paired recovery, and preserved-path
+regression/K3-retention gates are still required before default selection.
+
+### Public K5 integration: neutral correctness checks
+
+Strict GCC 13.3 checks pass with ordinary compiler defaults (13 selected tests)
+and host tuning enabled (29 selected tests). Portable arithmetic, ASan/UBSan
+with leak/fake-stack checks, and Clang 18.1.3 each pass five selected tests.
+Static Debug, shared Release, and dual RelWithDebInfo relocated-package checks
+all pass, including installed C and C++ K5 consumers. The literal C receiver
+uses independently derived repair packets before any encoder or explicit
+runtime initialization exists.
+
+The shared K3/K5 API test covers 69 width/tail shapes per dimension, nine K3
+and six explicit K5 constructor/policy routes, standalone systematic/low/distant
+decoders, and 4,864 K3 / 6,400 K5 packed-selector and mixed-chunk coefficient
+oracle packets. Every constructor/decoder allocation is fault-injected;
+packet operations and detach allocate nothing. Checks include protected
+borrowed-source repair/detach, source release, short buffers, aliases, invalid
+packets, conflicts before/after full rank and recovery, repeated recovery,
+C++ transactional moves, all 255 nonzero seed-attempt rejections, and the exact
+block-size bounds without large allocations.
+
+With matching default compiler flags, 16 of the 17 existing archive members
+are byte-identical to the preserved small-isolation library; only
+`WirehairV2Profile.cpp.o` changes, plus the new K5 table object. Certified
+handles remain 272 bytes and small outer handles remain 296 bytes on this host.
+The four common encode/decode/recover/free function sizes remain unchanged;
+that is layout evidence, not a performance result. The certified compatibility
+replay matches all 2,180,292 output bytes across 48 cases, SHA-256
+`2e6536dcd86a7c2892399ddf1f14c3ff2290c2ef9e270aaa0c5ed87d0928907b`.
+These are engineering checks, not a new loss cohort, comparative recovery
+qualification, or evidence that the earlier performance regression is fixed.
+
 ## Retired equation profile identifiers
 
 The identifiers `e161ce5d456f9bb7` and `20a4f27a870612a2` are permanently

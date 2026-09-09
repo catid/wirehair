@@ -6,6 +6,8 @@
 namespace wirehair_small_core {
 // One immutable table shared by the WHK3 and WHV2 facades, never serialized.
 Lookup K3Lookup();
+// Sealed K5 table, in a separate translation unit from the existing K3 facade.
+Lookup K5Lookup();
 }
 
 #endif
