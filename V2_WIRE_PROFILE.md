@@ -268,6 +268,59 @@ The preceding isolation R0 namespace is separately spent **INVALID**: its
 worker read a stale claim-file path and stopped before any codec work. R1
 fixed and positively tested that launch binding without changing the workload.
 
+### Uncovered-K recovery inventory
+
+At source `450eb82`, `wirehair.wh2.uncovered-k-recovery-inventory-r0`
+compared actual ordinary source-independent WH2 with owned-input WH1 in the
+unchanged native shared library produced at `5e902df`. This baseline-only
+diagnostic completed; it tested no new candidate and measured no performance.
+The frozen roster has 64 roots across three block widths (2, 64, 1280 bytes)
+and four loss schedules (IID, burst, adversarial, repair-only) for each K.
+
+Observed failures after receiving exactly K packets, with 768 traces per K:
+
+| K | Ordinary WH2 | WH1 | WH2 minus WH1 |
+|---|---:|---:|---:|
+| 2 | 49 (6.38%) | 5 (0.65%) | 44 |
+| 4 | 13 (1.69%) | 16 (2.08%) | -3 |
+| 5 | 61 (7.94%) | 13 (1.69%) | 48 |
+| 8 | 38 (4.95%) | 4 (0.52%) | 34 |
+
+The prospectively fixed priority rule selects K5, then K2, K8 and K4. This
+ordering is a diagnostic work priority, not a statistical superiority claim.
+K5's 64-byte burst cell had 24/64 WH2 failures versus 3/64 for WH1; its
+64-byte repair-only cell had 21/64 versus zero. After one additional packet,
+K5 still had five WH2 failures and K8 had two; both had none after two.
+Across all four K values WH1 had seven failures after one extra packet and
+two after two, all at K4, with none after three.
+
+The 24 separate full/partial low-repair hard cases are not in the rate
+denominator. WH2 needed one extra packet in two K2 cases; WH1 needed none.
+In every case, the first actual decoder success matched the first full-rank
+source-equation prefix: no decoder lag after full rank was observed. Thus
+the observed recovery gaps call for equation-structure work, not merely
+earlier recognition of sufficient rank. This does not identify the internal
+construction mechanism responsible for each deficiency.
+
+Native basis-message probes observed each generator's coefficient rows.
+Independent GF(256) arithmetic reconstructed every real packet and checked
+rank; these are observed native rows, not an independent derivation of the
+native generator. The worker checked source independence, packet guards and
+two exact recoveries, freeing each encoder before creating its receiver.
+Python 3.8 and 3.12 replayed all 683 receipt pins and the complete outcome.
+A separately written audit with no project imports reproduced all 3,096
+paired cases, 54,180 real-message packets, cell counts, priority decisions
+and API ledgers before source advancement. The explicit historical diagnostic
+log loss described above remained disclosed and checked.
+
+The immutable bundle is `/var/tmp/wh2-uncovered-k-recovery-inventory-r0`;
+raw SHA-256 is
+`dc4bbbac93cad98669f325755c42f47339eed349d3064b0cca0908819c4c5729`.
+Its namespace is spent. This inventory is not a candidate holdout, speed gate,
+all-K construction validation or promotion. K5 is the next structural-screen
+target; a survivor still needs independent recovery and actual full encoder
+and decoder WH1 speed qualification.
+
 ## Retired equation profile identifiers
 
 The identifiers `e161ce5d456f9bb7` and `20a4f27a870612a2` are permanently
