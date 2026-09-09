@@ -491,6 +491,63 @@ denied on this host; no host settings were changed. The latest Fable invocation
 returned a usage-limit error and no report, so none of these findings is
 attributed to Fable. K5 cost R0 remains **CONTROL_FAIL**.
 
+### Codec-free diagnostic: slow computation after output boundaries
+
+At source `3a2e099`, the separately frozen
+`wirehair.wh2.clock-boundary-r0` completed its single codec-free run. All
+524,288 observations and 34,359,738,368 fixed-count xorshift iterations passed
+checksum, timestamp, CPU identity, affinity, ordinal and counter checks. All
+48 passive absolute-millisecond bins are populated (9,741–11,063 observations
+each). No phase targeting, warm exclusion, filtering or codec operation occurs.
+See the [frozen protocol](bench/Wh2ClockBoundaryR0.md).
+
+Four ordered TSC/AUX stamps separate first-clock, register-only computation
+and second-clock windows. Descriptive times use the frozen full-run endpoint
+conversion of approximately 3.195199 TSC ticks per nanosecond:
+
+| Window | Median (microseconds) | Maximum (microseconds) |
+|---|---:|---:|
+| First monotonic read and capture bookkeeping | 0.0501 | 12.509 |
+| Fixed-count register computation | 78.167 | 165.809 |
+| Second monotonic read and capture bookkeeping | 0.0501 | 8.533 |
+
+None of the 1,048,576 clock windows reached the frozen 50-microsecond label.
+Fourteen computation windows exceeded 1.5 times their overall median, all with
+zero recorded in-window fault or context-switch changes. They form just two
+clusters: records 252672–252676 and 505344–505352, immediately after output
+chunks. The preceding gaps were 9.694065 and 9.513142 milliseconds, but only
+0.264537 and 0.165660 milliseconds of thread CPU time; each gap records one
+voluntary context switch. These are the only voluntary switches and the only
+greater-than-one-millisecond inter-observation gaps in the run. Computation
+returns to its usual duration after five and nine observations respectively.
+
+Thus long delays occur in fixed-count computation, not just in monotonic-clock
+reads, and timed-window counters alone miss the preceding descheduling event.
+The association with synchronous result output supplies a concrete reason to
+remove interleaved file I/O from a future timing instrument. It does not prove
+the precise blocking syscall, a CPU-frequency cause, or the cause of every
+earlier K5 excursion. This diagnostic did not reproduce a 50-microsecond clock
+window; that is not a universal bound on clock-read latency. The last four
+absolute-phase bins also retain 2.08–2.24% higher computation medians, so output
+changes cannot be assumed to remove all phase-dependent measurement effects.
+
+Strict native and ASan/UBSan neutral checks, final-record failure retention,
+claim authentication, sanitizer science-mode rejection and eleven Python
+reader tests passed before the sole run. Both Python 3.8 and 3.12 replay the
+full result exactly. A separate audit derives the checksum by binary-operator
+exponentiation, traverses every raw record, and reproduces all windows, events,
+phase summaries and receipt pins. Worker wall/CPU times were 41.718906 and
+41.699199 seconds; controller plus analysis took 45.610457 seconds. Stderr is
+empty. The immutable bundle is `/var/tmp/wh2-clock-boundary-r0`, raw SHA-256
+`2584d2ef6eb3e0fa7702cd5adc0d038155acc71885fa9f64d55a1c94aff4727e`.
+
+This namespace is spent. The next instrumentation change is deferred result
+output using preallocated record storage, with complete failure retention and
+all declared phases preserved. It requires neutral qualification before a new
+ownership-matched K5 lifecycle gate. No old speed result is rescored, no clock
+or wake-up cost is subtracted, and no K5 speed/admission or production change
+is claimed here. The full all-K objective remains open.
+
 ### K5 paired retained recovery comparison
 
 At source `3b82f35`, `wirehair.wh2.k5-serialized-recovery-r0` passed its
