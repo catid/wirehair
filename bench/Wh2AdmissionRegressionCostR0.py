@@ -428,9 +428,10 @@ def library_provenance(proof_dir=None, diagnostic_exclusions=()):
 
 
 
-# Only library/protocol identity and its producing-source proof vary. Work,
-# chronology, controls, decision thresholds and bounds remain the frozen R0.
-Configuration = namedtuple('Configuration', 'protocol output libraries sources provenance')
+# Explicit worker adapters may vary publication, never the default R0 worker.
+# Existing configurations retain their original worker and neutral checks.
+Configuration = namedtuple('Configuration',
+    'protocol output libraries sources provenance worker_source qualify', defaults=(None,None))
 
 
 def configuration(value):
@@ -439,6 +440,16 @@ def configuration(value):
 
 def claim_binding(cfg):
     return dict(protocol=cfg.protocol,claim_path=str(cfg.output/'CLAIM.json'),positive_returncode=0,negative_returncode=1)
+
+
+def verify_work_symbol(symbols):
+    # An instrumented build may retain RunWork's release lambda as a separate
+    # function. It is not a second WORK body: match the complete symbol name.
+    name = ('(anonymous namespace)::RunWork((anonymous namespace)::Api const&, '
+            '(anonymous namespace)::Fixture const&, (anonymous namespace)::Arm const&, '
+            'unsigned int, unsigned char*, (anonymous namespace)::Work&)')
+    A.exact(sum(re.fullmatch(r'[0-9a-fA-F]+ [tT] '+re.escape(name),line) is not None
+                for line in symbols.splitlines()),1,'single common WORK')
 
 
 def build(mode, output, settings=None):
@@ -466,7 +477,9 @@ def build(mode, output, settings=None):
     if cfg.protocol != PROTOCOL:
         flags += ['-DWH2_ADMISSION_PROTOCOL='+json.dumps(cfg.protocol)]
     flags += ['-DWH2_ADMISSION_CLAIM_PATH='+json.dumps(str(cfg.output/'CLAIM.json'))]
-    sources = [ROOT/NEW[0]]+[ROOT/'bench'/n for n in
+    worker_source = NEW[0] if cfg.worker_source is None else cfg.worker_source
+    A.require(worker_source in cfg.sources,'worker adapter is an explicitly pinned source')
+    sources = [ROOT/worker_source]+[ROOT/'bench'/n for n in
               ('Wh2FrozenTrace.cpp','Wh2PublicBorrowedTargetIdentity.cpp','Wh2RdpruTargetIdentityV2.cpp')]
     dependencies = {ROOT/n for n in cfg.sources}
     dependencies.update(library_inputs)
@@ -488,8 +501,7 @@ def build(mode, output, settings=None):
     command(args); commands.append(args)
     names = [line.split()[-1] for line in command(['/usr/bin/nm','-g',exe]).decode().splitlines() if line.split()]
     A.require(not any(n.startswith(('wirehair_','gf256_')) or n=='GF256Ctx' for n in names),'no linked Wirehair/GF runtime')
-    text = command(['/usr/bin/nm','-C',exe]).decode().splitlines()
-    A.exact(sum('RunWork(' in line and '.cold' not in line and '[clone' not in line for line in text),1,'single common WORK')
+    verify_work_symbol(command(['/usr/bin/nm','-C',exe]).decode())
     for name in ('c++','cc','as','ld','nm'):
         dependencies.add((Path('/usr/bin')/name).resolve(strict=True))
     for name in ('cc1','cc1plus','collect2'):
@@ -522,6 +534,8 @@ def build(mode, output, settings=None):
         A.require(result.returncode==1 and result.stdout==b'' and result.stderr.startswith(b'INVALID:'),'negative worker CLI')
         rejections.append(dict(arguments=tail,returncode=result.returncode,stderr=result.stderr.decode()))
     A.publish(output/'negative-cli.json',A.canonical(rejections))
+    if cfg.qualify is not None:
+        cfg.qualify(exe,output,meta,mode)
     manifest = dict(protocol=cfg.protocol,mode=mode,commands=commands,
                     environment={k:os.environ.get(k) for k in ENV_KEYS+('ASAN_OPTIONS','UBSAN_OPTIONS')},
                     inputs=[O.pin(p) for p in sorted(dependencies)],
