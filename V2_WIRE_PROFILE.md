@@ -701,8 +701,9 @@ K3 semantics, not the separate benchmark facade's permanent-poison policy.
 
 This is explicit public-path integration, **not performance promotion**.
 Benchmark speed/recovery results above cannot qualify the different owning
-facade. Actual-public-path speed, retained paired recovery, and preserved-path
-regression/K3-retention gates are still required before default selection.
+facade. The installed retained-recovery gate below now passes; valid
+actual-public-path speed and preserved-path regression/K3-retention gates
+are still required before default selection.
 
 ### Public K5 integration: neutral correctness checks
 
@@ -781,10 +782,13 @@ A separate bounded syscall trace of the existing neutral worker passes all
 108 WORK cells and records 8,228 `brk` calls, including repeated heap growth
 and shrinkage. Its 22 `mmap` calls and single `munmap` belong to startup;
 there is no repeated mapping/unmapping or `madvise` stream. Thus heap
-growth/trimming is an observed allocation mechanism in this neutral workload,
-not proof of a particular allocation call site's responsibility or of the
-scientific control failures' cause. Allocation-path attribution remains a
-separate diagnostic; allocator settings and codec code are unchanged.
+growth/trimming is an observed allocation mechanism in this neutral workload.
+A subsequent bounded stack trace attributes WH1 growth to `AllocateWorkspace`
+and shrinkage to `FreeWorkspace`/`FreeInput`; certified WH2 grows at
+`quotient_pivot_rhs` allocation and trims during RHS-buffer destruction and
+outer teardown. This does not establish the scientific control failures' cause.
+The earlier five-buffer release-order experiment already measured small encoder
+regressions; a duplicate variant was stopped before implementation or testing.
 
 The immutable, permanently spent bundle is
 `/var/tmp/wh2-k5-public-cost-r0`, raw SHA-256
@@ -794,8 +798,57 @@ COMPLETE SHA-256
 Qualification and independent audit artifacts are retained at
 `/tmp/wh2-k5-public-cost-neutral.IR0xrEBi`.
 See the [installed gate contract](bench/Wh2K5PublicCostR0.md).
-Installed retained recovery, valid installed speed, preserved-path regressions
-and ordinary K3 speed retention all remain required before default promotion.
+Valid installed speed, preserved-path regressions and ordinary K3 speed
+retention remain required before default promotion.
+
+### Installed K5 retained recovery: qualified
+
+At source `2a873f9`, `wirehair.wh2.k5-public-recovery-r0` passes through the
+actual installed WHV2 APIs, using the explicit K5 and certified profiles plus
+ownership-matched WH1. Native, portable arithmetic and ASan/UBSan agree on all
+6,273 cases and both source policies. The full records reproduce the earlier
+prototype results with only the candidate's serialized descriptor changed.
+
+On the same 6,144 retained loss traces:
+
+| Codec | Zero-overhead failures | Rate | Failures with one extra packet |
+|---|---:|---:|---:|
+| Installed K5 | 11 | 0.1790% | 0 |
+| WH1 | 122 | 1.9857% | 2 |
+| Certified WH2 | 439 | 7.1452% | 10 |
+
+K5 has about 91% fewer aggregate zero-overhead failures than WH1. It fixes all
+122 WH1 failures but introduces 11 different failures; there is no per-trace
+or per-cell dominance. Every 512-trace candidate cell is at most 1%, with a
+worst cell of 4/512 (0.78125%). All 72 hard cases recover at zero overhead for
+K5 and WH1; certified WH2 needs one extra packet in nine. All 57 original-width
+historical cases recover for K5, versus 12 unresolved WH1 and 45 unresolved
+certified cases at their original, unextended horizons.
+
+All real and basis encoders are destroyed before receivers. Independent
+polynomial coefficients, every-arm basis-derived packet hashes, rank/first
+success, twice-recovered messages, guards, immutable inputs and complete API
+ledgers pass. Each backend checks 337,404 real packets and 1,687,020 basis
+packets. These are repeated engineering checks of retained traces, not new
+independent samples, a population failure bound, speed evidence, or an all-K
+guarantee. Defaults remain unchanged.
+
+Final neutral qualification covers 36 cases and four late-call cleanup failures
+per backend; all 54 recovery/shared-build tests pass under Python 3.8 and 3.12.
+An initial sanitizer-driver context-layout mismatch was caught and fixed before
+the retained run; compiler ISA flags and linked GF context sizes now match.
+The sole controller completed in 32.703651 seconds with all workers successful
+and empty stderr. Exact replays and a separately written arithmetic/raw/build
+provenance audit agree under both Python versions, checking all 739 receipt
+pins before HEAD or pinned documentation advanced.
+
+The permanently spent bundle is `/var/tmp/wh2-k5-public-recovery-r0`, COMPLETE
+SHA-256 `66986b694e8d9a75eb19d913f5c18a580aaa38aaf341dbc85660376b7f798644`,
+native raw SHA-256
+`4fdc142519395b79de905be46c0fc336c1039b48fffe754c999412f476306fda`.
+Qualification and audits are retained at
+`/tmp/wh2-k5-public-recovery-qualified.bksSezzu`.
+See the [frozen recovery contract](bench/Wh2K5PublicRecoveryR0.md).
 
 ## Retired equation profile identifiers
 
