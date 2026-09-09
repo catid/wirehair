@@ -1,14 +1,20 @@
 #include "Wh2SmallSerializedCore.h"
+#if WH2_SMALL_CODEC_K == 5
+#include "Wh2K5NativeData.inc"
+namespace Data = wh2_k5_data;
+#else
 #include "Wh2K3NativeData.inc"
+namespace Data = wh2_k3_data;
+#endif
 
 namespace {
-struct K3 {
+struct Selected {
     static wirehair_small_core::Lookup View()
-    { return {wh2_k3_data::kLookup, sizeof(wh2_k3_data::kLookup)}; }
+    { return {Data::kLookup, sizeof(Data::kLookup)}; }
 };
-using F = wh2_small_serialized::Facade<3, K3>;
-static_assert(F::ProfileId == WH2_SMALL_PROFILE_ID, "K3 descriptor identity");
-static_assert(F::MaxBlockBytes == WH2_SMALL_MAX_BLOCK_BYTES, "K3 slab bound");
+using F = wh2_small_serialized::Facade<WH2_SMALL_CODEC_K, Selected>;
+static_assert(F::ProfileId == WH2_SMALL_PROFILE_ID, "selected descriptor identity");
+static_assert(F::MaxBlockBytes == WH2_SMALL_MAX_BLOCK_BYTES, "selected slab bound");
 }
 
 extern "C" Wh2SmallStatus wh2_small_profile_validate(const void* p, size_t n) noexcept

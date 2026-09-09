@@ -4,20 +4,26 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* Private benchmark C boundary, currently instantiated for K3 only. Not
+/* Private benchmark C boundary, built for exactly one of K3 (default) or K5. Not
  * installed, not selected by WH1/WH2/K6, and not a production speed claim.
  * Initialize the shared runtime with wirehair_init() before codec calls.
  * Only live handles returned by this boundary may be passed back. Calls and
  * source mutation/free are externally serialized. A null free is harmless.
  *
- * The 32-byte little-endian descriptor fixes the exact sealed K3 equations:
- * WHK3 / u16 version1 / u16 size32 / u64 profile ID / u64 message bytes /
+ * The 32-byte little-endian descriptor fixes the exact sealed equations:
+ * WHK3 or WHK5 / u16 version1 / u16 size32 / u64 profile ID / u64 message bytes /
  * u32 block bytes / u32 zero. No external table or live encoder is required.
  * Unknown and retired descriptors are rejected, never reinterpreted.
  */
 #define WH2_SMALL_PROFILE_BYTES 32u
-#define WH2_SMALL_PROFILE_ID UINT64_C(0x5748324b33544d31)
-#define WH2_SMALL_MAX_BLOCK_BYTES (UINT32_C(268435456) / 4u)
+#ifndef WH2_SMALL_CODEC_K
+#define WH2_SMALL_CODEC_K 3
+#endif
+#if WH2_SMALL_CODEC_K != 3 && WH2_SMALL_CODEC_K != 5
+#error "Unsupported benchmark boundary dimension"
+#endif
+#define WH2_SMALL_PROFILE_ID (UINT64_C(0x5748324b30544d31) + ((uint64_t)WH2_SMALL_CODEC_K << 24))
+#define WH2_SMALL_MAX_BLOCK_BYTES (UINT32_C(268435456) / (WH2_SMALL_CODEC_K + 1u))
 
 #ifdef __cplusplus
 #define WH2_SMALL_NOEXCEPT noexcept
@@ -57,7 +63,7 @@ Wh2SmallCreateResult wh2_small_decoder_create(const void*, size_t) WH2_SMALL_NOE
 /* First borrowed detach allocates/copies transactionally; failure preserves
  * the old source obligation. Independent/repeated detach allocates nothing. */
 Wh2SmallStatus wh2_small_encoder_detach_input(Wh2SmallCodec) WH2_SMALL_NOEXCEPT;
-/* ID2 carries its meaningful tail; other packets have block_bytes bytes.
+/* ID K-1 carries its meaningful tail; other packets have block_bytes bytes.
  * Outputs may not overlap handle/private storage/table or retained source.
  * Encode/Decode/Recover allocate nothing. Capacity/alias failures do not write.
  * Decode copies input during the call. Contradictions permanently poison the

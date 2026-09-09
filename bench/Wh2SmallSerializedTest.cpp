@@ -14,9 +14,10 @@
 
 
 #ifndef WH2_SMALL_TEST_K
-#define WH2_SMALL_TEST_K 3
+#define WH2_SMALL_TEST_K WH2_SMALL_CODEC_K
 #endif
-#if WH2_SMALL_TEST_K == 3
+#if WH2_SMALL_TEST_K == 3 || WH2_SMALL_TEST_K == 5
+static_assert(WH2_SMALL_TEST_K == WH2_SMALL_CODEC_K, "test matches external boundary");
 struct Api {
     static constexpr uint64_t ProfileId = WH2_SMALL_PROFILE_ID;
     static constexpr uint32_t MaxBlockBytes = WH2_SMALL_MAX_BLOCK_BYTES;
@@ -118,10 +119,12 @@ struct Oracle {
     {
         const Byte six[6] = {124, 127, 152, 84, 241, 63};
         const Byte three[3] = {8, 14, 7};
+        const Byte five[5] = {121, 110, 207, 198, 31};
         for (unsigned phase = 0; phase < 2; ++phase) {
             powers[phase][0].fill(0);
             for (unsigned i = 0; i < K - 1; ++i) powers[phase][0][(i + 1) * K + i] = 1;
-            for (unsigned i = 0; i < K; ++i) powers[phase][0][i * K + K - 1] = (K == 3 ? three[i] : six[i]) ^ (i == 0 ? phase : 0);
+            for (unsigned i = 0; i < K; ++i) powers[phase][0][i * K + K - 1] =
+                (K == 3 ? three[i] : K == 5 ? five[i] : six[i]) ^ (i == 0 ? phase : 0);
         }
         for (unsigned level = 1; level < 32; ++level) {
             powers[0][level] = Product(powers[0][level - 1], powers[1][level - 1]);
@@ -215,7 +218,7 @@ void Lifecycle(const Oracle& oracle, uint32_t block, uint32_t tail, uint32_t pol
         legacy_encoder = old.codec;
     } else {
         Check(wirehair_k6_profile_validate(profile.data(), profile.size()) == WirehairK6_UnsupportedProfile,
-              "installed K6 rejects K3 profile");
+              "installed K6 rejects other dimension profile");
     }
     if (policy == Wh2Small_Independent) {
         std::fill(source.begin(), source.end(), 0x5a);
@@ -314,10 +317,10 @@ void Malformed()
     reject(good.data(), 33, Wh2Small_InvalidInput);
     reject(nullptr, 32, Wh2Small_InvalidInput);
     reject(reinterpret_cast<void*>(UINTPTR_MAX - 15), 32, Wh2Small_InvalidInput);
-    {
+    for (unsigned other_k : {3u, 5u, 6u}) if (other_k != K) {
         Profile other = good;
-        other[3] = K == 3 ? '6' : '3';
-        Put(other.data() + 8, K == 3 ? WIREHAIR_K6_PROFILE_ID : WH2_SMALL_PROFILE_ID, 8);
+        other[3] = static_cast<Byte>('0' + other_k);
+        Put(other.data() + 8, UINT64_C(0x5748324b30544d31) + (uint64_t(other_k) << 24), 8);
         reject(other.data(), other.size(), Wh2Small_UnsupportedProfile);
     }
     for (unsigned i = 0; i < 32; ++i) if (i < 16 || i >= 28)

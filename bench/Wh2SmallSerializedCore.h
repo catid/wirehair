@@ -10,7 +10,7 @@ namespace wh2_small_serialized {
 namespace N = wirehair_small_core;
 
 template<unsigned K, class Traits> class Facade {
-    static_assert(K == 3 || K == 6, "Only screened K3/K6 dimensions");
+    static_assert(K == 3 || K == 5 || K == 6, "Only screened K3/K5/K6 dimensions");
     typedef N::Encoder<K> Encoder;
     typedef N::Decoder<K> Decoder;
     struct Shape { uint64_t message; uint32_t block; };

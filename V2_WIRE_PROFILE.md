@@ -359,6 +359,38 @@ full encoder/decoder timing comparison. It does not add an installed K5
 profile, change ordinary WH2 selection, repair the existing admission timing
 regressions, or establish all-K performance or construction-seed coverage.
 
+### K5 native payload qualification (benchmark boundary only)
+
+The sealed K5 equations now instantiate the existing compile-time small core
+and benchmark C boundary, using `WHK5` / `0x5748324b35544d31`. The decoder
+algorithm and shared arithmetic are unchanged; K5 does not use the six-source
+tiny-payload specialization. The generated lookup exactly matches the sealed
+29,440-byte hash above. No installed K5 profile or ordinary selector is added.
+
+Native, portable-arithmetic, and ASan/UBSan builds each passed all seven
+standalone correctness tests. The retained corpus has 10,053 cases and 75,134
+packet/feed/prefix-recovery checks, plus 2,270 recorded rows. It includes all
+6,144 fresh and 72 hard traces, 57 original-width historical cases from the
+54 unique prefixes, and every five-of-nine subset of the 30 seam windows.
+Both independent and borrowed serialized constructors reproduce the same
+packets and recovery; every encoder is freed before any receiver is created.
+The independent polynomial oracle checks packet bytes, rank, no-write errors,
+guards and repeated recovery. The observed prefix statuses match the original
+eleven five-packet deficiencies and full recovery after one additional packet.
+
+Separate neutral cases exercise partial tails, every packed selector, ownership
+and detach, allocation failures, aliases, malformed and cross-dimension
+descriptors, permanent public conflict poison, and original K6 parity.
+Recompiling both affected native production translation units with their
+recorded flags produces byte-identical `WirehairSmall.cpp.o` and
+`WirehairV2Profile.cpp.o`. Existing production selection is unchanged.
+
+This is an engineering replay of retained evidence, not additional independent
+recovery samples or a paired WH1 recovery comparison. Actual full-lifecycle
+WH1 timing, installed admission, preserved-path regression qualification, and
+the full all-K objective remain outstanding. See the standalone
+[build instructions](bench/Wh2SmallNative/README.md).
+
 ## Retired equation profile identifiers
 
 The identifiers `e161ce5d456f9bb7` and `20a4f27a870612a2` are permanently

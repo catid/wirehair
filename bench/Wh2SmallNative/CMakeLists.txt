@@ -14,20 +14,28 @@ option(WH2_SMALL_PORTABLE "Match an ANDROID-selected portable GF256 library layo
 if(NOT EXISTS "${WH2_SMALL_LIBRARY}")
     message(FATAL_ERROR "WH2_SMALL_LIBRARY must name an existing qualified library")
 endif()
+set(WH2_SMALL_TEST_DIMENSION "3" CACHE STRING "Sealed benchmark dimension: 3 or 5")
+set_property(CACHE WH2_SMALL_TEST_DIMENSION PROPERTY STRINGS 3 5)
+if(NOT WH2_SMALL_TEST_DIMENSION MATCHES "^(3|5)$")
+    message(FATAL_ERROR "Only sealed benchmark dimensions 3 and 5 are supported")
+endif()
+set(WH2_SMALL_DATA "Wh2K${WH2_SMALL_TEST_DIMENSION}NativeData")
 find_package(Python3 3.8 REQUIRED COMPONENTS Interpreter)
-add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/Wh2K3NativeData.inc"
-    COMMAND "${Python3_EXECUTABLE}" -I -B -S "${WH2_ROOT}/bench/Wh2K3NativeDataR0.py"
-            --header "${CMAKE_CURRENT_BINARY_DIR}/Wh2K3NativeData.inc"
+add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/${WH2_SMALL_DATA}.inc"
+    COMMAND "${Python3_EXECUTABLE}" -I -B -S "${WH2_ROOT}/bench/${WH2_SMALL_DATA}R0.py"
+            --header "${CMAKE_CURRENT_BINARY_DIR}/${WH2_SMALL_DATA}.inc"
     # The generator preserves matching bytes. Refresh only the build output's
     # timestamp so an unchanged reconstruction does not run on every build.
-    COMMAND "${CMAKE_COMMAND}" -E touch "${CMAKE_CURRENT_BINARY_DIR}/Wh2K3NativeData.inc"
-    DEPENDS "${WH2_ROOT}/bench/Wh2K3NativeDataR0.py"
+    COMMAND "${CMAKE_COMMAND}" -E touch "${CMAKE_CURRENT_BINARY_DIR}/${WH2_SMALL_DATA}.inc"
+    DEPENDS "${WH2_ROOT}/bench/${WH2_SMALL_DATA}R0.py"
             "${WH2_ROOT}/bench/Wh2NoncommutingRadixRunR0.py"
+            "${WH2_ROOT}/bench/Wh2K3NativeDataR0.py"
     VERBATIM)
+add_custom_target(wh2_small_data DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/${WH2_SMALL_DATA}.inc")
 add_executable(wh2_small_native_test
     "${WH2_ROOT}/bench/Wh2SmallNativeTest.cpp"
-    "${WH2_ROOT}/bench/Wh2FrozenTrace.cpp"
-    "${CMAKE_CURRENT_BINARY_DIR}/Wh2K3NativeData.inc")
+    "${WH2_ROOT}/bench/Wh2FrozenTrace.cpp")
+add_dependencies(wh2_small_native_test wh2_small_data)
 target_include_directories(wh2_small_native_test PRIVATE "${WH2_ROOT}" "${CMAKE_CURRENT_BINARY_DIR}")
 target_link_libraries(wh2_small_native_test PRIVATE "${WH2_SMALL_LIBRARY}")
 if(WH2_SMALL_PORTABLE)
@@ -36,6 +44,7 @@ endif()
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(wh2_small_native_test PRIVATE -Wall -Wextra -Wpedantic -Werror -fno-strict-aliasing)
 endif()
+target_compile_definitions(wh2_small_native_test PRIVATE WH2_SMALL_CODEC_K=${WH2_SMALL_TEST_DIMENSION})
 enable_testing()
 add_test(NAME small_neutral COMMAND wh2_small_native_test --neutral)
 add_test(NAME small_corpus COMMAND wh2_small_native_test --corpus)
@@ -44,8 +53,8 @@ set_tests_properties(small_neutral small_corpus PROPERTIES TIMEOUT 120)
 # Keep the complete serialized C boundary in a separate, non-LTO translation
 # unit. The installed library and its qualified K6 implementation are inputs,
 # not edited/rebuilt/replaced by this standalone project.
-add_library(wh2_small_serialized STATIC "${WH2_ROOT}/bench/Wh2SmallSerialized.cpp"
-    "${CMAKE_CURRENT_BINARY_DIR}/Wh2K3NativeData.inc")
+add_library(wh2_small_serialized STATIC "${WH2_ROOT}/bench/Wh2SmallSerialized.cpp")
+add_dependencies(wh2_small_serialized wh2_small_data)
 set_target_properties(wh2_small_serialized PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_link_libraries(wh2_small_serialized PUBLIC "${WH2_SMALL_LIBRARY}")
 add_executable(wh2_small_serialized_test "${WH2_ROOT}/bench/Wh2SmallSerializedTest.cpp")
@@ -54,11 +63,12 @@ target_compile_definitions(wh2_small_serialized_k6_test PRIVATE WH2_SMALL_TEST_K
 add_executable(wh2_small_serialized_c_test "${WH2_ROOT}/bench/Wh2SmallSerializedCTest.c")
 set_target_properties(wh2_small_serialized_c_test PROPERTIES LINKER_LANGUAGE CXX)
 add_executable(wh2_small_serialized_corpus_test
-    "${WH2_ROOT}/bench/Wh2SmallNativeTest.cpp" "${WH2_ROOT}/bench/Wh2FrozenTrace.cpp"
-    "${CMAKE_CURRENT_BINARY_DIR}/Wh2K3NativeData.inc")
+    "${WH2_ROOT}/bench/Wh2SmallNativeTest.cpp" "${WH2_ROOT}/bench/Wh2FrozenTrace.cpp")
+add_dependencies(wh2_small_serialized_corpus_test wh2_small_data)
 target_compile_definitions(wh2_small_serialized_corpus_test PRIVATE WH2_SMALL_TEST_SERIALIZED=1)
 foreach(target IN ITEMS wh2_small_serialized wh2_small_serialized_test wh2_small_serialized_k6_test
         wh2_small_serialized_c_test wh2_small_serialized_corpus_test)
+    target_compile_definitions(${target} PRIVATE WH2_SMALL_CODEC_K=${WH2_SMALL_TEST_DIMENSION})
     target_include_directories(${target} PRIVATE "${WH2_ROOT}" "${WH2_ROOT}/include" "${CMAKE_CURRENT_BINARY_DIR}")
     if(WH2_SMALL_PORTABLE)
         target_compile_definitions(${target} PRIVATE ANDROID WH2_SMALL_EXPECT_PORTABLE=1)
