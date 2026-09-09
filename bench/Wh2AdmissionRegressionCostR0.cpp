@@ -35,7 +35,13 @@
 namespace {
 const char protocol[]=WH2_ADMISSION_PROTOCOL;
 const char claim_path[]=WH2_ADMISSION_CLAIM_PATH;
+#ifdef WH2_ADMISSION_PUBLIC_SMALL
+const unsigned case_count=32,max_batch=128,callbacks=82944;
+#define WH2_ADMISSION_V2(family) ((family)==Certified || (family)==PublicSmall)
+#else
 const unsigned case_count=20,max_batch=128,callbacks=51840;
+#define WH2_ADMISSION_V2(family) ((family)==Certified)
+#endif
 const unsigned pairs[3][2]={{0,0},{1,1},{0,1}};
 const unsigned sides[18]={0,1,0,1,1,0,1,0,0,1,1,0,0,1,0,1,1,0};
 using Profile=std::array<uint8_t,32>;
@@ -130,22 +136,40 @@ void Load(unsigned order) {
 struct Symbols {
 #define DECLARE(name) decltype(&::name) name=nullptr;
     API_SYMBOLS(DECLARE)
+#ifdef WH2_ADMISSION_PUBLIC_SMALL
+    DECLARE(wirehair_v2_encoder_create)
+    DECLARE(wirehair_v2_encoder_create_with_options)
+#endif
 #undef DECLARE
     void Bind(void* library) {
 #define BIND(name) name=reinterpret_cast<decltype(name)>(dlsym(library,#name)); Check(name!=nullptr,"typed API symbol");
         API_SYMBOLS(BIND)
+#ifdef WH2_ADMISSION_PUBLIC_SMALL
+        BIND(wirehair_v2_encoder_create)
+        BIND(wirehair_v2_encoder_create_with_options)
+#endif
 #undef BIND
     }
 };
 Symbols symbols[2];
-enum Family { Certified,Small,Wh1,K6 };
+enum Family { Certified,Small,Wh1,K6
+#ifdef WH2_ADMISSION_PUBLIC_SMALL
+    ,PublicSmall
+#endif
+};
 struct Case { unsigned family,k,b,policy; };
 const Case cases[case_count]={
     {Certified,2,2,2},{Certified,2,1280,2},{Certified,3,2,2},{Certified,3,1280,2},
     {Certified,4,2,2},{Certified,4,1280,2},{Certified,6,2,2},{Certified,6,1280,2},
     {Certified,128,2,2},{Certified,128,1280,2},{Certified,3,2,1},{Certified,3,1280,1},
     {Small,3,2,1},{Small,3,2,2},{Small,3,1280,1},{Small,3,1280,2},
-    {Wh1,3,2,2},{Wh1,3,1280,2},{K6,6,2,2},{K6,6,1280,2}};
+    {Wh1,3,2,2},{Wh1,3,1280,2},{K6,6,2,2},{K6,6,1280,2}
+#ifdef WH2_ADMISSION_PUBLIC_SMALL
+    ,{PublicSmall,3,2,1},{PublicSmall,3,2,2},{PublicSmall,3,64,1},{PublicSmall,3,64,2},
+    {PublicSmall,3,1280,1},{PublicSmall,3,1280,2},{PublicSmall,5,2,1},{PublicSmall,5,2,2},
+    {PublicSmall,5,64,1},{PublicSmall,5,64,2},{PublicSmall,5,1280,1},{PublicSmall,5,1280,2}
+#endif
+};
 unsigned Batch(const Case& c) { return c.k==128?4:128; }
 unsigned PacketCount(const Case& c) { return c.k+14; }
 uint32_t Packet(const Case& c,unsigned slot) { return slot<c.k+8?slot:UINT32_MAX-2*(slot-c.k-8); }
@@ -160,6 +184,18 @@ struct Api {
     const Symbols* s=nullptr; Case c={};
     int Create(const void* source,Profile& p,void*& h) const {
         const uint64_t m=uint64_t(c.k)*c.b;
+#ifdef WH2_ADMISSION_PUBLIC_SMALL
+        if(c.family==PublicSmall) {
+            WirehairV2EncoderOptions o=WIREHAIR_V2_ENCODER_OPTIONS_INIT; o.source_policy=c.policy;
+            HandleResult<WirehairV2Codec> a(h); uint32_t n=0;
+            const int r=c.k==3 ? (c.policy==1 ?
+                s->wirehair_v2_encoder_create(source,m,c.b,p.data(),32,&n,&a.value) :
+                s->wirehair_v2_encoder_create_with_options(source,m,c.b,&o,p.data(),32,&n,&a.value)) :
+                s->wirehair_v2_encoder_create_profile_id_with_options(
+                    WIREHAIR_V2_PROFILE_SMALL_K5_2026_09,source,m,c.b,&o,p.data(),32,&n,&a.value);
+            return r==0 && n!=32?-1:r;
+        }
+#endif
         if(c.family==Certified) {
             WirehairV2EncoderOptions o=WIREHAIR_V2_ENCODER_OPTIONS_INIT; o.source_policy=c.policy;
             HandleResult<WirehairV2Codec> a(h); uint32_t n=0;
@@ -175,7 +211,7 @@ struct Api {
         return (c.policy==1?s->wirehair_encoder_create_owned_ex:s->wirehair_encoder_create_ex)(nullptr,source,m,c.b,&a.value);
     }
     int Encode(void* h,uint32_t id,void* out,uint32_t* n) const {
-        if(c.family==Certified) return s->wirehair_v2_encode(static_cast<WirehairV2Codec>(h),id,out,c.b,n);
+        if(WH2_ADMISSION_V2(c.family)) return s->wirehair_v2_encode(static_cast<WirehairV2Codec>(h),id,out,c.b,n);
         if(c.family==Wh1) return s->wirehair_encode(static_cast<WirehairCodec>(h),id,out,c.b,n);
         if(c.family==Small) { const auto r=s->wirehair_small_encode(static_cast<WirehairSmallCodec>(h),id,out,c.b);
             *n=uint32_t(r.bytes_written); return r.status==0 && (r.bytes_written!=c.b || r.bytes_required!=c.b)?-1:r.status; }
@@ -183,7 +219,7 @@ struct Api {
         *n=uint32_t(r.bytes_written); return r.status==0 && (r.bytes_written!=c.b || r.bytes_required!=c.b)?-1:r.status;
     }
     int Decoder(const Profile& p,void*& h) const {
-        if(c.family==Certified) { HandleResult<WirehairV2Codec> a(h);
+        if(WH2_ADMISSION_V2(c.family)) { HandleResult<WirehairV2Codec> a(h);
             return s->wirehair_v2_decoder_create(p.data(),32,&a.value); }
         if(c.family==Small) { const auto r=s->wirehair_small_decoder_create(p.data(),32); h=r.codec; return r.status; }
         if(c.family==K6) { const auto r=s->wirehair_k6_decoder_create(p.data(),32); h=r.codec; return r.status; }
@@ -191,14 +227,14 @@ struct Api {
         return s->wirehair_decoder_create_ex(nullptr,uint64_t(c.k)*c.b,c.b,&a.value);
     }
     int Feed(void* h,uint32_t id,const void* in) const {
-        if(c.family==Certified) return s->wirehair_v2_decode(static_cast<WirehairV2Codec>(h),id,in,c.b);
+        if(WH2_ADMISSION_V2(c.family)) return s->wirehair_v2_decode(static_cast<WirehairV2Codec>(h),id,in,c.b);
         if(c.family==Small) return s->wirehair_small_decode(static_cast<WirehairSmallCodec>(h),id,in,c.b);
         if(c.family==K6) return s->wirehair_k6_decode(static_cast<WirehairK6Codec>(h),id,in,c.b);
         return s->wirehair_decode(static_cast<WirehairCodec>(h),id,in,c.b);
     }
     int Recover(void* h,void* out,uint64_t* n) const {
         const uint64_t m=uint64_t(c.k)*c.b;
-        if(c.family==Certified) return s->wirehair_v2_recover(static_cast<WirehairV2Codec>(h),out,m,n);
+        if(WH2_ADMISSION_V2(c.family)) return s->wirehair_v2_recover(static_cast<WirehairV2Codec>(h),out,m,n);
         if(c.family==Small) { const auto r=s->wirehair_small_recover(static_cast<WirehairSmallCodec>(h),out,size_t(m));
             *n=r.bytes_written; return r.status==0 && r.bytes_required!=m?-1:r.status; }
         if(c.family==K6) { const auto r=s->wirehair_k6_recover(static_cast<WirehairK6Codec>(h),out,size_t(m));
@@ -206,7 +242,7 @@ struct Api {
         const int r=s->wirehair_recover(static_cast<WirehairCodec>(h),out,m); *n=r==0?m:0; return r;
     }
     void Free(void* h) const {
-        if(c.family==Certified) s->wirehair_v2_free(static_cast<WirehairV2Codec>(h));
+        if(WH2_ADMISSION_V2(c.family)) s->wirehair_v2_free(static_cast<WirehairV2Codec>(h));
         else if(c.family==Small) s->wirehair_small_free(static_cast<WirehairSmallCodec>(h));
         else if(c.family==K6) s->wirehair_k6_free(static_cast<WirehairK6Codec>(h));
         else s->wirehair_free(static_cast<WirehairCodec>(h));
@@ -556,8 +592,51 @@ void RosterCheck() {
         for(unsigned p=0;p<48;++p) Check(phases[w][m][c][o][p]==2,"all delay phases");
     }
 }
+#ifdef WH2_ADMISSION_PUBLIC_SMALL
+// Stub only the constructors during neutral route checks. A payload match
+// alone cannot prove the ordinary constructor was used instead of explicit K3.
+unsigned route_calls=0,route_kind=0,route_policy=0,route_b=0;
+uint64_t route_id=0,route_m=0;
+WirehairV2Result RouteRecord(unsigned kind,uint64_t id,const void* source,uint64_t m,uint32_t b,
+    const WirehairV2EncoderOptions* options,void* p,uint32_t capacity,uint32_t* n,WirehairV2Codec* h) {
+    Check(source && p && capacity==32 && n && h,"neutral constructor output arguments");
+    ++route_calls; route_kind=kind; route_id=id; route_m=m; route_b=b;
+    route_policy=options?options->source_policy:1;
+    if(options) Check(options->struct_bytes==16 && options->options_version==1 && options->reserved==0,
+        "neutral constructor options");
+    *n=0; *h=nullptr; return WirehairV2_Error;
+}
+WirehairV2Result RouteOrdinary(const void* s,uint64_t m,uint32_t b,void* p,uint32_t cap,uint32_t* n,WirehairV2Codec* h) {
+    return RouteRecord(1,0,s,m,b,nullptr,p,cap,n,h);
+}
+WirehairV2Result RouteOptions(const void* s,uint64_t m,uint32_t b,const WirehairV2EncoderOptions* o,
+    void* p,uint32_t cap,uint32_t* n,WirehairV2Codec* h) {
+    return RouteRecord(2,0,s,m,b,o,p,cap,n,h);
+}
+WirehairV2Result RouteExplicit(uint64_t id,const void* s,uint64_t m,uint32_t b,const WirehairV2EncoderOptions* o,
+    void* p,uint32_t cap,uint32_t* n,WirehairV2Codec* h) {
+    return RouteRecord(3,id,s,m,b,o,p,cap,n,h);
+}
+void PublicSmallRouteCheck() {
+    for(unsigned i=20;i<case_count;++i) for(unsigned a=0;a<2;++a) {
+        const auto& f=fixtures[i]; const auto& c=f.c;
+        Symbols probe=symbols[a]; Api api=f.api[a]; api.s=&probe;
+        probe.wirehair_v2_encoder_create=RouteOrdinary;
+        probe.wirehair_v2_encoder_create_with_options=RouteOptions;
+        probe.wirehair_v2_encoder_create_profile_id_with_options=RouteExplicit;
+        Profile p={}; void* h=nullptr; route_calls=0;
+        Check(api.Create(f.source.data(),p,h)==WirehairV2_Error && h==nullptr,"neutral constructor propagation");
+        Check(route_calls==1 && route_kind==(c.k==3?c.policy:3) && route_policy==c.policy &&
+            route_id==(c.k==3?0:WIREHAIR_V2_PROFILE_SMALL_K5_2026_09) && route_m==uint64_t(c.k)*c.b &&
+            route_b==c.b,"actual ordinary K3/explicit K5 constructor route");
+    }
+}
+#endif
 int Neutral(unsigned order,bool fixtures_only) {
     RosterCheck(); Pin(); Initialize(order); const std::string identity=Identity();
+#ifdef WH2_ADMISSION_PUBLIC_SMALL
+    PublicSmallRouteCheck();
+#endif
     unsigned checked=0;
     if(!fixtures_only) for(unsigned i=0;i<case_count;++i) for(unsigned m=0;m<2;++m) for(unsigned a=0;a<2;++a) for(unsigned lane=0;lane<2;++lane) {
         auto& f=fixtures[i]; Prepare(f); Work w; Observation o; FakeReader reader;
@@ -568,7 +647,7 @@ int Neutral(unsigned order,bool fixtures_only) {
     for(unsigned a=0;a<2;++a) libraries[a]->Validate(a);
     Check(Identity()==identity,"neutral target stability");
     if(fixtures_only) { Observation o; FakeReader r; Capture(r,[]{},o); HeaderJson(std::string(64,'0'),order,identity,o); }
-    else printf("PASS neutral51840-coordinate roster, %u native WORK cases; no timing\n",checked);
+    else printf("PASS neutral%u-coordinate roster, %u native WORK cases; no timing\n",callbacks,checked);
     return 0;
 }
 unsigned Order(const char* s) { Check(!strcmp(s,"old-new") || !strcmp(s,"new-old"),"explicit load order"); return !strcmp(s,"new-old"); }

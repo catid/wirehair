@@ -59,13 +59,13 @@ def provenance(proof_dir=None):
     return result,inputs
 
 
-def verify_publication(raw,mode,order,meta,reference_header):
+def verify_publication(raw,mode,order,meta,reference_header,protocol=PROTOCOL,header_checker=None):
     A.require(mode in PUBLICATIONS,'explicit neutral publication case')
     A.require(raw.endswith(b'\n') and len(raw)<4*1024*1024,'complete bounded neutral publication')
     rows = [A.decode(line) for line in raw.splitlines()]
     A.exact(len(rows),5,'three retained neutral records with header/footer')
     header,records,footer = rows[0],rows[1:-1],rows[-1]
-    R.verify_header(header,order,'0'*64,meta,PROTOCOL)
+    (R.verify_header if header_checker is None else header_checker)(header,order,'0'*64,meta,protocol)
     # DSO bases legitimately vary between these separate neutral processes.
     # Their complete binding graphs are independently checked above.
     A.exact({k:v for k,v in header.items() if k!='bindings'},
@@ -106,12 +106,12 @@ def verify_publication(raw,mode,order,meta,reference_header):
     return dict(mode=mode,load_order=order,records=3,scientific_launch=False)
 
 
-def qualify(executable,output,meta,mode):
+def qualify(executable,output,meta,mode,protocol=PROTOCOL,header_checker=None):
     for order,name in enumerate(('old-new','new-old')):
         reference=A.decode(A.read_regular(output/('fixtures-'+name+'.json'),4*1024*1024))
         for case in PUBLICATIONS:
             raw=R.command([executable,'--neutral-publication',name,case])
-            verify_publication(raw,case,order,meta,reference)
+            verify_publication(raw,case,order,meta,reference,protocol,header_checker)
             A.publish(output/('publication-'+name+'-'+case+'.jsonl'),raw)
     failures=[]
     with open('/dev/full','wb') as full:

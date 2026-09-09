@@ -118,14 +118,18 @@ def bindings_header(meta):
             'const LibrarySpec library_specs[2]={'+',\n'.join(rows)+'};\n').encode()
 
 
-def roster():
+def callback_count(cases=CASES):
+    return len(cases)*12*2*2*3*18
+
+
+def roster(cases=CASES):
     index = 0
     for r in range(12):
         for s in range(2):
-            for ws in range(len(CASES)):
+            for ws in range(len(cases)):
                 for ms in range(2):
                     for cs in range(3):
-                        order, which, metric = (r+s)%2, (r+s+ws)%len(CASES), (r+s+ws+ms)%2
+                        order, which, metric = (r+s)%2, (r+s+ws)%len(cases), (r+s+ws+ms)%2
                         comparison = (2*r+s+ws+metric+cs)%3
                         for p in range(18):
                             phase = r+12*(r%4) if p<2 else (r+6*((p-2)//8))%12+12*(((p-2)%8)//2)
@@ -134,12 +138,13 @@ def roster():
                             index += 1
 
 
-def statistics(records):
-    A.exact(len(records),CALLBACKS,'complete statistical cohort')
-    for row,coordinate in zip(records,roster()):
+def statistics(records, cases=CASES):
+    count = callback_count(cases)
+    A.exact(len(records),count,'complete statistical cohort')
+    for row,coordinate in zip(records,roster(cases)):
         A.exact(row['coordinate'],coordinate,'complete fixed statistical chronology')
     groups = {}
-    for start in range(0,CALLBACKS,18):
+    for start in range(0,count,18):
         panel, contrasts = records[start:start+18], []
         for j in range(8):
             values = {}
@@ -152,7 +157,7 @@ def statistics(records):
             contrasts.append(math.log(values[1])-math.log(values[0]))
         c = panel[0]['coordinate']
         groups.setdefault((c[3],c[4],c[5],c[2]),[]).append(math.fsum(contrasts)/8)
-    A.exact(len(groups),240,'all separate cost cells')
+    A.exact(len(groups),len(cases)*12,'all separate cost cells')
     results, controls, regressions, uncertain = [], [], [], []
     bound = math.log1p(.02)
     for key, values in sorted(groups.items()):
@@ -160,7 +165,7 @@ def statistics(records):
         which, metric, comparison, order = key
         estimate = A.confidence(values)
         lo, hi = estimate['lower95_log'], estimate['upper95_log']
-        item = dict(case=list(CASES[which]),metric=metric,comparison=comparison,order=order,
+        item = dict(case=list(cases[which]),metric=metric,comparison=comparison,order=order,
                     estimate=estimate,replicate_logs=values)
         if comparison<2:
             passed = -bound<lo and hi<bound
@@ -250,18 +255,19 @@ def verify_header(header, order, claim, meta, protocol=PROTOCOL):
 
 
 
-def verify_rows(rows, claim, order, meta, protocol=PROTOCOL):
-    A.exact(len(rows),CALLBACKS+2,'whole raw cohort')
+def verify_rows(rows, claim, order, meta, protocol=PROTOCOL, cases=CASES, header_checker=None):
+    count = callback_count(cases)
+    A.exact(len(rows),count+2,'whole raw cohort')
     header,footer = rows[0],rows[-1]
-    verify_header(header,order,claim,meta,protocol)
+    (verify_header if header_checker is None else header_checker)(header,order,claim,meta,protocol)
     previous = header['prelude']; work = 0
-    for row,coordinate in zip(rows[1:-1],roster()):
+    for row,coordinate in zip(rows[1:-1],roster(cases)):
         A.exact(set(row),{'type','coordinate','ready','target','wait','observation','counts',
                          'addresses','address_count','complete','checked'},'record schema')
         A.exact(row['type'],'record','record type')
         A.exact(row['coordinate'],coordinate,'fixed chronology')
         _,_,_,which,metric,_,_,arm,q = coordinate
-        c = CASES[which]; cycles = batch(c)
+        c = cases[which]; cycles = batch(c)
         ready,target = A.integer(row['ready']),A.integer(row['target'])
         A.require(previous['clocks'][5]<=ready and target==ready+q,'relative completion delay')
         A.exact(len(row['wait']),4,'wait shape')
@@ -284,14 +290,14 @@ def verify_rows(rows, claim, order, meta, protocol=PROTOCOL):
                 A.exact(address,0,'unused address slot')
         A.exact(row['complete'],True,'all WORK complete')
         A.exact(row['checked'],True,'all outputs checked')
-    A.exact(footer,dict(type='footer',complete=True,records=CALLBACKS,work_ns=work),'terminal complete footer')
+    A.exact(footer,dict(type='footer',complete=True,records=count,work_ns=work),'terminal complete footer')
     A.require(work<=150000000000,'inner WORK cap')
-    return statistics(rows[1:-1])
+    return statistics(rows[1:-1],cases)
 
 
-def verify(raw, claim, order, meta, protocol=PROTOCOL):
+def verify(raw, claim, order, meta, protocol=PROTOCOL, cases=CASES, header_checker=None):
     A.require(0<len(raw)<=RAW_CAP and raw.endswith(b'\n'),'complete bounded raw stream')
-    return verify_rows([A.decode(line) for line in raw.splitlines()],claim,order,meta,protocol)
+    return verify_rows([A.decode(line) for line in raw.splitlines()],claim,order,meta,protocol,cases,header_checker)
 
 
 def combine(results, protocol=PROTOCOL):
@@ -431,7 +437,8 @@ def library_provenance(proof_dir=None, diagnostic_exclusions=()):
 # Explicit worker adapters may vary publication, never the default R0 worker.
 # Existing configurations retain their original worker and neutral checks.
 Configuration = namedtuple('Configuration',
-    'protocol output libraries sources provenance worker_source qualify', defaults=(None,None))
+    'protocol output libraries sources provenance worker_source qualify cases header_checker result_combiner',
+    defaults=(None,None,CASES,None,None))
 
 
 def configuration(value):
@@ -523,7 +530,7 @@ def build(mode, output, settings=None):
     for order,name in enumerate(('old-new','new-old')):
         A.publish(output/('neutral-'+name+'.txt'),command([exe,'--neutral',name]))
         raw = command([exe,'--neutral-fixtures',name])
-        verify_header(A.decode(raw),order,'0'*64,meta,cfg.protocol)
+        (verify_header if cfg.header_checker is None else cfg.header_checker)(A.decode(raw),order,'0'*64,meta,cfg.protocol)
         A.publish(output/('fixtures-'+name+'.json'),raw)
     rejections = []
     for tail in ([],['--worker'],['--worker','0'*64,'bad-order'],['--worker','0'*64,'old-new'],
@@ -602,7 +609,8 @@ def current(frozen, settings=None):
             A.require(path.parent==folder and str(path) in declared,'mandatory recompiled producer proof')
             A.exact(O.pin(path)['sha256'],proof['sha256'],'byte-identical recompiled producer')
     for order,name in enumerate(('old-new','new-old')):
-        verify_header(A.decode(A.read_regular(folder/('fixtures-'+name+'.json'),4*1024*1024)),order,'0'*64,meta,cfg.protocol)
+        (verify_header if cfg.header_checker is None else cfg.header_checker)(
+            A.decode(A.read_regular(folder/('fixtures-'+name+'.json'),4*1024*1024)),order,'0'*64,meta,cfg.protocol)
     return meta
 
 
@@ -695,7 +703,7 @@ def run(receipt_path, settings=None):
                                   elapsed_seconds=time.monotonic()-start,stdout_bytes=len(raw),stderr_bytes=len(error)))
             try:
                 A.require(failure is None and code==0 and error==b'','worker/observer failure: '+str(failure))
-                result = verify(raw,A.sha(raw_receipt),order,meta,cfg.protocol)
+                result = verify(raw,A.sha(raw_receipt),order,meta,cfg.protocol,cfg.cases,cfg.header_checker)
                 results.append(result)
             except Exception as problem:
                 failures.append(dict(load_order=name,failure=str(problem)))
@@ -710,7 +718,7 @@ def run(receipt_path, settings=None):
                         static_speed_qualified=False,all_K_claimed=False,recovery_rate_claimed=False,
                         production_promotion_claimed=False)
     else:
-        analysis = combine(results,cfg.protocol)
+        analysis = (combine if cfg.result_combiner is None else cfg.result_combiner)(results,cfg.protocol)
     analysis.update(elapsed_seconds=time.monotonic()-begin,load_order_names=['old-new','new-old'])
     A.publish(output/'processes.json',A.canonical(processes))
     A.publish(output/'analysis.json',A.canonical(analysis))
@@ -748,8 +756,8 @@ def replay(settings=None):
         A.exact((p['load_order'],p['returncode'],p['observer_failure'],p['stdout_bytes'],p['stderr_bytes']),
                 (name,0,None,len(raw),0),'successful observer record')
         A.require(type(p['elapsed_seconds']) in (int,float) and 0<p['elapsed_seconds']<240,'observer deadline')
-        result.append(verify(raw,A.sha(raw_receipt),order,meta,cfg.protocol))
-    expected_analysis = combine(result,cfg.protocol)
+        result.append(verify(raw,A.sha(raw_receipt),order,meta,cfg.protocol,cfg.cases,cfg.header_checker))
+    expected_analysis = (combine if cfg.result_combiner is None else cfg.result_combiner)(result,cfg.protocol)
     stored = A.decode(A.read_regular(output/'analysis.json',1024*1024))
     elapsed = stored['elapsed_seconds']
     A.require(type(elapsed) in (int,float) and 0<elapsed<600,'controller deadline')
