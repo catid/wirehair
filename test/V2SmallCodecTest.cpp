@@ -1,5 +1,6 @@
 #include <wirehair/wirehair.h>
 #include <wirehair/wirehair.hpp>
+#include "../codec/WirehairV2Codec.h"
 #include <algorithm>
 #include <array>
 #include <cstdlib>
@@ -20,11 +21,12 @@
 
 namespace {
 bool tracking = false;
-size_t allocations = 0, fail_at = SIZE_MAX;
+size_t allocations = 0, first_allocation_bytes = 0, fail_at = SIZE_MAX;
 }
 SMALL_TEST_NOINLINE void* operator new(size_t n)
 {
     const size_t index = tracking ? allocations++ : SIZE_MAX;
+    if (tracking && index == 0) first_allocation_bytes = n;
     if (index == fail_at && tracking) throw std::bad_alloc();
     void* p = std::malloc(n ? n : 1);
     if (!p) throw std::bad_alloc();
@@ -60,7 +62,7 @@ void Check(bool value, const char* what)
     if (!value) { std::cerr << "FAIL: " << what << '\n'; std::exit(1); }
 }
 void Start(size_t failure = SIZE_MAX)
-{ allocations = 0; fail_at = failure; tracking = true; }
+{ allocations = 0; first_allocation_bytes = 0; fail_at = failure; tracking = true; }
 size_t Stop() { tracking = false; return allocations; }
 Byte Multiply(Byte a, Byte b)
 {
@@ -270,7 +272,8 @@ void AllocationFailures()
             Start();
             auto result = Create(route, policy, source.data(), source.size(), 64, p, &h);
             const size_t count = Stop();
-            Check(result == WirehairV2_Success && count >= 3, "allocation baseline");
+            Check(result == WirehairV2_Success && count == (tail == 64 ? 3u : 4u),
+                "small isolation adds no encoder allocation");
             wirehair_v2_free(h);
             for (size_t fail = 0; fail < count; ++fail) {
                 p = canonical;
@@ -297,6 +300,47 @@ void AllocationFailures()
         Stop();
         Check(result == WirehairV2_OOM && !h, "every decoder OOM transactional");
     }
+}
+void HandleAllocationIsolation()
+{
+    // The pre-admission certified handle's layout, using the current target
+    // ABI rather than a hard-coded 64-bit allocation size. Never instantiate
+    // or reinterpret a live handle as this test-only model.
+    struct PriorCertifiedLayout {
+        wirehair_v2::Codec Impl;
+        uint64_t MessageBytes;
+        uint32_t BlockBytes;
+        int Mode;
+        bool Decoded;
+        int SourceState;
+        const uint8_t* BorrowedSource;
+    };
+    for (unsigned k : {2u, 3u, 4u, 6u, 128u}) for (unsigned policy : {1u, 2u}) {
+        const auto source = Message(size_t(k) * 64 - 1);
+        Profile p = {};
+        WirehairV2EncoderOptions options = WIREHAIR_V2_ENCODER_OPTIONS_INIT;
+        options.source_policy = policy;
+        WirehairV2Codec h = nullptr;
+        uint32_t bytes = 0;
+        Start();
+        auto result = wirehair_v2_encoder_create_profile_id_with_options(
+            WIREHAIR_V2_PROFILE_CERTIFIED_2026_07, source.data(), source.size(),
+            64, &options, p.data(), 32, &bytes, &h);
+        const size_t encoder_count = Stop();
+        Check(result == WirehairV2_Success && h && bytes == 32 && encoder_count != 0 &&
+            first_allocation_bytes == sizeof(PriorCertifiedLayout),
+            "certified encoder retains pre-admission handle size");
+        wirehair_v2_free(h);
+        h = nullptr;
+        Start();
+        result = wirehair_v2_decoder_create(p.data(), 32, &h);
+        const size_t decoder_count = Stop();
+        Check(result == WirehairV2_Success && h && decoder_count != 0 &&
+            first_allocation_bytes == sizeof(PriorCertifiedLayout),
+            "certified decoder retains pre-admission handle size");
+        wirehair_v2_free(h);
+    }
+    wirehair_v2_free(nullptr);
 }
 void Contracts(const Oracle& oracle)
 {
@@ -481,6 +525,7 @@ int main()
 {
     Check(wirehair_init() == Wirehair_Success, "GF256 initialization");
     Oracle oracle;
+    HandleAllocationIsolation();
     Lifecycle(oracle);
     AllocationFailures();
     Contracts(oracle);

@@ -210,6 +210,36 @@ holdout; source-policy and backend replays do not multiply its sample size.
 The result is not a universal recovery guarantee, all-K construction-seed
 validation or an old-path performance regression check.
 
+### Preserved-path regression and small-state isolation
+
+The pre/post shared-library screen at source `26304b3`,
+`wirehair.wh2.admission-regression-cost-r0`, finished **REGRESSION**.
+All 320 same-code controls passed across the two DSO load orders, but
+57 and 56 treatment cells respectively showed resolved slowdowns. Certified
+K2/K3/K4/K6 encoder and decoder lifecycles took 4.8-9.1% more time after the
+ordinary K3 admission. The screen also retained order-sensitive K128 results
+and changes in WH1 and opt-in paths whose producing objects were unchanged;
+it does not establish allocation size as the sole cause. This is a native,
+co-resident shared-library result, not a static-link or all-K claim.
+
+The exact Python 3.8 replay and a separately written raw/statistical audit
+reproduced the outcome before source advancement: 643 pins, 103,680 records
+and 480 statistical decisions. The spent immutable bundle is
+`/var/tmp/wh2-admission-regression-cost-r0`, with analysis SHA-256
+`4bd1c590a36e677655524e04215959ef26fe3342ca01d4453b089d965ee15ada`.
+These regressions remain an unmet ordinary-admission qualification requirement.
+
+The follow-on implementation moves K3-only owning pointers to a private
+derived handle and keeps its operation bodies out of the common dispatch
+functions. The immutable type tag uses existing header padding on the tested
+ABI; no virtual dispatch, new allocation, equation or source-policy change
+is introduced. Certified handle allocation returns from 296 to 272 bytes on
+the native host. Allocation/OOM tests cover correct concrete-type destruction
+and unchanged small-profile allocation counts. These are structural and
+correctness checks, **not evidence that the timing regressions are fixed**;
+a fresh bounded timing gate is still required, including preservation of the
+ordinary K3 speed gain.
+
 ## Retired equation profile identifiers
 
 The identifiers `e161ce5d456f9bb7` and `20a4f27a870612a2` are permanently
