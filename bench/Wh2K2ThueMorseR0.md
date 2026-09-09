@@ -55,3 +55,55 @@ Tests use unrelated matrices and synthetic outcomes, never the frozen
 candidate. Commit/push before receipt and the sole launch. Complete exact and
 independently implemented arithmetic, trace, rank and provenance audits before
 HEAD/report advancement. Never rerun, filter, resize or reselect after results.
+
+## Retained result
+
+The sole screen is **PASS**, produced at pushed source
+`283ed9852637e9c75b5df4194f07b59cc62e094e`. The first local candidate,
+lambda 1, passed all 150 minors: feedbacks `(2,3)` and `(3,3)`.
+Its 7,168-byte lookup SHA256 is
+`c0529964214c5032bfc3d5b7d407ebc318bf23232ad60f694d9af1449cbdfd7a`.
+
+| Frozen check | Result |
+| --- | --- |
+| Local and seam minors | 600/600 full rank |
+| Hard traces, OH0 | 72/72 full rank |
+| Historical prefixes / legacy pairs | 13/13 and 3/3 full rank |
+| Fresh traces, OH0 | 0 failures / 6,144 |
+| Each width/schedule cell, OH0 | 0 failures / 512, all twelve cells |
+| Fresh traces, OH1 through OH4 | 0 failures at each overhead |
+| Stride 255 / 257 / 65537 pairs | 1/512, 3/512, 1/512 deficient; each below 1% |
+
+Worker wall time was 0.636934 seconds; observed whole controller time was
+0.960298 seconds. These are experiment execution times, **not codec timing**.
+
+Exact-source retained replay and a separate implementation importing no
+experiment code both passed under Python 3.8 and 3.12 before source/report
+advancement. The independent audit checked every source/receipt/member pin,
+all 56 historical origins, first-local selection, the entire packed lookup,
+all 5,274 unique rows, 31,080 trace-prefix ranks, and 1,536 stride determinants.
+All 6,216 hard/fresh traces also matched the native frozen trace generator.
+All 109 neutral/shared tests passed on each interpreter. Repeated source
+reviews were clean after fixing the prelaunch determinant-reporting omission.
+An audit-only first attempt incorrectly compared access time across a read;
+the stability check was corrected to use identity, size, mtime and ctime, then
+both complete audits passed. No worker rerun or scientific evidence changed.
+
+Retained artifacts:
+
+- Bundle `/var/tmp/wh2-k2-thue-morse-r0`; COMPLETE SHA256
+  `7b76bc8584ccc175d45bce9e1b1dbc36ec6c849f9ec8356f0a137b2854766a75`.
+- Raw SHA256 `984d0836e5d297c72ffa568527d0d23cea3da5588d554ec715fc69f331aa5e73`.
+- Receipt and audits `/tmp/wh2-k2-thue-receipt.IZwVCRuY`; receipt SHA256
+  `8fd5593d3eac830b012704811e549719a6c371080d965eafda06c7a86f2ac968`.
+- Final audit manifest `AUDITS.json` SHA256
+  `48beed9e33031653caddfc0e1f54b008cef236fd8c68a3495fc6267a72a95fa7`.
+- Independent auditor SHA256
+  `5c8ffc10cfd9ce81fe6a29c54f50e8440fa199f1d48d8dcb699e3f68f9eb7ae3`;
+  exact auditor SHA256
+  `bcbf3910c269aceff6a23943da787d5b5b94ae39d2dfa2e0c61042d3c328e280`.
+
+This accepts mathematical feasibility only. It does not establish an actual
+codec recovery rate, statistical superiority over WH1, native speed, a new
+public profile, all-K success or promotion. Native qualification is tracked
+separately in `wirehair-sxvz.16.1.20.82.4.2`; production is unchanged.
