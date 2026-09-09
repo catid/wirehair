@@ -321,6 +321,44 @@ all-K construction validation or promotion. K5 is the next structural-screen
 target; a survivor still needs independent recovery and actual full encoder
 and decoder WH1 speed qualification.
 
+### K5 structural-screen survivor (not an installed profile)
+
+At source `13988b9`, the separately frozen
+`wirehair.wh2.k5-thue-morse-r0` mathematical screen passed. The first local
+algebra parameter, lambda 1, selected the GF(256) companion feedbacks
+`(121,110,207,198,31)` and `(120,110,207,198,31)`. Selection did not use loss
+traces or retry after observing recovery results. The dimension-five packed
+lookup has 29,440 bytes, SHA-256
+`4ac8059aba3b5797c8789c4258a1bda52e5fdb005592d601591705940cfe76c9`.
+
+The selected pair passed all 1,260 local five-column minors, all 3,780
+dyadic-seam/window minors, all 72 main-contract hard traces at zero overhead,
+and all 54 distinct retained failure prefixes from 79 WH2/WH1 inventory
+origins. Prefixes retained their original lengths; no extra packets were
+appended to rescue a historical failure.
+
+On 6,144 fresh loss traces, source-equation rank was deficient after exactly
+five packets in 11 cases (0.1790%). Every case reached full rank with one
+additional packet. All twelve 512-trace width/schedule cells met the frozen
+1% bound; the largest count was four failures (0.78125%). These are rank
+results on a different cohort from the baseline inventory, not a paired WH1
+recovery comparison, native payload result or universal guarantee.
+
+Independent Python 3.8 and 3.12 audits reproduced the selected parameter,
+all 2,270 recorded packet rows, the entire lookup, all local/seam minors,
+31,080 hard/fresh prefix ranks, history origins, and every cell decision
+before source advancement. The audit used separate field arithmetic,
+fraction-free elimination, recursive prefix products and trace generation.
+All eleven source pins, interpreter bytes and immutable historical inputs
+were checked; the exact receipt also replayed without rerunning the worker.
+
+The spent immutable bundle is `/var/tmp/wh2-k5-thue-morse-r0`, raw SHA-256
+`acddcd2d6c8dbfa7284aa900980b2845a03130b5f2f721515ac8d45bb580af76`.
+This licenses the next bounded native-core/payload validation and actual
+full encoder/decoder timing comparison. It does not add an installed K5
+profile, change ordinary WH2 selection, repair the existing admission timing
+regressions, or establish all-K performance or construction-seed coverage.
+
 ## Retired equation profile identifiers
 
 The identifiers `e161ce5d456f9bb7` and `20a4f27a870612a2` are permanently
