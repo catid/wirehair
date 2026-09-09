@@ -850,6 +850,53 @@ Qualification and audits are retained at
 `/tmp/wh2-k5-public-recovery-qualified.bksSezzu`.
 See the [frozen recovery contract](bench/Wh2K5PublicRecoveryR0.md).
 
+### Current preserved paths: valid regression result
+
+At source `bdf5c83`, `wirehair.wh2.current-preserved-deferred-cost-r0`
+compares the exact pre-admission shared library against the current
+K5-integrated native-default library. It retains the original 20-case
+preserved-path roster, workloads, batches, 48 delay phases and decision rules,
+but publishes the header and every retained record after measurement ends.
+No codec implementation or equation changes for this screen.
+
+All 320 same-code controls pass. Both load orders nevertheless report
+**REGRESSION**: 42/80 and 49/80 treatment cells have resolved slowdowns;
+15/80 and 28/80 have upper confidence bounds reaching 2% (these sets overlap).
+Certified K2/3/4/6 full-encoder point estimates are 0.30–3.09% slower than
+pre-admission WH2 across the declared widths and orders; not every individual
+estimate is resolved. Opt-in K6 two-byte encoders improve by 4.39–4.91%, but
+that does not satisfy the complete preserved-path gate. No pooling, trimming,
+rerun, threshold change or promotion follows from this result.
+
+The mechanism remains unresolved. WH1 two-byte decoder timings also regress
+despite its unchanged codec object, and K128 results change direction with
+measurement order. Fifteen of the original 17 archive objects are byte-identical;
+only `WirehairSmall.cpp.o` and `WirehairV2Profile.cpp.o` differ, with the K5 table
+object added. This motivates distinguishing facade overhead from linked-code
+placement and physical-context effects before another candidate is measured.
+It does not establish any one of those as the cause.
+
+Both workers finish normally with empty stderr. All 103,680 callbacks, payload
+and ledger checks are retained; WORK totals are 36.446777265 and 36.446111810
+seconds, and the controller takes 230.228120 seconds. Native and ASan/UBSan
+driver qualification pass, including late failures, incomplete clocks and
+output errors; the loaded native DSOs are not sanitizer-instrumented. All 32
+reader tests pass under Python 3.8 and 3.12. Exact replays and a separately
+written full raw/statistical/library-provenance audit agree under both versions
+before HEAD or this document advances: 770 receipt pins, 480 decisions and a
+maximum independent arithmetic difference below `1e-15`.
+
+The permanently spent bundle is
+`/var/tmp/wh2-current-preserved-deferred-cost-r0`, COMPLETE SHA-256
+`4b0e106c180aee5460d467c93171a903735b82654159ff8a462ddf2430384125`.
+Qualification and audits are retained at
+`/tmp/wh2-current-preserved-deferred-qualified.B6qTTW13`.
+See the [frozen gate contract](bench/Wh2CurrentPreservedDeferredCostR0.md).
+Earlier admission REGRESSION, isolation CONTROL_FAIL and installed K5
+CONTROL_FAIL outcomes remain unchanged. Preserved-path restoration, current
+ordinary K3 retention and installed K5 speed are still unmet; this screen
+does not qualify strict WH1 speed, recovery, static speed, defaults or all K.
+
 ## Retired equation profile identifiers
 
 The identifiers `e161ce5d456f9bb7` and `20a4f27a870612a2` are permanently
