@@ -386,10 +386,49 @@ recorded flags produces byte-identical `WirehairSmall.cpp.o` and
 `WirehairV2Profile.cpp.o`. Existing production selection is unchanged.
 
 This is an engineering replay of retained evidence, not additional independent
-recovery samples or a paired WH1 recovery comparison. Actual full-lifecycle
+recovery samples or a paired WH1 recovery comparison. Qualified full-lifecycle
 WH1 timing, installed admission, preserved-path regression qualification, and
 the full all-K objective remain outstanding. See the standalone
 [build instructions](bench/Wh2SmallNative/README.md).
+
+### K5 serialized lifecycle screen: timing not qualified
+
+At source `14d14e4`, `wirehair.wh2.k5-serialized-cost-r0` completed
+**CONTROL_FAIL**. The exact qualified K5 benchmark boundary and actual WH1
+and explicitly selected certified-WH2 libraries were compared separately for
+independent and borrowed input. Full five-block messages used 2-, 64-, and
+1,280-byte blocks. Encoder work includes create, descriptor output, 18 packets
+and free; decoder work includes create, feed through its own first success,
+recover and free, for separate low-ID and distant-ID streams.
+
+All 38,880 callbacks completed with correct packets, descriptors, recovery,
+guards and API ledgers: 4,976,640 fresh codec lifecycles and 59,719,680 API
+calls. Every arm needed five packets in these particular decoder streams.
+Native, portable-arithmetic and ASan/UBSan preflights reproduced all six arms'
+fixtures, with every packet checked using independent GF(256) arithmetic and
+first success checked against independently computed source-equation rank.
+
+Three of 108 same-code controls failed the frozen equivalence bounds. All
+three compare the borrowed K5 path with itself: two-byte encoder order 0 and
+1,280-byte distant decoder orders 0 and 1. Their 95% ratio intervals were
+`[0.96493, 1.01463]`, `[0.98785, 1.03696]` and `[0.98482, 1.03627]`.
+Each includes one: these are failed precision/equivalence checks, not resolved
+directional bias. Each affected cell contains one approximately threefold
+CPU-and-wall-time excursion, with no recorded fault or context switch and
+the same handle address as surrounding callbacks. The cause is unproven.
+All 72 treatment constraints nominally passed, but cannot override the global
+control failure or establish a K5 speed win.
+
+Exact Python 3.8 and 3.12 replays and a separate standard-library audit agree
+on all 180 statistical decisions, the complete chronology and ledgers, and
+all 691 receipt pins before source advancement. The controller completed in
+69.263 seconds, including 22.452 seconds of timed work, with empty stderr.
+The immutable bundle is `/var/tmp/wh2-k5-serialized-cost-r0`, raw SHA-256
+`59c5e626f8c6dffd6176e932d0753d2e5ee67d9ccd3daf54be6c8d53ae527019`.
+This namespace is spent: no rerun, sample removal, resizing or subset rescue.
+No installed/default, recovery-rate or all-K claim follows. The separate
+paired retained-trace WH1 recovery comparison remains required; another speed
+screen needs new evidence addressing the measurement failure, not a blind retry.
 
 ## Retired equation profile identifiers
 
