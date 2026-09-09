@@ -51,6 +51,9 @@ The retained native object-identity proof must match the actual archive's
 three SmallCore users. Rebuild only the benchmark boundary in a fresh directory
 against the selected GF runtime; ASAN direct-table users must match its
 `-march=native` private context layout. Run all seven existing boundary checks.
+Preprocess all eight boundary/test compilation commands before building, freeze
+their complete input sets, and compare with the actual compiler dependency files.
+Use the pinned controller interpreter for the generated fixture header.
 
 Before science: qualify 216 real WORK cases, the complete roster, independent
 polynomial packet and rank oracles, all meaningful tail lengths/guards,

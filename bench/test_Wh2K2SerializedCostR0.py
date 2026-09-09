@@ -415,5 +415,52 @@ class CostTest(unittest.TestCase):
         with self.assertRaises(ValueError):C.verify(raw,'0'*64,prior)
 
 
+    def boundary_database(self):
+        directory=Path('/synthetic/boundary')
+        entries=[]
+        for i in range(8):
+            compiler='/usr/bin/cc' if i==5 else '/usr/bin/c++'
+            source=C.ROOT/'bench'/('fixture.c' if i==5 else 'fixture.cpp')
+            target='CMakeFiles/test'+str(i)+'.dir/fixture.o'
+            entries.append(dict(directory=str(directory),file=str(source),output=target,
+                command=compiler+' -DWH2_SMALL_CODEC_K=2 -I'+str(C.ROOT)+
+                        ' -o '+target+' -c '+str(source)))
+        return directory,entries
+
+    def test_boundary_probes_preserve_every_c_and_cpp_command(self):
+        directory,entries=self.boundary_database()
+        recipes=C.boundary_recipes(C.A.canonical(entries),directory)
+        self.assertEqual(len(recipes),8)
+        for (target,argv),entry in zip(recipes,entries):
+            self.assertEqual(str(target),entry['output'])
+            self.assertEqual(argv,C.shlex.split(entry['command'])[:-4]+
+                             ['-M','-MT',entry['output'],entry['file']])
+
+    def test_boundary_probe_roster_and_paths_fail_closed(self):
+        directory,entries=self.boundary_database()
+        for mutation in (lambda e:e.pop(),lambda e:e.append(copy.deepcopy(e[0])),
+                lambda e:e[1].update(output=e[0]['output']),
+                lambda e:e[0].update(output='../escape.o'),
+                lambda e:e[0].update(output='/absolute.o'),
+                lambda e:e[0].update(output=''),
+                lambda e:e[0].update(directory='/elsewhere'),
+                lambda e:e[0].update(command=e[0]['command']+' -MD')):
+            changed=copy.deepcopy(entries);mutation(changed)
+            with self.assertRaises(ValueError):C.boundary_recipes(C.A.canonical(changed),directory)
+
+    def test_test_only_boundary_header_is_frozen(self):
+        with tempfile.TemporaryDirectory(prefix='wh2-boundary-dep-test-') as d:
+            header=Path(d)/'iostream'; header.write_bytes(b'first')
+            target=Path('CMakeFiles/test.dir/fixture.o')
+            raw=(str(target)+': '+str(header)+'\n').encode()
+            dependencies=C.U.preprocessor_dependencies(raw,target)
+            self.assertEqual(dependencies,{header})
+            frozen={};C.U.freeze_inputs(dependencies,frozen)
+            self.assertIn(header,frozen)
+            header.write_bytes(b'changed')
+            with self.assertRaisesRegex(ValueError,'input changed during qualification'):
+                C.U.freeze_inputs(dependencies,frozen)
+
+
 if __name__ == '__main__':
     unittest.main()

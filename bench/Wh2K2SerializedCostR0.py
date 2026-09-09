@@ -451,11 +451,33 @@ def qualified_inputs(mode):
     return [archive],paths,provenance,snapshots
 
 
+def boundary_recipes(raw, directory):
+    """Reconstruct dependency probes for every boundary and test object."""
+    result = []
+    for entry in A.decode(raw):
+        A.exact(set(entry),{'directory','command','file','output'},'boundary compile entry')
+        A.exact(entry['directory'],str(directory),'boundary compile directory')
+        target,source = Path(entry['output']),Path(entry['file'])
+        A.require(target.parts and not target.is_absolute() and '..' not in target.parts and
+                  target.parts[0]=='CMakeFiles' and target.suffix=='.o','boundary object path')
+        A.require(source.is_absolute() and ROOT in source.parents,'boundary source path')
+        argv = shlex.split(entry['command'])
+        A.require(argv and argv[0] in ('/usr/bin/cc','/usr/bin/c++'),'boundary compiler')
+        A.exact(argv[-4:],['-o',str(target),'-c',str(source)],'boundary compile outputs')
+        A.require(not any(a in ('-o','-c','-MD','-MMD','-MF','-MT') for a in argv[:-4]),
+                  'unambiguous boundary dependency probe')
+        result.append((target,argv[:-4]+['-M','-MT',str(target),str(source)]))
+    A.exact(len(result),8,'complete boundary object roster')
+    A.exact(len({target for target,_ in result}),8,'unique boundary objects')
+    return result
+
+
 def build(mode, output):
     output = output.parent.resolve(strict=True)/output.name
     A.require(output.is_absolute() and ROOT not in output.parents and output != ROOT and
               not output.exists() and not output.is_symlink(), 'fresh external build')
     archives, dependencies, provenance, snapshots = qualified_inputs(mode)
+    dependencies.add(Path(sys.executable).resolve(strict=True))
     frozen = {}; U.freeze_inputs(dependencies,frozen)
     output.mkdir(mode=0o700)
     A.publish(output/'qualified-library.json',A.canonical(provenance))
@@ -463,16 +485,32 @@ def build(mode, output):
     boundary = output/'boundary'
     args = ['cmake','-S',str(ROOT/'bench/Wh2SmallNative'),'-B',str(boundary),
             '-DWH2_SMALL_LIBRARY='+str(archives[0]),'-DWH2_SMALL_TEST_DIMENSION=2',
+            '-DPython3_EXECUTABLE='+str(Path(sys.executable).resolve(strict=True)),
             '-DCMAKE_BUILD_TYPE='+('Debug' if mode=='asan' else 'Release')]
     if mode=='scalar': args.append('-DWH2_SMALL_PORTABLE=ON')
     if mode=='asan':
         flags = '-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -march=native'
         args += ['-DCMAKE_C_FLAGS='+flags,'-DCMAKE_CXX_FLAGS='+flags,
                  '-DCMAKE_EXE_LINKER_FLAGS=-fsanitize=address,undefined']
-    for tag,argv in (('configure',args),('build',['cmake','--build',str(boundary),'-j4']),
-                     ('test',['ctest','--test-dir',str(boundary),'-V','--timeout','120'])):
+    for tag,argv in (('configure',args),
+                     ('data',['cmake','--build',str(boundary),'--target','wh2_small_data'])):
         raw = command(argv); A.publish(output/('boundary-'+tag+'.txt'),raw)
-        if tag=='test': A.require(b'100% tests passed, 0 tests failed out of 7' in raw,'current-GF boundary qualification')
+    database = boundary/'compile_commands.json'
+    dependencies.update((database,Path(sys.executable).resolve(strict=True)))
+    probes = []
+    for i,(target,argv) in enumerate(boundary_recipes(A.read_regular(database,1024*1024),boundary)):
+        raw = command(argv); before = U.preprocessor_dependencies(raw,target)
+        A.publish(output/('boundary-preprocess-'+str(i)+'.d'),raw)
+        dependencies.update(before); probes.append((target,before))
+    U.freeze_inputs(dependencies,frozen)
+    A.publish(output/'boundary-build.txt',command(['cmake','--build',str(boundary),'-j4']))
+    for target,before in probes:
+        after = U.preprocessor_dependencies(A.read_regular(boundary/(str(target)+'.d'),1024*1024),target)
+        A.exact(sorted(after),sorted(before),'actual boundary compiler dependency closure')
+    U.freeze_inputs(dependencies,frozen)
+    raw = command(['ctest','--test-dir',str(boundary),'-V','--timeout','120'])
+    A.publish(output/'boundary-test.txt',raw)
+    A.require(b'100% tests passed, 0 tests failed out of 7' in raw,'current-GF boundary qualification')
     archives.insert(0,boundary/'libwh2_small_serialized.a')
     dependencies.update(p for p in boundary.rglob('*') if p.is_file())
     flags = ['-std=c++11', '-Wall', '-Wextra', '-Wpedantic', '-Werror', '-fno-lto', '-fPIC',
