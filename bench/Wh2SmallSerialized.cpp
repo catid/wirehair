@@ -1,5 +1,8 @@
 #include "Wh2SmallSerializedCore.h"
-#if WH2_SMALL_CODEC_K == 5
+#if WH2_SMALL_CODEC_K == 2
+#include "Wh2K2NativeData.inc"
+namespace Data = wh2_k2_data;
+#elif WH2_SMALL_CODEC_K == 5
 #include "Wh2K5NativeData.inc"
 namespace Data = wh2_k5_data;
 #else

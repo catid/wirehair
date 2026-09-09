@@ -4,14 +4,14 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* Private benchmark C boundary, built for exactly one of K3 (default) or K5. Not
+/* Private benchmark C boundary, built for exactly one of K2, K3 (default), or K5. Not
  * installed, not selected by WH1/WH2/K6, and not a production speed claim.
  * Initialize the shared runtime with wirehair_init() before codec calls.
  * Only live handles returned by this boundary may be passed back. Calls and
  * source mutation/free are externally serialized. A null free is harmless.
  *
  * The 32-byte little-endian descriptor fixes the exact sealed equations:
- * WHK3 or WHK5 / u16 version1 / u16 size32 / u64 profile ID / u64 message bytes /
+ * WHK2, WHK3 or WHK5 / u16 version1 / u16 size32 / u64 profile ID / u64 message bytes /
  * u32 block bytes / u32 zero. No external table or live encoder is required.
  * Unknown and retired descriptors are rejected, never reinterpreted.
  */
@@ -19,7 +19,7 @@
 #ifndef WH2_SMALL_CODEC_K
 #define WH2_SMALL_CODEC_K 3
 #endif
-#if WH2_SMALL_CODEC_K != 3 && WH2_SMALL_CODEC_K != 5
+#if WH2_SMALL_CODEC_K != 2 && WH2_SMALL_CODEC_K != 3 && WH2_SMALL_CODEC_K != 5
 #error "Unsupported benchmark boundary dimension"
 #endif
 #define WH2_SMALL_PROFILE_ID (UINT64_C(0x5748324b30544d31) + ((uint64_t)WH2_SMALL_CODEC_K << 24))

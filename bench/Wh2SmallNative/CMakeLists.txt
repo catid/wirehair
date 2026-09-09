@@ -50,12 +50,6 @@ add_test(NAME small_neutral COMMAND wh2_small_native_test --neutral)
 add_test(NAME small_corpus COMMAND wh2_small_native_test --corpus)
 set_tests_properties(small_neutral small_corpus PROPERTIES TIMEOUT 120)
 
-# K2 currently qualifies only the direct private core. No K2 serialized wire
-# identity or public profile is introduced by this build option.
-if(WH2_SMALL_TEST_DIMENSION STREQUAL "2")
-    return()
-endif()
-
 # Keep the complete serialized C boundary in a separate, non-LTO translation
 # unit. The installed library and its qualified K6 implementation are inputs,
 # not edited/rebuilt/replaced by this standalone project.

@@ -78,6 +78,7 @@ std::uint64_t packet_checks = 0, feed_checks = 0, recover_checks = 0, row_checks
 std::uint64_t deficient_cases = 0;
 #ifdef WH2_SMALL_TEST_SERIALIZED
 std::uint64_t serialized_cases = 0, serialized_packets = 0;
+std::uint64_t serialized_deficient_cases = 0;
 #endif
 
 void Check(bool ok, const char* message)
@@ -364,8 +365,10 @@ template<unsigned K> void Exercise(S::Lookup lookup, const Oracle<K>& oracle, un
     if (K == SelectedK) for (auto& handle : serialized_decoders) {
         std::vector<Byte> actual(source.size() + 2, 0xa5);
         const auto r = NoAlloc([&] { return wh2_small_recover(handle.get(), actual.data() + 1, source.size()); });
-        Check(r.status == Wh2Small_Success && r.bytes_written == source.size() &&
+        Check(r.status == (terminal_rank == K ? Wh2Small_Success : Wh2Small_NeedMore) &&
+              r.bytes_written == (terminal_rank == K ? source.size() : 0) &&
               r.bytes_required == source.size() && actual == output, "serialized repeat exact recovery/guards");
+        if (terminal_rank < K) ++serialized_deficient_cases;
     }
 #endif
     Check(source == Message(source.size()), "codec preserves immutable source");
@@ -608,6 +611,8 @@ int main(int argc, char** argv)
     const bool neutral = !std::strcmp(argv[1], "--neutral");
     Check(serialized_cases == 2 * (neutral ? 162 : CorpusCases) && serialized_packets == 2 * (neutral ? 162 * (SelectedK + 9) : CorpusPackets),
           "serialized corpus count accounting");
+    Check(serialized_deficient_cases == (SelectedK == 2 && !neutral ? 60u : 0u),
+          "serialized deficient shape replay accounting");
     std::cout << "PASS serialized cases=" << serialized_cases << " packets=" << serialized_packets << '\n';
 #endif
     return 0;

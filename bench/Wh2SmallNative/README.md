@@ -17,8 +17,9 @@ Use a fresh, task-owned build directory. This harness needs the original local
 The ordinary library and installed package do not depend on this directory.
 Pass `-DWH2_SMALL_TEST_DIMENSION=5` to select the separately sealed K5 evidence
 at `/var/tmp/wh2-k5-thue-morse-r0` instead. Dimension 2 selects the separately
-sealed `/var/tmp/wh2-k2-thue-morse-r0` evidence and builds only the two direct
-core tests; it does not introduce a K2 serialized boundary or profile.
+sealed `/var/tmp/wh2-k2-thue-morse-r0` evidence. All three selected dimensions
+build two direct-core tests and five serialized-boundary tests. The K2 boundary
+is benchmark-only; it does not introduce an installed profile.
 Other dimensions are rejected. K3 remains the default build; this option never
 changes the installed library.
 
@@ -86,13 +87,13 @@ This is code-generation identity, not a new timing result or restoration
 of previously measured regressions.
 
 Native replay confirms the already retained recovery cases; it does not add
-a fresh sample or a paired WH1 recovery-rate comparison. Full lifecycle speed
-and an ownership-matched external boundary require separate qualification.
+a fresh sample or a paired WH1 recovery-rate comparison. At this direct-core
+milestone, the external boundary and full lifecycle speed were still unqualified.
 
-## Serialized correctness for K3 and K5
+## Serialized correctness for K2, K3 and K5
 
 The build also produces a separate, non-LTO serialized C boundary and five
-additional tests for K3 and K5. Its shared `Facade<K,Traits>` implementation retains K6's
+additional tests for K2, K3 and K5. Its shared `Facade<K,Traits>` implementation retains K6's
 independent/borrowed input, transactional allocating detach, descriptor
 validation and permanent conflict-poison behavior. Only the selected benchmark
 wrapper instantiates that boundary for external callers; the installed K6
@@ -101,6 +102,10 @@ implementation remains untouched. K3 uses `WHK3` and profile ID
 K5 uses `WHK5` and `0x5748324b35544d31`, a 29,440-byte lookup, and the same
 bounded allocation policy (`block_bytes <= floor(268435456 / 6)`). There is no
 K5-specific decoder, duplicated API, or inherited six-source tiny-payload kernel.
+K2 uses `WHK2` and `0x5748324b32544d31`, the sealed 7,168-byte lookup,
+and `block_bytes <= 89478485` (`floor(268435456 / 3)`). Its admission changes
+only compile-time dimension checks and fixture selection, not the shared
+runtime algorithm or the ordinary WHV2 conflict contract.
 
 `small_serialized` tests the selected dimension's ownership/error/byte behavior;
 `small_serialized_k6`
@@ -113,6 +118,35 @@ replays do not increase the number of recovery samples. All seven tests are
 correctness checks, not speed measurements.
 When enabling sanitizers, instrument both C and C++ compile flags and the link
 flags; the supplied archive must use the same sanitizers/backend configuration.
+
+### K2 serialized qualification
+
+All 63 tests passed: all seven checks at K2/K3/K5 under native, portable
+arithmetic, and ASan+UBSan with leak and fake-stack detection. K2's external
+boundary passed 78 lifecycle shapes, including both input policies, partial
+tails, transactional detach, every allocation-failure site, aliases, malformed
+descriptors and permanent conflict poison. The separate C consumer created a
+decoder from a literal descriptor before any encoder existed.
+
+The retained K2 corpus replayed 31,912 serialized cases and 113,552 packets
+across both policies, with independent packet/prefix-rank/recovery checks.
+All 60 deficient shape/policy replays remained `NeedMore` with untouched output;
+no extra packets were appended. These are repeated engineering checks of the
+same retained cases, not additional recovery samples.
+
+Artifacts are retained at `/tmp/wh2-k2-serialized.rnxDJH4G`; `QUALIFIED.json`
+SHA256 is `616ecfb9727a4ad48990d3fa00cf8b559ca2f6fd5e767c83c906269b2fbbdf6c`.
+A separate artifact audit passed on Python 3.8 and 3.12, checking source and
+library hashes, build flags, every generated K2 fixture value, K3/K5 fixture
+identity, test counts and backend agreement. All 19 fixture-generator tests
+also passed on both interpreters. Repeated source-reading passes, including a
+separate local review, found no boundary bugs. An initial artifact-auditor
+syntax error was corrected before either recorded audit; codec tests were
+unaffected. No Fable report was obtained for this milestone.
+
+Full lifecycle speed against ownership-matched WH1 and ordinary WH2 remains
+unmeasured for K2. No installed API, profile, default or production source
+changed in this serialized-boundary milestone.
 
 ## Separate K3 serialized performance qualification
 
