@@ -114,8 +114,9 @@ library's core/GF backend, not a second arithmetic context.
 Issue `wirehair-sxvz.16.1.20.82.5.3.4` remains active. The separately measured
 [actual ordinary-path full-lifecycle speed gate](../Wh2K8OrdinaryCost/README.md)
 now passes; it does not inherit the earlier explicit-profile timings. The
-separate retained recovery comparison, preserved-path restoration and current
-K3 speed retention remain required before default promotion. Production
+separate [ordinary retained recovery comparison](../Wh2K8OrdinaryRecovery/README.md)
+also passes. Preserved-path restoration and current K3 speed retention remain
+required before default promotion. Production
 defaults are unchanged. This correctness qualification claims no new recovery
 rate, shared-call or cold speed, real non-GFNI-host speed, all-K success or
 zero bad construction seeds.

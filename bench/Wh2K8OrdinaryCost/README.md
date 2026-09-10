@@ -150,7 +150,7 @@ This qualifies only static-call lifecycles for the isolated ordinary-K8
 candidate's six shapes on the retained GFNI-capable host after initialization.
 It is not a production default change, new recovery sample, all-K guarantee,
 shared-call/cold-start/non-GFNI-host result, preserved-path restoration or
-current K3 speed retention. The ordinary retained-recovery gate is separately
-tracked in `wirehair-sxvz.16.1.20.82.5.3.4.2`; admission remains open.
+current K3 speed retention. The separate [ordinary retained-recovery gate](../Wh2K8OrdinaryRecovery/README.md)
+now passes under `wirehair-sxvz.16.1.20.82.5.3.4.2`; admission remains open.
 Do not rerun the scientific namespace or invoke its strict current-HEAD replay
 after this result documentation advances. Preserve the pre-advancement audits.

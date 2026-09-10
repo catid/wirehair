@@ -1143,10 +1143,52 @@ independent full raw/statistical/build audits pass under Python 3.12 and 3.8
 before source advancement. See the [complete result and scope](bench/Wh2K8OrdinaryCost/README.md).
 
 The selector remains benchmark-only: **ordinary production K8 still selects
-certified WH2**. Its separate retained-recovery comparison, pre-admission
-preserved-path restoration and current K3 speed retention remain outstanding.
+certified WH2**. Its separate retained-recovery comparison below now passes;
+pre-admission preserved-path restoration and current K3 speed retention remain
+outstanding.
 This is not shared-call, cold-start, non-GFNI-host or all-K speed, a new
 recovery sample or zero-bad-construction-seed qualification.
+
+### Ordinary K8 retained recovery: qualified
+
+At source `adeb96c`, `wirehair.wh2.k8-ordinary-recovery-r0` passes through
+the actual ordinary independent-bare and borrowed-options constructors in the
+same six-line selector candidate. Each source policy gives these results on
+the 6,144 retained loss traces:
+
+| Codec | OH0 failures | Observed rate | Failures with one extra packet |
+| --- | ---: | ---: | ---: |
+| Ordinary K8 candidate | 12 | 0.1953125% | 0 |
+| WH1 | 37 | 0.6022% | 5 |
+| Explicit certified WH2 | 246 | 4.0039% | 3 |
+
+K8 fixes 37 WH1 failures and introduces twelve different ones; it fixes 245
+certified-WH2 failures and introduces eleven, sharing one failure. Every
+candidate cell meets the frozen 1% bound; the worst is 3/512. All candidate
+failures recover with one extra packet, all 72 hard cases recover at OH0 and
+all 44 historical origins recover within their original, unextended horizons.
+This is aggregate retained-cohort improvement, not per-trace dominance or a
+population guarantee. Policy/backend replays do not multiply the shared roots.
+
+Native, portable and full ASan/UBSan agree on all 6,260 records and 74,946
+packet IDs. Every record exactly matches installed explicit-K8 evidence,
+including the actual WHV2 descriptor; the separate prototype parity remains
+unchanged. Independent payload/rank, first-success and guarded repeated
+recovery checks pass. All nineteen original archive objects and all three
+selector objects reproduce exactly; link maps exclude the old facade and
+select one matching GF runtime.
+
+Exact replays and independent full arithmetic/raw/build audits pass under
+Python 3.12 and 3.8 before source or pinned documentation advances. All 1,346
+receipt pins and every summary cell/fix/introduction list agree. The spent
+bundle is `/var/tmp/wh2-k8-ordinary-recovery-r0`, COMPLETE SHA256
+`22c461bb67fe7458d6aa36e5272fe96ec3deeb7f3cf8228485305336ae4ac992`.
+See the [complete ordinary recovery result](bench/Wh2K8OrdinaryRecovery/README.md).
+
+Both scoped ordinary K8 gates now pass. Production defaults remain unchanged:
+pre-admission preserved-path restoration and current K3 speed retention still
+precede promotion. Neither this retained replay nor the separate static speed
+screen establishes all-K, shared-call, cold-start or non-GFNI-host performance.
 
 ## Retired equation profile identifiers
 
