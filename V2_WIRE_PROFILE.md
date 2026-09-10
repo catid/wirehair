@@ -1242,10 +1242,34 @@ screen/controller tests and five independent-auditor tests pass per interpreter.
 
 See the [complete K4 contract and result](bench/Wh2K4ThueMorseR0.md).
 This is structural feasibility, not a paired WH1 recovery comparison or native
-speed evidence. Ordinary K4 still selects certified WH2. Native payload and
-ownership-matched full encoder/decoder qualification remain required, alongside
-the unresolved existing-path admission and all-K objectives. The scientific
-namespace is spent and must not be rerun or retuned.
+speed evidence. Ordinary K4 still selects certified WH2. This mathematical
+screen alone does not qualify native payloads or ownership-matched full
+encoder/decoder speed, nor resolve existing-path admission or the all-K
+objective. The scientific namespace is spent and must not be rerun or retuned.
+
+### K4 native payload qualification: direct core only
+
+The exact sealed K4 equations now pass native payload validation through the
+reusable small-block core, with no runtime algorithm or production default
+change. Native, portable arithmetic and full ASan/UBSan agree with independent
+packet/rank oracles on all 8,424 retained cases, 58,571 packets and 2,252
+coefficient rows. This includes all 6,216 hard/fresh traces, every original
+historical width/tail/horizon and all 2,170 four-of-eight seam subsets.
+The nine original OH0 deficiencies and recovery with one extra packet are
+preserved; these replays are not new recovery samples.
+
+All 90 selected direct/serialized regression tests pass across the three
+backends, including K2/K3/K5/K8 and K6 parity. K4 itself has only the two
+direct-core tests: no K4 serialized facade or installed profile is added.
+All 31 fixture tests pass on Python 3.12/3.8. Independent full artifact/source
+audits agree across both interpreters; all four affected native production
+objects remain byte-identical to their original archive members.
+
+See the [complete native qualification](bench/Wh2SmallNative/README.md#k4-native-qualification).
+The next step is K4's external ownership/serialized boundary, then separate
+actual ownership-matched WH1 full encoder/decoder speed and paired retained
+recovery qualification. Public speed, default admission and the all-K
+objective remain unmet.
 
 ## Retired equation profile identifiers
 

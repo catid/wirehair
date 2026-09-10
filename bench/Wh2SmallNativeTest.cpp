@@ -7,6 +7,9 @@
 #if WH2_SMALL_CODEC_K == 2
 #include "Wh2K2NativeData.inc"
 namespace Data = wh2_k2_data;
+#elif WH2_SMALL_CODEC_K == 4
+#include "Wh2K4NativeData.inc"
+namespace Data = wh2_k4_data;
 #elif WH2_SMALL_CODEC_K == 8
 #include "Wh2K8NativeData.inc"
 namespace Data = wh2_k8_data;
@@ -71,9 +74,9 @@ namespace S = wirehair_small_core;
 namespace Old = wirehair_k6_core;
 using Byte = std::uint8_t;
 constexpr unsigned SelectedK = WH2_SMALL_CODEC_K;
-constexpr unsigned CorpusCases = SelectedK == 8 ? 21110 : SelectedK == 2 ? 15956 : SelectedK == 5 ? 10053 : 7774;
-constexpr unsigned CorpusPackets = SelectedK == 8 ? 193746 : SelectedK == 2 ? 56776 : SelectedK == 5 ? 75134 : 48187;
-constexpr unsigned RecordedRows = SelectedK == 8 ? 2347 : SelectedK == 2 ? 5274 : SelectedK == 5 ? 2270 : 2226;
+constexpr unsigned CorpusCases = SelectedK == 4 ? 8424 : SelectedK == 8 ? 21110 : SelectedK == 2 ? 15956 : SelectedK == 5 ? 10053 : 7774;
+constexpr unsigned CorpusPackets = SelectedK == 4 ? 58571 : SelectedK == 8 ? 193746 : SelectedK == 2 ? 56776 : SelectedK == 5 ? 75134 : 48187;
+constexpr unsigned RecordedRows = SelectedK == 4 ? 2252 : SelectedK == 8 ? 2347 : SelectedK == 2 ? 5274 : SelectedK == 5 ? 2270 : 2226;
 alignas(64) const Byte kK6Lookup[] = {
 #include "../codec/WirehairK6Lookup.inc"
 };
@@ -132,13 +135,14 @@ template<unsigned K> struct Oracle {
         const Byte six[6] = {124, 127, 152, 84, 241, 63};
         const Byte five[5] = {121, 110, 207, 198, 31};
         const Byte two[2] = {2, 3};
+        const Byte four[4] = {64, 120, 54, 15};
         const Byte eight[8] = {96, 19, 186, 153, 85, 252, 7, 255};
         for (unsigned phase = 0; phase < 2; ++phase) {
             powers[phase][0].fill(0);
             for (unsigned i = 0; i + 1 < K; ++i) powers[phase][0][(i + 1) * K + i] = 1;
             for (unsigned i = 0; i < K; ++i)
                 powers[phase][0][i * K + K - 1] = static_cast<Byte>(
-                    (K == 8 ? eight[i] : K == 2 ? two[i] : K == 3 ? small[i] : K == 5 ? five[i] : six[i]) ^
+                    (K == 4 ? four[i] : K == 8 ? eight[i] : K == 2 ? two[i] : K == 3 ? small[i] : K == 5 ? five[i] : six[i]) ^
                     (i == 0 ? phase * (K == 8 ? 2u : 1u) : 0u));
         }
         for (unsigned level = 1; level < 32; ++level) {
@@ -198,8 +202,8 @@ std::vector<Byte> Message(std::size_t n)
 S::Lookup LookupSelected() { return S::Lookup{Data::kLookup, sizeof(Data::kLookup)}; }
 S::Lookup Lookup6() { return S::Lookup{kK6Lookup, sizeof(kK6Lookup)}; }
 static_assert(sizeof(Data::kTraces) / sizeof(Data::kTraces[0]) == 6216, "trace roster");
-static_assert(sizeof(Data::kHistory) / sizeof(Data::kHistory[0]) == (SelectedK == 8 ? 44 : SelectedK == 2 ? 56 : SelectedK == 5 ? 54 : 45), "history roster");
-static_assert(sizeof(Data::kWindows) / sizeof(Data::kWindows[0]) == (SelectedK == 3 ? 43 : 30), "window roster");
+static_assert(sizeof(Data::kHistory) / sizeof(Data::kHistory[0]) == (SelectedK == 4 ? 38 : SelectedK == 8 ? 44 : SelectedK == 2 ? 56 : SelectedK == 5 ? 54 : 45), "history roster");
+static_assert(sizeof(Data::kWindows) / sizeof(Data::kWindows[0]) == (SelectedK == 4 ? 31 : SelectedK == 3 ? 43 : 30), "window roster");
 static_assert(sizeof(Data::kRows) / sizeof(Data::kRows[0]) == RecordedRows, "row roster");
 #if WH2_SMALL_CODEC_K == 2
 static_assert(sizeof(Data::kPairs) / sizeof(Data::kPairs[0]) == 1539, "legacy and stride pair roster");
@@ -207,6 +211,9 @@ static_assert(sizeof(Data::kLookup) == 7168, "K2 packed geometry");
 #endif
 #if WH2_SMALL_CODEC_K == 8
 static_assert(sizeof(Data::kLookup) == 65536, "K8 packed geometry");
+#endif
+#if WH2_SMALL_CODEC_K == 4
+static_assert(sizeof(Data::kLookup) == 20480, "K4 packed geometry");
 #endif
 void Match(S::Result result, Old::Result old)
 {
@@ -601,7 +608,7 @@ void Corpus(const Oracle<SelectedK>& oracle)
         Exercise<SelectedK>(LookupSelected(), oracle, trace.B, trace.B,
             std::vector<std::uint32_t>(trace.ids, trace.ids + SelectedK + 4), trace.ranks, false, trace.ranks[4]);
     const unsigned widths[] = {2,64,1280};
-#if WH2_SMALL_CODEC_K == 2 || WH2_SMALL_CODEC_K == 8
+#if WH2_SMALL_CODEC_K == 2 || WH2_SMALL_CODEC_K == 4 || WH2_SMALL_CODEC_K == 8
     for (const auto& prefix : Data::kHistory)
         Exercise<SelectedK>(LookupSelected(), oracle, prefix.B, prefix.tail,
             std::vector<std::uint32_t>(prefix.ids, prefix.ids + prefix.count));
@@ -653,7 +660,7 @@ int main(int argc, char** argv)
             Check(gf256_mul(static_cast<Byte>(a), static_cast<Byte>(b)) == Mul(static_cast<Byte>(a), static_cast<Byte>(b)),
                   "shared field oracle");
         Neutral<SelectedK>(LookupSelected(), selected);
-        if (SelectedK == 8) HighestPivotTests<SelectedK>(LookupSelected(), selected);
+        if (SelectedK == 4 || SelectedK == 8) HighestPivotTests<SelectedK>(LookupSelected(), selected);
         const Oracle<6> six;
         Neutral<6>(Lookup6(), six);
         Check(cases == 324 && packet_checks == 162 * (SelectedK + 24) && row_checks == 5632, "neutral count accounting");

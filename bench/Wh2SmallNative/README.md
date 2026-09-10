@@ -1,4 +1,4 @@
-# K2/K3/K5/K6/K8 native correctness harness
+# K2/K3/K4/K5/K6/K8 native correctness harness
 
 This standalone build tests the private compile-time small-block core. It does
 not change the public library, select a wire profile, or measure performance.
@@ -18,8 +18,10 @@ The ordinary library and installed package do not depend on this directory.
 Pass `-DWH2_SMALL_TEST_DIMENSION=5` to select the separately sealed K5 evidence
 at `/var/tmp/wh2-k5-thue-morse-r0` instead. Dimension 2 selects the separately
 sealed `/var/tmp/wh2-k2-thue-morse-r0` evidence. Dimension 8 selects
-`/var/tmp/wh2-k8-thue-morse-r0`. All four selected dimensions build two
-direct-core tests and five serialized-boundary tests. The K2/K8 boundaries
+`/var/tmp/wh2-k8-thue-morse-r0`. Dimensions 2, 3, 5 and 8 build two
+direct-core tests and five serialized-boundary tests. Dimension 4 selects
+`/var/tmp/wh2-k4-thue-morse-r0` and builds only the two direct-core tests;
+its external serialized boundary is a separate follow-up. The K2/K8 boundaries
 are benchmark-only; they do not introduce installed profiles.
 Other dimensions are rejected. K3 remains the default build; this option never
 changes the installed library.
@@ -54,6 +56,14 @@ packets. All other cases must recover exactly. Neutral coverage additionally
 includes 19 selected widths spanning 1 to 4,096, partial tails, every packed selector, aliases,
 OOM, conflict preservation and allocation-free packet operations.
 
+At K4 the corpus has 8,424 cases and 58,571 packets: all 6,216 hard/fresh
+eight-ID traces with all five recorded prefix ranks; all 38 historical origins
+at their original widths, tails and horizons (163 packets, 37 unique ID
+prefixes); and all 2,170 four-of-eight seam subsets, replayed at B2/full tail.
+All 2,252 recorded coefficient rows are checked against native mapping and an
+independent polynomial oracle. The lookup is exactly 20,480 bytes. No history
+is deduplicated or extended and no new loss traces are generated.
+
 At K8 the corpus preserves 21,110 cases and 193,746 packets: 6,216 retained
 hard/fresh twelve-ID traces with all five recorded ranks, all 44 historical
 origins with original widths/tails/prefix lengths (354 packets), and all
@@ -67,6 +77,62 @@ shapes, including duplicates, contradictions, repeated recovery and allocation
 checks. Corpus replay uses recorded terminal ranks and never appends rescue
 packets. This is retained-data correctness validation, not new recovery or
 timing evidence.
+
+## K4 native qualification
+
+The sealed `(64,120,54,15)` / `(65,120,54,15)` pair now instantiates the
+existing native core. Only three compile-time dimension assertions and a
+comment change in the core; there is no new runtime algorithm, payload
+kernel, installed lookup, public API, wire profile or default. K4 uses the
+generic payload operation, not the K6-only two-byte specialization.
+
+All 90 tests pass: two K4 direct-core tests plus all seven existing K2/K3/K5/K8
+direct/serialized/K6-parity tests, in each of native, portable-arithmetic and
+ASan/UBSan builds. Sanitizers instrument the harness and linked library;
+leak and fake-stack detection are enabled. Every backend checks the complete
+8,424-case K4 corpus, 58,571 packet/feed/prefix-recovery checks and 2,252 rows.
+All nine retained OH0 deficiencies agree with the original ranks and recover
+with the recorded extra packet. These replays add no recovery samples.
+
+K4 neutral testing checks 162 width/tail/order cases alongside 162 K6 parity
+cases, 5,632 selector rows, ownership lifetimes, every constructor allocation
+failure, aliases, error outputs, dependent conflicts and repeated recovery.
+Another 108 K4 highest-pivot shapes exercise 432 systematic feeds. Every
+payload replay destroys its sender before receiver creation. This is the
+private core's borrowed-source contract, not qualification of a public ownership
+facade.
+
+All 31 fixture-generator tests pass on Python 3.12 and 3.8. Independent
+source review caught a copied negative test that left the first K4 seam ID
+unchanged; it was corrected before the first test/build run. Repeated main
+and independent complete source reviews find no remaining confirmed bugs.
+
+The four affected native production translation units (`Small`, `SmallK5`,
+`SmallK8`, `V2Profile`) were each recompiled with baseline-header, candidate-
+header and normal inclusion. All twelve outputs exactly match the original
+archive members. The archive and shared library consume those same original
+objects. This proves native code-generation identity, not speed qualification.
+
+Builds and complete logs are retained at `/tmp/wh2-k4-native.j0iJxQDC`.
+`QUALIFIED.json` SHA256:
+`1317c222c7b9a32e02a3831a76b817e44edbfa4bb72d6ff0ae0d2947546443a2`.
+The generated fixture has 534,629 bytes, SHA256
+`608bafbe37ac0ba3aa94f5d030390af6cc623f9cf0791e86c5bcb8d72f277763`.
+The independent audit at `/tmp/wh2-k4-native-independent.f65PiBZz` verifies
+all 895 input identities, every initializer, all test logs and dependency/ABI
+settings, and the object proof. Its Python 3.12/3.8 reports are byte-identical,
+SHA256 `ca7d5cf1e3ef38758d7044c9bd836800b6d53225cc8eb14872f32bff327ece83`.
+Five auditor neutral tests pass per interpreter. Four auditor-only development
+exits (formatting, access-time comparison, interpreter hardlinks and Ninja
+link evidence) are disclosed in its `DEVELOPMENT.json`; they changed no codec
+or retained test result.
+
+Do not reconfigure or run CTest discovery in these archived builds. Source-
+sensitive audits completed before this documentation advanced. The next step
+is the separately qualified serialized ownership boundary in
+`wirehair-sxvz.16.1.20.82.6.1.1`, followed by actual ownership-matched WH1
+full-lifecycle speed and retained paired recovery gates. Ordinary K4 still
+selects certified WH2; no promotion or all-K claim follows from this milestone.
 
 ## K8 native qualification
 
