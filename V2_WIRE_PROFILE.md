@@ -1125,6 +1125,29 @@ after process initialization on this GFNI-capable host. It is not shared-call,
 cold-start, non-GFNI-host or all-K performance, a new recovery sample, restored
 preserved-path speed or current K3 speed retention. Defaults remain unchanged.
 
+### Ordinary K8 selector: candidate lifecycle speed qualified
+
+The isolated six-line ordinary-K8 selector now has its own independently
+audited full-lifecycle speed result at source `7088ddf`, separate from the
+explicit-profile timings above. All 216 same-code controls and all 144 strict
+comparisons pass against ownership-matched WH1 and explicitly selected
+certified WH2. Encoder time is 51.32–66.04% lower than WH1; low-ID decoder time
+82.81–86.23% lower, and distant-ID decoder time 66.21–77.42% lower. These are
+ranges of separate point estimates across 2/64/1280-byte blocks, full/one-byte
+tails, both source policies and both measurement orders, not pooled results.
+
+The actual ordinary entry points include owned-basis preparation, descriptor
+output, 24 encoder packets or decoding through each arm's own first success,
+recovery and teardown. All 77,760 observations are retained. Exact replays and
+independent full raw/statistical/build audits pass under Python 3.12 and 3.8
+before source advancement. See the [complete result and scope](bench/Wh2K8OrdinaryCost/README.md).
+
+The selector remains benchmark-only: **ordinary production K8 still selects
+certified WH2**. Its separate retained-recovery comparison, pre-admission
+preserved-path restoration and current K3 speed retention remain outstanding.
+This is not shared-call, cold-start, non-GFNI-host or all-K speed, a new
+recovery sample or zero-bad-construction-seed qualification.
+
 ## Retired equation profile identifiers
 
 The identifiers `e161ce5d456f9bb7` and `20a4f27a870612a2` are permanently

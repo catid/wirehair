@@ -111,9 +111,11 @@ library's core/GF backend, not a second arithmetic context.
 
 ## Admission is still open
 
-Issue `wirehair-sxvz.16.1.20.82.5.3.4` remains active. Actual ordinary-path
-full-lifecycle speed, its separately recorded retained recovery comparison,
-preserved-path restoration and current K3 speed retention are required before
-default promotion. Explicit K8 speed evidence cannot be inherited by this
-selector. This qualification claims no new recovery rate, shared-call or cold
-speed, real non-GFNI-host speed, all-K success or zero bad construction seeds.
+Issue `wirehair-sxvz.16.1.20.82.5.3.4` remains active. The separately measured
+[actual ordinary-path full-lifecycle speed gate](../Wh2K8OrdinaryCost/README.md)
+now passes; it does not inherit the earlier explicit-profile timings. The
+separate retained recovery comparison, preserved-path restoration and current
+K3 speed retention remain required before default promotion. Production
+defaults are unchanged. This correctness qualification claims no new recovery
+rate, shared-call or cold speed, real non-GFNI-host speed, all-K success or
+zero bad construction seeds.
