@@ -3,6 +3,11 @@
 Tracked in `wirehair-sxvz.16.1.20.84.3.5`. This is an isolated compile and
 correctness experiment, not a codec promotion or timing result.
 
+The subsequent [full-lifecycle cost screen](../Wh2ProfileClassificationCostR0.md)
+did not retain this candidate: overall CONTROL_FAIL, with a separately
+controlled reverse-load REGRESSION and no qualifying certified-path benefit.
+The compile/correctness evidence below remains valid, but is not a speed win.
+
 After `IsSupportedProfileId` accepts the ID, the supported set contains exactly
 the certified profile and K3/K5/K8. In `ValidateHostProfile` only, replace its
 second three-ID small-family predicate with `profile_id != CERTIFIED`. The

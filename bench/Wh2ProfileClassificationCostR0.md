@@ -56,3 +56,78 @@ This can qualify current-to-candidate cost and retention only. Serializer
 inlining/code growth may offset removed comparisons. It is not pre-admission
 restoration, strict WH1 superiority, static/cold/non-GFNI/all-K performance,
 a new recovery sample or default promotion.
+
+## Terminal result: candidate not retained
+
+The sole run at pushed source `2de922993f96467289aafdc8403da6dc0604f69c`
+completed **CONTROL_FAIL**, with `candidate_retained=false`. No certified
+case/metric met the required benefit in all four load/measurement-order cells.
+Production source, defaults, equations and installed libraries are unchanged.
+
+| Separate load order | Failed same-code controls | Treatment slowdowns | Uncertainty failures | Verdict |
+| --- | ---: | ---: | ---: | --- |
+| Current then candidate | 1/304 | 75/152 nominal | 53/152 | CONTROL_FAIL |
+| Candidate then current | 0/304 | 85/152 resolved | 57/152 | REGRESSION |
+
+Slowdown and uncertainty sets overlap. Failed controls dominate the overall
+decision; the first load's nominal treatments are not qualified speed evidence.
+The second load independently passes every control and fails retention. It
+does not rescue the first load or license a pooled conclusion.
+
+The failed control compares the current ordinary K3 two-byte independent
+decoder with itself, measurement order zero. Its time ratio is 0.994522,
+95% interval [0.978222, 1.011094]. The interval includes equality but does not
+fit the frozen equivalence bounds: a precision failure, not established
+directional bias. All observations remain retained.
+
+In the independently controlled reverse-load pass, certified K2/K3/K4/K6
+encoder point estimates take 0.275–5.221% more time (19/20 resolved cells),
+and decoders 1.256–5.114% more time (20/20 resolved). There is no qualifying
+certified benefit. Unchanged opt-in/WH1 paths also have load-order-dependent
+timing differences, so this is not proof that serializer inlining alone causes
+the changes. The smaller validator did not translate into a retained
+full-lifecycle improvement. Do not repeat or retune this candidate to rescue it.
+
+Both workers exit zero with empty stderr and no codec, guard, packet, rank,
+ledger, clock-capture or observer error. All 196,992 records are retained.
+Observer times are 176.635536 and 176.334653 seconds; WORK totals are
+39.815343978 and 39.911371948 seconds. The whole controller takes
+363.290561 seconds, within the frozen limits.
+
+Before measurement, preparation reproduced all 19 original objects, the whole
+archive and original DSO byte-for-byte, then replaced only the qualified Profile
+object. Every shared link's actual LOAD inputs were frozen, including shared
+startup objects. Native and ASan/UBSan driver qualification passed 304 WORK
+cases, all 98,496 roster coordinates and 32 existing fault checks per load,
+constructor-route checks and all deferred-publication/output-error checks.
+These drivers load native DSOs; the prior 19-test codec qualification supplies
+the separate full-code sanitizer evidence. All 16 new tests pass on Python 3.12
+and 3.8, and 30 reused reader/publication tests pass on Python 3.12.
+
+Exact new-controller replays and a separately written standard-library audit
+pass on Python 3.12 and 3.8 before HEAD or pinned documentation advances.
+The independent audit checks all 1,289 receipt pins, both complete raw streams,
+912 statistical cells, packet/rank oracles, chronology, ledgers, phases and
+the one-object producing-input chain. Its reports are byte-identical across
+interpreters; the maximum arithmetic difference from the reader is below
+1.15e-15. Repeated main-worker and independent source/artifact reviews are clean.
+
+Evidence, all preserved:
+
+- Sole spent bundle: `/var/tmp/wh2-profile-classification-cost-r0`.
+- COMPLETE SHA256: `a8c598f7f74b02fe3f9f2d13840fdb3299becdbfbfb2704710cf08eb83a77089`.
+- Analysis SHA256: `a9a628e409d21eff31b05ecb844c7a69d1ce6d6f4110a5f4614fed83439d31a4`.
+- Current/candidate raw SHA256: `318c2f135ad45a98b77d68b42d38e6816c4757e54f8556644cc26a553018c694`.
+- Candidate/current raw SHA256: `bc5b63cd087bdb8c6c19cce1f6ac14a89cb5d7b87a6aec0e31b6034e91e6ec6d`.
+- Receipt SHA256: `55dedba162f241c31c188cf621189478e36942cd13d9921056e263b0b645dd9b`.
+- Qualification: `/tmp/wh2-profile-classification-cost-qualified.jAcW8r`.
+- Independent auditor: `/tmp/wh2-profile-classification-independent-audit.el6N3xoL/audit.py`,
+  SHA256 `ca588fa682106a07ca266ca40787cec9ac63504b1f7c73e5811c3b591041e008`.
+- Either audit report SHA256: `6e3fa8d4a9b4b918e7c3bfbe7794420b667c62e7d57bcee4496245251fcb4b8b`.
+
+This namespace is permanently spent. Historical exact verifiers remain bound
+to their producing HEAD and document versions; do not rerun or rebind them
+after this report advances. Preserved-path restoration, ordinary K3 retention,
+installed K5 speed and broader/default admission remain unmet. Further facade
+optimization needs new causal or profiling evidence, not another hint or
+classification variation. The all-K speed/recovery objective remains active.
