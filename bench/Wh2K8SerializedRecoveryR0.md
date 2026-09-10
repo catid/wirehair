@@ -75,3 +75,67 @@ compiler/linker/runtime and fixture generation receive their own provenance.
 ASan must match the archive's native GF context ABI. Repeated source reviews,
 neutral/controller tests, committed/pushed source precede the sole launch;
 exact and independent full arithmetic/raw/provenance audits precede reporting.
+
+## Audited retained result
+
+The sole run at source `a4e185bcfddf6e499eb6f3fb1de99d2e41bd14ec`
+completed PASS. Execution validity, the frozen recovery target and paired
+aggregate superiority all pass, separately for independent and borrowed input.
+Each backend retained all 6,260 records and 74,946 packet IDs; no stderr or
+codec/oracle failure occurred. The controller completed in 44.653176 seconds.
+
+Failures on the 6,144 retained loss traces, identical under both policies:
+
+| Codec | OH0 failures | Observed rate | OH1 | OH2 | OH3 | OH4 |
+|---|---:|---:|---:|---:|---:|---:|
+| K8 candidate | 12 | 0.1953125% | 0 | 0 | 0 | 0 |
+| WH1 | 37 | 0.6022% | 5 | 3 | 2 | 0 |
+| Ordinary WH2 | 246 | 4.0039% | 3 | 0 | 0 | 0 |
+
+K8 has approximately 67.6% fewer aggregate OH0 failures than WH1 and 95.1%
+fewer than ordinary WH2. Against WH1 it fixes 37 failures and introduces 12;
+against ordinary WH2 it fixes 245 and introduces 11, with one shared failure.
+This is not per-trace or per-cell dominance: for example, the two-byte burst
+cell has two candidate failures versus ordinary WH2's one. Every candidate
+cell meets the frozen 1% threshold; the worst has 3/512 (0.5859375%). All twelve
+candidate failures recover with one additional packet.
+
+The separate 72 hard cases have no K8 or WH1 OH0 failures; ordinary WH2 has
+six at OH0 and one at OH1. All 44 original historical origins recover within
+their unextended horizons for K8, versus five unresolved WH1 and 41 unresolved
+ordinary-WH2 cases. Hard/history cases are outside the 6,144 denominator.
+
+Native, portable arithmetic and ASan/UBSan agree on every descriptor, observed
+basis row, real packet hash, feed status, first success and attempted-call
+ledger. The independent auditor derives candidate coefficients and normalized
+GF(256) prefix ranks, checks 449,676 real-message packet hashes per backend,
+rebuilds every group/cell and paired identity list, and verifies the exact
+1,213-pin receipt union and 77 repository blobs at the producing HEAD.
+WH1/ordinary coefficient rows are observations from their actual basis
+encoders, not an independently implemented version of their generators.
+
+Exact retained replays and independently written full audits pass on Python
+3.8 and 3.12 before this document advances; the independent reports are
+byte-identical. Review found three audit-only coverage gaps: historical
+installed-tool/runtime closure, repeated control-row consistency, and initial
+COMPLETE/source identity retention. They were fixed and covered by 71 negative
+and positive selftests, all passing under both interpreters. The initial test
+run also caught auditor JSON numeric overflow handling. Pre-review reports and
+the failed selftest report are preserved; scientific source/data never changed
+and no codec was rerun. Repeated final source reviews are clean.
+
+Artifacts:
+
+- Sole spent bundle: `/var/tmp/wh2-k8-serialized-recovery-r0`.
+- COMPLETE SHA256: `90b532d0ae2a58e3725b2baedaf162bef413a35b86201fbd5fa02c08cb909ea2`.
+- Native raw SHA256: `7069bc8ec5ec8895d0a554eb4dbe06bff54796713f082eb6742d45f865bd86c7`.
+- Qualification: `/tmp/wh2-k8-recovery-qualified.xXh1l8t1`.
+- Independent audit: `/tmp/wh2-k8-recovery-audit.Zn2zYLoj`; final report SHA256
+  `09aa5c9ba1050ee339d29daefb8b93600c53fcb69258556813b687e84afbedb5`.
+
+This is retained recovery evidence: 512 roots shared across twelve cells,
+not 6,144 independent new samples or a population-level failure bound.
+All producing archive/header dependencies were checked; historical separate
+qualification-test system-header closure is not claimed. No timing, all-K,
+zero-all-seeds, installed profile, default or production-promotion claim follows.
+The separate prospective full-lifecycle speed task is `.82.5.2.2`.
