@@ -1205,6 +1205,19 @@ slowdown cells. The exact replay and independent full audits agree. Current
 shared-path retention is not qualified; gates B/C did not launch and the
 selector remains unpromoted. See the [complete retained gate-A result](bench/Wh2K8SharedRetention/README.md#independently-audited-gate-a-result-not-retained).
 
+The [read-only retained-data diagnosis](bench/Wh2K8RetentionDiagnosis/README.md)
+and independent source/ELF review now cover all 196,992 observations and 912
+cells. For valid full K3 B2/B64, the bare ordinary constructor skips the added
+K8 checks and executes 48 non-NOP instructions in each library, counting its
+call/return but excluding callees. The counts, not the instructions, are equal.
+All 108 paired public-handle
+vectors match in each of 32 investigated encoder cells; 31 cells have zero
+capture fault/switch deltas, with one retained WH1 B1280 prelude switch in the
+exception. Failed-control excursions resemble the previously observed
+millisecond-boundary association. These findings do not establish a cause or
+license sample exclusion, a gate rerun or another selector/layout variant.
+The original verdict, stopped B/C gates and unpromoted selector are unchanged.
+
 ## Retired equation profile identifiers
 
 The identifiers `e161ce5d456f9bb7` and `20a4f27a870612a2` are permanently
