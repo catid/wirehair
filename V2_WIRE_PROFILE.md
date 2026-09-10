@@ -941,8 +941,9 @@ prototype facade's borrowed-source and permanent-poison contracts.
 The benchmark boundary has independently audited
 [paired retained recovery](bench/Wh2K8SerializedRecoveryR0.md) and
 [full-lifecycle speed](bench/Wh2K8SerializedCostR0.md) passes. Those results
-do not qualify this installed owned-basis path. Its own installed speed/recovery
-gates and preserved-path regressions remain separate admission requirements.
+do not qualify this installed owned-basis path. Its own installed recovery
+gate below now passes; installed speed and preserved-path regressions remain
+separate admission requirements.
 No default, all-K, non-GFNI-host speed or all-construction-seed qualification
 is implied by adding the explicit profile.
 
@@ -1010,6 +1011,61 @@ Actual installed paired recovery and full-lifecycle speed are tracked separately
 in `.82.5.3.2` and `.82.5.3.3`. The existing preserved-path regressions and
 current K3 speed retention remain unqualified; no default promotion follows
 from these neutral results.
+
+### Installed K8 retained recovery: qualified
+
+At source `5a30050`, `wirehair.wh2.k8-public-recovery-r0` passes through the
+actual installed WHV2 APIs, comparing explicit K8, ordinary certified WH2 and
+WH1 under matched independent/owned and borrowed source policies. Native,
+portable arithmetic and ASan/UBSan agree on all 6,260 retained cases and all
+six arms. No benchmark facade is linked and candidate descriptors are the
+actual WHV2 records, not translated prototype identities.
+
+On the 6,144 retained loss traces, each source policy gives:
+
+| Codec | Zero-overhead failures | Observed rate | Failures with one extra packet |
+|---|---:|---:|---:|
+| Installed explicit K8 | 12 | 0.1953125% | 0 |
+| WH1 | 37 | 0.6022% | 5 |
+| Ordinary WH2 | 246 | 4.0039% | 3 |
+
+K8 has about 67.6% fewer aggregate zero-overhead failures than WH1 and 95.1%
+fewer than ordinary WH2. It fixes 37 WH1 failures but introduces 12 different
+ones; against ordinary WH2 it fixes 245 and introduces 11, with one shared
+failure. There is no per-trace or per-cell dominance. All twelve 512-trace
+candidate cells meet the frozen 1% threshold; the worst is 3/512 (0.5859375%).
+All twelve candidate failures recover with one additional packet.
+
+All 72 separate hard cases recover without extra packets for K8 and WH1,
+versus six ordinary-WH2 failures. All 44 historical origins recover for K8 at
+their original widths/tails and unextended horizons, versus five unresolved
+WH1 and 41 unresolved ordinary-WH2 origins. These cases are outside the loss
+denominator. The twelve cells share 512 roots; policy/backend replays do not
+increase the independent sample size.
+
+Independent coefficients, every-arm packet arithmetic and prefix ranks,
+twice-recovered guarded messages and complete attempted API ledgers agree.
+All senders are destroyed before receivers. Complete six-arm prototype parity
+permits only separately validated candidate descriptor differences, without
+rewriting either record stream. The different API ownership/detach/conflict
+contracts retain their separate neutral qualification.
+
+All nineteen production objects and full archives reproduce byte-for-byte on
+all three backends. Forty-eight neutral cases and twelve late-call cleanup
+checks pass per backend; all 27 controller/build tests pass on Python 3.12 and
+3.8. Exact replays and a separately written full arithmetic, summary,
+archive/ELF and 1,287-pin provenance audit pass on both interpreters before
+source advancement. All sixteen auditor selftests and repeated source reviews
+are clean. Worker stderr is empty; the complete controller took 66.611779
+seconds. These are retained-data checks, not new recovery samples or timing.
+
+The spent bundle is `/var/tmp/wh2-k8-public-recovery-r0`, COMPLETE SHA256
+`699415eef17fcc486aeb3e5487feef0a9dcd4812110497df1370014c47b7af02`;
+native raw SHA256
+`bab96ca60d697f9f5a751fdbc74dce306c6c0d12a98e651f7e9735beb6af50e1`.
+See the [installed recovery contract](bench/Wh2K8PublicRecoveryR0.md).
+Installed K8 speed, preserved-path restoration and current K3 speed retention
+remain unmet; defaults are unchanged and no all-K or promotion claim follows.
 
 ## Retired equation profile identifiers
 
