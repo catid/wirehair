@@ -138,6 +138,8 @@ set(LIB_SOURCE_FILES
         codec/WirehairSmallK3Lookup.inc
         codec/WirehairSmallK5.cpp
         codec/WirehairSmallK5Lookup.inc
+        codec/WirehairSmallK8.cpp
+        codec/WirehairSmallK8Lookup.inc
         codec/WirehairK6.cpp
         codec/WirehairK6Core.cpp
         codec/WirehairK6Core.h
@@ -535,6 +537,18 @@ if (BUILD_TESTS)
     set_tests_properties(v2_small_k5_codec_test PROPERTIES
         LABELS "v2;k5;recovery;ownership;allocation" TIMEOUT 120)
 
+    add_executable(v2_small_k8_codec_test test/V2SmallCodecTest.cpp)
+    target_compile_definitions(v2_small_k8_codec_test PRIVATE WIREHAIR_V2_SMALL_TEST_K=8)
+    wirehair_apply_project_options(v2_small_k8_codec_test)
+    if(WIREHAIR_PRIMARY_VARIANT STREQUAL "STATIC")
+        target_link_libraries(v2_small_k8_codec_test PRIVATE wirehair)
+    else()
+        target_link_libraries(v2_small_k8_codec_test PRIVATE wirehair_test_support)
+    endif()
+    add_test(NAME v2_small_k8_codec_test COMMAND v2_small_k8_codec_test)
+    set_tests_properties(v2_small_k8_codec_test PROPERTIES
+        LABELS "v2;k8;recovery;ownership;allocation" TIMEOUT 120)
+
     add_executable(v2_small_c_consumer test/V2SmallCConsumer.c)
     set_target_properties(v2_small_c_consumer PROPERTIES
         LINKER_LANGUAGE CXX C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
@@ -567,6 +581,23 @@ if (BUILD_TESTS)
         target_link_libraries(v2_small_k5_c_consumer_shared PRIVATE wirehair_shared)
         add_test(NAME v2_small_k5_c_consumer_shared COMMAND v2_small_k5_c_consumer_shared)
         set_tests_properties(v2_small_k5_c_consumer_shared PROPERTIES LABELS "v2;k5;abi;shared" TIMEOUT 60)
+    endif()
+
+    add_executable(v2_small_k8_c_consumer test/V2SmallK8CConsumer.c)
+    set_target_properties(v2_small_k8_c_consumer PROPERTIES
+        LINKER_LANGUAGE CXX C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
+    wirehair_apply_project_options(v2_small_k8_c_consumer)
+    target_link_libraries(v2_small_k8_c_consumer PRIVATE wirehair)
+    add_test(NAME v2_small_k8_c_consumer COMMAND v2_small_k8_c_consumer)
+    set_tests_properties(v2_small_k8_c_consumer PROPERTIES LABELS "v2;k8;abi" TIMEOUT 60)
+    if(TARGET wirehair_shared)
+        add_executable(v2_small_k8_c_consumer_shared test/V2SmallK8CConsumer.c)
+        set_target_properties(v2_small_k8_c_consumer_shared PROPERTIES
+            LINKER_LANGUAGE CXX C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
+        wirehair_apply_project_options(v2_small_k8_c_consumer_shared)
+        target_link_libraries(v2_small_k8_c_consumer_shared PRIVATE wirehair_shared)
+        add_test(NAME v2_small_k8_c_consumer_shared COMMAND v2_small_k8_c_consumer_shared)
+        set_tests_properties(v2_small_k8_c_consumer_shared PROPERTIES LABELS "v2;k8;abi;shared" TIMEOUT 60)
     endif()
 
     add_executable(small_c_consumer test/SmallCConsumer.c)

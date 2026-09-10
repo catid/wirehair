@@ -67,3 +67,70 @@ sole launch; exact and independent full retained audits precede result updates.
 Even PASS qualifies only these prototype static-call lifecycles on this host.
 It is not installed speed, new recovery evidence, shared-call/cold-start/
 non-GFNI-host speed, an all-K guarantee, or proof of restored preserved paths.
+
+## Audited retained result
+
+The sole run at source `379accfd1c412618be490b1653ade8b568180657` completed
+**PASS**. All 216 same-code controls and all 144 candidate comparisons pass,
+separately by shape, lifecycle, source policy and measurement order. Every
+candidate upper 95% time-ratio bound is below one against both ownership-matched
+WH1 and ordinary WH2. No samples, phases or orders were omitted or pooled.
+
+Observed elapsed-time reductions versus ownership-matched WH1, spanning both
+measurement orders (percentages are time saved, not throughput increases):
+
+| Source policy | Block bytes / tail | Encoder | Low-ID decoder | Distant-ID decoder |
+| --- | ---: | ---: | ---: | ---: |
+| Independent | 2 / 2 | 56.98–57.20% | 87.04–87.15% | 67.17–67.20% |
+| Independent | 2 / 1 | 55.92–55.94% | 87.11–87.21% | 67.28–67.30% |
+| Independent | 64 / 64 | 66.55–66.60% | 86.20–86.21% | 68.37–68.40% |
+| Independent | 64 / 1 | 65.55% | 86.17–86.23% | 68.44–68.64% |
+| Independent | 1280 / 1280 | 64.76–64.83% | 83.05–83.11% | 77.17–77.20% |
+| Independent | 1280 / 1 | 65.46–65.54% | 83.14–83.20% | 76.97–77.05% |
+| Borrowed | 2 / 2 | 56.41–56.42% | 87.18–87.19% | 67.34–67.37% |
+| Borrowed | 2 / 1 | 55.16–55.41% | 87.10–87.16% | 67.29–67.41% |
+| Borrowed | 64 / 64 | 66.34–66.36% | 86.18–86.20% | 68.49–68.63% |
+| Borrowed | 64 / 1 | 65.46–65.52% | 86.15–86.20% | 68.51–68.63% |
+| Borrowed | 1280 / 1280 | 66.04–66.16% | 83.07–83.08% | 77.11–77.14% |
+| Borrowed | 1280 / 1 | 70.80–70.85% | 83.11–83.15% | 77.23–77.25% |
+
+Against ordinary WH2, independent K8's control-time/candidate-time ratios are
+6.80–9.01 for encoding, 7.65–20.17 for low-ID decoding and 5.40–7.84 for
+distant-ID decoding. Borrowed K8's corresponding ratios are 7.25–8.84,
+7.66–20.25 and 5.38–7.84. These compare the same ownership
+policy; they are not policy-versus-policy comparisons.
+
+Every arm and stream reached its own first success after eight feeds; no
+systematic fallback was needed. All 77,760 callbacks and 9,953,280 fresh
+lifecycles remain retained, with 159,252,480 attempted API actions. Timed WORK
+totals 38.461061016 seconds; the complete controller took 149.625211 seconds.
+One minor fault and 155 involuntary switches in the WORK observation intervals
+remain in the data. These intervals had no major faults or voluntary switches;
+there were no codec/oracle errors.
+
+Exact retained replays pass under Python 3.8 and 3.12. Separately written
+full raw, GF(256) payload/rank, chronology, ledger, phase, statistical and
+historical-provenance audits also pass under both interpreters, producing
+byte-identical reports. The independent audit checks 941 receipt pins and the
+1,406-pin qualified backend union; its largest numerical difference is below
+`9.5e-16`. All 895 independent auditor selftests pass under both interpreters.
+Repeated worker/controller source reviews were clean before the sole run;
+all result audits completed before this document or source HEAD advanced.
+
+Retained evidence:
+
+- Bundle: `/var/tmp/wh2-k8-serialized-cost-r0` (permanently spent).
+- COMPLETE SHA256: `326ebb3aeea4985731239af2f2ac29b1146e5708b1e95b1ff14c5e1258467bae`.
+- Raw SHA256: `086fe68aa3752a6e73196e184725643a4ea75f2ca5b50b5d71208d0fdf12a245`.
+- Analysis SHA256: `4cd254114e2f744fadf6f62d6e3de4e9bf4a64fcee15565e727bf4c4d8db6006`.
+- Qualified builds: `/tmp/wh2-k8-cost-qualified.dszLNHHF`.
+- Independent audits: `/tmp/wh2-k8-cost-independent-audit.EPvKDVxr/terminal-python3.{8,12}-report.json`.
+- Both audit report SHA256: `ad42e8057698e87bb502ee06ce31942cc401bf2fdf6d947fe87bbbdeb26a5906`.
+
+This qualifies the benchmark serialized boundary on this native GFNI host,
+including the declared full/partial tails and both source policies. It does
+not qualify an installed or ordinary-WH2 K8 profile, shared-call or non-GFNI
+performance, process cold starts, preserved-path restoration or all K. The
+[paired recovery result](Wh2K8SerializedRecoveryR0.md) is separate retained
+evidence; this timing run adds no recovery samples. Installed admission must
+preserve ordinary-WH2 ownership and conflict contracts and pass its own gates.

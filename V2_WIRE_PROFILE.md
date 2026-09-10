@@ -897,6 +897,120 @@ CONTROL_FAIL outcomes remain unchanged. Preserved-path restoration, current
 ordinary K3 retention and installed K5 speed are still unmet; this screen
 does not qualify strict WH1 speed, recovery, static speed, defaults or all K.
 
+## Small K8 equation profile: explicit admission candidate
+
+`WIREHAIR_V2_PROFILE_SMALL_K8_2026_09` has ID `7a9276b85c730ae0`, the first
+64 bits of SHA-256 over the exact name (no newline):
+
+```text
+wirehair:v2:small-k8:thue-morse-96-19-186-153-85-252-7-255:lambda-2:gf256-14d:2026-09
+```
+
+The full digest is
+`7a9276b85c730ae04a8ac1c2648e556d1586f771d5f35b5db8ad1bbeead2ad95`.
+This freezes GF(256), polynomial `0x14d`, and the selected Thue-Morse
+companion pair `(96,19,186,153,85,252,7,255)` /
+`(98,19,186,153,85,252,7,255)`. The phase perturbation is two, not the
+one used by K3/K5. The right-product packet-ID mapping, systematic identity
+rows and zero tail padding equal the qualified benchmark K8 equations.
+Its 65,536-byte immutable lookup has byte SHA-256
+`512c6646e44517964e7e6a7cd0ffa41057802182ddc500a818af541c05770817`.
+The table is compiled into the ordinary library; installation and consumers
+need neither Python, benchmark artifacts, a live encoder nor a seed search.
+
+Require exactly eight source blocks, `7*block_bytes < message_bytes <=
+8*block_bytes`, `block_bytes <= 29826161`, and attempt zero. The bound limits
+the decoder's eight pivot blocks plus scratch to at most 256 MiB. Invalid
+dimensions precede `BadSeed` for a nonzero attempt. ID7 carries only the
+meaningful final-block bytes; all other IDs carry one full block.
+
+This is an explicit WHV2 profile, not a new default. Ordinary K8 constructors
+still select certified WH2. K3 selection, K5 explicit selection, the CURRENT
+alias, all existing profile IDs and the opt-in WHK3/K6 APIs are unchanged.
+WHK8 prototype descriptors and its distinct profile ID are rejected, never
+silently reinterpreted as WHV2.
+
+K8 reuses ordinary WHV2's small-profile owning state and shared core. Both
+source policies prepare one owned source basis, with private zero padding for
+a partial tail. Borrowing adds no full-message copy or allocation; repairs
+do not read borrowed input, and detach is allocation-free. Contradictory
+dependent packets report `Error` without poisoning the retained basis, even
+after recovery; successful recovery can be repeated. This differs from the
+prototype facade's borrowed-source and permanent-poison contracts.
+
+The benchmark boundary has independently audited
+[paired retained recovery](bench/Wh2K8SerializedRecoveryR0.md) and
+[full-lifecycle speed](bench/Wh2K8SerializedCostR0.md) passes. Those results
+do not qualify this installed owned-basis path. Its own installed speed/recovery
+gates and preserved-path regressions remain separate admission requirements.
+No default, all-K, non-GFNI-host speed or all-construction-seed qualification
+is implied by adding the explicit profile.
+
+### Installed K8 neutral qualification
+
+The explicit profile passes correctness and package qualification at
+`/tmp/wh2-v2-k8-admission.YNN2XmAx`. GNU 13.3 native static/shared testing
+passes 34 selected gates, including all three relocated package configurations
+(static Debug, shared Release, and dual RelWithDebInfo). Portable arithmetic
+passes six selected gates; ASan/UBSan with leak and fake-stack detection passes
+six; Clang 18 shared-primary passes eight. Its C++ codec tests link
+`libwirehair_test_support.a`; its C consumer and export checks exercise the
+actual shared DSO. The separately retained `LAUNCH_ENVIRONMENT.json` records
+the explicit sanitizer launch options; it is execution metadata, not part of
+the earlier neutral inventory. Portable arithmetic here is a forced backend
+on this host, not a separate non-GFNI-machine performance result.
+
+The public K8 correctness test covers 69 width/tail shapes through six explicit
+constructor/policy routes, independent lambda-2 packet oracles, every constructor
+allocation failure, aliases, source release, protected borrowed-source repairs,
+allocation-free detach, conflict/basis preservation, repeated recovery and C++
+transactional ownership. An additional 96 rotated/reversed systematic-order
+cases exercise pivot bit 7, full/one-byte tails and conflicts before and after
+recovery. Bounds include the exact maximum block size, both message boundaries,
+all 255 invalid nonzero attempts and prototype/retired descriptor rejection.
+K3/K5 tests and ordinary K8 default-preservation checks pass too.
+
+`bench/Wh2V2SmallProductionParity.cpp` additionally replays the unchanged sealed
+native corpus through both the original benchmark boundary archive and the
+actual WHV2 library, translating descriptors explicitly in test code. Per
+native/portable/sanitizer backend, all 21,110 K8 corpus cases and 193,746 packet
+oracles pass. The 2,347 retained coefficient-row checks call the reusable
+core's `S::Row`, not the installed WHV2 API. Both source policies produce
+42,220 paired external lifecycles and 387,492 packet comparisons. Every prefix
+status and recovery agrees, including repeated recovery, original historical
+widths/tails/horizons and all 14,850 seam subsets; encoders are freed before
+receivers are created. K3's 7,774-case and K5's 10,053-case retained corpora also
+pass through this same adapter on all three backends. These are semantic
+replays, not new recovery samples, timing, or equality of the two APIs' distinct
+ownership/detach/conflict contracts. Core-only subtests in the reused harness
+are not counted as installed contract coverage.
+
+The same certified-compatibility program linked against the pre-K8 and current
+native libraries emits exactly 2,180,292 identical bytes over 48 cases; SHA-256
+is `2e6536dcd86a7c2892399ddf1f14c3ff2290c2ef9e270aaa0c5ed87d0928907b`.
+Seventeen of eighteen existing archive members are byte-identical: only
+`WirehairV2Profile.cpp.o` changes, plus the new K8 lookup object. This is byte
+compatibility and change isolation, not evidence of preserved-path speed.
+
+Clang testing exposed an export-checker portability bug: LLVM nm decorates
+the zero-valued absolute ABI version marker while GNU nm leaves it bare.
+Both describe the same 53 function exports. The checker now normalizes only
+either exact zero-valued/zero-sized absolute marker spelling, at most once;
+19 synthetic parser fixtures retain strict rejection of malformed metadata,
+duplicate markers, unexpected functions and wrong function versions. The
+original failed Clang log is retained. Repeated main and independent complete
+source reviews of the integration, parity adapter and checker fix found no
+remaining defects.
+
+Native archive SHA-256:
+`0d4a0a7ec3cfa4b8e0f08df75e2c12935b51f28653c8c953a32bb49a5658eff5`;
+native DSO:
+`ef684abac606667e30e3b0de1204b0897aa0fa93a4f5ec2268d1ba951dce03b2`.
+Actual installed paired recovery and full-lifecycle speed are tracked separately
+in `.82.5.3.2` and `.82.5.3.3`. The existing preserved-path regressions and
+current K3 speed retention remain unqualified; no default promotion follows
+from these neutral results.
+
 ## Retired equation profile identifiers
 
 The identifiers `e161ce5d456f9bb7` and `20a4f27a870612a2` are permanently

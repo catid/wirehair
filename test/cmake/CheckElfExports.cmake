@@ -90,27 +90,8 @@ if(NOT nm_result EQUAL 0)
         "stdout:\n${nm_output}\nstderr:\n${nm_error}")
 endif()
 
-set(actual_exports "")
-string(REPLACE "\r\n" "\n" nm_output "${nm_output}")
-string(REPLACE "\r" "\n" nm_output "${nm_output}")
-string(REPLACE "\n" ";" nm_lines "${nm_output}")
-foreach(line IN LISTS nm_lines)
-    string(STRIP "${line}" line)
-    if(line STREQUAL "")
-        continue()
-    endif()
-    if(NOT line MATCHES "^([^ \t]+)[ \t]+[A-Za-z?][ \t]+")
-        message(FATAL_ERROR "Unrecognized nm output line: '${line}'")
-    endif()
-    list(APPEND actual_exports "${CMAKE_MATCH_1}")
-endforeach()
-
-# GNU ld emits the version namespace itself as an absolute dynamic symbol;
-# mold records the same version definition without that synthetic dynsym row.
-# It is linker metadata rather than a callable ABI entry point.  Normalize only
-# that exact marker while still requiring every function to carry the default
-# version suffix and rejecting every other name.
-list(REMOVE_ITEM actual_exports "${abi_version}")
+include("${CMAKE_CURRENT_LIST_DIR}/ParseElfExports.cmake")
+wirehair_parse_elf_exports("${nm_output}" "${abi_version}" actual_exports)
 set(expected_exports "")
 foreach(symbol IN LISTS public_symbols)
     list(APPEND expected_exports "${symbol}@@${abi_version}")

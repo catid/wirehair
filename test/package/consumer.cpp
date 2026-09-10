@@ -129,7 +129,7 @@ template<unsigned K> int CppSmallRoundTrip()
     std::array<std::uint8_t, K * 2 - 1> expected{};
     for (unsigned i = 0; i < expected.size(); ++i) expected[i] = static_cast<std::uint8_t>(i);
     const uint64_t profile_id = K == 3 ? WIREHAIR_V2_PROFILE_SMALL_K3_2026_09 :
-        WIREHAIR_V2_PROFILE_SMALL_K5_2026_09;
+        K == 5 ? WIREHAIR_V2_PROFILE_SMALL_K5_2026_09 : WIREHAIR_V2_PROFILE_SMALL_K8_2026_09;
     auto source = expected;
     wirehair::v2::Encoder encoder;
     wirehair::v2::SerializedProfile profile;
@@ -167,5 +167,7 @@ int main()
     const int v2_result = CppV2RoundTrip();
     if (v2_result) return v2_result;
     const int k3_result = CppSmallRoundTrip<3>();
-    return k3_result == 0 ? CppSmallRoundTrip<5>() : k3_result;
+    if (k3_result) return k3_result;
+    const int k5_result = CppSmallRoundTrip<5>();
+    return k5_result == 0 ? CppSmallRoundTrip<8>() : k5_result;
 }

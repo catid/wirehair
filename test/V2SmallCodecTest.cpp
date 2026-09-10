@@ -57,11 +57,11 @@ using Byte = uint8_t;
 #define WIREHAIR_V2_SMALL_TEST_K 3
 #endif
 constexpr unsigned K = WIREHAIR_V2_SMALL_TEST_K;
-static_assert(K == 3 || K == 5, "Installed small WHV2 profiles only");
+static_assert(K == 3 || K == 5 || K == 8, "Installed small WHV2 profiles only");
 constexpr uint64_t ProfileId = K == 3 ? WIREHAIR_V2_PROFILE_SMALL_K3_2026_09 :
-    WIREHAIR_V2_PROFILE_SMALL_K5_2026_09;
+    K == 5 ? WIREHAIR_V2_PROFILE_SMALL_K5_2026_09 : WIREHAIR_V2_PROFILE_SMALL_K8_2026_09;
 constexpr uint32_t MaxBlockBytes = UINT32_C(268435456) / (K + 1);
-// K5 is explicit-only until ordinary-path performance/recovery gates pass.
+// K5/K8 are explicit-only until ordinary-path admission gates pass.
 constexpr unsigned FirstRoute = K == 3 ? 0 : 1;
 using Matrix = std::array<Byte, K * K>;
 using Row = std::array<Byte, K>;
@@ -93,11 +93,13 @@ struct Oracle {
     {
         const Byte three[3] = {8, 14, 7};
         const Byte five[5] = {121, 110, 207, 198, 31};
-        const Byte* feedback = K == 3 ? three : five;
+        const Byte eight[8] = {96, 19, 186, 153, 85, 252, 7, 255};
+        const Byte* feedback = K == 3 ? three : K == 5 ? five : eight;
+        const unsigned lambda = K == 8 ? 2 : 1;
         for (unsigned phase = 0; phase < 2; ++phase) {
             powers[phase][0].fill(0);
             for (unsigned i = 0; i < K - 1; ++i) powers[phase][0][(i + 1) * K + i] = 1;
-            for (unsigned i = 0; i < K; ++i) powers[phase][0][i * K + K - 1] = static_cast<Byte>(feedback[i] ^ (i == 0 ? phase : 0));
+            for (unsigned i = 0; i < K; ++i) powers[phase][0][i * K + K - 1] = static_cast<Byte>(feedback[i] ^ (i == 0 ? lambda * phase : 0));
         }
         for (unsigned level = 1; level < 32; ++level) {
             powers[0][level] = Product(powers[0][level - 1], powers[1][level - 1]);
@@ -334,6 +336,55 @@ void Lifecycle(const Oracle& oracle)
     std::cout << "K" << K << " WHV2 lifecycles: " << shapes << " width/tail shapes x "
               << (3 - FirstRoute) * 3 << " constructors\n";
 }
+void PivotOrders(const Oracle& oracle)
+{
+    // Especially for K8: exercise pivot-mask bit7 before the lower pivots,
+    // and rotated/reversed RHS/scratch orderings with full and one-byte tails.
+    size_t cases = 0;
+    for (uint32_t block : {2u, 64u, 1280u}) for (uint32_t tail : {1u, block})
+        for (unsigned reverse = 0; reverse < 2; ++reverse)
+            for (unsigned rotation = 0; rotation < K; ++rotation) {
+                const auto original = Message(size_t(block) * (K - 1) + tail);
+                const auto p = Descriptor(original.size(), block);
+                WirehairV2Codec h = nullptr;
+                Check(wirehair_v2_decoder_create(p.data(), 32, &h) == WirehairV2_Success,
+                    "pivot order receiver");
+                std::vector<Byte> untouched(original.size(), 0xa5);
+                const auto before = untouched;
+                for (unsigned i = 0; i < K; ++i) {
+                    const unsigned position = (rotation + i) % K;
+                    const uint32_t id = reverse ? K - 1 - position : position;
+                    const auto good = oracle.Packet(original, block, id);
+                    auto bad = good; bad.back() ^= 1;
+                    const auto expected = i == K - 1 ? WirehairV2_Success : WirehairV2_NeedMore;
+                    Start(0);
+                    const auto fed = wirehair_v2_decode(h, id, good.data(), static_cast<uint32_t>(good.size()));
+                    const auto conflict = wirehair_v2_decode(h, id, bad.data(), static_cast<uint32_t>(bad.size()));
+                    const auto duplicate = wirehair_v2_decode(h, id, good.data(), static_cast<uint32_t>(good.size()));
+                    const size_t count = Stop();
+                    Check(fed == expected && conflict == WirehairV2_Error && duplicate == expected && count == 0,
+                        "pivot permutation / nonpoisoning conflict / allocation-free feed");
+                    if (i != K - 1) {
+                        Check(wirehair_v2_recover(h, untouched.data(), untouched.size(), nullptr) ==
+                            WirehairV2_NeedMore && untouched == before, "incomplete permuted basis no-write");
+                    }
+                }
+                Recover(h, original);
+                Recover(h, original);
+                for (uint32_t id : {K - 1, K, UINT32_MAX}) {
+                    const auto good = oracle.Packet(original, block, id);
+                    auto bad = good; bad.back() ^= 1;
+                    Check(wirehair_v2_decode(h, id, bad.data(), static_cast<uint32_t>(bad.size())) ==
+                        WirehairV2_Error, "post-recovery highest-pivot/repair conflict");
+                    Check(wirehair_v2_decode(h, id, good.data(), static_cast<uint32_t>(good.size())) ==
+                        WirehairV2_Success, "post-recovery identity retains basis");
+                    Recover(h, original);
+                }
+                wirehair_v2_free(h);
+                ++cases;
+            }
+    std::cout << "K" << K << " pivot order cases: " << cases << '\n';
+}
 void AllocationFailures()
 {
     for (uint32_t tail : {1u, 64u}) for (unsigned route = FirstRoute; route < 3; ++route)
@@ -388,7 +439,7 @@ void HandleAllocationIsolation()
         int SourceState;
         const uint8_t* BorrowedSource;
     };
-    for (unsigned k : {2u, 3u, 4u, 6u, 128u}) for (unsigned policy : {1u, 2u}) {
+    for (unsigned k : {2u, 3u, 4u, 5u, 6u, 8u, 128u}) for (unsigned policy : {1u, 2u}) {
         const auto source = Message(size_t(k) * 64 - 1);
         Profile p = {};
         WirehairV2EncoderOptions options = WIREHAIR_V2_ENCODER_OPTIONS_INIT;
@@ -413,14 +464,15 @@ void HandleAllocationIsolation()
             "certified decoder retains pre-admission handle size");
         wirehair_v2_free(h);
     }
-    for (unsigned k : {3u, 5u}) {
+    for (unsigned k : {3u, 5u, 8u}) {
         const auto source = Message(size_t(k) * 64 - 1);
         Profile p = {};
         WirehairV2Codec h = nullptr;
         uint32_t bytes = 0;
         Start();
         const auto result = wirehair_v2_encoder_create_profile_id(
-            k == 3 ? WIREHAIR_V2_PROFILE_SMALL_K3_2026_09 : WIREHAIR_V2_PROFILE_SMALL_K5_2026_09,
+            k == 3 ? WIREHAIR_V2_PROFILE_SMALL_K3_2026_09 :
+                k == 5 ? WIREHAIR_V2_PROFILE_SMALL_K5_2026_09 : WIREHAIR_V2_PROFILE_SMALL_K8_2026_09,
             source.data(), source.size(), 64, p.data(), 32, &bytes, &h);
         Stop();
         Check(result == WirehairV2_Success && h &&
@@ -484,7 +536,7 @@ void Contracts(const Oracle& oracle)
     Check(wirehair_v2_profile_serialize(&host, out, sizeof(out), nullptr) == WirehairV2_InvalidDimensions,
         "geometry precedes seed");
     for (uint64_t retired : {UINT64_C(0xe161ce5d456f9bb7), UINT64_C(0x20a4f27a870612a2),
-            UINT64_C(0x5748324b35544d31), UINT64_MAX}) {
+            UINT64_C(0x5748324b35544d31), UINT64_C(0x5748324b38544d31), UINT64_MAX}) {
         host.profile_id = retired;
         Check(wirehair_v2_profile_serialize(&host, out, sizeof(out), nullptr) ==
             WirehairV2_UnsupportedProfile, "retired profile never reinterpreted");
@@ -505,16 +557,16 @@ void Contracts(const Oracle& oracle)
     Check(wirehair_v2_profile_deserialize(p.data(), static_cast<uint32_t>(p.size()), &host) == WirehairV2_Success &&
         host.profile_id == WIREHAIR_V2_PROFILE_CURRENT, "explicit old descriptor unchanged");
     wirehair_v2_free(h);
-    // Explicit K5 must not silently alter either ordinary selector.
-    for (unsigned policy : {0u, 1u, 2u}) {
-        const auto ordinary_source = Message(5 * 64 - 1);
+    // Explicit K5/K8 must not silently alter either ordinary selector.
+    for (unsigned k : {5u, 8u}) for (unsigned policy : {0u, 1u, 2u}) {
+        const auto ordinary_source = Message(k * 64 - 1);
         Profile ordinary = {};
         h = nullptr;
         Check(Create(0, policy, ordinary_source.data(), ordinary_source.size(), 64,
-            ordinary, &h) == WirehairV2_Success, "ordinary K5 still constructs");
+            ordinary, &h) == WirehairV2_Success, "ordinary K5/K8 still constructs");
         Check(wirehair_v2_profile_deserialize(ordinary.data(), 32, &host) == WirehairV2_Success &&
             host.profile_id == WIREHAIR_V2_PROFILE_CERTIFIED_2026_07,
-            "K5 default stays certified until admission gates pass");
+            "K5/K8 defaults stay certified until admission gates pass");
         wirehair_v2_free(h);
     }
 }
@@ -592,6 +644,10 @@ void CppOwnership()
 void ProfileBounds()
 {
     const Profile valid = Descriptor(2 * K - 1, 2);
+    Profile foreign_magic = valid;
+    foreign_magic[2] = 'K'; foreign_magic[3] = static_cast<Byte>('0' + K);
+    Check(wirehair_v2_profile_validate(foreign_magic.data(), 32) == WirehairV2_InvalidMagic,
+        "prototype descriptor magic is not WHV2");
     for (unsigned attempt = 1; attempt < 256; ++attempt) {
         Profile p = valid;
         p[28] = static_cast<Byte>(attempt);
@@ -617,6 +673,25 @@ void ProfileBounds()
         Check(result == (block == 1 || block == MaxBlockBytes ? WirehairV2_Success : WirehairV2_InvalidDimensions)
             && count == 0, "exact small block-size bound without allocation");
     }
+    for (uint32_t block : {1u, 2u, MaxBlockBytes}) {
+        for (uint64_t message : {uint64_t(block) * (K - 1),
+                uint64_t(block) * (K - 1) + 1, uint64_t(block) * K,
+                uint64_t(block) * K + 1}) {
+            WirehairV2Profile host = {};
+            host.struct_bytes = sizeof(host);
+            host.profile_version = WIREHAIR_V2_PROFILE_VERSION;
+            host.profile_id = ProfileId;
+            host.block_bytes = block;
+            host.message_bytes = message;
+            Profile p = {};
+            Start(0);
+            const auto result = wirehair_v2_profile_serialize(&host, p.data(), 32, nullptr);
+            const size_t count = Stop();
+            const bool valid_shape = message > uint64_t(block) * (K - 1) && message <= uint64_t(block) * K;
+            Check(result == (valid_shape ? WirehairV2_Success : WirehairV2_InvalidDimensions) && count == 0,
+                "exact small message geometry without allocation");
+        }
+    }
     auto p = valid;
     auto* wrapped = reinterpret_cast<const void*>(UINTPTR_MAX - 3);
     WirehairV2Codec encoder = nullptr;
@@ -635,6 +710,7 @@ int main()
     LookupCoverage(oracle);
     DecoderErrors(oracle);
     Lifecycle(oracle);
+    PivotOrders(oracle);
     AllocationFailures();
     Contracts(oracle);
     ProtectedSource(oracle);

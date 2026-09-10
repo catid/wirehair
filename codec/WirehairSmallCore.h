@@ -1,8 +1,8 @@
 #ifndef WIREHAIR_SMALL_CORE_H
 #define WIREHAIR_SMALL_CORE_H
 
-// Private compile-time small-block core, shared by the K3/K5 library paths
-// and correctness harness (including screened K2/K8). Existing K6 does not include this file.
+// Private compile-time small-block core, shared by the K3/K5/K8 library paths
+// and correctness harness (including screened K2). Existing K6 does not include this file.
 // Initialize the existing shared GF256 runtime before using these classes.
 #include "WirehairK6Payload.h"
 #include <climits>

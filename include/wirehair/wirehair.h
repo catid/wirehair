@@ -247,6 +247,15 @@ WIREHAIR_EXPORT WirehairResult wirehair_wire_profile_init(
 #define WIREHAIR_V2_PROFILE_SMALL_K5_2026_09 \
     UINT64_C(0x80070c81bfe375f1)
 
+/**
+    Explicit-only fixed K8 GF(256) equations; exactly eight source blocks,
+    block bytes at most 29826161, and seed_attempt zero. Not selected by the
+    ordinary constructors pending installed-path admission qualification.
+    See V2_WIRE_PROFILE.md for the immutable lambda-2 equation identity.
+*/
+#define WIREHAIR_V2_PROFILE_SMALL_K8_2026_09 \
+    UINT64_C(0x7a9276b85c730ae0)
+
 /** Stable alias for the original certified profile, not a dispatch policy. */
 #define WIREHAIR_V2_PROFILE_CURRENT \
     WIREHAIR_V2_PROFILE_CERTIFIED_2026_07
@@ -282,7 +291,7 @@ typedef enum WirehairV2Result_t
     wirehair_v2_profile_deserialize() at persistence or transport boundaries.
     All reserved fields must be zero. seed_attempt is the selected deterministic
     equation-seed attempt in [0, 255] for CERTIFIED_2026_07 and must be zero for
-    SMALL_K3_2026_09.
+    the SMALL_K3_2026_09, SMALL_K5_2026_09 and SMALL_K8_2026_09 profiles.
 */
 typedef struct WirehairV2Profile_t
 {

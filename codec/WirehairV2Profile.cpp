@@ -77,7 +77,7 @@ struct PublicCodec
 // No virtual dispatch: destruction must select the actual allocated type.
 template<unsigned K> struct SmallPublicCodec : PublicCodec
 {
-    static_assert(K == 3 || K == 5, "Only installed small WHV2 profiles");
+    static_assert(K == 3 || K == 5 || K == 8, "Only installed small WHV2 profiles");
     SmallPublicCodec() : PublicCodec(K) {}
 
     // Same prepared identity basis for both source policies. Declare it before
@@ -97,8 +97,10 @@ WH2_SMALL_NOINLINE void FreeSmallCodec(PublicCodec* codec)
 {
     if (codec->SmallK == 3) {
         delete static_cast<SmallPublicCodec<3>*>(codec);
-    } else {
+    } else if (codec->SmallK == 5) {
         delete static_cast<SmallPublicCodec<5>*>(codec);
+    } else if (codec->SmallK == 8) {
+        delete static_cast<SmallPublicCodec<8>*>(codec);
     }
 }
 
@@ -148,7 +150,8 @@ bool IsSupportedProfileId(uint64_t profile_id)
 {
     return profile_id == WIREHAIR_V2_PROFILE_CERTIFIED_2026_07 ||
         profile_id == WIREHAIR_V2_PROFILE_SMALL_K3_2026_09 ||
-        profile_id == WIREHAIR_V2_PROFILE_SMALL_K5_2026_09;
+        profile_id == WIREHAIR_V2_PROFILE_SMALL_K5_2026_09 ||
+        profile_id == WIREHAIR_V2_PROFILE_SMALL_K8_2026_09;
 }
 
 template<unsigned K> bool SmallShape(uint64_t message_bytes, uint32_t block_bytes)
@@ -162,7 +165,8 @@ template<unsigned K> bool SmallShape(uint64_t message_bytes, uint32_t block_byte
 bool IsSmallProfileId(uint64_t profile_id)
 {
     return profile_id == WIREHAIR_V2_PROFILE_SMALL_K3_2026_09 ||
-        profile_id == WIREHAIR_V2_PROFILE_SMALL_K5_2026_09;
+        profile_id == WIREHAIR_V2_PROFILE_SMALL_K5_2026_09 ||
+        profile_id == WIREHAIR_V2_PROFILE_SMALL_K8_2026_09;
 }
 
 bool OptionsForProfileId(
@@ -278,7 +282,9 @@ WirehairV2Result ValidateHostProfile(const WirehairV2Profile& profile)
     if (IsSmallProfileId(profile.profile_id)) {
         const bool shape = profile.profile_id == WIREHAIR_V2_PROFILE_SMALL_K3_2026_09 ?
             SmallShape<3>(profile.message_bytes, profile.block_bytes) :
-            SmallShape<5>(profile.message_bytes, profile.block_bytes);
+            profile.profile_id == WIREHAIR_V2_PROFILE_SMALL_K5_2026_09 ?
+            SmallShape<5>(profile.message_bytes, profile.block_bytes) :
+            SmallShape<8>(profile.message_bytes, profile.block_bytes);
         if (!shape) {
             return WirehairV2_InvalidDimensions;
         }
@@ -308,27 +314,46 @@ WirehairV2Result MapSmallResult(wirehair_small_core::Status result)
 WH2_SMALL_NOINLINE WirehairV2Result EncodeSmall(
     PublicCodec* codec, uint32_t id, void* output, uint32_t capacity)
 {
-    return MapSmallResult(codec->SmallK == 3 ?
-        static_cast<SmallPublicCodec<3>*>(codec)->SmallEncoder->Encode(id, output, capacity).status :
+    switch (codec->SmallK) {
+    case 3: return MapSmallResult(
+        static_cast<SmallPublicCodec<3>*>(codec)->SmallEncoder->Encode(id, output, capacity).status);
+    case 5: return MapSmallResult(
         static_cast<SmallPublicCodec<5>*>(codec)->SmallEncoder->Encode(id, output, capacity).status);
+    case 8: return MapSmallResult(
+        static_cast<SmallPublicCodec<8>*>(codec)->SmallEncoder->Encode(id, output, capacity).status);
+    default: return WirehairV2_Error;
+    }
 }
 
 WH2_SMALL_NOINLINE WirehairV2Result DecodeSmall(
     PublicCodec* codec, uint32_t id, const void* input, uint32_t bytes)
 {
-    return MapSmallResult(codec->SmallK == 3 ?
-        static_cast<SmallPublicCodec<3>*>(codec)->SmallDecoder->Feed(id, input, bytes).status :
+    switch (codec->SmallK) {
+    case 3: return MapSmallResult(
+        static_cast<SmallPublicCodec<3>*>(codec)->SmallDecoder->Feed(id, input, bytes).status);
+    case 5: return MapSmallResult(
         static_cast<SmallPublicCodec<5>*>(codec)->SmallDecoder->Feed(id, input, bytes).status);
+    case 8: return MapSmallResult(
+        static_cast<SmallPublicCodec<8>*>(codec)->SmallDecoder->Feed(id, input, bytes).status);
+    default: return WirehairV2_Error;
+    }
 }
 
 WH2_SMALL_NOINLINE WirehairV2Result RecoverSmall(
     PublicCodec* codec, void* output)
 {
-    return MapSmallResult(codec->SmallK == 3 ?
+    switch (codec->SmallK) {
+    case 3: return MapSmallResult(
         static_cast<SmallPublicCodec<3>*>(codec)->SmallDecoder->Recover(
-            output, (size_t)codec->MessageBytes).status :
+            output, (size_t)codec->MessageBytes).status);
+    case 5: return MapSmallResult(
         static_cast<SmallPublicCodec<5>*>(codec)->SmallDecoder->Recover(
             output, (size_t)codec->MessageBytes).status);
+    case 8: return MapSmallResult(
+        static_cast<SmallPublicCodec<8>*>(codec)->SmallDecoder->Recover(
+            output, (size_t)codec->MessageBytes).status);
+    default: return WirehairV2_Error;
+    }
 }
 
 #undef WH2_SMALL_NOINLINE
@@ -760,6 +785,9 @@ WirehairV2Result CreateEncoderForProfile(
     }
     if (profile.profile_id == WIREHAIR_V2_PROFILE_SMALL_K5_2026_09) {
         return CreateSmallEncoder<5>(wirehair_small_core::K5Lookup(), message, profile, codec_out);
+    }
+    if (profile.profile_id == WIREHAIR_V2_PROFILE_SMALL_K8_2026_09) {
+        return CreateSmallEncoder<8>(wirehair_small_core::K8Lookup(), message, profile, codec_out);
     }
 
     PublicCodec* codec = AllocatePublicCodec();
@@ -1381,6 +1409,9 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_decoder_create(
     }
     if (profile.profile_id == WIREHAIR_V2_PROFILE_SMALL_K5_2026_09) {
         return CreateSmallDecoder<5>(wirehair_small_core::K5Lookup(), profile, codecOut);
+    }
+    if (profile.profile_id == WIREHAIR_V2_PROFILE_SMALL_K8_2026_09) {
+        return CreateSmallDecoder<8>(wirehair_small_core::K8Lookup(), profile, codecOut);
     }
     PublicCodec* codec = AllocatePublicCodec();
     if (!codec) {
