@@ -449,7 +449,10 @@ int Neutral(bool emit) {
 }
 static_assert(sizeof(small_recovery_data::kTraces)/sizeof(small_recovery_data::kTraces[0])==6216,"trace roster");
 static_assert(sizeof(small_recovery_data::kHistory)/sizeof(small_recovery_data::kHistory[0])==small_recovery_config::history_count,"history roster");
-static_assert(sizeof(small_recovery_data::kWindows)/sizeof(small_recovery_data::kWindows[0])==30,"window provenance");
+// K4 additionally retains the exponent-two window; the existing K8 roster
+// stays at 30. These are provenance checks, not extra recovery records.
+static_assert(sizeof(small_recovery_data::kWindows)/sizeof(small_recovery_data::kWindows[0])==
+              (small_recovery_config::K==4?31u:30u),"window provenance");
 static_assert(sizeof(small_recovery_data::kRows)/sizeof(small_recovery_data::kRows[0])==small_recovery_config::row_count,"coefficient provenance");
 } // namespace
 int main(int argc,char** argv) {
