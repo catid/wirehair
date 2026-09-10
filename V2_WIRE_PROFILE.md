@@ -1198,7 +1198,12 @@ The separate [native shared and relocated-package qualification](bench/Wh2K8Ordi
 now passes actual shared C/C++ ownership/provider and installed consumer/plugin
 checks. Its [prospective shared gates](bench/Wh2K8OrdinaryShared/Gates.md)
 separate current-path retention, ordinary K8 superiority and ownership-matched
-K3 speed/retention; those timing instruments are not yet qualified or launched.
+K3 speed/retention. The independently qualified gate-A instrument has now
+completed **CONTROL_FAIL**: current-then-candidate has two failed same-code
+controls, while the reverse load passes every control and finds 17 resolved
+slowdown cells. The exact replay and independent full audits agree. Current
+shared-path retention is not qualified; gates B/C did not launch and the
+selector remains unpromoted. See the [complete retained gate-A result](bench/Wh2K8SharedRetention/README.md#independently-audited-gate-a-result-not-retained).
 
 ## Retired equation profile identifiers
 
