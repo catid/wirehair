@@ -112,3 +112,80 @@ before producing HEAD or pinned documentation advances. A survivor licenses
 separate native payload and ownership-matched actual-WH1 encoder/decoder
 qualification only. K8 retention, K3 preservation, installed K5 speed and the
 full all-K speed/recovery/zero-bad-construction objective remain required.
+
+## Independently audited terminal result
+
+The sole screen at pushed source
+`86acfff0ff4a7a831a5a4ba9651a208dbc1cea19` completed **PASS** on 2026-09-10.
+The first local parameter, lambda 1, selected feedbacks `(64,120,54,15)` and
+`(65,120,54,15)`. No second parameter was tried and no loss/history outcome
+influenced selection.
+
+| Frozen check | Result |
+| --- | --- |
+| Selected local minors | 700/700 full rank |
+| Seam minors | 2170/2170 full rank |
+| Main hard traces, OH0 | 72/72 full rank |
+| Original-length historical prefixes | 37/37 full rank; all 38 origins retained |
+| Fresh traces, OH0 | 9/6144 failures = 0.146484375% |
+| Worst width/schedule cell, OH0 | 4/512 = 0.78125%, B2 repair-only |
+| Fresh traces, OH1 through OH4 | Zero failures at every overhead |
+| Packed lookup | 20480 bytes |
+
+All nine deficient fresh prefixes become full rank with one additional
+packet. All twelve width/schedule cells meet the frozen 1% threshold. The
+baseline inventory used different roots, so its 13 WH2 / 16 WH1 failures
+must not be treated as a paired comparison with this candidate. This is not
+per-trace dominance, an installed-codec recovery rate or a universal guarantee.
+
+The worker exited zero with empty stderr in 0.823798982 seconds. The complete
+observed controller took 1.139050763 seconds and retained every output with
+matching pre/post source, interpreter and inventory identities. These are
+experiment execution times, not encoder/decoder performance.
+
+Both exact-helper retained replays passed on Python 3.12 and 3.8 without
+invoking a worker or extending the search. The separately written auditor
+imports no experiment module. It independently checked field arithmetic,
+the finite selection, all local/seam minors, the complete lookup, 2049 literal
+sequential rows, all 2252 accessed rows, every one of 31080 hard/fresh prefix
+ranks, full history projection, all cell decisions and fourteen source pins.
+Its two complete reports are byte-identical; all inputs matched again after
+each audit. A trace-only C++ program linked to the unchanged FrozenTrace
+generator also agrees on every one of 6216 hard/fresh ID lists and their
+packet-ID hashes under both Python readers. No native codec was executed.
+
+All 34 neutral screen/controller tests pass under each Python version. The
+independent auditor's five neutral tests and standalone unrelated-matrix
+checks pass under both as well. Repeated main/independent source reviews are
+clean. A replay command initially named a nonexistent `/usr/bin/python3.8`;
+it executed nothing. Using the installed `python3.8` completed the read-only
+check, preserving the preceding Python 3.12 report and the sole scientific run.
+
+Retained evidence:
+
+- Bundle `/var/tmp/wh2-k4-thue-morse-r0`; COMPLETE SHA256
+  `8f1c9357b125edffc282df4cde29592130e27566f86946a7a85b0e92f175d281`.
+- Raw SHA256
+  `1e6422eeb1a62631fb9f0e8df86dac286b39ec7021cc5bbcb1d3f2335a351ce2`.
+- Lookup SHA256
+  `f4c3bc7d9fffac727acefc217d0481206b4c2d608af051993f34fb6a19f47c69`.
+- Receipt/exact/native-trace artifacts `/tmp/wh2-k4-thue-receipt.kV7XJ04c`;
+  receipt SHA256
+  `96253f1b876b170af9bee75be946822d1240c5355a8d3b37428833c744a12b70`;
+  `AUDITS.json` SHA256
+  `e2f79b46a2242b2bf7ad5b8966af2289adcf1a34444fca3c57f11848851b08b6`.
+- Independent auditor directory `/tmp/wh2-k4-independent-audit.y5uXMxNj`;
+  `audit.py` SHA256
+  `17d71ad9ed6075b4f66329d9d741c1bb6444cef0095bcc14fd7d71cbbb8fc6f0`;
+  both final report SHA256
+  `e3ede776af6bb83eabac1728184075e75cb411840970f7144765946e493153ae`;
+  `POSTRUN.json` SHA256
+  `9a0199c760ecaea524edd2e46f131351d39b41bdc7a20afacef280fcea6aece9`.
+
+All exact and independent audits and the sealed crosslinks completed before
+producing HEAD or this pinned contract advanced. The namespace is permanently
+spent: do not rerun its strict current-HEAD checks after this documentation
+change. Native qualification now proceeds separately in
+`wirehair-sxvz.16.1.20.82.6.1`, preserving the exact selected equations. No
+production/profile/default change, WH1 speed win, comparative recovery win or
+all-K qualification follows from this mathematical result alone.

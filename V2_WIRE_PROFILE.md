@@ -1218,6 +1218,35 @@ millisecond-boundary association. These findings do not establish a cause or
 license sample exclusion, a gate rerun or another selector/layout variant.
 The original verdict, stopped B/C gates and unpromoted selector are unchanged.
 
+## K4 structural-screen survivor: not an installed profile
+
+The separately frozen `wirehair.wh2.k4-thue-morse-r0` mathematical screen
+passes at source `86acfff`. First local lambda 1 selects the GF(256)
+companion feedbacks `(64,120,54,15)` and `(65,120,54,15)`, polynomial `0x14d`,
+with the same dimension-parametric mapping approach, not inherited K3/K5/K8
+qualification. The packed lookup has 20,480 bytes, SHA256
+`f4c3bc7d9fffac727acefc217d0481206b4c2d608af051993f34fb6a19f47c69`.
+
+All 700 local minors, 2,170 seam minors, 72 hard OH0 traces and 37 original-
+length historical prefixes pass, preserving all 38 WH2/WH1 failure origins.
+On 6,144 fresh loss traces, nine have deficient rank after exactly four
+packets (0.146484375%); all become full rank with one extra packet. Every
+512-trace width/schedule cell meets the frozen 1% bound; the worst has four
+failures (0.78125%, B2 repair-only).
+
+Exact and independent full arithmetic, lookup, trace/rank and provenance
+audits pass under Python 3.12 and 3.8 before source advancement; the independent
+reports are byte-identical. The unchanged native FrozenTrace generator agrees
+on all 6,216 hard/fresh traces, without executing a codec. Thirty-four neutral
+screen/controller tests and five independent-auditor tests pass per interpreter.
+
+See the [complete K4 contract and result](bench/Wh2K4ThueMorseR0.md).
+This is structural feasibility, not a paired WH1 recovery comparison or native
+speed evidence. Ordinary K4 still selects certified WH2. Native payload and
+ownership-matched full encoder/decoder qualification remain required, alongside
+the unresolved existing-path admission and all-K objectives. The scientific
+namespace is spent and must not be rerun or retuned.
+
 ## Retired equation profile identifiers
 
 The identifiers `e161ce5d456f9bb7` and `20a4f27a870612a2` are permanently
