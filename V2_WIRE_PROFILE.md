@@ -148,7 +148,12 @@ GFNI-capable host. Encoder time includes create, descriptor output, 18 packets
 and free. Decoder time includes create, feed through its own first success,
 recover and free; both frozen streams needed three packets for every arm.
 The two source policies share the decoder: its repeated observations are not
-extra recovery samples. This screen does not establish partial-tail,
+extra recovery samples. Both WH2 source policies were compared with borrowed-input
+WH1 and borrowed certified-WH2 controls. The source-independent WH2 rows are
+therefore not ownership-matched comparisons; owned-input WH1 was not timed in
+this gate. The historical measurements and decisions are unchanged. New
+ownership-matched qualification must use the corresponding owned WH1 control.
+This screen does not establish partial-tail,
 additional-width, shared-call, cold-start, non-GFNI or all-K performance, nor
 does it isolate regressions in the preserved old profile or opt-in facade.
 
@@ -1189,6 +1194,11 @@ Both scoped ordinary K8 gates now pass. Production defaults remain unchanged:
 pre-admission preserved-path restoration and current K3 speed retention still
 precede promotion. Neither this retained replay nor the separate static speed
 screen establishes all-K, shared-call, cold-start or non-GFNI-host performance.
+The separate [native shared and relocated-package qualification](bench/Wh2K8OrdinaryShared/README.md)
+now passes actual shared C/C++ ownership/provider and installed consumer/plugin
+checks. Its [prospective shared gates](bench/Wh2K8OrdinaryShared/Gates.md)
+separate current-path retention, ordinary K8 superiority and ownership-matched
+K3 speed/retention; those timing instruments are not yet qualified or launched.
 
 ## Retired equation profile identifiers
 
