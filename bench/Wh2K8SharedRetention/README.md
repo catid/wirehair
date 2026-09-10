@@ -2,7 +2,7 @@
 
 Tracked in `wirehair-sxvz.16.1.20.82.5.3.4.4`. This implements the observer
 for gate A in [the prospective shared-call contract](../Wh2K8OrdinaryShared/Gates.md).
-It contains only preparation/build commands. No timing cohort has been
+`Adapter.py` contains only preparation/build commands. No timing cohort has been
 launched, no scientific namespace has been claimed, and defaults are unchanged.
 
 The comparison is current versus the six-line ordinary K8 selector candidate,
@@ -102,8 +102,22 @@ env ASAN_OPTIONS=detect_leaks=1:detect_stack_use_after_return=1 UBSAN_OPTIONS=ha
 python3 -m unittest discover -s bench/Wh2K8SharedRetention -p 'test_*.py' -v
 ```
 
-The next step is the separately frozen, independently qualified gate-A
-controller and sole comparison. A non-PASS stops gates B/C. Gate A's combined
+The separate [gate-A controller freeze](Freeze.md) supplies `Runner.py` for
+closed build, receipt, one-shot run and exact replay. Its native and ASan-driver
+builds pass at `/tmp/wh2-k8-retention-runner-final.960tdF4R`; their manifests are
+`d0b754b4b9b5211f31ebb0be6c3ba1c7a23e719b586b22921a17c2648db1ce7d` and
+`777f77d7967e62b4f16a949535b453625c5fa8259903e7bc90d6834dfcbcd08d`.
+The native worker is byte-identical to the accepted observer above. Each new
+manifest has 3,218 inputs and 89 artifacts, including all 3,207 accepted
+observer prerequisite pins. All twenty Adapter/Runner tests pass under both
+Python versions, as do two reused bounded capture/spool tests. Initial
+synthetic-receipt mock errors were fixed before final builds. The earlier
+parallel ASan-driver build in `/tmp/wh2-k8-retention-runner.RMTVYd7w` stopped
+at its target-identity guard without a sanitizer report; that log is retained.
+Final qualifications ran sequentially and passed without changing the guard.
+
+The sole scientific comparison remains subject to the complete prelaunch
+requirements in the freeze. A non-PASS stops gates B/C. Gate A's combined
 decoder stream and seventeen-packet K3 encoder do not establish the full
 historical K3 workload; gate C explicitly retains that separate eighteen-packet
 work and corrects its WH1 ownership comparison. Neither A/B/C nor this neutral
