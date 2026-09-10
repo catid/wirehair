@@ -17,11 +17,10 @@ Use a fresh, task-owned build directory. This harness needs the original local
 The ordinary library and installed package do not depend on this directory.
 Pass `-DWH2_SMALL_TEST_DIMENSION=5` to select the separately sealed K5 evidence
 at `/var/tmp/wh2-k5-thue-morse-r0` instead. Dimension 2 selects the separately
-sealed `/var/tmp/wh2-k2-thue-morse-r0` evidence. All three selected dimensions
-build two direct-core tests and five serialized-boundary tests. Dimension 8
-selects `/var/tmp/wh2-k8-thue-morse-r0` and builds only the two direct-core tests;
-its external ownership boundary is not yet implemented. The K2 boundary
-is benchmark-only; it does not introduce an installed profile.
+sealed `/var/tmp/wh2-k2-thue-morse-r0` evidence. Dimension 8 selects
+`/var/tmp/wh2-k8-thue-morse-r0`. All four selected dimensions build two
+direct-core tests and five serialized-boundary tests. The K2/K8 boundaries
+are benchmark-only; they do not introduce installed profiles.
 Other dimensions are rejected. K3 remains the default build; this option never
 changes the installed library.
 
@@ -99,8 +98,8 @@ The generated fixture SHA256 is
 Evidence was audited and sealed before this result paragraph was appended;
 the qualification reports pin the pre-result README, not this later text.
 
-This accepts native K8 only. Its external ownership boundary, actual paired
-WH1 recovery and full lifecycle timing require separate qualification. No
+This milestone accepted native K8 only. Its external ownership boundary, actual
+paired WH1 recovery and full lifecycle timing require separate qualification. No
 installed lookup, public profile, default, speed or all-K claim is made.
 
 ## K2 native qualification
@@ -140,10 +139,10 @@ Native replay confirms the already retained recovery cases; it does not add
 a fresh sample or a paired WH1 recovery-rate comparison. At this direct-core
 milestone, the external boundary and full lifecycle speed were still unqualified.
 
-## Serialized correctness for K2, K3 and K5
+## Serialized correctness for K2, K3, K5 and K8
 
 The build also produces a separate, non-LTO serialized C boundary and five
-additional tests for K2, K3 and K5. Its shared `Facade<K,Traits>` implementation retains K6's
+additional tests for K2, K3, K5 and K8. Its shared `Facade<K,Traits>` implementation retains K6's
 independent/borrowed input, transactional allocating detach, descriptor
 validation and permanent conflict-poison behavior. Only the selected benchmark
 wrapper instantiates that boundary for external callers; the installed K6
@@ -156,6 +155,17 @@ K2 uses `WHK2` and `0x5748324b32544d31`, the sealed 7,168-byte lookup,
 and `block_bytes <= 89478485` (`floor(268435456 / 3)`). Its admission changes
 only compile-time dimension checks and fixture selection, not the shared
 runtime algorithm or the ordinary WHV2 conflict contract.
+K8 uses `WHK8` and `0x5748324b38544d31`, the same sealed 65,536-byte lookup,
+and `block_bytes <= 29826161` (`floor(268435456 / 9)`). This limit bounds the
+nine-block decoder slab, not aggregate or transient process memory. No K8
+production facade or exported installed API is introduced. The independent
+serialized oracle uses K8's lambda 2; smaller dimensions retain lambda 1.
+K8's retained serialized corpus has 42,220 cases and 387,492 packets across
+both policies, without changing any trace, width, tail or terminal rank.
+Its additional external highest-pivot gate checks 108 ID7-first/last shapes,
+864 primary feeds, and 216 separate permanent-poison receivers before and
+after full recovery. The private-core conflict-and-resume checks remain
+separate because the external boundary intentionally poisons permanently.
 
 `small_serialized` tests the selected dimension's ownership/error/byte behavior;
 `small_serialized_k6`
@@ -197,6 +207,39 @@ unaffected. No Fable report was obtained for this milestone.
 Full lifecycle speed against ownership-matched WH1 and ordinary WH2 remains
 unmeasured for K2. No installed API, profile, default or production source
 changed in this serialized-boundary milestone.
+
+### K8 serialized qualification
+
+All 84 tests passed: all seven checks at K8/K2/K3/K5 under native, portable
+arithmetic, and ASan+UBSan with leak and fake-stack detection. K8's external
+boundary passed 78 ownership/lifecycle shapes, the separate literal-descriptor
+C receiver, 108 highest-pivot shapes and 216 permanent-poison receivers.
+The complete retained corpus passed 42,220 serialized cases and 387,492 packet
+checks across both ownership policies per backend; no history was extended,
+deduplicated or given different widths/tails. Native prefix-rank and guarded
+payload recovery match the same sealed mathematical records.
+
+Two source reviewers and repeated local reading found no boundary bugs. An
+independent artifact auditor verified all tests, every generated fixture value,
+222 pinned artifacts, compilation/link settings, private GF ABI and complete
+repository dependency coverage. Python 3.12 and 3.8 audit reports are identical.
+All 25 fixture-generator tests also passed under both interpreters. The core,
+production sources, installed profiles and existing library archives remained
+unchanged; only six benchmark files implement/document this boundary extension.
+
+Artifacts: `/tmp/wh2-k8-serialized.qQHyZqaa`, with `QUALIFIED.json` SHA256
+`991c5a69b5fa22d34ad0d51922e81dd64a678a867f38add7d121c05b342bd1a4`.
+The independent reports at `/tmp/wh2-k8-serialized-independent.sbcgjBaH`
+both have SHA256
+`d59235955675ebfda2eded46e25054f96d42752b8ba4dcb9ad6fecd5f11f8f33`.
+The source/fixture hashes were audited and sealed before this result text.
+`README-pre-result.md` in each K8 native/serialized artifact directory preserves
+the exact non-producing README bytes pinned by its qualification report.
+
+This is benchmark-boundary correctness qualification, not an installed profile,
+new recovery sample, paired WH1 recovery result or speed promotion. Actual
+ownership-matched WH1 recovery and full encoder/decoder lifecycle comparisons
+remain required in `wirehair-sxvz.16.1.20.82.5.2`.
 
 ## Separate K3 serialized performance qualification
 

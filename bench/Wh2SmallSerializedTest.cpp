@@ -1,6 +1,7 @@
 #include "Wh2SmallSerializedCore.h"
 #include "../codec/WirehairK6Payload.h"
 #include "wirehair/wirehair_k6.h"
+#include "wirehair/wirehair_small.h"
 #include "wirehair/wirehair.h"
 
 #include <algorithm>
@@ -16,7 +17,7 @@
 #ifndef WH2_SMALL_TEST_K
 #define WH2_SMALL_TEST_K WH2_SMALL_CODEC_K
 #endif
-#if WH2_SMALL_TEST_K == 2 || WH2_SMALL_TEST_K == 3 || WH2_SMALL_TEST_K == 5
+#if WH2_SMALL_TEST_K == 2 || WH2_SMALL_TEST_K == 3 || WH2_SMALL_TEST_K == 5 || WH2_SMALL_TEST_K == 8
 static_assert(WH2_SMALL_TEST_K == WH2_SMALL_CODEC_K, "test matches external boundary");
 struct Api {
     static constexpr uint64_t ProfileId = WH2_SMALL_PROFILE_ID;
@@ -85,6 +86,8 @@ __attribute__((noinline)) void operator delete[](void* p, size_t) noexcept { std
 namespace {
 using Byte = uint8_t;
 constexpr unsigned K = WH2_SMALL_TEST_K;
+static_assert(K != 8 || Api::ProfileId == UINT64_C(0x5748324b38544d31), "sealed WHK8 identity");
+static_assert(K != 8 || Api::MaxBlockBytes == 29826161u, "K8 nine-block slab cap");
 using Matrix = std::array<Byte, K * K>;
 using Row = std::array<Byte, K>;
 using Profile = std::array<Byte, WH2_SMALL_PROFILE_BYTES>;
@@ -121,12 +124,13 @@ struct Oracle {
         const Byte three[3] = {8, 14, 7};
         const Byte five[5] = {121, 110, 207, 198, 31};
         const Byte two[2] = {2, 3};
+        const Byte eight[8] = {96, 19, 186, 153, 85, 252, 7, 255};
         for (unsigned phase = 0; phase < 2; ++phase) {
             powers[phase][0].fill(0);
             for (unsigned i = 0; i < K - 1; ++i) powers[phase][0][(i + 1) * K + i] = 1;
             for (unsigned i = 0; i < K; ++i) powers[phase][0][i * K + K - 1] =
-                static_cast<Byte>((K == 2 ? two[i] : K == 3 ? three[i] : K == 5 ? five[i] : six[i]) ^
-                    (i == 0 ? phase : 0));
+                static_cast<Byte>((K == 8 ? eight[i] : K == 2 ? two[i] : K == 3 ? three[i] : K == 5 ? five[i] : six[i]) ^
+                    (i == 0 ? phase * (K == 8 ? 2u : 1u) : 0u));
         }
         for (unsigned level = 1; level < 32; ++level) {
             powers[0][level] = Product(powers[0][level - 1], powers[1][level - 1]);
@@ -320,7 +324,7 @@ void Malformed()
     reject(good.data(), 33, Wh2Small_InvalidInput);
     reject(nullptr, 32, Wh2Small_InvalidInput);
     reject(reinterpret_cast<void*>(UINTPTR_MAX - 15), 32, Wh2Small_InvalidInput);
-    for (unsigned other_k : {2u, 3u, 5u, 6u}) if (other_k != K) {
+    for (unsigned other_k : {2u, 3u, 5u, 6u, 8u}) if (other_k != K) {
         Profile other = good;
         other[3] = static_cast<Byte>('0' + other_k);
         Put(other.data() + 8, UINT64_C(0x5748324b30544d31) + (uint64_t(other_k) << 24), 8);
@@ -388,6 +392,91 @@ void Malformed()
           "encoder rejects capacity wrapping");
     PacketCheck(e.codec, 0, std::vector<Byte>(original.begin(), original.begin() + 64));
     Api::Free(e.codec);
+}
+
+// Unlike the private core, this external boundary permanently poisons after a
+// contradiction. Keep clean bit7 recovery and poisoned receivers separate.
+void HighestPivot(const Oracle& oracle)
+{
+    unsigned shapes = 0, feeds = 0, poisons = 0;
+    for (unsigned block : {1u,2u,3u,4u,7u,16u,31u,32u,63u,64u,65u,127u,128u,129u,255u,256u,257u,1280u,4096u}) {
+        std::vector<unsigned> tails = {block};
+        if (block > 1) tails.push_back(1);
+        if (block > 2) tails.push_back(block - 1);
+        for (unsigned tail : tails) for (unsigned order = 0; order < 2; ++order) {
+            const auto source = Message(size_t(K - 1) * block + tail);
+            const auto profile = Descriptor(source.size(), block);
+            Check(wirehair_small_profile_validate(profile.data(), profile.size()) == WirehairSmall_UnsupportedProfile,
+                  "installed small codec rejects WHK8");
+            const auto d = Api::DecoderCreate(profile.data(), profile.size());
+            Check(d.status == Wh2Small_Success && d.codec, "highest pivot standalone receiver");
+            std::vector<Byte> output(source.size() + 2, 0xa5);
+            for (unsigned i = 0; i < K; ++i) {
+                const unsigned id = order == 0 ? (i == 0 ? K - 1 : i - 1) : i;
+                const auto packet = oracle.Packet(source, block, id);
+                const auto expected = i + 1 == K ? Wh2Small_Success : Wh2Small_NeedMore;
+                Start(0);
+                const auto first = Api::Decode(d.codec, id, packet.data(), packet.size());
+                const auto duplicate = Api::Decode(d.codec, id, packet.data(), packet.size());
+                Check(Stop() == 0 && first == expected && duplicate == expected, "highest pivot duplicate and rank status");
+                for (unsigned repeat = 0; repeat < 2; ++repeat) {
+                    std::fill(output.begin(), output.end(), 0xa5);
+                    Start(0);
+                    const auto r = Api::Recover(d.codec, output.data() + 1, source.size());
+                    Check(Stop() == 0 && r.status == expected && r.bytes_required == source.size() &&
+                        r.bytes_written == (i + 1 == K ? source.size() : 0) && output.front() == 0xa5 && output.back() == 0xa5 &&
+                        (i + 1 == K ? std::equal(source.begin(), source.end(), output.begin() + 1) :
+                            std::all_of(output.begin(), output.end(), [](Byte b) { return b == 0xa5; })),
+                        "highest pivot repeated guarded recovery");
+                }
+                Check(packet == oracle.Packet(source, block, id), "highest pivot packet preserved");
+                ++feeds;
+            }
+            Api::Free(d.codec);
+            for (unsigned solved = 0; solved < 2; ++solved) {
+                const auto poisoned = Api::DecoderCreate(profile.data(), profile.size());
+                Check(poisoned.status == Wh2Small_Success && poisoned.codec, "highest pivot poison receiver");
+                const auto top = oracle.Packet(source, block, K - 1);
+                Start(0);
+                const auto first = Api::Decode(poisoned.codec, K - 1, top.data(), top.size());
+                Check(Stop() == 0 && first == Wh2Small_NeedMore, "poison fixture bit7 first");
+                if (solved) {
+                    for (unsigned id = 0; id < K - 1; ++id) {
+                        const auto packet = oracle.Packet(source, block, id);
+                        Start(0);
+                        const auto s = Api::Decode(poisoned.codec, id, packet.data(), packet.size());
+                        Check(Stop() == 0 && s == (id == K - 2 ? Wh2Small_Success : Wh2Small_NeedMore),
+                              "poison fixture full rank");
+                    }
+                    std::fill(output.begin(), output.end(), 0xa5);
+                    Start(0);
+                    const auto r = Api::Recover(poisoned.codec, output.data() + 1, source.size());
+                    Check(Stop() == 0 && r.status == Wh2Small_Success && r.bytes_written == source.size() &&
+                        r.bytes_required == source.size() && output.front() == 0xa5 && output.back() == 0xa5 &&
+                        std::equal(source.begin(), source.end(), output.begin() + 1), "poison fixture solved bytes");
+                }
+                auto bad = top; bad.back() ^= 1;
+                Start(0);
+                const auto conflict = Api::Decode(poisoned.codec, K - 1, bad.data(), bad.size());
+                const auto again = Api::Decode(poisoned.codec, K - 1, top.data(), top.size());
+                Check(Stop() == 0 && conflict == Wh2Small_Conflict && again == Wh2Small_Conflict,
+                      "highest pivot permanent poison");
+                for (unsigned repeat = 0; repeat < 2; ++repeat) {
+                    std::fill(output.begin(), output.end(), 0xa5);
+                    Start(0);
+                    const auto r = Api::Recover(poisoned.codec, output.data() + 1, source.size());
+                    Check(Stop() == 0 && r.status == Wh2Small_Conflict && r.bytes_required == source.size() &&
+                        !r.bytes_written && std::all_of(output.begin(), output.end(), [](Byte b) { return b == 0xa5; }),
+                        "highest pivot poison never writes recovery");
+                }
+                Api::Free(poisoned.codec); ++poisons;
+            }
+            ++shapes;
+        }
+    }
+    Check(shapes == 108 && feeds == 108 * K && poisons == 216, "serialized highest pivot accounting");
+    std::cout << "PASS K" << K << " serialized highest_pivot shapes=" << shapes << " feeds=" << feeds
+              << " poisoned_receivers=" << poisons << '\n';
 }
 
 void FailuresAndAliases(const Oracle& oracle)
@@ -509,6 +598,7 @@ int main()
     }
     Check(shapes == 78, "exact lifecycle shape roster");
     Malformed(); FailuresAndAliases(oracle);
+    if (K == 8) HighestPivot(oracle);
     std::cout << "PASS K" << K << " " << shapes << " serialized lifecycle shapes; independent packet/recovery oracle, C ABI separately, ownership/detach/OOM/alias/profile/poison gates; GFNI="
               << wirehair_k6_payload::Available() << '\n';
 }

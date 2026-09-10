@@ -2,12 +2,17 @@
 #if WH2_SMALL_CODEC_K == 2
 #include "Wh2K2NativeData.inc"
 namespace Data = wh2_k2_data;
+#elif WH2_SMALL_CODEC_K == 8
+#include "Wh2K8NativeData.inc"
+namespace Data = wh2_k8_data;
 #elif WH2_SMALL_CODEC_K == 5
 #include "Wh2K5NativeData.inc"
 namespace Data = wh2_k5_data;
-#else
+#elif WH2_SMALL_CODEC_K == 3
 #include "Wh2K3NativeData.inc"
 namespace Data = wh2_k3_data;
+#else
+#error "Unsupported benchmark boundary dimension"
 #endif
 
 namespace {

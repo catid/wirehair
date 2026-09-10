@@ -50,12 +50,6 @@ add_test(NAME small_neutral COMMAND wh2_small_native_test --neutral)
 add_test(NAME small_corpus COMMAND wh2_small_native_test --corpus)
 set_tests_properties(small_neutral small_corpus PROPERTIES TIMEOUT 120)
 
-# K8 is a direct-core qualification only. Its serialized ownership boundary
-# needs separate implementation and gates; do not instantiate a K3 fallback.
-if(WH2_SMALL_TEST_DIMENSION STREQUAL "8")
-    return()
-endif()
-
 # Keep the complete serialized C boundary in a separate, non-LTO translation
 # unit. The installed library and its qualified K6 implementation are inputs,
 # not edited/rebuilt/replaced by this standalone project.
