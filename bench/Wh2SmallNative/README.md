@@ -1,4 +1,4 @@
-# K2/K3/K5/K6 native correctness harness
+# K2/K3/K5/K6/K8 native correctness harness
 
 This standalone build tests the private compile-time small-block core. It does
 not change the public library, select a wire profile, or measure performance.
@@ -18,7 +18,9 @@ The ordinary library and installed package do not depend on this directory.
 Pass `-DWH2_SMALL_TEST_DIMENSION=5` to select the separately sealed K5 evidence
 at `/var/tmp/wh2-k5-thue-morse-r0` instead. Dimension 2 selects the separately
 sealed `/var/tmp/wh2-k2-thue-morse-r0` evidence. All three selected dimensions
-build two direct-core tests and five serialized-boundary tests. The K2 boundary
+build two direct-core tests and five serialized-boundary tests. Dimension 8
+selects `/var/tmp/wh2-k8-thue-morse-r0` and builds only the two direct-core tests;
+its external ownership boundary is not yet implemented. The K2 boundary
 is benchmark-only; it does not introduce an installed profile.
 Other dimensions are rejected. K3 remains the default build; this option never
 changes the installed library.
@@ -52,6 +54,54 @@ leave recovery buffers unchanged. These cases are not extended with rescue
 packets. All other cases must recover exactly. Neutral coverage additionally
 includes 19 selected widths spanning 1 to 4,096, partial tails, every packed selector, aliases,
 OOM, conflict preservation and allocation-free packet operations.
+
+At K8 the corpus preserves 21,110 cases and 193,746 packets: 6,216 retained
+hard/fresh twelve-ID traces with all five recorded ranks, all 44 historical
+origins with original widths/tails/prefix lengths (354 packets), and all
+14,850 eight-of-twelve seam subsets. It checks all 2,347 recorded coefficient
+rows against both native mapping and an independent polynomial oracle. The
+selected companion parameter is 2, not the parameter 1 used by smaller
+dimensions. The native core admits K8 only through compile-time assertions;
+no decoder algorithm, production profile, installed lookup or default changes.
+Additional highest-pivot tests feed ID7 first and last over 108 width/tail/order
+shapes, including duplicates, contradictions, repeated recovery and allocation
+checks. Corpus replay uses recorded terminal ranks and never appends rescue
+packets. This is retained-data correctness validation, not new recovery or
+timing evidence.
+
+## K8 native qualification
+
+All 69 tests passed: K8 direct neutral/corpus tests and all seven K2/K3/K5
+direct/serialized/K6-parity checks, each in native, portable arithmetic and
+ASan+UBSan builds with leak and fake-stack detection. Each K8 backend checked
+21,110 corpus cases and 193,746 packets, 324 neutral cases, and 108 additional
+highest-pivot shapes with 864 packet feeds. All 25 fixture-generator tests
+passed under both Python 3.12 and 3.8. Backend replays are correctness checks
+of retained data, not extra recovery samples or performance measurements.
+
+The separate source reviews and independent artifact audit found no confirmed
+bugs. Both interpreter audits checked every K8 fixture value, all 69 test
+results, build flags, library/private-GF ABI and dependency identities. Eighteen
+production compilations (`Small`, `SmallK5`, `V2Profile`, static/shared,
+baseline-forced/candidate-forced/normal) produced six byte-identical three-way
+groups. The object-check script initially stopped because shared CMake also
+exports internal-support compile entries; selecting the exact public target
+resolved this audit-only ambiguity. The completed final objects and original
+partial attempt are both retained. No codec result was discarded or retimed.
+
+Artifacts: `/tmp/wh2-k8-native.ncbVY3vR`, with `QUALIFIED.json` SHA256
+`dbb31bb68bcee09934537de91453a094c695df3d3815d92d98b280b7a5c4997f`.
+The independent Python 3.12/3.8 reports at
+`/tmp/wh2-k8-native-independent.pdP8n3ii` both have SHA256
+`aef362ab0f718fa5e91e4e7f45fb4f15cfca9d16b13f437738eae0e529d33ab8`.
+The generated fixture SHA256 is
+`99e2b20da1405755136311d58bd7391474866bdee1a10ccf22a2de7482b4aaea`.
+Evidence was audited and sealed before this result paragraph was appended;
+the qualification reports pin the pre-result README, not this later text.
+
+This accepts native K8 only. Its external ownership boundary, actual paired
+WH1 recovery and full lifecycle timing require separate qualification. No
+installed lookup, public profile, default, speed or all-K claim is made.
 
 ## K2 native qualification
 

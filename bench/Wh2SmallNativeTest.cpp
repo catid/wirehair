@@ -7,6 +7,9 @@
 #if WH2_SMALL_CODEC_K == 2
 #include "Wh2K2NativeData.inc"
 namespace Data = wh2_k2_data;
+#elif WH2_SMALL_CODEC_K == 8
+#include "Wh2K8NativeData.inc"
+namespace Data = wh2_k8_data;
 #elif WH2_SMALL_CODEC_K == 5
 #include "Wh2K5NativeData.inc"
 namespace Data = wh2_k5_data;
@@ -68,9 +71,9 @@ namespace S = wirehair_small_core;
 namespace Old = wirehair_k6_core;
 using Byte = std::uint8_t;
 constexpr unsigned SelectedK = WH2_SMALL_CODEC_K;
-constexpr unsigned CorpusCases = SelectedK == 2 ? 15956 : SelectedK == 5 ? 10053 : 7774;
-constexpr unsigned CorpusPackets = SelectedK == 2 ? 56776 : SelectedK == 5 ? 75134 : 48187;
-constexpr unsigned RecordedRows = SelectedK == 2 ? 5274 : SelectedK == 5 ? 2270 : 2226;
+constexpr unsigned CorpusCases = SelectedK == 8 ? 21110 : SelectedK == 2 ? 15956 : SelectedK == 5 ? 10053 : 7774;
+constexpr unsigned CorpusPackets = SelectedK == 8 ? 193746 : SelectedK == 2 ? 56776 : SelectedK == 5 ? 75134 : 48187;
+constexpr unsigned RecordedRows = SelectedK == 8 ? 2347 : SelectedK == 2 ? 5274 : SelectedK == 5 ? 2270 : 2226;
 alignas(64) const Byte kK6Lookup[] = {
 #include "../codec/WirehairK6Lookup.inc"
 };
@@ -129,12 +132,14 @@ template<unsigned K> struct Oracle {
         const Byte six[6] = {124, 127, 152, 84, 241, 63};
         const Byte five[5] = {121, 110, 207, 198, 31};
         const Byte two[2] = {2, 3};
+        const Byte eight[8] = {96, 19, 186, 153, 85, 252, 7, 255};
         for (unsigned phase = 0; phase < 2; ++phase) {
             powers[phase][0].fill(0);
             for (unsigned i = 0; i + 1 < K; ++i) powers[phase][0][(i + 1) * K + i] = 1;
             for (unsigned i = 0; i < K; ++i)
                 powers[phase][0][i * K + K - 1] = static_cast<Byte>(
-                    (K == 2 ? two[i] : K == 3 ? small[i] : K == 5 ? five[i] : six[i]) ^ (i == 0 ? phase : 0));
+                    (K == 8 ? eight[i] : K == 2 ? two[i] : K == 3 ? small[i] : K == 5 ? five[i] : six[i]) ^
+                    (i == 0 ? phase * (K == 8 ? 2u : 1u) : 0u));
         }
         for (unsigned level = 1; level < 32; ++level) {
             powers[0][level] = Product(powers[0][level - 1], powers[1][level - 1]);
@@ -193,12 +198,15 @@ std::vector<Byte> Message(std::size_t n)
 S::Lookup LookupSelected() { return S::Lookup{Data::kLookup, sizeof(Data::kLookup)}; }
 S::Lookup Lookup6() { return S::Lookup{kK6Lookup, sizeof(kK6Lookup)}; }
 static_assert(sizeof(Data::kTraces) / sizeof(Data::kTraces[0]) == 6216, "trace roster");
-static_assert(sizeof(Data::kHistory) / sizeof(Data::kHistory[0]) == (SelectedK == 2 ? 56 : SelectedK == 5 ? 54 : 45), "history roster");
+static_assert(sizeof(Data::kHistory) / sizeof(Data::kHistory[0]) == (SelectedK == 8 ? 44 : SelectedK == 2 ? 56 : SelectedK == 5 ? 54 : 45), "history roster");
 static_assert(sizeof(Data::kWindows) / sizeof(Data::kWindows[0]) == (SelectedK == 3 ? 43 : 30), "window roster");
 static_assert(sizeof(Data::kRows) / sizeof(Data::kRows[0]) == RecordedRows, "row roster");
 #if WH2_SMALL_CODEC_K == 2
 static_assert(sizeof(Data::kPairs) / sizeof(Data::kPairs[0]) == 1539, "legacy and stride pair roster");
 static_assert(sizeof(Data::kLookup) == 7168, "K2 packed geometry");
+#endif
+#if WH2_SMALL_CODEC_K == 8
+static_assert(sizeof(Data::kLookup) == 65536, "K8 packed geometry");
 #endif
 void Match(S::Result result, Old::Result old)
 {
@@ -485,6 +493,52 @@ template<unsigned K> void DependencyTests(S::Lookup lookup, const Oracle<K>& ora
           output == source, "deferred solve after conflict");
 }
 
+// Explicitly exercise the top pivot-mask bit both before and after the other
+// pivots. Packet bytes are independently produced; no encoder is alive.
+template<unsigned K> void HighestPivotTests(S::Lookup lookup, const Oracle<K>& oracle)
+{
+    unsigned shapes = 0, feeds = 0;
+    for (unsigned B : {1u,2u,3u,4u,7u,16u,31u,32u,63u,64u,65u,127u,128u,129u,255u,256u,257u,1280u,4096u}) {
+        std::vector<unsigned> tails = {B};
+        if (B > 1) tails.push_back(1);
+        if (B > 2) tails.push_back(B - 1);
+        for (unsigned tail : tails) for (unsigned order = 0; order < 2; ++order) {
+            const auto source = Message(std::size_t(K - 1) * B + tail);
+            std::unique_ptr<S::Decoder<K>> decoder;
+            Check(S::Decoder<K>::Create(lookup, source.size(), B, decoder) == S::Status::Success,
+                  "highest pivot decoder create");
+            std::vector<Byte> output(source.size() + 2, 0xa5);
+            for (unsigned i = 0; i < K; ++i) {
+                const unsigned id = order == 0 ? (i == 0 ? K - 1 : i - 1) : i;
+                const auto packet = oracle.Packet(source, B, id);
+                const auto expected = i + 1 == K ? S::Status::Success : S::Status::NeedMore;
+                Check(NoAlloc([&] { return decoder->Feed(id, packet.data(), packet.size()); }).status == expected &&
+                      decoder->Rank() == i + 1, "highest pivot rank");
+                Check(NoAlloc([&] { return decoder->Feed(id, packet.data(), packet.size()); }).status == expected &&
+                      decoder->Rank() == i + 1, "highest pivot duplicate");
+                auto bad = packet; bad.back() ^= 1;
+                Check(NoAlloc([&] { return decoder->Feed(id, bad.data(), bad.size()); }).status == S::Status::Conflict &&
+                      decoder->Rank() == i + 1, "highest pivot conflict preserves basis");
+                for (unsigned repeat = 0; repeat < 2; ++repeat) {
+                    std::fill(output.begin(), output.end(), 0xa5);
+                    const auto recovered = NoAlloc([&] { return decoder->Recover(output.data() + 1, source.size()); });
+                    Check(recovered.status == expected && recovered.bytes_required == source.size() &&
+                          recovered.bytes_written == (i + 1 == K ? source.size() : 0) &&
+                          output.front() == 0xa5 && output.back() == 0xa5 &&
+                          (i + 1 == K ? std::equal(source.begin(), source.end(), output.begin() + 1) :
+                              std::count(output.begin(), output.end(), 0xa5) == static_cast<std::ptrdiff_t>(output.size())),
+                          "highest pivot repeat recovery preserves bytes");
+                }
+                Check(packet == oracle.Packet(source, B, id), "highest pivot input unchanged");
+                ++feeds;
+            }
+            ++shapes;
+        }
+    }
+    Check(shapes == 108 && feeds == 108 * K, "highest pivot shape accounting");
+    std::cout << "PASS K" << K << " highest_pivot shapes=" << shapes << " feeds=" << feeds << '\n';
+}
+
 template<unsigned K> void Neutral(S::Lookup lookup, const Oracle<K>& oracle)
 {
     InvalidAndAllocations<K>(lookup);
@@ -544,17 +598,22 @@ void Corpus(const Oracle<SelectedK>& oracle)
         ++row_checks;
     }
     for (const auto& trace : Data::kTraces)
-        Exercise<SelectedK>(LookupSelected(), oracle, trace.B, trace.B, std::vector<std::uint32_t>(trace.ids, trace.ids + SelectedK + 4), trace.ranks);
+        Exercise<SelectedK>(LookupSelected(), oracle, trace.B, trace.B,
+            std::vector<std::uint32_t>(trace.ids, trace.ids + SelectedK + 4), trace.ranks, false, trace.ranks[4]);
     const unsigned widths[] = {2,64,1280};
-#if WH2_SMALL_CODEC_K == 2
+#if WH2_SMALL_CODEC_K == 2 || WH2_SMALL_CODEC_K == 8
     for (const auto& prefix : Data::kHistory)
         Exercise<SelectedK>(LookupSelected(), oracle, prefix.B, prefix.tail,
             std::vector<std::uint32_t>(prefix.ids, prefix.ids + prefix.count));
+#if WH2_SMALL_CODEC_K == 2
     for (const auto& pair : Data::kPairs) for (unsigned B : widths) for (unsigned tail : {B, 1u}) {
         const unsigned expected[] = {pair.rank};
         Exercise<SelectedK>(LookupSelected(), oracle, B, tail,
             std::vector<std::uint32_t>(pair.ids, pair.ids + 2), expected, false, pair.rank);
     }
+#else
+    (void)widths;
+#endif
 #else
     for (const auto& prefix : Data::kHistory) for (unsigned bit = 0; bit < 3; ++bit) if (prefix.widths & (1u << bit))
         Exercise<SelectedK>(LookupSelected(), oracle, widths[bit], widths[bit], std::vector<std::uint32_t>(prefix.ids, prefix.ids + prefix.count));
@@ -594,6 +653,7 @@ int main(int argc, char** argv)
             Check(gf256_mul(static_cast<Byte>(a), static_cast<Byte>(b)) == Mul(static_cast<Byte>(a), static_cast<Byte>(b)),
                   "shared field oracle");
         Neutral<SelectedK>(LookupSelected(), selected);
+        if (SelectedK == 8) HighestPivotTests<SelectedK>(LookupSelected(), selected);
         const Oracle<6> six;
         Neutral<6>(Lookup6(), six);
         Check(cases == 324 && packet_checks == 162 * (SelectedK + 24) && row_checks == 5632, "neutral count accounting");

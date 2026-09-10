@@ -2,7 +2,7 @@
 #define WIREHAIR_SMALL_CORE_H
 
 // Private compile-time small-block core, shared by the K3/K5 library paths
-// and correctness harness (including screened K2). Existing K6 does not include this file.
+// and correctness harness (including screened K2/K8). Existing K6 does not include this file.
 // Initialize the existing shared GF256 runtime before using these classes.
 #include "WirehairK6Payload.h"
 #include <climits>
@@ -41,7 +41,7 @@ inline Result Answer(Status status, std::size_t required, std::size_t written = 
 }
 
 template<unsigned K> struct Geometry {
-    static_assert(K == 2 || K == 3 || K == 5 || K == 6, "Only the screened K2/K3/K5/K6 dimensions are supported");
+    static_assert(K == 2 || K == 3 || K == 5 || K == 6 || K == 8, "Only the screened K2/K3/K5/K6/K8 dimensions are supported");
     enum : std::size_t {
         LowPhase = 1024 * K, MatrixBytes = K * K, MiddlePhase = 128 * MatrixBytes,
         Middle10 = 2 * LowPhase, Middle17 = Middle10 + 2 * MiddlePhase,
@@ -104,7 +104,7 @@ template<unsigned K> Status Row(Lookup lookup, std::uint32_t id, std::uint8_t ou
 // borrowed source; only a partial last block is copied/padded privately.
 // Output handle must be empty. Every failed Create preserves it.
 template<unsigned K> class Encoder {
-    static_assert(K == 2 || K == 3 || K == 5 || K == 6, "Only K2/K3/K5/K6 handles are supported");
+    static_assert(K == 2 || K == 3 || K == 5 || K == 6 || K == 8, "Only K2/K3/K5/K6/K8 handles are supported");
     typedef detail::Geometry<K> G;
 public:
     static Status Create(Lookup lookup, const void* source, std::uint64_t message,
@@ -171,7 +171,7 @@ private:
 // public facade may add permanent poison; do not substitute this for WH2's
 // public semantics. There is no packet-ID ledger or receive allocation.
 template<unsigned K> class Decoder {
-    static_assert(K == 2 || K == 3 || K == 5 || K == 6, "Only K2/K3/K5/K6 handles are supported");
+    static_assert(K == 2 || K == 3 || K == 5 || K == 6 || K == 8, "Only K2/K3/K5/K6/K8 handles are supported");
     typedef detail::Geometry<K> G;
 public:
     static Status Create(Lookup lookup, std::uint64_t message, std::uint32_t block,
