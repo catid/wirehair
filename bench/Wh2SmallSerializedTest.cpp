@@ -17,7 +17,7 @@
 #ifndef WH2_SMALL_TEST_K
 #define WH2_SMALL_TEST_K WH2_SMALL_CODEC_K
 #endif
-#if WH2_SMALL_TEST_K == 2 || WH2_SMALL_TEST_K == 3 || WH2_SMALL_TEST_K == 5 || WH2_SMALL_TEST_K == 8
+#if WH2_SMALL_TEST_K == 2 || WH2_SMALL_TEST_K == 3 || WH2_SMALL_TEST_K == 4 || WH2_SMALL_TEST_K == 5 || WH2_SMALL_TEST_K == 8
 static_assert(WH2_SMALL_TEST_K == WH2_SMALL_CODEC_K, "test matches external boundary");
 struct Api {
     static constexpr uint64_t ProfileId = WH2_SMALL_PROFILE_ID;
@@ -86,6 +86,8 @@ __attribute__((noinline)) void operator delete[](void* p, size_t) noexcept { std
 namespace {
 using Byte = uint8_t;
 constexpr unsigned K = WH2_SMALL_TEST_K;
+static_assert(K != 4 || Api::ProfileId == UINT64_C(0x5748324b34544d31), "sealed WHK4 identity");
+static_assert(K != 4 || Api::MaxBlockBytes == 53687091u, "K4 five-block slab cap");
 static_assert(K != 8 || Api::ProfileId == UINT64_C(0x5748324b38544d31), "sealed WHK8 identity");
 static_assert(K != 8 || Api::MaxBlockBytes == 29826161u, "K8 nine-block slab cap");
 using Matrix = std::array<Byte, K * K>;
@@ -124,12 +126,13 @@ struct Oracle {
         const Byte three[3] = {8, 14, 7};
         const Byte five[5] = {121, 110, 207, 198, 31};
         const Byte two[2] = {2, 3};
+        const Byte four[4] = {64, 120, 54, 15};
         const Byte eight[8] = {96, 19, 186, 153, 85, 252, 7, 255};
         for (unsigned phase = 0; phase < 2; ++phase) {
             powers[phase][0].fill(0);
             for (unsigned i = 0; i < K - 1; ++i) powers[phase][0][(i + 1) * K + i] = 1;
             for (unsigned i = 0; i < K; ++i) powers[phase][0][i * K + K - 1] =
-                static_cast<Byte>((K == 8 ? eight[i] : K == 2 ? two[i] : K == 3 ? three[i] : K == 5 ? five[i] : six[i]) ^
+                static_cast<Byte>((K == 4 ? four[i] : K == 8 ? eight[i] : K == 2 ? two[i] : K == 3 ? three[i] : K == 5 ? five[i] : six[i]) ^
                     (i == 0 ? phase * (K == 8 ? 2u : 1u) : 0u));
         }
         for (unsigned level = 1; level < 32; ++level) {
@@ -324,7 +327,7 @@ void Malformed()
     reject(good.data(), 33, Wh2Small_InvalidInput);
     reject(nullptr, 32, Wh2Small_InvalidInput);
     reject(reinterpret_cast<void*>(UINTPTR_MAX - 15), 32, Wh2Small_InvalidInput);
-    for (unsigned other_k : {2u, 3u, 5u, 6u, 8u}) if (other_k != K) {
+    for (unsigned other_k : {2u, 3u, 4u, 5u, 6u, 8u}) if (other_k != K) {
         Profile other = good;
         other[3] = static_cast<Byte>('0' + other_k);
         Put(other.data() + 8, UINT64_C(0x5748324b30544d31) + (uint64_t(other_k) << 24), 8);
@@ -395,7 +398,7 @@ void Malformed()
 }
 
 // Unlike the private core, this external boundary permanently poisons after a
-// contradiction. Keep clean bit7 recovery and poisoned receivers separate.
+// contradiction. Keep clean highest-pivot recovery and poisoned receivers separate.
 void HighestPivot(const Oracle& oracle)
 {
     unsigned shapes = 0, feeds = 0, poisons = 0;
@@ -407,7 +410,7 @@ void HighestPivot(const Oracle& oracle)
             const auto source = Message(size_t(K - 1) * block + tail);
             const auto profile = Descriptor(source.size(), block);
             Check(wirehair_small_profile_validate(profile.data(), profile.size()) == WirehairSmall_UnsupportedProfile,
-                  "installed small codec rejects WHK8");
+                  "installed small codec rejects other dimension");
             const auto d = Api::DecoderCreate(profile.data(), profile.size());
             Check(d.status == Wh2Small_Success && d.codec, "highest pivot standalone receiver");
             std::vector<Byte> output(source.size() + 2, 0xa5);
@@ -439,7 +442,7 @@ void HighestPivot(const Oracle& oracle)
                 const auto top = oracle.Packet(source, block, K - 1);
                 Start(0);
                 const auto first = Api::Decode(poisoned.codec, K - 1, top.data(), top.size());
-                Check(Stop() == 0 && first == Wh2Small_NeedMore, "poison fixture bit7 first");
+                Check(Stop() == 0 && first == Wh2Small_NeedMore, "poison fixture highest pivot first");
                 if (solved) {
                     for (unsigned id = 0; id < K - 1; ++id) {
                         const auto packet = oracle.Packet(source, block, id);
@@ -598,7 +601,7 @@ int main()
     }
     Check(shapes == 78, "exact lifecycle shape roster");
     Malformed(); FailuresAndAliases(oracle);
-    if (K == 8) HighestPivot(oracle);
+    if (K == 4 || K == 8) HighestPivot(oracle);
     std::cout << "PASS K" << K << " " << shapes << " serialized lifecycle shapes; independent packet/recovery oracle, C ABI separately, ownership/detach/OOM/alias/profile/poison gates; GFNI="
               << wirehair_k6_payload::Available() << '\n';
 }

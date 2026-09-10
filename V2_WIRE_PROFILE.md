@@ -1259,17 +1259,53 @@ The nine original OH0 deficiencies and recovery with one extra packet are
 preserved; these replays are not new recovery samples.
 
 All 90 selected direct/serialized regression tests pass across the three
-backends, including K2/K3/K5/K8 and K6 parity. K4 itself has only the two
-direct-core tests: no K4 serialized facade or installed profile is added.
+backends, including K2/K3/K5/K8 and K6 parity. At that milestone K4 itself had
+only the two direct-core tests: no K4 serialized facade or installed profile
+was added.
 All 31 fixture tests pass on Python 3.12/3.8. Independent full artifact/source
 audits agree across both interpreters; all four affected native production
 objects remain byte-identical to their original archive members.
 
 See the [complete native qualification](bench/Wh2SmallNative/README.md#k4-native-qualification).
-The next step is K4's external ownership/serialized boundary, then separate
-actual ownership-matched WH1 full encoder/decoder speed and paired retained
-recovery qualification. Public speed, default admission and the all-K
-objective remain unmet.
+The subsequent external-boundary qualification is recorded below. Actual
+ownership-matched WH1 full encoder/decoder speed and paired retained recovery,
+public speed, default admission and the all-K objective remain unmet.
+
+### K4 serialized ownership qualification: benchmark boundary only
+
+At base source `84eeea9`, the existing benchmark `Facade<4,Traits>` now uses
+the exact sealed native K4 equations. Its distinct 32-byte descriptor is
+`WHK4`, version 1, size 32, profile `0x5748324b34544d31`, with message and
+block lengths and zero reserved bytes. It is not an installed WHV2 profile.
+Blocks are bounded at 53,687,091 bytes so the five-block decoder slab stays
+within 256 MiB; existing size/overflow checks remain.
+
+Independent creation copies input before returning. Borrowed repairs can
+read the source until successful allocating/copying detach or free; detach
+failure preserves the original source obligation. Packet operations allocate
+no memory. Contradictions permanently poison the benchmark facade, unlike
+ordinary WHV2's preserved-basis contract. Neither ownership nor wire identity
+is silently inherited by an installed profile.
+
+All 105 direct/serialized/K6-parity tests pass across K4/K2/K3/K5/K8 in native,
+portable arithmetic and full ASan/UBSan builds. Per backend, K4 checks all
+8,424 direct cases and 58,571 packets, plus 16,848 serialized cases and
+117,142 packets across both policies. Literal-C standalone receiver creation,
+78 lifecycle shapes, 108 highest-pivot shapes and 216 poisoned receivers pass.
+Original widths, tails, horizons, ranks and all nine OH0 deficiencies are
+preserved; these replays add no recovery samples.
+
+Independent full source/artifact audits pass on Python 3.12/3.8 with identical
+reports, verifying 924 input identities, exact fixtures, all test outputs,
+non-LTO C boundaries and private GF ABI/sanitizers. Repeated source reviews
+find no remaining confirmed bug. Only five benchmark files change behavior
+or test coverage; production/core/defaults and qualified archives are unchanged.
+See the [complete serialized qualification and evidence](bench/Wh2SmallNative/README.md#k4-serialized-qualification).
+
+K4 is now qualified for separately frozen actual ownership-matched WH1 and
+certified-WH2 paired retained recovery and full lifecycle timing. Neither
+comparison has run, ordinary K4 still selects certified WH2, and no speed,
+paired-superiority, default-admission or all-K claim follows.
 
 ## Retired equation profile identifiers
 

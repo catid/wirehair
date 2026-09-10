@@ -18,10 +18,9 @@ The ordinary library and installed package do not depend on this directory.
 Pass `-DWH2_SMALL_TEST_DIMENSION=5` to select the separately sealed K5 evidence
 at `/var/tmp/wh2-k5-thue-morse-r0` instead. Dimension 2 selects the separately
 sealed `/var/tmp/wh2-k2-thue-morse-r0` evidence. Dimension 8 selects
-`/var/tmp/wh2-k8-thue-morse-r0`. Dimensions 2, 3, 5 and 8 build two
-direct-core tests and five serialized-boundary tests. Dimension 4 selects
-`/var/tmp/wh2-k4-thue-morse-r0` and builds only the two direct-core tests;
-its external serialized boundary is a separate follow-up. The K2/K8 boundaries
+`/var/tmp/wh2-k8-thue-morse-r0`. Dimension 4 selects
+`/var/tmp/wh2-k4-thue-morse-r0`. All five dimensions build two direct-core
+tests and five serialized-boundary tests. The K2/K4/K8 boundaries
 are benchmark-only; they do not introduce installed profiles.
 Other dimensions are rejected. K3 remains the default build; this option never
 changes the installed library.
@@ -128,10 +127,10 @@ link evidence) are disclosed in its `DEVELOPMENT.json`; they changed no codec
 or retained test result.
 
 Do not reconfigure or run CTest discovery in these archived builds. Source-
-sensitive audits completed before this documentation advanced. The next step
-is the separately qualified serialized ownership boundary in
-`wirehair-sxvz.16.1.20.82.6.1.1`, followed by actual ownership-matched WH1
-full-lifecycle speed and retained paired recovery gates. Ordinary K4 still
+sensitive audits completed before this documentation advanced. At this native
+milestone, the next step was the serialized ownership boundary; its separate
+qualification is recorded below. Actual ownership-matched WH1 full-lifecycle
+speed and retained paired recovery gates remain required. Ordinary K4 still
 selects certified WH2; no promotion or all-K claim follows from this milestone.
 
 ## K8 native qualification
@@ -205,10 +204,10 @@ Native replay confirms the already retained recovery cases; it does not add
 a fresh sample or a paired WH1 recovery-rate comparison. At this direct-core
 milestone, the external boundary and full lifecycle speed were still unqualified.
 
-## Serialized correctness for K2, K3, K5 and K8
+## Serialized correctness for K2, K3, K4, K5 and K8
 
 The build also produces a separate, non-LTO serialized C boundary and five
-additional tests for K2, K3, K5 and K8. Its shared `Facade<K,Traits>` implementation retains K6's
+additional tests for K2, K3, K4, K5 and K8. Its shared `Facade<K,Traits>` implementation retains K6's
 independent/borrowed input, transactional allocating detach, descriptor
 validation and permanent conflict-poison behavior. Only the selected benchmark
 wrapper instantiates that boundary for external callers; the installed K6
@@ -221,6 +220,10 @@ K2 uses `WHK2` and `0x5748324b32544d31`, the sealed 7,168-byte lookup,
 and `block_bytes <= 89478485` (`floor(268435456 / 3)`). Its admission changes
 only compile-time dimension checks and fixture selection, not the shared
 runtime algorithm or the ordinary WHV2 conflict contract.
+K4 uses `WHK4` and `0x5748324b34544d31`, the sealed 20,480-byte lookup,
+and `block_bytes <= 53687091` (`floor(268435456 / 5)`). This bounds the
+five-block decoder slab, not aggregate or transient process memory. K4 uses
+the existing generic runtime and lambda 1, not a new payload kernel.
 K8 uses `WHK8` and `0x5748324b38544d31`, the same sealed 65,536-byte lookup,
 and `block_bytes <= 29826161` (`floor(268435456 / 9)`). This limit bounds the
 nine-block decoder slab, not aggregate or transient process memory. No K8
@@ -273,6 +276,57 @@ unaffected. No Fable report was obtained for this milestone.
 Full lifecycle speed against ownership-matched WH1 and ordinary WH2 remains
 unmeasured for K2. No installed API, profile, default or production source
 changed in this serialized-boundary milestone.
+
+### K4 serialized qualification
+
+At base source `84eeea9`, five benchmark files admit the exact sealed K4
+fixture and extend dimension-specific oracle, descriptor and highest-pivot
+tests. The facade runtime bodies, private core, production sources, installed
+profiles and existing library archives are unchanged. There is no installed
+K4 API or ordinary-WH2 ownership/poison semantic change.
+
+All 105 tests pass: all seven checks at K4/K2/K3/K5/K8 under native, portable
+arithmetic and full ASan/UBSan with leak and fake-stack detection. K4 passes
+78 lifecycle shapes, 108 highest-pivot shapes with 432 primary feeds, and
+216 separate permanent-poison receivers. The literal-descriptor C consumer
+creates its receiver before any encoder exists. Independent source copying,
+borrowed-source lifetime, transactional allocating detach, every allocation
+failure, aliases, partial tails, malformed descriptors and repeated recovery
+are checked. Packet operations allocate no memory.
+
+Each backend preserves all 8,424 direct-core cases, 58,571 packets and 2,252
+coefficient rows. The serialized corpus checks 16,848 cases and 117,142 packets
+across both source policies; serialized neutral replay adds 324 policy cases
+and 4,212 packets. Every original history keeps its width, tail and horizon.
+The nine retained OH0 deficiencies remain deficient until the recorded extra
+packet. These engineering replays do not add recovery samples.
+
+Builds and complete logs are at `/tmp/wh2-k4-serialized.yegpP9w9`.
+The native, scalar and sanitizer `RESULT.json` SHA256 values are respectively:
+
+- `90f743af46b9d7d2ae4e7869e2ed148900df130289d28504ebdf500c98147a8c`
+- `55be9432eaca5fb9399dc0ef18ef56688f459c03cfec70c784a86de35501427e`
+- `c7ef4675b33335dbc5f6ffaddbd864c4cbc716b82192173bcfff1c95e52d077f`
+
+Independent source/artifact audits at
+`/tmp/wh2-k4-serialized-independent.VQMU5xiC` pass on Python 3.12 and 3.8.
+The byte-identical 3,611-byte reports have SHA256
+`c0a5afa2e2250da819bde1b9eeefb9e13e895ce7a81666564fb143ff766054d9`.
+They verify all 924 pre/post input identities, every fixture initializer,
+all 105 complete test outputs, nine actual C exports, non-LTO translation-unit
+boundaries, compiler dependencies and private GF ABI/sanitizer settings.
+All 398 other source files match the native qualification pins; its four
+production object-identity groups are reauthenticated without recompiling.
+Six auditor selftests pass per interpreter; no diagnostic development exits
+occurred. Repeated main and independent source-reading passes find no
+remaining confirmed bug.
+
+These audits completed before this result documentation advanced. Do not
+rerun source-sensitive historical auditors, reconfigure archived builds or
+run CTest discovery there. Separate ownership-matched actual WH1/certified-WH2
+retained recovery and full encoder/decoder lifecycle timing remain required.
+This qualification changes no production default and establishes no speed,
+paired recovery superiority or all-K result.
 
 ### K8 serialized qualification
 

@@ -2,6 +2,9 @@
 #if WH2_SMALL_CODEC_K == 2
 #include "Wh2K2NativeData.inc"
 namespace Data = wh2_k2_data;
+#elif WH2_SMALL_CODEC_K == 4
+#include "Wh2K4NativeData.inc"
+namespace Data = wh2_k4_data;
 #elif WH2_SMALL_CODEC_K == 8
 #include "Wh2K8NativeData.inc"
 namespace Data = wh2_k8_data;
