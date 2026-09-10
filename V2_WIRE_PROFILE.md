@@ -942,8 +942,8 @@ The benchmark boundary has independently audited
 [paired retained recovery](bench/Wh2K8SerializedRecoveryR0.md) and
 [full-lifecycle speed](bench/Wh2K8SerializedCostR0.md) passes. Those results
 do not qualify this installed owned-basis path. Its own installed recovery
-gate below now passes; installed speed and preserved-path regressions remain
-separate admission requirements.
+and full-lifecycle speed gates below now pass; preserved-path restoration and
+current K3 speed retention remain separate admission requirements.
 No default, all-K, non-GFNI-host speed or all-construction-seed qualification
 is implied by adding the explicit profile.
 
@@ -1064,8 +1064,66 @@ The spent bundle is `/var/tmp/wh2-k8-public-recovery-r0`, COMPLETE SHA256
 native raw SHA256
 `bab96ca60d697f9f5a751fdbc74dce306c6c0d12a98e651f7e9735beb6af50e1`.
 See the [installed recovery contract](bench/Wh2K8PublicRecoveryR0.md).
-Installed K8 speed, preserved-path restoration and current K3 speed retention
-remain unmet; defaults are unchanged and no all-K or promotion claim follows.
+The separately qualified installed speed result follows below. Preserved-path
+restoration and current K3 speed retention remain unmet; defaults are unchanged
+and no all-K or default-promotion claim follows.
+
+### Installed K8 full-lifecycle speed: qualified
+
+At source `6f557dd`, `wirehair.wh2.k8-public-cost-r0` completed **PASS**
+through the actual installed WHV2 APIs. All 216 same-code controls and all
+144 candidate comparisons pass, separately for each shape, lifecycle, source
+policy and measurement order. Every candidate comparison's upper 95%
+time-ratio bound is below one against both ownership-matched actual WH1 and
+ordinary certified WH2. There is no 5% minimum, filtering, timing subtraction,
+order pooling or candidate regression tolerance.
+
+Observed elapsed-time reductions versus WH1, spanning both source policies
+and measurement orders (ranges of separate estimates, not pooled results):
+
+| Block bytes | Tail bytes | Full encoder | Low-ID decoder | Distant-ID decoder |
+|---|---|---|---|---|
+| 2 | 2 | 53.61–54.72% | 86.29–86.44% | 66.15–66.42% |
+| 2 | 1 | 52.62–53.56% | 86.35–86.51% | 66.36–66.60% |
+| 64 | 64 | 64.72–65.24% | 85.71–85.81% | 68.82–69.01% |
+| 64 | 1 | 63.48–63.78% | 85.67–85.73% | 68.86–69.01% |
+| 1280 | 1280 | 63.90–65.27% | 82.73–82.92% | 77.31–77.42% |
+| 1280 | 1 | 63.99–64.85% | 82.88–82.90% | 77.22–77.37% |
+
+The candidate uses explicit profile `7a9276b85c730ae0` with independent and
+borrowed options, matching the installed recovery routes. Both policies'
+owned-basis allocation and preparation stay inside timed creation. Encoder
+time includes create, descriptor output, 24 encodes and free. Decoder time
+includes create, feeds through its own first success, recover and free; all
+arms require eight packets on both frozen decoder streams. These are actual
+installed static-library calls, not the prototype facade or translated
+descriptors. Source policies share the receiver implementation.
+
+All 77,760 callbacks, 9,953,280 fresh codec lifecycles and 159,252,480 attempted
+API calls are retained with packet, descriptor, recovery, ownership and buffer
+checks. All 160 involuntary switches and the one minor fault within WORK are
+retained. WORK totals 38.577614860 seconds; the controller completes in
+149.622703180 seconds with empty worker stderr.
+
+All nineteen original production objects and complete archives reproduce
+byte-for-byte in native, portable-arithmetic and sanitizer qualification.
+The three backends agree on neutral packet/rank fixtures; only native is timed.
+All 38 reader/build tests and all 16 independent-auditor selftests pass under
+Python 3.12 and 3.8. Both exact retained replays and a separately written full
+arithmetic, chronology, API-ledger, statistical and build-provenance audit
+pass before HEAD or pinned documentation advances. Independent decisions
+agree exactly across interpreters; the maximum numeric difference from the
+controller is below `9e-16`. All 915 receipt pins are verified.
+
+The permanently spent bundle is `/var/tmp/wh2-k8-public-cost-r0`, COMPLETE
+SHA-256 `787021740f10034a3c7acba4ef033b990c4b3fe215f7692de240178f0953f942`;
+native raw SHA-256
+`c28f29059652ccc3cfce7d3b29615b4e15224018c3411818ad478e7947fe65fa`.
+See the [installed timing contract](bench/Wh2K8PublicCostR0.md).
+This qualifies only the six explicit-profile shapes and frozen lifecycles
+after process initialization on this GFNI-capable host. It is not shared-call,
+cold-start, non-GFNI-host or all-K performance, a new recovery sample, restored
+preserved-path speed or current K3 speed retention. Defaults remain unchanged.
 
 ## Retired equation profile identifiers
 
