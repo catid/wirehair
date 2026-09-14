@@ -162,3 +162,97 @@ This completes only initial observer preparation. The new controller, reader,
 decision/failure mutation tests and complete producing receipt still precede
 the sole full retained comparison. No paired superiority, new recovery rate,
 speed, installed profile or default-promotion result follows.
+
+## Independently audited terminal comparison
+
+The sole comparison at pushed source
+`adb71c27257602ef372b16569d177ecae9ece776` completed **PASS**. Execution,
+the retained target and all four paired OH0 superiority predicates pass.
+This section supersedes the preparation-only status above, not its historical
+qualification evidence. No scientific run was repeated.
+
+Each source policy has the following results on the same 6,144 retained loss
+traces. Counts after zero through four extra packets are kept separately:
+
+| Codec | OH0 failures | Observed OH0 rate | OH1 | OH2 | OH3 | OH4 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| K4 benchmark boundary | 9 | 0.146484375% | 0 | 0 | 0 | 0 |
+| Certified WH2 | 125 | 2.034505208% | 3 | 0 | 0 | 0 |
+| WH1 | 207 | 3.369140625% | 35 | 8 | 2 | 1 |
+
+K4 fixes all 207 WH1 OH0 failures and introduces nine different failures;
+against certified WH2 it fixes all 125 and introduces nine. The net paired
+improvements are 198 and 116 respectively, identical for both source policies.
+All nine K4 deficiencies recover with one extra packet. Every candidate
+width/schedule cell meets the frozen 1% bound; the worst is B2 repair-only,
+4/512 (0.78125%). This is aggregate improvement, not per-trace or per-cell
+dominance: B2 burst has one K4 failure versus zero for both controls, and
+B2 repair-only has four versus zero for certified WH2.
+
+All 72 separate hard cases recover for K4 at OH0, versus two certified-WH2
+and one WH1 failures. K4 recovers all 38 historical origins at OH0 and within
+their original horizons; certified WH2 leaves 13 unresolved and WH1 25.
+Historical eligible denominators at OH0..4 are `[38,9,2,0,0]`, never extended
+or pooled with the loss sample. Width/schedule cells share 512 roots; backend
+and ownership replays are not additional independent samples.
+
+Native, portable arithmetic and full ASan/UBSan agree on all 6,254 records per
+backend: 18,762 records, 112,572 arms and 898,038 real-message packet hashes
+in total. Independently derived GF(256) coefficients, every arm's basis-derived
+payloads, incremental ranks/first success, repeated guarded recovery and full
+attempted-call ledgers agree. All encoders are destroyed before receivers.
+
+Before launch, all 40 controller/build tests passed under each Python 3.12
+and 3.8. All three backends passed 48 neutral cases, twelve late faults and
+claim/CLI checks. The independent full auditor passed 88 synthetic tests per
+interpreter and both prelaunch checks. Repeated source-reading passes were
+clean. The exact receipt authenticates the nineteen-object production archives,
+reproduced K4 boundary, producing commands, historical/current source snapshots,
+compiler/linker/runtime closure and matching private GF contexts.
+
+The scientific controller exited zero in 31.334223550 seconds. This is experiment
+execution time, not codec speed. Both exact retained replays exited zero with
+PASS (Python 3.12 session 4994, Python 3.8 session 20044). The unchanged sealed
+independent auditor's terminal runs also exited zero and passed on their first
+attempt under both interpreters. They verify 1,421 stable identities and
+identical full scientific semantics and identity rosters. All exact/independent
+audits completed before pinned documentation or HEAD advanced.
+
+Retained evidence:
+
+- Permanently spent bundle `/var/tmp/wh2-k4-serialized-recovery-r0`.
+- COMPLETE SHA256 `9dd8b7572b695ece659b5eefd9dd6fda5aef619fccccfbe6c34ed1f0ed173987`.
+- Analysis SHA256 `11bac7a21459ed51a5cd7154197c8be29f7ada06ca644822e2e22be6f5b35255`.
+- Native raw SHA256 `4f5abd676ddc30cf94b6ede52c8625d6fc73e5ac8ec997dfb6a5d0aabc04404e`.
+- Receipt `/tmp/wh2-k4-recovery-qualified.c0L2U2Ns/receipt.json`, SHA256
+  `845ffe3cd66f46e00699ca001dfcbedbcdf349a13e627316878ca015bcd82acf`.
+- Independent directory `/tmp/wh2-k4-recovery-full-independent.gnZWOsv0`;
+  sealed `audit-v2.py` SHA256
+  `2511d2662134198d1c79acbfa716f41213f06cb2d2cc082c995f6ff441e4dbf8`.
+- `terminal-v2-python312.json` SHA256
+  `8ac9892d7ec5b3148783deb4721bf1fc7784769fa79111c583b9beaf88d7c3fc`;
+  `terminal-v2-python38.json` SHA256
+  `8687993e1a15a095afaf2bba996de4b58ea65a50c0765a6161e213287b666093`.
+
+Do not rerun archived source-sensitive auditors after these documentation
+changes. This is actual benchmark-boundary recovery on retained traces, not a
+new independent holdout, population guarantee, installed/default admission,
+speed result or all-K construction qualification. Separate full encoder and
+decoder speed remains required before progressing K4 integration.
+
+### Later artifact availability: 2026-09-14
+
+On resumption, the referenced `/tmp` qualification directories, production
+archives and independent auditor/report files were no longer present. The
+cause of their removal was not established. The sealed scientific bundle under
+`/var/tmp/wh2-k4-serialized-recovery-r0` remains present with the original
+COMPLETE, analysis and native-raw hashes shown above. Its CLAIM also preserves
+the original receipt bytes, but many files named by its pins are missing.
+
+The completed September 10 audit outcomes remain historical results; they are
+not currently reproducible as full artifact-closure audits. Missing reports
+must not be fabricated or recreated under their old identities. The new K4
+speed preparation stopped at the absent producing manifest before compiling
+or launching science. Fresh current-source library/boundary engineering
+qualification is separately tracked in `wirehair-sxvz.16.1.20.82.6.1.1.2.1`.
+It neither reruns this recovery experiment nor restores the old receipt closure.

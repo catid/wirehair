@@ -1302,10 +1302,50 @@ find no remaining confirmed bug. Only five benchmark files change behavior
 or test coverage; production/core/defaults and qualified archives are unchanged.
 See the [complete serialized qualification and evidence](bench/Wh2SmallNative/README.md#k4-serialized-qualification).
 
-K4 is now qualified for separately frozen actual ownership-matched WH1 and
-certified-WH2 paired retained recovery and full lifecycle timing. Neither
-comparison has run, ordinary K4 still selects certified WH2, and no speed,
-paired-superiority, default-admission or all-K claim follows.
+The separate ownership-matched retained recovery comparison below now passes.
+Full lifecycle speed remains unmeasured, ordinary K4 still selects certified
+WH2, and no installed/default-admission or all-K claim follows.
+
+### K4 benchmark-boundary paired recovery: qualified
+
+At source `adb71c2`, the sole full retained comparison completed independently
+audited **PASS**. Both source policies give the same OH0 results:
+
+| Codec | Failures / retained traces | Observed rate | Failures with one extra packet |
+| --- | ---: | ---: | ---: |
+| K4 benchmark boundary | 9 / 6144 | 0.146484375% | 0 |
+| Certified WH2 | 125 / 6144 | 2.034505208% | 3 |
+| WH1 | 207 / 6144 | 3.369140625% | 35 |
+
+K4 fixes all 207 WH1 failures and introduces nine different ones; against
+certified WH2 it fixes 125 and introduces nine. This is aggregate improvement,
+not per-trace or per-cell dominance. All twelve candidate cells pass the frozen
+1% bound; the worst is 4/512 (0.78125%). Every K4 deficiency recovers with one
+extra packet. All 72 hard cases and all 38 historical origins recover at OH0;
+histories retain their original widths and horizons outside the loss denominator.
+
+Native, portable and full ASan/UBSan agree on all 6,254 records per backend.
+Every arm's packet bytes, source-equation rank/first success, guarded repeated
+recovery and attempted-call ledgers pass independent arithmetic checks.
+Exact replays and independently written full terminal audits pass under both
+Python 3.12 and 3.8 before source or documentation advances. The independent
+audits verify 1,421 stable identities, 18,762 records and 898,038 real-message
+packet hashes across all backends. Replays do not multiply the sample size.
+
+The spent bundle is `/var/tmp/wh2-k4-serialized-recovery-r0`, COMPLETE SHA256
+`9dd8b7572b695ece659b5eefd9dd6fda5aef619fccccfbe6c34ed1f0ed173987`.
+See the [full comparison and audit evidence](bench/Wh2K4SerializedRecoveryR0.md#independently-audited-terminal-comparison).
+This is not a fresh independent holdout, population guarantee, speed result,
+installed/default profile or all-K construction qualification. Full K4 encoder
+and decoder lifecycle timing remains the next separate requirement.
+
+On 2026-09-14, the earlier `/tmp` build/provenance and independent-audit
+directories were found missing. The sealed `/var/tmp` recovery bundle retains
+its original hashes, but its full historical input closure is no longer
+available. The audit outcomes above are historical, not a claim that those
+missing artifacts can be verified now. K4 speed preparation requires a fresh,
+explicitly qualified current-source build lineage; no recovery rerun or silent
+replacement of old receipt inputs is permitted.
 
 ## Retired equation profile identifiers
 
