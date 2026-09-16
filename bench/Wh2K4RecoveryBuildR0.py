@@ -24,11 +24,6 @@ ENV_KEYS = ('MALLOC_TRIM_THRESHOLD_', 'MALLOC_MMAP_THRESHOLD_', 'MALLOC_TOP_PAD_
             'MALLOC_PERTURB_', 'GLIBC_TUNABLES', 'LD_PRELOAD', 'LD_LIBRARY_PATH')
 PROTOCOL = 'wirehair.wh2.k4-serialized-recovery-r0'
 PRODUCTION = Path('/tmp/wh2-v2-k8-admission.YNN2XmAx')
-# The historical producer roots above are intentionally immutable evidence.
-# After their loss, a separately qualified current-source neutral build may be
-# used for a new cost-build lineage, but it must never be confused with the
-# historical producer or rebound to its receipts.
-FRESH_NEUTRAL = Path('/var/tmp/wh2-k4-fresh-neutral-r0.R12')
 PROOFS = Path('/tmp/wh2-k8-public-recovery-qualified.i7v7bPnq')
 PRIOR = Path('/var/tmp/wh2-k8-public-recovery-r0')
 PRIOR_PROTOCOL = 'wirehair.wh2.k8-public-recovery-r0'
@@ -160,7 +155,7 @@ def producer_recipes(database, mode):
     return result
 
 
-def boundary_recipe(database, build, mode, fresh=False):
+def boundary_recipe(database, build, mode):
     A.exact(len(database), 8, 'eight qualified boundary/test translation units')
     selected = [r for r in database if r['output'].startswith('CMakeFiles/wh2_small_serialized.dir/')]
     A.exact(len(selected), 1, 'one producing boundary translation unit')
@@ -169,17 +164,6 @@ def boundary_recipe(database, build, mode, fresh=False):
     target = 'CMakeFiles/wh2_small_serialized.dir/home/catid/wirehair/bench/Wh2SmallSerialized.cpp.o'
     A.exact((entry['directory'], entry['file'], entry['output']),
             (str(build), str(HERE/'Wh2SmallSerialized.cpp'), target), 'exact boundary producer')
-    if fresh:
-        # A fresh CMake build is authoritative for its own command line.  In
-        # particular, the scalar neutral configuration contributes -DANDROID
-        # both from the target and from CMAKE_CXX_FLAGS.  Preserve that exact
-        # command rather than applying the historical single-definition
-        # recipe to a new lineage.
-        recorded = shlex.split(entry['command'])
-        A.exact(recorded[0], '/usr/bin/c++', 'fresh boundary compiler')
-        A.exact(recorded[-2:], ['-c', str(HERE/'Wh2SmallSerialized.cpp')],
-                'fresh boundary source command')
-        return build/entry['output'], recorded
     flags = ['-DWH2_SMALL_CODEC_K=4']
     if mode == 'scalar':
         flags = ['-DANDROID']+flags+['-DWH2_SMALL_EXPECT_PORTABLE=1']
@@ -202,18 +186,10 @@ def context_size(raw):
 def external_output(output):
     """Never add files inside the repository or any reused evidence root."""
     output = Path(output)
-    # Cost-build outputs may live in a task-owned /var/tmp child.  Direct
-    # /var/tmp children and every historical/fresh evidence root remain
-    # rejected; permitting only the explicitly named cost-build prefix keeps
-    # accidental writes fail-closed while retaining durable artifacts.
-    task_owned = (output.parent.name.startswith('wh2-k4-cost-fresh-neutral-r0.') and
-                  output.parent.parent == Path('/var/tmp'))
-    protected = (ROOT, PRODUCTION, PROOFS, PRIOR, SMALL, SEALED, BOUNDARY_AUDIT.parent,
-                 FRESH_NEUTRAL)
+    protected = (ROOT, PRODUCTION, PROOFS, PRIOR, SMALL, SEALED, BOUNDARY_AUDIT.parent, Path('/var/tmp'))
     A.require(output.is_absolute() and '..' not in output.parts and not output.is_symlink() and
-              output == output.resolve() and output not in (Path('/'), Path('/tmp'), Path('/var/tmp')) and
-              task_owned and not any(base == output or base in output.parents for base in protected),
-              'external snapshot directory')
+              output == output.resolve() and output not in (Path('/'), Path('/tmp')) and
+              not any(base == output or base in output.parents for base in protected), 'external snapshot directory')
     return output
 
 
@@ -221,8 +197,6 @@ def qualified_inputs(mode, output):
     """Authenticate old producing evidence as data; never rebind changed paths."""
     A.require(mode in MODES, 'backend')
     output = external_output(output)
-    if not PROOFS.exists():
-        return fresh_qualified_inputs(mode, output)
     dependencies, frozen, snapshots, historical = set(), {}, {}, []
 
     def retain(path, expected=None):
@@ -401,87 +375,6 @@ def qualified_inputs(mode, output):
         historical_snapshots=historical, input_pins=[frozen[p] for p in sorted(frozen)],
         scope='authenticated original production; K4 boundary still requires exact reproduction')
     return [small_archive, archive], dependencies, provenance, snapshots
-
-
-def fresh_qualified_inputs(mode, output):
-    """Bind a new current-source neutral build without historical evidence.
-
-    This path is deliberately selected only when the old producer root is
-    absent.  It authenticates the fresh runner's source pins, command results,
-    fixture and actual archives, then exposes those artifacts to the cost
-    builder.  It does not claim historical producer identity or reuse the
-    spent recovery/cost receipts.
-    """
-    A.require(mode in MODES, 'fresh backend')
-    root = FRESH_NEUTRAL.resolve(strict=True)
-    mode_root = root / mode
-    source_report = A.decode(A.read_regular(mode_root/'SOURCE.json', 32*1024**2))
-    result_path = mode_root/'RESULT.json'
-    result_pin = pin(result_path)
-    result = A.decode(A.read_regular(result_path, 32*1024**2))
-    A.exact((result['schema'], result['mode'], result['status'], result['head']),
-            ('wh2-k4-fresh-neutral-r0', mode, 'PASS', source_report['head']),
-            'fresh neutral result identity')
-    A.exact((result['producing_source_closure'], result['scientific_launch']),
-            (False, False), 'fresh neutral scope disclosure')
-    source_records = pin_map(source_report['source_pins'])
-    for name, record in source_records.items():
-        A.exact(pin(Path(name)), record, 'fresh source pin')
-    # The source report is itself a producing input; command records and their
-    # outputs are retained by the fresh runner and must remain unchanged.
-    frozen = {result_path: result_pin}
-    dependencies = set(source_records.values() and (Path(name) for name in source_records))
-    dependencies.update((mode_root/'SOURCE.json', result_path))
-    for path in sorted(mode_root.rglob('*')):
-        if path.is_file() and not path.is_symlink():
-            record = pin(path)
-            if path.name.startswith('command-') or path.name in ('SOURCE.json', 'RESULT.json'):
-                frozen[path] = record
-                dependencies.add(path)
-    # The current neutral result must contain the actual libraries and the
-    # retained exact K4 boundary fixture.  Artifact records are authoritative
-    # only after their files are checked in place.
-    artifacts = pin_map(result['artifacts'])
-    library = mode_root/'library'/'libwirehair.a'
-    small_archive = mode_root/'k4'/'libwh2_small_serialized.a'
-    fixture = mode_root/'k4'/'Wh2K4NativeData.inc'
-    for path in (library, small_archive, fixture):
-        record = artifacts.get(str(path))
-        A.require(record is not None, 'fresh artifact listed: '+str(path))
-        A.exact(pin(path), record, 'fresh artifact identity')
-        frozen[path] = record; dependencies.add(path)
-    A.exact(frozen[fixture]['sha256'], FIXTURE_SHA, 'fresh retained K4 fixture')
-    # The fresh K4 compile database supplies the exact boundary recipe used by
-    # the cost builder; no historical command or archive is substituted.
-    boundary_dir = mode_root/'k4'
-    database = A.decode(A.read_regular(boundary_dir/'compile_commands.json', 4*1024**2))
-    boundary_obj, recipe = boundary_recipe(database, boundary_dir, mode, fresh=True)
-    depfile = Path(str(boundary_obj)+'.d')
-    A.require(boundary_obj.is_file() and depfile.is_file(), 'fresh boundary object/dependency')
-    for path in (boundary_dir/'compile_commands.json', boundary_obj, depfile):
-        record = pin(path); frozen[path] = record; dependencies.add(path)
-    depraw = A.read_regular(depfile, 2*1024**2)
-    # CMake emits a relative object target in this dependency file.
-    boundary_deps = preprocessor_dependencies(depraw, boundary_obj.relative_to(boundary_dir))
-    for path in boundary_deps:
-        record = source_records.get(str(path))
-        if record is None:
-            # Installed headers/tools are still pinned by their actual bytes.
-            record = pin(path)
-        frozen[path] = record; dependencies.add(path)
-    provenance = dict(
-        mode=mode, fresh_neutral=True, historical_producer_available=False,
-        fresh_root=str(root), fresh_source=source_report,
-        fresh_result=result_pin, fresh_artifacts=list(artifacts.values()),
-        serialized_build_dir=str(boundary_dir), serialized_object=pin(boundary_obj),
-        serialized_archive=pin(small_archive), serialized_command=recipe,
-        serialized_dependencies=depraw.decode(), historical_snapshots=[],
-        input_pins=[frozen[p] for p in sorted(frozen)],
-        producing_source_closure=True,
-        scope='new current-source neutral lineage; historical producer identity unavailable')
-    # Keep the interface consumed by Wh2K4CostBuildR0.py.  The archive paths
-    # are immutable fresh artifacts and are never copied over old roots.
-    return [small_archive, library], dependencies, provenance, {}
 
 
 def imported_files():

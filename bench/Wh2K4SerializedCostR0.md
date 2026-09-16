@@ -1,5 +1,10 @@
 # K4 serialized lifecycle cost R0
 
+The sole run is terminal: its controller reported **PASS**, but independent
+producer review found incomplete fresh-build provenance. This is **not a
+qualified speed result or promotion**. The namespace is spent; see the
+terminal assessment below. Preparation descriptions are historical.
+
 Protocol `wirehair.wh2.k4-serialized-cost-r0`; sole scientific namespace
 `/var/tmp/wh2-k4-serialized-cost-r0`. Prospectively frozen in
 `wirehair-sxvz.16.1.20.82.6.1.1.2` before new speed code or timing workloads.
@@ -117,3 +122,52 @@ timing. Independent artifact review and a new explicitly bound provenance
 reader/receipt remain necessary before the frozen speed experiment can launch.
 Equations, fixture bytes, workload, decision rules and the unspent scientific
 namespace are unchanged; historical recovery is not rerun or reinterpreted.
+
+## Terminal assessment: statistical PASS, producing qualification incomplete
+
+The sole run at source `6621dbb` on 2026-09-14 completed in 126.390137 seconds,
+with empty stderr, all 216 same-code controls passing and all 144 candidate
+comparisons having upper 95% time-ratio bounds below one. All 77,760 callbacks
+were retained; WORK was 27.626300508 seconds. Descriptive elapsed-time reductions
+versus WH1 span 61.92–72.14% for encoding, 92.03–94.07% for low-ID decoding,
+and 89.67–90.64% for distant-ID decoding across the declared shapes, policies
+and orders. These numbers describe the captured run, not qualified promotion.
+
+On 2026-09-16, exact retained replays passed under Python 3.12 and 3.8 before
+source advancement. A separate standard-library audit, with no project imports
+or codec execution, independently reconstructed GF(256) coefficient rows,
+720 fixture packets, decoder rank endpoints, every chronology/API-ledger record
+and all 360 statistical decisions. It verified all 1,565 receipt pins before
+and after traversal. Both interpreters produced byte-identical reports, with
+maximum statistical arithmetic difference below `9e-16` from the controller.
+The audit is retained in `/var/tmp/wh2-k4-cost-terminal-audit.jUFD9xsn`.
+
+However, the separate source/artifact review found the newly added fresh
+reader asserted `producing_source_closure=true` without validating the complete
+production lineage. Per backend, the receipt omitted all 19 production objects,
+their 19 dependency files, the production compile database, 32 system headers,
+and the CMake/Ninja/CTest identities. It did not bind and validate the retained
+command/test results or preserve all source pins through handoff. In-memory
+mutation tests accepted a failed test result, missing production source,
+wrong K, LTO, missing scalar defines and missing sanitizer instrumentation.
+Actual retained R12 artifacts currently match their recorded hashes and all
+68 neutral tests passed; no source tampering or payload failure was observed.
+Those positive checks do not supply the missing pre-launch qualification.
+
+The frozen raw PASS and bundle are preserved unchanged, but this result is
+non-promotional. The historical recovery reader has been restored exactly;
+automatic substitution of fresh evidence was removed. Cost receipt validation
+now unconditionally rejects producer qualification for R0, even if the proof's
+fresh marker is removed and its hashes are internally consistent. Its old
+current-source replay is not to be rerun after this source
+advancement or rebound to a new HEAD. A separately tracked explicit fresh
+qualifier must establish exact recipes, full producer/tool/dependency closure,
+original pin preservation and independent mutation coverage before later work.
+No R0 rerun, rescoring, filtering or default change is authorized by this result.
+
+The spent bundle is `/var/tmp/wh2-k4-serialized-cost-r0`. COMPLETE SHA256:
+`f1504ab7422cb9a64164f45b0d46ef74684d34c0c76f185a1558107646a8d113`;
+raw SHA256: `e2daec72c40ac05c00533c7848504e8a19d920e27b02115b942d93d4c9b5c0b5`.
+Fable produced no review: its OAuth session was expired. The independently
+reviewed recovery result remains separate, and full K4 speed qualification,
+installed/default admission and the all-K objective remain open.

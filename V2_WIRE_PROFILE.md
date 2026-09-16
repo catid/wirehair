@@ -1337,7 +1337,7 @@ The spent bundle is `/var/tmp/wh2-k4-serialized-recovery-r0`, COMPLETE SHA256
 See the [full comparison and audit evidence](bench/Wh2K4SerializedRecoveryR0.md#independently-audited-terminal-comparison).
 This is not a fresh independent holdout, population guarantee, speed result,
 installed/default profile or all-K construction qualification. Full K4 encoder
-and decoder lifecycle timing remains the next separate requirement.
+and decoder lifecycle speed qualification remains a separate requirement.
 
 On 2026-09-14, the earlier `/tmp` build/provenance and independent-audit
 directories were found missing. The sealed `/var/tmp` recovery bundle retains
@@ -1346,6 +1346,23 @@ available. The audit outcomes above are historical, not a claim that those
 missing artifacts can be verified now. K4 speed preparation requires a fresh,
 explicitly qualified current-source build lineage; no recovery rerun or silent
 replacement of old receipt inputs is permitted.
+
+### K4 lifecycle timing: observed PASS, not producing-qualified
+
+The sole benchmark-boundary cost run at `6621dbb` reported PASS on 2026-09-14:
+all 216 same-code controls and 144 strict candidate comparisons passed.
+Exact Python 3.12/3.8 replays and a separate raw/payload/rank/statistical audit
+on 2026-09-16 reproduced all 77,760 callbacks and 360 decisions before source
+advancement. However, independent producer review found the new fresh reader
+claimed complete provenance without binding the 19 production objects,
+dependencies, build tools and validated command/test results. This is therefore
+**not a qualified K4 speed result or promotion**.
+
+The captured statistics and spent bundle remain unchanged. The unsupported
+fresh-reader fallback has been removed, and R0 cost producer qualification now
+unconditionally fails closed. See the [full terminal assessment](bench/Wh2K4SerializedCostR0.md#terminal-assessment-statistical-pass-producing-qualification-incomplete).
+An explicit complete fresh qualifier, actual-path speed qualification and
+preserved-path checks remain necessary. Ordinary K4 selection is unchanged.
 
 ## Retired equation profile identifiers
 

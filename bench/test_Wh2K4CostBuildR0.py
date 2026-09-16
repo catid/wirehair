@@ -27,7 +27,8 @@ class BuildTest(unittest.TestCase):
         source = add('/synthetic/source.cpp', b'source')
         for mode in C.MODES:
             base = Path('/synthetic')/mode
-            artifacts = [add(base/name, C.A.canonical(self.fixture()) if name == 'fixtures.json' else name.encode())
+            artifacts = [add(base/name, C.A.canonical(self.fixture()) if name == 'fixtures.json' else
+                             C.A.canonical(dict(producing_source_closure=True)) if name == 'qualified-library.json' else name.encode())
                          for name in ('cost_worker','fixtures.json','contract.json','qualified-library.json')]
             if mode == 'native': artifacts.append(add(base/'target.json', b'target'))
             manifest = dict(protocol=C.PROTOCOL, mode=mode, inputs=[source], artifacts=artifacts)
@@ -40,8 +41,12 @@ class BuildTest(unittest.TestCase):
                        pins=sorted(files.values(), key=lambda p:p['path']))
         return receipt, files, data, manifests
 
-    def check_receipt(self, receipt, files, data):
+    def check_receipt(self, receipt, files, data, producer_prerequisite_mocked=True):
+        # These generic schema tests isolate the unrelated producer prerequisite.
+        # No real producer is qualified. Direct guard tests below never mock it.
+        producer_check=(lambda proof: None) if producer_prerequisite_mocked else C.R.verify_qualified_library
         with patch.dict(os.environ, C.SANITIZERS, clear=True), \
+                patch.object(C.R,'verify_qualified_library',side_effect=producer_check), \
                 patch.object(C, 'pin', side_effect=lambda p:files[str(p)]), \
                 patch.object(C, 'command', return_value=b'head\n'), \
                 patch.object(C.A, 'read_regular', side_effect=lambda p,cap:data[str(p)]), \
@@ -91,6 +96,34 @@ class BuildTest(unittest.TestCase):
         data[path]=raw; files[path].update(bytes=len(raw),sha256=C.A.sha(raw))
         with self.assertRaisesRegex(ValueError,'artifact identity'):
             self.check_receipt(receipt,files,data)
+
+    def test_fresh_producing_assertion_never_qualifies(self):
+        for fresh in (True,False,1,0,None,'qualified'):
+            with self.subTest(fresh=fresh), self.assertRaisesRegex(ValueError,'K4 R0'):
+                C.R.verify_qualified_library(dict(fresh_neutral=fresh,producing_source_closure=True))
+        for closure in (True,False,None,1,'true'):
+            with self.subTest(closure=closure), self.assertRaises(ValueError):
+                C.R.verify_qualified_library(dict(producing_source_closure=closure))
+
+    def test_receipt_rejects_even_hash_consistent_fresh_proof(self):
+        receipt,files,data,manifests=self.fake_receipt()
+        proof_path='/synthetic/native/qualified-library.json'
+        raw=C.A.canonical(dict(producing_source_closure=True,fresh_neutral=True))
+        data[proof_path]=raw; files[proof_path].update(bytes=len(raw),sha256=C.A.sha(raw))
+        path='/synthetic/native/manifest.json'
+        raw=C.A.canonical(manifests['native']); data[path]=raw
+        files[path].update(bytes=len(raw),sha256=C.A.sha(raw))
+        with self.assertRaisesRegex(ValueError,'K4 R0'):
+            self.check_receipt(receipt,files,data,producer_prerequisite_mocked=False)
+
+    def test_receipt_without_fresh_marker_is_still_blocked(self):
+        receipt,files,data,_=self.fake_receipt()
+        with self.assertRaisesRegex(ValueError,'K4 R0'):
+            self.check_receipt(receipt,files,data,producer_prerequisite_mocked=False)
+
+    def test_historical_recovery_reader_restored_byte_exactly(self):
+        original=C.command(['git','show','adb71c2:bench/Wh2K4RecoveryBuildR0.py'])
+        self.assertEqual(original,(C.ROOT/'bench/Wh2K4RecoveryBuildR0.py').read_bytes())
 
     def test_environment_values_are_not_optional(self):
         receipt,files,data,_=self.fake_receipt()

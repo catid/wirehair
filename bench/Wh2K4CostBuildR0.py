@@ -28,6 +28,18 @@ qualified_inputs, boundary_recipe = U.qualified_inputs, U.boundary_recipe
 preprocessor_dependencies, context_size = U.preprocessor_dependencies, U.context_size
 
 
+def verify_qualified_library(provenance):
+    """R0 has no reusable qualified producer proof; fail closed for every input.
+
+    A numerical PASS cannot repair missing producer qualification.  This check
+    also runs during receipt validation so the old fresh receipt cannot be
+    accepted for a new launch, including after deleting its fresh marker.
+    A separately reviewed explicit qualifier is required before replacing
+    this unconditional block. The historical reader remains unchanged.
+    """
+    raise ValueError('K4 R0 producing closure is unqualified; preserve spent R0 evidence')
+
+
 def output_device_check(executable, sink, output, index, commands):
     """Preserve each output-error attempt before checking its result."""
     argv = [str(executable), '--neutral-publication', 'success']
@@ -109,10 +121,7 @@ def build(mode, output):
         dependencies.add(path)
     for record in provenance['historical_snapshots']:
         A.exact(pin(Path(record['snapshot']['path'])), record['snapshot'], 'published original bytes')
-    # Fresh lineage supplies the fixture; historical lineage keeps its old
-    # authenticated boundary path.  Never synthesize or silently rebind it.
-    fixture = Path(provenance.get('serialized_build_dir',
-                                  str(SMALL/mode/'k4'))) / 'Wh2K4NativeData.inc'
+    fixture = SMALL/mode/'k4'/'Wh2K4NativeData.inc'
     A.publish(output/'Wh2K4NativeData.inc', A.read_regular(fixture, 2*1024**2))
     A.exact(pin(output/'Wh2K4NativeData.inc')['sha256'], FIXTURE_SHA, 'copied retained fixture')
     dependencies.add(output/'Wh2K4NativeData.inc')
@@ -159,11 +168,9 @@ def build(mode, output):
     # Close the boundary's installed-header gap by reproducing ONLY its one
     # object and archive. Preserve original compiler cwd and object basename;
     # all writes go to this fresh output, never the qualification directory.
-    boundary_dir = Path(provenance.get('serialized_build_dir',
-                                       str(SMALL/mode/'k4')))
+    boundary_dir = SMALL/mode/'k4'
     original_obj, argv = boundary_recipe(
-        A.decode(A.read_regular(boundary_dir/'compile_commands.json', 1024**2)), boundary_dir, mode,
-        fresh=bool(provenance.get('fresh_neutral')))
+        A.decode(A.read_regular(boundary_dir/'compile_commands.json', 1024**2)), boundary_dir, mode)
     source, boundary_flags = HERE/'Wh2SmallSerialized.cpp', argv[1:-4]
     obj, dep = output/original_obj.name, output/(original_obj.name+'.d')
     run(['/usr/bin/c++']+boundary_flags+['-M', '-MT', str(obj), '-MF', str(dep), str(source)], cwd=boundary_dir)
@@ -184,6 +191,7 @@ def build(mode, output):
         serialized_reproducing_dependencies=[frozen[p] for p in sorted(before)],
         producing_source_closure=True,
         scope='authenticated original nineteen-object production; exact newly reproduced K4 boundary')
+    verify_qualified_library(provenance)
     A.publish(output/'qualified-library.json', A.canonical(provenance))
     dependencies.add(output/'qualified-library.json'); freeze_inputs(dependencies, frozen)
 

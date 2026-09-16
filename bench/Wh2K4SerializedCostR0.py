@@ -428,6 +428,7 @@ def current(receipt):
             artifact = str(executable.parent/name)
             A.require(artifact in artifacts and artifact in declared, 'pinned required build artifact: '+name)
             A.exact(artifacts[artifact], declared[artifact], 'required artifact identity')
+        R.verify_qualified_library(A.decode(A.read_regular(executable.parent/'qualified-library.json', 4*1024**2)))
         for record in manifest['inputs']+manifest['artifacts']+[declared[str(path)]]:
             if record['path'] in closure:
                 A.exact(closure[record['path']], record, 'shared manifest input')
