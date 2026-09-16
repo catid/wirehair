@@ -2,5 +2,5 @@
 #define WH2_SMALL_COST_K 4
 #define WH2_SMALL_COST_REPAIRS 8
 #define WH2_SMALL_COST_PROTOCOL "wirehair.wh2.k4-serialized-cost-r0"
-#define WH2_SMALL_COST_CLAIM_PATH "/var/tmp/wh2-k4-serialized-cost-r1.R18/science/CLAIM.json"
+#define WH2_SMALL_COST_CLAIM_PATH "/var/tmp/wh2-k4-serialized-cost-r1.R22/science/CLAIM.json"
 #include "Wh2SmallLifecycleWorkerR0.h"
