@@ -105,7 +105,7 @@ def build(mode, proof_path, neutral_root, output):
                             "HERE/'Wh2K4SerializedCostR1.cpp'")
     source = source.replace(
         "A.exact((reader.PROTOCOL, reader.MODES), (PROTOCOL, MODES), 'new cost reader contract')",
-        "reader.OUTPUT = Path('/var/tmp/wh2-k4-serialized-cost-r1.R22/science')\n"
+        "reader.OUTPUT = Path('/var/tmp/wh2-k4-serialized-cost-r1.R23/science')\n"
         "    A.exact((reader.PROTOCOL, reader.MODES), (PROTOCOL, MODES), 'new cost reader contract')")
     namespace = dict(C.__dict__)
     exec(compile(source, str(HERE / 'Wh2K4FreshCostBuildR1.py'), 'exec'), namespace)
