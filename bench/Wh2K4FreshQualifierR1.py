@@ -4,7 +4,9 @@
 The R0 K4 readers deliberately reject fresh provenance.  This module is an
 isolated reader for a *new* ``Wh2K4FreshNeutralR0.py`` result.  It does not
 compile, run tests, launch a worker, or consult the historical R0 receipts.
-Every input is checked before the proof is written.
+The R1 qualification entrypoint is now retired: it omitted test dependencies,
+the native version script, and actual PIE startup inputs. Historical helpers
+remain for inspection, but cannot publish a new producing-closure assertion.
 """
 import argparse
 import hashlib
@@ -531,7 +533,9 @@ def _boundary(mode_root, mode, source_map):
 
 
 def qualify(mode_root, mode, proof_path=None):
-    """Validate one fresh neutral mode and optionally publish its R1 proof."""
+    """Reject incomplete R1 qualification before reading inputs or writing proof."""
+    raise ValueError('K4 R1 qualifier retired: incomplete test/link input closure; never rebind historical proofs')
+    # Historical implementation below is intentionally unreachable.
     require(mode in MODES, "backend")
     mode_root = _neutral_root(mode_root)
     result = read_json(mode_root / "RESULT.json", 8 * 1024 ** 2)

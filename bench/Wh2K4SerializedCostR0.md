@@ -5,6 +5,12 @@ producer review found incomplete fresh-build provenance. This is **not a
 qualified speed result or promotion**. The namespace is spent; see the
 terminal assessment below. Preparation descriptions are historical.
 
+The later fresh R1 attempts do not resolve this limitation. The retained-history
+audit found incomplete R22 provenance and path-only retries, including R23
+CONTROL_FAIL followed by R24 PASS. Fresh R1 proof/build entrypoints are retired;
+see [Wh2K4RetainedHistory.md](Wh2K4RetainedHistory.md). All original outcomes and
+artifacts remain unchanged; no later PASS is a substitute promotion result.
+
 Protocol `wirehair.wh2.k4-serialized-cost-r0`; sole scientific namespace
 `/var/tmp/wh2-k4-serialized-cost-r0`. Prospectively frozen in
 `wirehair-sxvz.16.1.20.82.6.1.1.2` before new speed code or timing workloads.

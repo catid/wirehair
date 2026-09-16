@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Build the K4 cost observer from an authenticated R1 fresh proof.
+"""Retired K4 R1 cost adapter; retained for source-history inspection only.
 
 This is deliberately a thin, explicit adapter around the byte-pinned R0
 observer builder.  It supplies only a proof-validated fresh archive/boundary
 root and a new producing provenance record; it never launches the worker.
-The R0 ``verify_qualified_library`` guard is not changed.
+The R0 ``verify_qualified_library`` guard is not changed. The committed launch
+reader did not authenticate R22, and later claim-path-only relaunches include
+CONTROL_FAIL followed by PASS. Never build another observer for this family.
 """
 import argparse
 import importlib.util
@@ -84,6 +86,9 @@ def _proof(path, mode, neutral_root):
 
 
 def build(mode, proof_path, neutral_root, output):
+    # Stop before reading proofs, mutating imported modules, or creating output.
+    raise ValueError('K4 R1 cost family retired: unqualified launch provenance and path-only timing retries; preserve spent evidence')
+    # Historical implementation below is intentionally unreachable.
     Q.require(mode in Q.MODES, "backend")
     proof, pins = _proof(proof_path, mode, neutral_root)
     neutral_root = Path(neutral_root)
