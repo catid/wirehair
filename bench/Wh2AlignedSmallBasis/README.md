@@ -59,3 +59,13 @@ Retained `Testing/Temporary/LastTest.log` SHA256 values:
 
 This checkpoint qualifies construction/packet safety, not promotion. Do not
 run a previous candidate's spent timing controller against these libraries.
+
+## Speed decision
+
+The separate `Wh2AlignedSmallBasisScreen` at `047d20b` is terminal
+**CONTROL_FAIL** in both natural-lifecycle load orders. Controlled repairs
+passed, but lifecycle retention/control failures prevent promotion. See that
+screen's README for independently audited results and limitations. This
+candidate remains benchmark-only; no production or recovery change was made.
+Follow-up `wirehair-6juk` is attribution work, not permission to rerun this
+candidate or recycle its spent namespace.

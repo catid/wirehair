@@ -100,3 +100,58 @@ libraries and their previously recorded test logs were not modified.
 Initial build-only checks caught and fixed a quoted CMake variable collision,
 a pointer comparison requiring `void*`, and the certified constant's versioned
 name. These were compile errors before any timing launch, not timing retries.
+
+## Terminal result (2026-09-16): candidate not qualified
+
+The sole namespace completed at `047d20b` and is permanently spent. All six
+workers exited successfully with empty stderr. No rerun, trimming or pooling.
+
+| Layer / DSO load order | Decision | Failed A/A | Failed C/B |
+| --- | --- | ---: | ---: |
+| Controlled / baseline first | PASS | 0/96 | 0/96 |
+| Controlled / candidate first | PASS | 0/96 | 0/96 |
+| Natural / baseline first | CONTROL_FAIL | 13/828 | 46/276 |
+| Natural / candidate first | CONTROL_FAIL | 13/828 | 36/276 |
+
+All 144 nonzero-offset controlled comparisons pass, with C/B point ratios
+0.8190–0.8648 (13.5–18.1% lower hot-repair time). All 48 aligned-offset retention
+comparisons also pass. This supports the controlled placement mechanism only.
+
+The eight natural K8/B1280 full-encoder primary comparisons nominally pass,
+with ratios 0.8684–0.8765 (12.35–13.16% lower time). They **do not** rescue the
+failed lifecycle controls. Natural C/WH1 has 16/276 cells per load order not
+proven faster, all in the certified sentinel group; no universal-speed claim.
+
+All 13 failed normal A/A intervals include 1, but only 12/13 reversed intervals
+do. Reversed cell14/pair1/order0 (K3/B64 independent distant-decoder C/C) has
+ratio 0.985326 and CI [0.972815,0.997998]. Do not characterize every control
+failure as merely insufficient precision.
+
+Descriptive leads, not qualified regressions or speed claims: K3/B1280-full
+low-decoder ratios are 1.0229–1.0348 across all policies/orders/load orders;
+K5/B256 distant-decoder ratios are 1.0159–1.0279. Across all natural C/B cells,
+76 normal and 57 reversed CIs lie above 1, but only one and two respectively
+lie wholly above 1.02. The rejection includes precision/retention failures,
+not a claim that every failed constraint proves a >2% regression.
+
+Independent reconstruction without importing this controller verified 679,104
+timing rows, 75,456 retained warmups, 3,144 intervals/decisions, both 144-row
+traces, all 326 current pins and 20 manifest artifacts before HEAD/pinned files
+changed. Maximum CI discrepancy: `8.88e-16`. Exact Python 3.8/3.12 replays pass.
+Total recorded WORK across the four timed workers: 43.900707664 seconds.
+
+Bundle `/var/tmp/wh2-aligned-small-basis-screen-r0`, `complete.json` SHA256:
+`2543ee36848b2d1ef004d1ed92a559c0e64ae8cef371e4bedfa5e346a0802518`.
+Independent auditor/report:
+`/tmp/wh2-aligned-basis-independent-audit.LamR534O/{audit.py,report.json}`;
+report SHA256:
+`09b556509f674b7ff853b751f7051abb8dd86bc70831e65c326b302737706314`.
+
+Production remains unchanged. Issue `wirehair-6juk` investigates the retained
+paths before any new candidate. Static inspection shows `CreateEncoderForProfile`
+grows 127 bytes, moving the decoder constructor, later facade entries and custom
+recovery sections by 128 bytes. The decoder constructor's 770 instructions match
+after relocation/compiler-table-name normalization; its two lookup tables have
+identical addresses and bytes. This is a concrete attribution lead, **not** proof
+that placement caused the observed lifecycle shifts. No arbitrary padding search
+or retry of this failed candidate is authorized by these results.
