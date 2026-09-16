@@ -62,6 +62,8 @@ def _proof(path, mode, neutral_root):
     Q.exact(proof["head"], Q.current_head(), "R1 proof current HEAD")
     Q.pin(path)
     neutral_root = Path(neutral_root)
+    verified = Q.qualify(neutral_root, mode)
+    Q.exact(proof, verified, "R1 proof independently revalidated")
     Q.exact(Path(proof["neutral_result"]["path"]), neutral_root / "RESULT.json",
             "R1 neutral result root")
     Q.exact(Path(proof["neutral_source"]["path"]), neutral_root / "SOURCE.json",
