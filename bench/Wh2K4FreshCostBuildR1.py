@@ -9,6 +9,7 @@ The R0 ``verify_qualified_library`` guard is not changed.
 import argparse
 import importlib.util
 from pathlib import Path
+import shlex
 
 
 HERE = Path(__file__).resolve().parent
@@ -89,6 +90,7 @@ def build(mode, proof_path, neutral_root, output):
     # historical constant is modified on disk.
     C.SMALL = neutral_root.parent.parent / neutral_root.parent.name
     C.U.SMALL = C.SMALL
+    C.boundary_recipe = _boundary_recipe
     C.qualified_inputs = lambda requested_mode, unused_output: _inputs(
         requested_mode, proof, pins)
     C.verify_qualified_library = lambda provenance: _verify(provenance, proof)
@@ -110,6 +112,34 @@ def _inputs(mode, proof, pins):
                       fresh_proof=proof)
     reused = {Path(record["path"]) for record in pins.values()}
     return [small_archive, production_archive], reused, provenance, {}
+
+
+def _boundary_recipe(database, build, mode):
+    """Parse the current neutral boundary recipe, including scalar's CMake flag."""
+    Q.exact(len(database), 8, "eight fresh boundary translation units")
+    source = C.HERE / "Wh2SmallSerialized.cpp"
+    selected = [entry for entry in database
+                if entry.get("file") == str(source)]
+    Q.exact(len(selected), 1, "one fresh boundary producer")
+    entry = selected[0]
+    Q.exact(set(entry), {"directory", "command", "file", "output"},
+            "fresh boundary compile schema")
+    target = "CMakeFiles/wh2_small_serialized.dir" + str(source) + ".o"
+    Q.exact((entry["directory"], entry["output"]), (str(build), target),
+            "fresh boundary output binding")
+    flags = (["-DANDROID"] if mode == "scalar" else []) + ["-DWH2_SMALL_CODEC_K=4"]
+    if mode == "scalar":
+        flags.append("-DWH2_SMALL_EXPECT_PORTABLE=1")
+    flags += ["-I" + str(C.ROOT), "-I" + str(C.ROOT / "include"), "-I" + str(build)]
+    if mode == "scalar":
+        flags.append("-DANDROID")
+    flags += (["-fsanitize=address,undefined", "-fno-omit-frame-pointer",
+               "-march=native", "-g"] if mode == "asan" else ["-O3", "-DNDEBUG"])
+    flags += ["-std=c++11", "-fPIC", "-Wall", "-Wextra", "-Wpedantic", "-Werror",
+              "-fno-strict-aliasing", "-fno-lto"]
+    argv = ["/usr/bin/c++"] + flags + ["-o", target, "-c", str(source)]
+    Q.exact(shlex.split(entry["command"]), argv, "fresh boundary compiler recipe")
+    return build / target, argv
 
 
 def _verify(provenance, proof):
