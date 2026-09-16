@@ -88,7 +88,7 @@ def build(mode, proof_path, neutral_root, output):
     # Bind the R0 builder's fresh paths only in this process.  No R0 source or
     # historical constant is modified on disk.
     C.SMALL = neutral_root.parent.parent / neutral_root.parent.name
-    C.R.SMALL = C.SMALL
+    C.U.SMALL = C.SMALL
     C.qualified_inputs = lambda requested_mode, unused_output: _inputs(
         requested_mode, proof, pins)
     C.verify_qualified_library = lambda provenance: _verify(provenance, proof)
