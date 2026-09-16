@@ -18,7 +18,8 @@ Use `cmake -S bench/Wh2SmallPayload2Outlined -B <fresh-external-build> -G Ninja
 `PORTABLE`, `SANITIZE`, and `COUNT` builds. ASan/UBSan gates use leak detection,
 stack-use-after-return detection, and halt-on-UB. The exhaustive independent
 polynomial oracle and public-API parity fixtures are reused from the inline
-experiment; its candidate and its controller are not reused.
+experiment. Its candidate and spent launch namespace are not reused; shared
+runner/analysis code is reused through the new fixed-namespace wrapper.
 
 Inspect the native `EncodeSmall` and surrounding symbols against the paired
 baseline. A smaller or identical encoder is only code-shape evidence. A
