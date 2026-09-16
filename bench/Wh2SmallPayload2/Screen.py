@@ -111,7 +111,11 @@ def write(path, value):
         f.write('\n')
 
 
-def run(build):
+def run(build, output=None, here=None, protocol='wh2-small-payload2-screen-r0'):
+    # Additional experiments must supply their own fixed namespace and source
+    # directory. The original default namespace remains spent, never reusable.
+    output = OUTPUT if output is None else output
+    here = HERE if here is None else here
     build = build.resolve(strict=True)
     require(not any(os.environ.get(k) is not None for k in ENV), 'unmodified allocator/loader environment')
     cache = (build/'CMakeCache.txt').read_text()
@@ -122,19 +126,19 @@ def run(build):
     # transitive toolchain/loader provenance contract.
     sources = subprocess.check_output(['git','ls-files'], cwd=ROOT, text=True).splitlines()
     paths = [ROOT/p for p in sources if (ROOT/p).suffix in ('.cpp','.c','.h','.inc','.cmake') or p == 'CMakeLists.txt']
-    paths += list(HERE.glob('*'))
+    paths += list(HERE.glob('*')) + list(here.glob('*'))
     paths += [build/p for p in ('screen','libbaseline.so','libcandidate.so','build.ninja','compile_commands.json','CMakeCache.txt')]
     paths += list((build/'candidate').glob('*'))
     pins = {str(p):digest(p) for p in paths if p.is_file()}
-    OUTPUT.mkdir(mode=0o700)  # A spent namespace is never overwritten/retried.
-    write(OUTPUT/'claim.json', dict(protocol='wh2-small-payload2-screen-r0', pins=pins,
+    output.mkdir(mode=0o700)  # A spent namespace is never overwritten/retried.
+    write(output/'claim.json', dict(protocol=protocol, pins=pins,
         head=subprocess.check_output(['git','rev-parse','HEAD'], cwd=ROOT, text=True).strip(),
         batch=32, replicates=12, rows_per_order=207360, cpu=50, limits='2% AA/retention; strict B2 encoder/repair gain',
         scope='diagnostic only; not all-K, installed-package, or production promotion'))
     results = {}
     for mode in ('run','run-reverse'):
         require(all(digest(p) == h for p,h in pins.items()), 'inputs changed before launch')
-        with (OUTPUT/(mode+'.csv')).open('xb') as raw, (OUTPUT/(mode+'.stderr')).open('xb') as error:
+        with (output/(mode+'.csv')).open('xb') as raw, (output/(mode+'.stderr')).open('xb') as error:
             try:
                 completed = subprocess.run([str(build/'screen'), str(build/'libbaseline.so'),
                     str(build/'libcandidate.so'), mode], stdout=raw, stderr=error, timeout=240, check=False)
@@ -142,19 +146,19 @@ def run(build):
             except subprocess.TimeoutExpired:
                 code = 'TIMEOUT'
         try:
-            require(code == 0 and (OUTPUT/(mode+'.stderr')).stat().st_size == 0, 'worker failed: '+str(code))
+            require(code == 0 and (output/(mode+'.stderr')).stat().st_size == 0, 'worker failed: '+str(code))
             require(all(digest(p) == h for p,h in pins.items()), 'inputs changed during launch')
-            with (OUTPUT/(mode+'.csv')).open() as f:
+            with (output/(mode+'.csv')).open() as f:
                 result = analyze(f)
         except (ValueError, OSError) as error:
             result = dict(outcome='INVALID', failure=str(error))
-        result.update(exit=code, raw_sha256=digest(OUTPUT/(mode+'.csv')))
+        result.update(exit=code, raw_sha256=digest(output/(mode+'.csv')))
         results[mode] = result
-        write(OUTPUT/(mode+'.json'), result)
+        write(output/(mode+'.json'), result)
         print(mode, result['outcome'], 'controls', len(result.get('failed_controls',[])),
               'candidate', len(result.get('failed_candidate',[])), flush=True)
-    write(OUTPUT/'complete.json', {p.name:digest(p) for p in OUTPUT.iterdir() if p.is_file()})
-    for p in OUTPUT.iterdir():
+    write(output/'complete.json', {p.name:digest(p) for p in output.iterdir() if p.is_file()})
+    for p in output.iterdir():
         p.chmod(0o400)
 
 

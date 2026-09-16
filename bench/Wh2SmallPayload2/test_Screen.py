@@ -81,6 +81,30 @@ class Test(unittest.TestCase):
                     S.run(root)
                 run.assert_not_called()
 
+    def test_explicit_namespace_and_imported_sources(self):
+        class StopBeforeLaunch(Exception):
+            pass
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root/'CMakeCache.txt').write_text('SANITIZE:BOOL=OFF\nPORTABLE:BOOL=OFF\nCOUNT:BOOL=OFF\n')
+            (root/'libbaseline.so').write_text('baseline')
+            (root/'libcandidate.so').write_text('candidate')
+            additional = root/'new-sources'
+            additional.mkdir()
+            (additional/'extra.py').write_text('# extra controller')
+            output = root/'new-output'
+            with patch.object(S.subprocess, 'check_output', return_value=''), \
+                    patch.object(S, 'write', side_effect=StopBeforeLaunch) as write, \
+                    patch.object(S.subprocess, 'run') as run:
+                with self.assertRaises(StopBeforeLaunch):
+                    S.run(root, output=output, here=additional, protocol='different-protocol')
+                path, claim = write.call_args.args
+                self.assertEqual(path, output/'claim.json')
+                self.assertEqual(claim['protocol'], 'different-protocol')
+                self.assertIn(str(additional/'extra.py'), claim['pins'])
+                self.assertIn(str(S.HERE/'Screen.py'), claim['pins'])
+                run.assert_not_called()
+
 
 if __name__ == '__main__':
     unittest.main()
