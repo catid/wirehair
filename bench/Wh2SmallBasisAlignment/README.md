@@ -70,8 +70,8 @@ The receipt pins sources and binaries, not a full transitive toolchain closure.
 
 ## Integration checkpoint
 
-The diagnostic is committed as tooling, not as a production optimization or
-a completed timing result. The one-shot timing namespace has not been claimed.
+The diagnostic was committed as tooling before its timing launch, not as a
+production optimization. At that checkpoint the namespace was unclaimed.
 Neutral checks passed under Python 3.8 and 3.12 (seven controller tests each).
 Native, portable-arithmetic, and ASan/UBSan baseline checks each passed all
 320 controlled constructions, including packet parity, placement, guards and
@@ -79,6 +79,40 @@ deallocation. Native and ASan/UBSan traces passed in both DSO load orders,
 with all 144 records per trace accepted by the controller. Sanitizer checks
 enabled leak detection, fake-stack checks and immediate UB failure.
 
-Issue `wirehair-m9f5` remains open for the separately launched timing diagnostic
-and its independent result audit. Neither previous payload candidate is
-promoted by these neutral checks.
+Neither previous payload candidate is promoted by these neutral checks.
+
+## Terminal result (2026-09-16): alignment effect detected
+
+The sole run at `17f79db` completed and was independently audited before HEAD
+or pinned files changed. All 64 cross-carrier A/A intervals passed the reciprocal
+2% equivalence gate. All 24 K8/B1280 primary intervals detected higher cost
+at offsets 16/32/48 than at offset zero.
+
+| Shape | Nonzero-offset / aligned time, point-estimate range | Status |
+| --- | ---: | --- |
+| K5/B64 | 1.0076–1.0222 | Descriptive |
+| K5/B1280 | 1.1978–1.2139 | Descriptive |
+| K8/B64 | 1.0120–1.0194 | Descriptive |
+| K8/B1280 | 1.2116–1.2171 | All primary constraints pass |
+
+These ranges cover both policies, carriers, offsets and observation orders.
+Primary confidence-interval extrema are 1.2079–1.2202. Total measured WORK,
+including all retained warmups, was 1.50720061 seconds. The new malloc traces
+placed the first-created K8/B1280 basis at mod64=0 and the second at mod64=16;
+reversing creation order exchanged the implementation assigned to each address.
+This held in both DSO load orders and both source policies.
+
+Independent reconstruction, without importing the controller, verified all
+34,560 observations, 3,840 retained warmups, 1,920 panels, 160 intervals and
+decisions, both 144-row traces, ten manifest hashes, and twelve input pins.
+Maximum numerical discrepancy was `6.66e-16`; Python 3.8/3.12 exact replays
+also passed. The permanently spent bundle is
+`/var/tmp/wh2-small-basis-alignment-r0`; its `complete.json` SHA256 is
+`5876fbabea54b78b5b1bb0f2679a85a489f3f8635095305b61cf696655e7efc9`.
+
+This establishes a hot-repair placement effect in unchanged baseline code.
+It does not reconstruct the previous screen's addresses, isolate the outlined
+helper's overhead, prove lifecycle speed, or promote either rejected candidate.
+Issue `wirehair-m9f5` is closed. Follow-up `wirehair-hgiu` tests a separate
+alignment-only allocation change; production and recovery equations remain
+unchanged until its own neutral and speed/retention gates pass.
