@@ -285,7 +285,7 @@ def _validate_runner_roster(mode_root, commands, mode):
     # Test output is bound to the command result, not merely to RESULT fields.
     lib_text = _regular(mode_root / "command-004.stdout", 32 * 1024 ** 2)
     boundary_text = _regular(mode_root / "command-007.stdout", 32 * 1024 ** 2)
-    require(("100% tests passed, 0 tests failed out of %d" % expected_tests).encode()
+    require((f"100% tests passed, 0 tests failed out of {expected_tests}").encode()
             in lib_text, "exact selected library test count")
     require(b"100% tests passed, 0 tests failed out of 7" in boundary_text,
             "exact selected K4 test count")
