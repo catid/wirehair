@@ -349,6 +349,11 @@ def _inspect(argv, cap=4 * 1024 ** 2):
     return result.stdout
 
 
+def _runtime_roster(raw):
+    """Remove ASLR load addresses while retaining ldd's library identities."""
+    return re.sub(rb"0x[0-9a-fA-F]+", b"0xADDR", raw)
+
+
 def validate_toolchain():
     names = ("cmake", "ninja", "ctest", "python3", "c++", "ar", "ranlib", "nm",
              "ld", "as", "ldd", "git")
@@ -396,7 +401,7 @@ def validate_toolchain():
                             "returncode": 0, "stdout": raw_bytes.hex(), "stderr": ""})
     for name, record in programs.items():
         binary = Path(record["binary"]["path"])
-        raw = _inspect(["/usr/bin/ldd", binary])
+        raw = _runtime_roster(_inspect(["/usr/bin/ldd", binary]))
         require(b"not found" not in raw, "resolved compiler runtime: " + name)
         inspections.append({"argv": ["/usr/bin/ldd", str(binary)], "returncode": 0,
                             "stdout": raw.hex(), "stderr": ""})
@@ -404,7 +409,7 @@ def validate_toolchain():
         binary = Path(record["binary"]["path"])
         if _regular(binary, installed=True)[:4] != b"\x7fELF":
             continue
-        raw = _inspect(["/usr/bin/ldd", binary])
+        raw = _runtime_roster(_inspect(["/usr/bin/ldd", binary]))
         require(b"not found" not in raw, "resolved tool runtime: " + name)
         inspections.append({"argv": ["/usr/bin/ldd", str(binary)], "returncode": 0,
                             "stdout": raw.hex(), "stderr": ""})
