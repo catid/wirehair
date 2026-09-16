@@ -462,7 +462,8 @@ def _production(mode_root, mode, source_map):
                "sha256": hashlib.sha256(member).hexdigest()}, item["object"],
               "archive member/object identity")
     return {"compile_database": pin(db_path), "archive": archive_pin,
-            "objects": objects, "dependencies": list(dependencies.values())}
+            "objects": objects,
+            "dependencies": [dependencies[name] for name in sorted(dependencies)]}
 
 
 def _boundary(mode_root, mode, source_map):
