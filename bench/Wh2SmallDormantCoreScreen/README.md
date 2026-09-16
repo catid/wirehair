@@ -3,7 +3,8 @@
 Issue `wirehair-fcsn.1`. This is a new screen of conditional unused-core lifetime,
 not a retry of the rejected alignment or serialization candidates. No production
 change or recovery-rate claim. Sole namespace:
-`/var/tmp/wh2-small-dormant-core-screen-r0`. **Not launched yet.**
+`/var/tmp/wh2-small-dormant-core-screen-r0`.
+**Terminal CONTROL_FAIL; candidate not qualified or promoted.**
 
 The observer uses the exact qualified libraries from
 `/tmp/wh2-small-dormant-core.qARBuvHF/`; it never rebuilds them. Native baseline
@@ -136,3 +137,57 @@ Generated worker SHA256
 native executable SHA256
 `825bc1ae5167b798956340fe9e0525f5460ee3f7e2442f83b6d548bf4b5b46ef`.
 Do not rebuild these observers or rerun CTest into their now-pinned test logs.
+
+## Terminal result (2026-09-16)
+
+The sole run at frozen commit `a2d669d` completed both workers with exit zero and
+empty stderr. Every raw observation and warmup was retained. No retry, trimming,
+subset selection, resizing or pooling. The namespace is permanently spent.
+
+| DSO load order | Outcome | Failed A/A | Failed C/B retention | Nominal primary wins |
+| --- | --- | ---: | ---: | ---: |
+| Baseline first | CONTROL_FAIL | 3/1,080 | 0/360 | 6/6 |
+| Candidate first | CONTROL_FAIL | 6/1,080 | 0/360 | 6/6 |
+
+The equal-fixture primary point estimates below are **descriptive, not qualified
+speed improvements**. Each range spans both observation orders and both library
+load orders; it is not a pooled estimate or confidence interval.
+
+| Small-profile lifecycle | Nominal time reduction versus current WH2 |
+| --- | ---: |
+| Full encoder | 3.32–3.65% |
+| Low-repair decoder | 6.10–6.46% |
+| Distant-repair decoder | 3.76–4.25% |
+
+All 720 C/B point estimates lie below one, and all retention upper bounds lie
+below 1.02. Neither observation overrides the failed controls. All three normal
+A/A failure intervals and five of six reversed intervals include one. The other
+failure is reversed explicit-small K3 / B1280-full / independent low decoder,
+B/B observation-order1: ratio `0.9899870738`, CI
+`[0.9803769758,0.9996913743]`. Do not describe every control failure as merely an
+inconclusive interval containing equality, or infer its cause from this sample.
+
+The C/WH1 roster has 104/360 intervals per load order not proven faster, all
+certified: every certified K3 cell, every certified K16 encoder, and K16 low/
+distant decoders at B2-full, B2-tail1 and B64. All 240 small-route comparisons per
+load order nominally have upper bounds below one, but control failure prevents
+qualification. This still does not address every K, default admission, or the
+separate existing certified-path restoration requirement.
+
+Exact Python 3.8/3.12 replay and independent reconstruction passed **before**
+advancing HEAD or pinned documents: 777,600 observations, 86,400 retained warmups,
+3,600 cell intervals plus 12 primary intervals, all 389 current source/artifact
+pins, all 48 codec-manifest and 29 observer-manifest members. Maximum numerical
+discrepancy `1.11e-16`. Recorded WORK totals `183.499771298` seconds across both
+workers. This is validation of the rejection and its evidence, not a speed gate
+pass. No recovery equations or production sources changed.
+
+Bundle `complete.json` SHA256:
+`19d7f29303de3f35ee7412b3fa1f64876183d9f7e82e762f67a39f724ab111fa`.
+Independent auditor and report:
+`/tmp/wh2-dormant-core-independent-audit.PxMjCIlT/{audit.py,report.json}`;
+report SHA256:
+`fded79c3b13a588ae6726768b5466bdb673246b11aa91fd40bd6a9c050d2b8f6`.
+Do not rerun a historical current-pin audit after these report-only edits or
+rebind its receipt to a later HEAD. Existing admission/uncovered-K work remains
+open; this candidate and cohort are not a new retry opportunity.

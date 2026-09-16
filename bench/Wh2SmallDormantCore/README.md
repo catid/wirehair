@@ -1,8 +1,9 @@
 # Dormant certified core in small-profile handles
 
 Issue `wirehair-fcsn`; performance screening is `wirehair-fcsn.1`.
-**Neutral correctness/lifetime qualification passed; no speed qualification or
-production promotion.** No timing namespace has been launched for this candidate.
+**Neutral correctness/lifetime qualification passed; lifecycle screen rejected
+by A/A control gates. No speed qualification or production promotion.** The sole
+screen is terminal and permanently spent; see `../Wh2SmallDormantCoreScreen/`.
 
 ## Change and rationale
 
@@ -141,13 +142,14 @@ all six DSOs and archives, lifetime/layout executables, compile/test definitions
 final test logs, compatibility streams and the initial failed log. Its SHA256 is
 `dc84b6d96b4d5994c717a339a11326229a9108a860d730e61a7aca5900efa4f4`.
 
-Next: freeze a short actual-lifecycle screen using these exact libraries, with
+The subsequent actual-lifecycle screen used these exact libraries, with
 ordinary K3, explicit small routes, both source policies, full/partial payloads,
 preserved certified K3/K16, both load orders, A/A controls and separate WH1
-comparisons. Primary wins, retention bounds, roster, statistics and stop rule
-must be fixed before timing. No production adoption, broad speed claim or all-K
-campaign is justified until that screen passes. Existing spent namespaces remain
-closed; this candidate has not been timed.
+comparisons. Its primary wins, retention bounds, roster, statistics and stop rule
+were frozen at `a2d669d` before timing. All 720 C/B retention and 12 primary gates
+nominally passed, but 9/2,160 A/A gates failed. Overall `CONTROL_FAIL`: no adoption,
+retained-speed claim, or broader campaign is justified. Existing spent namespaces
+remain closed; this candidate must not be retried or rescued through subsets.
 
 To reproduce correctness, use a **different fresh external** GNU/Linux build:
 `cmake -S bench/Wh2SmallDormantCore -B <fresh-dir> -G Ninja`, then build and run
