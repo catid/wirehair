@@ -8,6 +8,7 @@ The R0 ``verify_qualified_library`` guard is not changed.
 """
 import argparse
 import importlib.util
+import inspect
 from pathlib import Path
 import shlex
 
@@ -94,7 +95,20 @@ def build(mode, proof_path, neutral_root, output):
     C.qualified_inputs = lambda requested_mode, unused_output: _inputs(
         requested_mode, proof, pins)
     C.verify_qualified_library = lambda provenance: _verify(provenance, proof)
-    return C.build(mode, Path(output))
+    # Reuse the reviewed R0 build algorithm but swap only the worker source
+    # and its authenticated claim namespace. This leaves the byte-pinned R0
+    # module unchanged while binding the fresh worker to the R1 namespace.
+    source = inspect.getsource(C.build)
+    source = source.replace("HERE/'Wh2K4SerializedCostR0.cpp'",
+                            "HERE/'Wh2K4SerializedCostR1.cpp'")
+    source = source.replace(
+        "A.exact((reader.PROTOCOL, reader.MODES), (PROTOCOL, MODES), 'new cost reader contract')",
+        "reader.OUTPUT = Path('/var/tmp/wh2-k4-serialized-cost-r1.R18/science')\n"
+        "    A.exact((reader.PROTOCOL, reader.MODES), (PROTOCOL, MODES), 'new cost reader contract')")
+    namespace = dict(C.__dict__)
+    exec(compile(source, str(HERE / 'Wh2K4FreshCostBuildR1.py'), 'exec'), namespace)
+    fresh_build = namespace['build']
+    return fresh_build(mode, Path(output))
 
 
 def _inputs(mode, proof, pins):
