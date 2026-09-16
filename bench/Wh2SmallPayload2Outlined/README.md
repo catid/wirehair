@@ -65,12 +65,14 @@ This was a structural confound, **not a proven cause** of its failures. The
 old worker and spent results remain unchanged and rejected.
 
 This build generates a distinct worker from the hash-pinned original source.
-Within a workload cell, all arms now use one source allocation and one output
-workspace. Their profiles, decoder repair bytes, and own-first-success counts
+Within a workload cell, all arms' constructor inputs now use one source
+allocation and one output workspace. Their profiles, decoder repair bytes, and own-first-success counts
 are copied into common staging addresses before WORK. Prebuilt borrowed handles
 outlive no staging allocation. Output reset, staging, and independent output
 verification are outside WORK. Staging copies still read the arm-specific
 fixture allocations, so cache preparation is not claimed address-identical.
+Each encoder also owns a private prepared basis; those internal allocations
+are not address-matched by sharing the constructor's source pointer.
 These changes remove fixed arm-to-workspace mapping inside WORK; they do not
 guarantee unbiased timings or cure all noise.
 
@@ -90,3 +92,46 @@ below 1.02, only a screening tolerance. Report C/WH1 separately. Both load
 orders must pass for further qualification; no production, ordinary-default,
 preserved-certified-path, universal-speed or recovery-rate claim follows.
 The explicit K5/K8 routes are still not ordinary defaults.
+
+## Terminal result (2026-09-16): not qualified
+
+The sole outlined namespace is now spent and sealed. Both workers exited
+successfully with empty stderr and complete 207,360-row outputs; no retry.
+
+| DSO load order | Decision | Failed A/A controls | Failed C/B constraints | C/WH1 cells not proven faster |
+| --- | --- | ---: | ---: | ---: |
+| Baseline first | CONTROL_FAIL | 11/576 | 17/192 | 40/192 |
+| Candidate first | CONTROL_FAIL | 14/576 | 18/192 | 40/192 |
+
+All strict B2 encoder/repair constraints nominally pass. Descriptive
+full-encoder time reductions are 12.3–16.1% (K3), 22.2–24.2% (K5), and
+16.5–18.4% (K8). However, K8/B1280 prebuilt repairs take **18.6–19.7% more
+time in all eight policy/side-order/load-order combinations**. K5/B64
+independent repairs take 1.0–1.2% more time in normal load order and 2.4–3.0%
+more in reverse. Decoder retention constraints also fail. No promotion.
+
+All 25 failed A/A intervals include 1: they failed the equivalence/precision
+gate, unlike the previous screen's resolved directional failures. This does
+not prove that workspace matching caused the difference between the two runs,
+and does not excuse the failures. Likewise the treatment estimates are not
+validated speed claims and cannot establish the slowdown's cause.
+
+Exact replay passed on Python 3.8 and 3.12. An independent audit, without
+importing either controller, verified all 414,720 rows, 1,920 decisions, seven
+artifact hashes and 296 source/build pins at `13b67e7`. Maximum numerical
+discrepancy was `8.88e-16`; no analysis bug found.
+
+Bundle `/var/tmp/wh2-small-payload2-outlined-screen-r0`:
+
+- `complete.json`: `dd013af05a8639494df751c5440478b94f9d92d5bcd78bc977436cd1ce0653f4`
+- `run.csv`: `d1d98d55f95ffd362abbf2dcd8172711e66b33ec4d11bdb366b81dc7812769cc`
+- `run-reverse.csv`: `b3c1400ccd2e61e06be944ea098d3b3bad547669800a054ac16cc726b76f53e9`
+
+The next useful investigation is the prebuilt-handle asymmetry. In the worker,
+A/A compares the same prebuilt handle with itself; C/B compares different
+handles. `CreateSmallEncoder` allocates/copies a private `SmallBasis` for both
+ownership policies, and all repairs read it. Shared public input/output
+staging therefore does not equalize those private addresses. Basis alignment
+and cache placement are plausible leads for the wide prebuilt-only slowdown,
+not established causes. Inspect them before changing another kernel or
+launching another timing screen. This candidate remains benchmark-only.
