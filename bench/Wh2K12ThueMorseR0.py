@@ -310,6 +310,8 @@ def history_inputs(deadline=None):
     require(canonical(manifest) == complete_raw, 'canonical baseline manifest')
     require(set(manifest) == {'analysis.json', 'claim.json', 'process.json', 'raw.jsonl', 'stderr.txt'},
             'baseline complete members')
+    require({path.name for path in INVENTORY.iterdir()} ==
+            set(manifest) | {'complete.json'}, 'exact baseline directory members')
     raw_path = INVENTORY / 'raw.jsonl'
     raw = raw_path.read_bytes()
     require(len(raw) == 86272424, 'baseline raw byte count')
@@ -334,6 +336,7 @@ def history_inputs(deadline=None):
         row = json.loads(line, object_pairs_hook=dict,
                          parse_constant=lambda value: (_ for _ in ()).throw(
                              ValueError('nonfinite baseline record')))
+        require(canonical(row) == line + b'\n', 'canonical baseline record')
         if row.get('type') != 'case':
             continue
         require(row['ordinal'] == case_ordinal, 'baseline chronology')
@@ -381,7 +384,28 @@ def fresh_roots(history):
     return roots
 
 
+def claimed_inputs():
+    """Authenticate the controller's immutable claim before candidate work."""
+    path = Path('/var/tmp/wh2-k12-thue-morse-r0') / 'CLAIM.json'
+    raw = path.read_bytes()
+    require(len(raw) <= 1024 * 1024, 'claim size')
+    claim = json.loads(raw, object_pairs_hook=dict,
+                       parse_constant=lambda value: (_ for _ in ()).throw(
+                           ValueError('nonfinite claim')))
+    require(canonical(claim) == raw and
+            set(claim) == {'protocol', 'receipt_sha256', 'receipt'} and
+            claim['protocol'] == PROTOCOL and
+            claim['receipt_sha256'] == digest(canonical(claim['receipt'])),
+            'claim identity')
+    return digest(raw)
+
+
 def check_mapper(mapper, budget):
+    require(matrix_rank(mapper.pair[0]) == K and matrix_rank(mapper.pair[1]) == K,
+            'invertible candidate pair')
+    require(matrix_multiply(mapper.pair[0], mapper.pair[1]) !=
+            matrix_multiply(mapper.pair[1], mapper.pair[0]),
+            'noncommuting candidate pair')
     require(tuple(mapper.row(i) for i in range(K)) == identity(), 'systematic K12 rows')
     product = identity()
     for i in range(2049):
@@ -478,9 +502,8 @@ def set_limits():
 def main(argv):
     require(argv == ['--worker'], 'usage')
     set_limits()
-    claim = sys.stdin.buffer.read(128)
-    require(len(claim) == 64 and claim.strip() == claim, 'claim SHA')
-    result = run_screen(claim.decode('ascii'))
+    claim = claimed_inputs()
+    result = run_screen(claim)
     raw = canonical(result)
     require(len(raw) <= OUTPUT_LIMIT, 'worker output cap')
     sys.stdout.buffer.write(raw)
