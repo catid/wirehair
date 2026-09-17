@@ -63,3 +63,63 @@ an alternate reader Python is allowed while the producing interpreter remains
 pinned. Perform exact and independent full audits before advancing pinned
 HEAD or documents. The DSO checks authenticate bytes and public-function
 ownership, not full transitive linker/toolchain/runtime provenance.
+
+## Completed baseline diagnostic — 2026-09-17
+
+The sole run at `cf5f416e44f109f22c5ea1c5b332b6646fc5236a` completed with exit 0,
+empty stderr and 86,272,424 captured bytes in 3.973 seconds. That wall time
+describes the diagnostic process, **not codec speed**. All 3,096 cases were
+retained and audited; the namespace is permanently spent.
+
+Zero-overhead failures among 768 loss cases per K:
+
+| K | WH2 | WH1 | WH2 failures at +1 | WH1 failures at +1 |
+|---|---:|---:|---:|---:|
+| 7 | 9 (1.17%) | 33 (4.30%) | 0 | 0 |
+| 9 | 7 (0.91%) | 23 (2.99%) | 0 | 2 |
+| 12 | 49 (6.38%) | 11 (1.43%) | 3 | 0 |
+| 16 | 1 (0.13%) | 24 (3.13%) | 0 | 0 |
+
+Every loss case recovered by +2. Both arms also passed all 24 separate low-repair
+cases at zero overhead. Actual decoder endpoints matched information-rank
+endpoints throughout; there was no full-rank decoder lag in this inventory.
+
+The frozen priority is **K12, K9, K16, K7**, with **K12 recommended**. Its worst
+cell is B1280/adversarial: WH2 33/64 zero-overhead failures versus WH1 0/64.
+All 49 observed high-ID coefficient rows in that cell are distinct and their
+union has rank 12; the 64 zero-overhead prefixes have ranks 11 (33 cases) or
+12 (31 cases), with no duplicate coefficient rows within a prefix. This points
+to linear dependence, not exact row collisions. These are retained-sample
+diagnostics, not universal recovery-rate or construction-seed certification.
+
+The both-arm K12 history projection retains 63 failed-prefix origins (60 at
+length 12, three at length 13), 60 distinct ID prefixes and 64 inventory roots.
+Do not shorten failed prefixes or treat their later successful suffixes as new
+tests. Follow-up `wirehair-sxvz.16.1.20.82.3.3` will freeze and screen a finite
+K12 GF(256) construction before any native integration or lifecycle timing.
+
+Evidence anchors:
+
+- Bundle: `/var/tmp/wh2-uncovered-band-inventory-r0`;
+  `complete.json` SHA256
+  `16fcf13214cd25362fe66ee35f62c1c9616ed082e343fa5e2009d81d61359ea0`.
+- Neutral: `/var/tmp/wh2-uncovered-band-qualification.C0lOL3VL`;
+  16 cases per backend, identical normalized parity
+  `92de12b58a8731bb50a938fffce23d0c0feef3dbabf331f5f3905c5fe033315b`;
+  31 synthetic tests pass under each Python version.
+- Exact Python 3.12/3.8 replays:
+  `/tmp/wh2-uncovered-band-root-audit.6uwksoXP`.
+- Independent no-harness-import audits:
+  `/tmp/wh2-uncovered-band-independent-audit.kw63F6qe`;
+  both report SHA256
+  `21cd4ed9c81d94d7aa1e9a912a2ec3130139aa0624ba605dd81791260b16012a`.
+  All 92,880 packet payloads (41,672,160 bytes), rank/actual decode endpoints,
+  API ledgers, 48 cells, four totals, neutral evidence and 1,062 input pins were
+  independently verified before HEAD or pinned documentation advanced.
+- K12 derived history/row checks in the same independent-audit directory:
+  `k12-projection-python312.json` and `k12-projection-python38.json`, identical
+  SHA256 `0798dc50291a1b5db9d6cd3538fea90611b6a610bd21a0853f2d32017638f4a7`.
+
+Strict current-tree replay is now historical: use the producing commit and
+unchanged pinned inputs, not this advanced README, for that check. No candidate,
+speed improvement, production change or promotion resulted from this inventory.
