@@ -15,7 +15,18 @@ def require(ok, reason):
 
 
 def exact(actual, expected, reason):
-    require(type(actual) is type(expected) and actual == expected, reason)
+    def same(a, b):
+        if type(a) is not type(b): return False
+        if isinstance(a, dict):
+            return (len(a)==len(b) and
+                    same(set(a),set(b)) and
+                    all(same(a[k],b[k]) for k in a))
+        if isinstance(a, (list,tuple)):
+            return len(a)==len(b) and all(same(x,y) for x,y in zip(a,b))
+        if isinstance(a, (set,frozenset)):
+            return len(a)==len(b) and all(any(same(x,y) for y in b) for x in a)
+        return a == b
+    require(same(actual,expected), reason)
 
 
 def sha(raw):

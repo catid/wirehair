@@ -1,10 +1,11 @@
-"""Disabled draft of a baseline-only uncovered-size inventory.
+"""Baseline-only uncovered-size inventory; no candidate, timing or promotion.
 
 Numeric, packet-oracle and public-API logic is carried from the reviewed
 Wh2UncoveredKRecoveryInventoryR0 without its historical producer/receipt chain.
 """
 import ctypes as T
 from functools import lru_cache
+import hashlib
 from pathlib import Path
 import struct
 import Support as A
@@ -23,11 +24,6 @@ KS, WIDTHS = (7, 9, 12, 16), (2, 64, 1280)
 SCHEDULES = ('iid', 'burst', 'adversarial', 'repair-only')
 MASK = (1 << 64) - 1
 RAW_CAP = 128*1024**2
-
-
-def require_qualified():
-    """Fail closed until the draft's launch prerequisites are implemented/reviewed."""
-    raise ValueError('unqualified draft: launch disabled; see wirehair-sxvz.16.1.20.82.3.2')
 
 
 def roots():
@@ -361,6 +357,7 @@ def expected_calls(records,cases):
 
 def verify(path,claim,mode='native',neutral=False):
     records = []; cases = neutral_roster() if neutral else roster()
+    parity = hashlib.sha256()
     A.require(path.stat().st_size<=RAW_CAP,'raw bound')
     with path.open('rb') as stream:
         def next_record():
@@ -374,8 +371,10 @@ def verify(path,claim,mode='native',neutral=False):
         A.exact((header['type'],header['protocol'],header['claim']),('header',PROTOCOL,claim),'header identity')
         check_library(header['library'],mode)
         index = row_index(header['coefficients'],cases)
+        parity.update(A.canonical({key:header[key] for key in ('type','protocol','coefficients')}))
         for ordinal,case in enumerate(cases):
             r = next_record()
+            parity.update(A.canonical(r))
             A.exact(set(r),{'type','ordinal','case','arms'},'case schema')
             A.exact((r['type'],r['ordinal'],r['case']),('case',ordinal,case),'whole case chronology')
             A.exact(len(r['arms']),2,'paired actual decoders')
@@ -390,16 +389,19 @@ def verify(path,claim,mode='native',neutral=False):
                 A.exact(x['recovered'],[A.sha(data)]*2 if x['first'] else [],'two exact recoveries')
                 A.exact(x['rank_first'],first_rank([rows[i] for i in case['ids']],k),'independent row rank')
                 if x['first']: A.require(0<x['rank_first']<=x['first'],'successful decode has full information')
+                if neutral: A.exact((x['first'],x['rank_first']),(k,k),'systematic neutral succeeds at K')
                 del x['packets']
             records.append(r)
-        A.exact(next_record(),dict(type='footer',complete=True,records=len(cases),calls=expected_calls(records,cases)),'complete footer and API ledger')
+        footer = next_record()
+        A.exact(footer,dict(type='footer',complete=True,records=len(cases),calls=expected_calls(records,cases)),'complete footer and API ledger')
+        parity.update(A.canonical(footer))
         A.exact(stream.read(),b'','no trailing records')
-    return dict(cases=len(cases), checked=True, scientific_launch=False, mode=mode) if neutral else summarize(records)
+    return dict(cases=len(cases), checked=True, scientific_launch=False, mode=mode,
+                parity_sha256=parity.hexdigest()) if neutral else summarize(records)
 
 
 
 def run_inventory(mode, cases, claim, emit):
-    require_qualified()
     A.require(mode in LIBRARIES,'known inventory backend')
     library = A.Library(*LIBRARIES[mode])
     apis = [Api(library,arm) for arm in ('wh2','wh1')]

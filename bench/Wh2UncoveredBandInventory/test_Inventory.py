@@ -137,6 +137,10 @@ class Test(unittest.TestCase):
         raw=[dict(type='header',protocol=I.PROTOCOL,claim='test',library={},coefficients=observed)]+records+[
             dict(type='footer',complete=True,records=len(cases),calls=I.expected_calls(records,cases))]
         mutations=[lambda x:x[1].update(ordinal=1),
+                   lambda x:x[1].update(ordinal=False),
+                   lambda x:x[1]['case'].update(k=7.0),
+                   lambda x:x[1]['arms'][0]['feed'].__setitem__(0,True),
+                   lambda x:x[-1]['calls'][0].__setitem__(0,float(x[-1]['calls'][0][0])),
                    lambda x:x[1]['arms'][0].update(rank_first=0),
                    lambda x:x[-1]['calls'][0].__setitem__(5,0),
                    lambda x:x[1]['arms'][0]['packets'].__setitem__(0,'00'),
@@ -145,8 +149,22 @@ class Test(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory,mock.patch.object(I,'check_library'):
             path=Path(directory)/'raw'
             path.write_bytes(b''.join(I.A.canonical(row) for row in raw))
-            self.assertEqual(I.verify(path,'test',neutral=True),
+            result=I.verify(path,'test',neutral=True)
+            self.assertEqual({k:v for k,v in result.items() if k!='parity_sha256'},
                              dict(cases=16,checked=True,scientific_launch=False,mode='native'))
+            expected=I.hashlib.sha256()
+            expected.update(I.A.canonical({k:raw[0][k] for k in ('type','protocol','coefficients')}))
+            for row in raw[1:]: expected.update(I.A.canonical(row))
+            self.assertEqual(result['parity_sha256'],expected.hexdigest())
+            for first in (0,8):
+                changed=copy.deepcopy(raw)
+                arm=changed[1]['arms'][0]
+                arm.update(first=first,feed=[1]*11 if first==0 else [1]*7+[0],
+                           recovered=[] if first==0 else arm['recovered'])
+                changed[-1]['calls']=I.expected_calls(changed[1:-1],cases)
+                path.write_bytes(b''.join(I.A.canonical(row) for row in changed))
+                with self.assertRaisesRegex(ValueError,'systematic neutral succeeds at K'):
+                    I.verify(path,'test',neutral=True)
             for mutate in mutations:
                 changed=copy.deepcopy(raw);mutate(changed)
                 path.write_bytes(b''.join(I.A.canonical(row) for row in changed))
