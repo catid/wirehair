@@ -518,6 +518,6 @@ def main(argv):
 if __name__ == '__main__':
     try:
         sys.exit(main(sys.argv[1:]))
-    except BaseException as error:
+    except Exception as error:
         print(type(error).__name__ + ': ' + str(error)[:1000], file=sys.stderr)
         sys.exit(1)
