@@ -363,6 +363,30 @@ int main()
 
 #### Benchmarks
 
+##### Wirehair 1 vs Wirehair 2
+
+These plots compare the public C APIs for legacy Wirehair 1 and default
+pure-GF(256) Wirehair 2 at four message block counts (K) and two block sizes
+(B). Message size is K × B. The metric is the **no-loss lifecycle time**:
+encoder creation, encoding all K systematic packets, decoder creation,
+decode and recovery. Lower is better; both panels use the same logarithmic
+scales.
+
+![Wirehair 1 vs default Wirehair 2 lifecycle time at K=8, 128, 512, and 1024, for 64-byte and 1280-byte blocks. WH2 is slower at 64 bytes and faster at 1280 bytes except K=8.](docs/benchmarks/wh1-vs-wh2.svg)
+
+In this snapshot, WH2 is faster at 1280 bytes per block for K=128, 512, and
+1024, but slower at every measured 64-byte point and at K=8/1280 bytes.
+These are rounded, one-host diagnostic timings recorded on 2026-09-17,
+without retained raw samples or confidence intervals—not proof that WH2 is
+always faster. This no-loss workload does not measure recovery failure
+rates or repair overhead. See the [data and measurement limitations](docs/benchmarks/README.md)
+and the [reproducible plot generator](docs/benchmarks/plot_wh1_vs_wh2.py).
+
+##### Historical Wirehair 1 measurements
+
+The older WH1-only measurements below are a separate workload and should
+not be compared directly with the lifecycle plots above.
+
 Some quick comments:
 
 Benchmarks on my PC do not mean a whole lot.  Right now it's clocked at 3 GHz and has Turbo Boost on, etc.
