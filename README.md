@@ -64,6 +64,29 @@ B=64 points and at K=8/B=1,280. These are rounded, one-host diagnostic
 timings—not proof that WH2 is always faster, nor a recovery-rate result. See
 the [data, generator, and measurement limitations](docs/benchmarks/README.md).
 
+### Large-K speed and recovery sweep
+
+The extended graph covers K=8, 128, 512, 1,024 and every 1,000-block point
+from K=1,000 through the supported maximum K=64,000, at B=64 and B=1,280.
+The upper panels show no-loss lifecycle time; the lower panels show paired
+10%-IID-loss recovery. Exact-K means recovery with zero repair packets;
+eventual means recovery within the bounded K+4 delivered-packet horizon.
+
+![Wirehair 1 vs Wirehair 2 large-K lifecycle and recovery plot through K=64,000.](docs/benchmarks/wh1-vs-wh2-large-k.svg)
+
+Across the 1,088 trials at each block size, WH2 had more exact-K successes:
+
+| Block bytes | WH1 exact-K | WH2 exact-K | WH1 eventual | WH2 eventual |
+| ---: | ---: | ---: | ---: |
+| 64 | 1,069 / 1,088 (98.25%) | 1,080 / 1,088 (99.26%) | 1,087 / 1,088 (99.91%) | 1,088 / 1,088 (100%) |
+| 1,280 | 1,071 / 1,088 (98.44%) | 1,084 / 1,088 (99.63%) | 1,088 / 1,088 (100%) | 1,088 / 1,088 (100%) |
+
+These are aggregate one-host diagnostic results from 16 paired trials per
+K/B cell, not a universal reliability qualification. Eventual recovery was
+nearly tied at this horizon, with one WH1 miss at B=64; individual cells can
+favor WH1. Full methodology, CSV snapshots, and the reproducible generator
+are in the [benchmark notes](docs/benchmarks/README.md).
+
 
 ##### Building: Quick Setup
 
