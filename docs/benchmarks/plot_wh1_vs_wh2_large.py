@@ -138,7 +138,9 @@ def render(speed, recovery):
             values = [speed[(k, block_bytes)][field]
                       for k in EXPECTED_K
                       for field in ("wh1_lifecycle_ms", "wh2_lifecycle_ms")]
-            low = max(0.005, min(values) * 0.75)
+            # Keep the smallest K points inside the log-scale panel; the
+            # snapshots contain strictly positive lifecycle measurements.
+            low = max(1e-6, min(values) * 0.75)
             high = max(values) * 1.25
 
             def y_coord(value):
