@@ -1,7 +1,8 @@
 # One-allocation small-decoder storage
 
 Issue `wirehair-sxvz.16.1.20.85`. Benchmark-only candidate, **neutral checks
-passed; speed unmeasured and production unchanged**. This is a new allocation
+passed; subsequent speed screen CONTROL_FAIL; candidate not retained**.
+Production is unchanged. This is a new allocation
 reduction, not a retry of dormant-core lifetime, alignment or serializer changes.
 
 ## Change
@@ -110,11 +111,16 @@ input seal. Repeated independent source and final artifact review is clean.
 
 These are neutral compatibility and ownership results, not new recovery samples,
 speed qualification, complete transitive toolchain provenance or an all-K claim.
-The remaining gate must prospectively freeze actual decoder lifecycle wins,
-encoder/certified/standalone retention, matched WH1 comparisons, same-code
-controls, both load orders and a bounded stop rule before measuring
-(`wirehair-sxvz.16.1.20.85.1`). Reduced
-allocation count alone cannot justify production adoption.
+The prospectively frozen decoder lifecycle/retention/WH1 screen
+(`wirehair-sxvz.16.1.20.85.1`) is now terminal CONTROL_FAIL in both loading
+orders: 10/16 failed same-code bounds and 141/168 failed retention bounds,
+respectively. Nominal decoder means improved 0.71–1.77%, but failed controls
+and retention prevent promotion. All 907,200 rows and both decisions were
+independently reconstructed before result-documentation advancement; see
+[the full screen result](../Wh2SmallDecoderStorageScreen/README.md).
+This candidate is not retained; no retry, alignment rescue or production
+adoption. The allocation reduction is correctness-qualified only, not a
+demonstrated acceptable speedup or new recovery-rate result.
 
 Reproduce correctness only in a **new external** directory:
 `cmake -S bench/Wh2SmallDecoderStorage -B <fresh-dir> -G Ninja`, build and run

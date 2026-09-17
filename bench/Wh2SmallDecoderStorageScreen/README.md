@@ -2,7 +2,9 @@
 
 Prospective experiment for `wirehair-sxvz.16.1.20.85.1`. Protocol was recorded
 in Beads before this observer was implemented. Production is unchanged.
-No timing result is claimed by this directory's existence or neutral tests.
+The sole screen is now terminal **CONTROL_FAIL; candidate not retained**.
+See the independently audited result below. Neutral correctness remains valid;
+it does not establish speed or recovery-rate superiority.
 
 The sole candidate from `bench/Wh2SmallDecoderStorage` combines the small
 decoder object and packet slab in one allocation. Public allocations fall
@@ -141,3 +143,68 @@ Seal the final observer inputs/results before the one native timing launch:
 ```sh
 python3 -B bench/Wh2SmallDecoderStorageScreen/Screen.py --run /tmp/wh2-small-decoder-storage-screen.r5PFefBn/native
 ```
+
+The command above documents the original launch only. Its namespace is spent;
+do not execute another scientific run or rebuild its pinned inputs.
+
+## Terminal result, 2026-09-17
+
+Producing source: `103ebe4e10001e3afefc064bb66dc4987a73668b`, committed and
+pushed before the sole launch. Both workers exited zero, with empty stderr,
+complete raw output and unchanged input pins. Normal/reverse wall times were
+163.010/172.798 seconds; summed WORK was 95.482/95.663 seconds, including
+warmups. No timeout, trimming, retry, subset selection or codec change occurred.
+
+| DSO loading order | Same-code failures / 1,260 | Retention failures / 420 | Required WH1 failures / 300 | Decoder primary passes / 4 | Decision |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Baseline first | 10 | 141 | 0 | 4 | CONTROL_FAIL |
+| Candidate first | 16 | 168 | 0 | 4 | CONTROL_FAIL |
+
+All eight decoder primary point estimates were nominally 0.71–1.77% faster,
+but failed controls override those apparent improvements. There are also
+numerous failed retention bounds; these count failed upper-bound gates, not
+necessarily individually established slowdowns. All 300 required small-codec
+WH1 bounds passed per order. Of the 120 separately reported certified WH1
+bounds, 104 failed in each order. Those old deficits are not resolved by this
+candidate. No general speedup, production adoption or recovery-rate improvement
+is claimed. Do not rescue this candidate with alignment changes or another run
+of the same cohort.
+
+Before changing any producing HEAD, pinned source or result documentation:
+
+- Exact replay passed under Python3.12 and Python3.8. The complete rebuilt
+  input map matched all 1,425 claim pins and the original HEAD.
+- A separate implementation, importing neither controller nor launcher,
+  reconstructed all 907,200 rows, 100,800 retained warmups, 58,060,800 measured
+  lifecycles, 4,200 cell intervals and eight primary intervals. It checked
+  chronology, fixtures, separate WH1 endpoints, actual public addresses,
+  covariance-preserving means, strict gates, complete captures and both seals.
+- Independent Python3.12/3.8 reports are byte-identical. Independent arithmetic
+  used `log(numerator/denominator)` rather than a subtraction of logs; maximum
+  numerical discrepancy was `7.105427357601002e-15`, with identical decisions.
+  Both source/manifest rechecks and repeated source/report review were clean.
+
+Retained bundle: `/var/tmp/wh2-small-decoder-storage-screen-r0/`.
+
+| Artifact | SHA256 |
+| --- | --- |
+| `complete.json` | `5df9c0e4bd10cd0e0a812e45532a359d37d1a790e3e8b7133451c9e20ec8e7dd` |
+| `normal.csv` | `e3cca193b72013c8aa6c37c9e97c4dbcbaa9efd48b852366a9fd56ee6915670e` |
+| `reverse.csv` | `830466752efc4274337f48eb4571445bff72f7a0653039cbfe0be75c2505fafb` |
+| Independent audit script | `99ccf5a495e56717f8f2042d514bbaed925f05335fa615be6330e2ab6de7e376` |
+| Either independent report | `6981a225091d489b893c99f65bb6138e9670a27ab0c9288793bf457da417fcf6` |
+
+Independent script, reports and execution logs are preserved in
+`/tmp/wh2-small-decoder-storage-independent-audit.7ZFmofMi/`.
+Exact replay and postrun input-map logs are in
+`/tmp/wh2-small-decoder-storage-root-audit.ODgzsPOn/`.
+The 161-member observer seal SHA256 is
+`c95f25e6d3b4ed2281fa6b04055d34ebc7f2b8038b6190273ca8df214dd8f9f2`.
+The preliminary pre-whitespace seal is retained for history, not qualification.
+
+This result section intentionally advances a document pinned in the producing
+claim. Strict current-tree input audits are therefore historical and must not
+be rerun as if this were the producing tree. Use the recorded commit and
+completed audits; the immutable bundle remains available for mathematical
+replay. The broader speed/recovery objective and existing certified-path gaps
+remain unresolved. This experiment is closed as rejected, not promoted.
