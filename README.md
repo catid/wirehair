@@ -77,7 +77,7 @@ eventual means recovery within the bounded K+4 delivered-packet horizon.
 Across the 1,088 trials at each block size, WH2 had more exact-K successes:
 
 | Block bytes | WH1 exact-K | WH2 exact-K | WH1 eventual | WH2 eventual |
-| ---: | ---: | ---: | ---: |
+| ---: | ---: | ---: | ---: | ---: |
 | 64 | 1,069 / 1,088 (98.25%) | 1,080 / 1,088 (99.26%) | 1,087 / 1,088 (99.91%) | 1,088 / 1,088 (100%) |
 | 1,280 | 1,071 / 1,088 (98.44%) | 1,084 / 1,088 (99.63%) | 1,088 / 1,088 (100%) | 1,088 / 1,088 (100%) |
 
