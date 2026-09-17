@@ -5,6 +5,9 @@ two arithmetic substitutions in `bench/Wh2SmallUnitDiagonal`. Production,
 equations, allocation counts and layouts are unchanged. No recovery-rate or
 all-K qualification follows from this bounded screen.
 
+The sole screen is now terminal **CONTROL_FAIL; candidate not retained**.
+The independently audited result is below. Do not repeat the launch command.
+
 The workload, statistics, launcher, generator and synthetic tests are unchanged
 from the reviewed `Wh2SmallDecoderStorageScreen` observer. This is a distinct
 arithmetic candidate, not a retry or combination of that rejected allocation
@@ -110,3 +113,61 @@ The sole native launch, once all prerequisites are sealed and reviewed, is:
 ```sh
 python3 -B bench/Wh2SmallUnitDiagonalScreen/Screen.py --run /tmp/wh2-small-unit-diagonal-screen.tSZm35BW/native
 ```
+
+## Terminal result, 2026-09-17
+
+Producing commit `f4723a150a54c4dff8cae9cebfad8a2eae9caa54` was pushed before
+the sole launch. Both workers exited zero with empty stderr, complete captures
+and unchanged inputs. Wall times were 177.315/186.703 seconds; measured WORK
+including warmups was 95.914/96.322 seconds. No codec rebuild, timing retry,
+trimming, retuning or subset selection occurred.
+
+| DSO loading order | Same-code failures / 1,260 | Retention failures / 420 | Required WH1 failures / 300 | Decoder primary passes / 4 | Decision |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Baseline first | 14 | 95 | 0 | 4 | CONTROL_FAIL |
+| Candidate first | 15 | 87 | 0 | 4 | CONTROL_FAIL |
+
+The eight decoder primary point estimates show nominally 1.91–2.51% less
+time, but failed controls override those gains. All 29 failed same-code
+intervals include one while extending beyond the equivalence bounds. The
+retention counts are failed upper-bound gates, not 95/87 individually proven
+slowdowns greater than 2%. Both encoder and unchanged certified routes have
+nominal regressions; their cause is not established by this experiment.
+All required small-route WH1 bounds passed, but 104 of the other 120 certified
+WH1 bounds failed in each loading order. Those deficits remain unresolved.
+
+Before any producing HEAD or pinned documentation advanced, exact replay
+passed under Python 3.12 and 3.8 and the complete current input map matched all
+1,383 claim pins and the producing HEAD. A separate implementation importing
+neither controller nor launcher reconstructed all 907,200 rows, 100,800
+warmups, 58,060,800 lifecycle invocations, 4,200 cell intervals and eight
+decoder primary intervals. It checked chronology, all fixtures and endpoints,
+public addresses, covariance, strict gates, captures, seals and unchanged
+before/after source pins. Independent reports under both Python versions are
+byte-identical; maximum numerical discrepancy from the controller's different
+log-ratio arithmetic is `1.0658141036401503e-14`, with identical decisions.
+Repeated root and independent source/artifact review found no outstanding bugs.
+
+Bundle: `/var/tmp/wh2-small-unit-diagonal-screen-r0/`.
+Exact replay/input-map logs:
+`/tmp/wh2-small-unit-diagonal-root-audit.Eo3lToxJ/`.
+Independent script, reports and logs:
+`/tmp/wh2-small-unit-diagonal-independent-audit.wS4UtJzx/`.
+
+| Artifact | SHA-256 |
+| --- | --- |
+| `complete.json` | `875508969c502d7f1cc373b5ca8dd7bc084e29afe0058e0b4c05883d3e836ac3` |
+| `normal.csv` | `dd2f6d27bb3b65480dd63f839cc80fc6ebfd78f85f9d984de7891a969e3e5d4a` |
+| `reverse.csv` | `4068bb1fc147df4cf27de071768bcc65aaa70aeb627db30ce4574ebe6d5d653d` |
+| Independent audit script | `235c44e0e365545e96fea3155d9d09a8e805b5f40c7e2c5b316ece248668a19e` |
+| Either independent report | `aac3660d77318fa3a29402dd6128b7c6cd50fa1071d5053c0eeedd16bb8f7981` |
+
+This result section intentionally changes a document pinned by the producing
+claim. Strict current-tree provenance checks are now historical: use the
+recorded revision and completed audits, not a fresh current-tree revalidation
+after documentation advancement. Mathematical replay remains available.
+
+The experiment is rejected, not promoted. Its proven arithmetic reduction
+does not establish an acceptable lifecycle speedup. No retry, alignment or
+layout rescue, subset promotion or combination with rejected candidates is
+authorized by these results. The broader speed/recovery objective remains open.

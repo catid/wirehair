@@ -1,8 +1,9 @@
 # Small-decoder unit-diagonal experiment
 
 Issue: `wirehair-sxvz.16.1.20.86`. Experiment only; production code, wire
-equations, profiles and defaults are unchanged. No timing has been run and
-this is not a performance promotion or a recovery-rate improvement.
+equations, profiles and defaults are unchanged. Correctness checks passed;
+the subsequent sole lifecycle screen is **CONTROL_FAIL; candidate not retained**.
+This is not a performance promotion or a recovery-rate improvement.
 
 `Generate.py` pins the original `WirehairSmallCore.h` and changes exactly two
 coefficient loops in `Decoder::Feed`. An occupied pivot row has zeros before
@@ -70,8 +71,20 @@ af37e1286af35fe7695e9d423aafd3d4cba2ea7127ef432ce89f807ef990d0ba
 ```
 
 These identities are not a complete transitive build-provenance seal. That
-seal and a separately frozen, bounded lifecycle/retention/WH1 timing protocol
-remain tracked in the issue before any timing or production adoption.
+artifact/dependency inventory was subsequently sealed as the 1,039-member
+`NEUTRAL.sha256`, SHA-256
+`93bfff5491f451c15ff8be50ec4453bef8770c0dbbc24e290ad48caa1822f532`.
+It includes the retained builds/logs, compiler-reported dependencies and
+relevant source/test inputs, not this document or every toolchain/runtime input.
+
+The separately frozen lifecycle screen failed in both loading orders:
+14/15 same-code bounds and 95/87 retention bounds failed. All eight decoder
+primary averages were nominally 1.91–2.51% faster, but failed controls prevent
+promotion. All required small-route WH1 bounds passed; certified deficits
+remain. Complete independent raw/statistical/provenance audits preceded
+result-documentation advancement. See
+[the full screen result](../Wh2SmallUnitDiagonalScreen/README.md).
+No rerun, subset rescue or production adoption follows from this result.
 
 ## Reproduce in a fresh external directory
 
