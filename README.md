@@ -36,6 +36,34 @@ verify their own trusted digest or MAC before accepting recovered data.
 A simple C API is provided to make it easy to incorporate into existing
 projects.  No external dependencies are required.
 
+## Wirehair 1 vs Wirehair 2 at different sizes
+
+This size sweep compares the legacy Wirehair 1 public C API with the default,
+pure-GF(256) Wirehair 2 public C API. It measures an all-systematic, no-loss
+lifecycle (encoder creation, encoding, decoder creation, decode, and recovery)
+at four block counts (K) and two block sizes (B). Lower time is better.
+
+![Wirehair 1 vs default Wirehair 2 lifecycle time at K=8, 128, 512, and 1024, for 64-byte and 1280-byte blocks.](docs/benchmarks/wh1-vs-wh2.svg)
+
+If your Markdown viewer does not render SVG images, [open the plot directly](docs/benchmarks/wh1-vs-wh2.svg)
+or use the values below:
+
+| K blocks | B bytes | Message bytes | WH1 (ms) | WH2 (ms) |
+| ---: | ---: | ---: | ---: | ---: |
+| 8 | 64 | 512 | 0.003 | 0.007 |
+| 128 | 64 | 8,192 | 0.029 | 0.038 |
+| 512 | 64 | 32,768 | 0.132 | 0.170 |
+| 1024 | 64 | 65,536 | 0.334 | 0.395 |
+| 8 | 1,280 | 10,240 | 0.012 | 0.013 |
+| 128 | 1,280 | 163,840 | 0.163 | 0.112 |
+| 512 | 1,280 | 655,360 | 0.639 | 0.595 |
+| 1024 | 1,280 | 1,310,720 | 1.288 | 1.182 |
+
+WH2 is faster at B=1,280 for K=128, 512, and 1,024, but slower at all four
+B=64 points and at K=8/B=1,280. These are rounded, one-host diagnostic
+timings—not proof that WH2 is always faster, nor a recovery-rate result. See
+the [data, generator, and measurement limitations](docs/benchmarks/README.md).
+
 
 ##### Building: Quick Setup
 
@@ -365,22 +393,8 @@ int main()
 
 ##### Wirehair 1 vs Wirehair 2
 
-These plots compare the public C APIs for legacy Wirehair 1 and default
-pure-GF(256) Wirehair 2 at four message block counts (K) and two block sizes
-(B). Message size is K × B. The metric is the **no-loss lifecycle time**:
-encoder creation, encoding all K systematic packets, decoder creation,
-decode and recovery. Lower is better; both panels use the same logarithmic
-scales.
-
-![Wirehair 1 vs default Wirehair 2 lifecycle time at K=8, 128, 512, and 1024, for 64-byte and 1280-byte blocks. WH2 is slower at 64 bytes and faster at 1280 bytes except K=8.](docs/benchmarks/wh1-vs-wh2.svg)
-
-In this snapshot, WH2 is faster at 1280 bytes per block for K=128, 512, and
-1024, but slower at every measured 64-byte point and at K=8/1280 bytes.
-These are rounded, one-host diagnostic timings recorded on 2026-09-17,
-without retained raw samples or confidence intervals—not proof that WH2 is
-always faster. This no-loss workload does not measure recovery failure
-rates or repair overhead. See the [data and measurement limitations](docs/benchmarks/README.md)
-and the [reproducible plot generator](docs/benchmarks/plot_wh1_vs_wh2.py).
+The comparison and table are at the top of this README. The [reproducible
+plot generator](docs/benchmarks/plot_wh1_vs_wh2.py) can regenerate the SVG.
 
 ##### Historical Wirehair 1 measurements
 
