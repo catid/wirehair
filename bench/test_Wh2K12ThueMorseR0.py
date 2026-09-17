@@ -90,6 +90,24 @@ class Tests(unittest.TestCase):
         self.assertEqual(result['cells'][0]['first_success'], [7, 0, 0, 0, 0, 1])
         with self.assertRaises(ValueError): M.summarize_fresh(rows[:-1], 8)
 
+    def test_compact_controller_claim_authentication(self):
+        receipt = {'protocol': M.PROTOCOL, 'sentinel': True}
+        claim = {'protocol': M.PROTOCOL, 'receipt': receipt,
+                 'receipt_sha256': hashlib.sha256((M.json.dumps(
+                     receipt, sort_keys=True, separators=(',', ':'),
+                     ensure_ascii=True, allow_nan=False)).encode('ascii')).hexdigest()}
+        with tempfile.TemporaryDirectory() as directory:
+            output = M.Path(directory)
+            raw = (M.json.dumps(claim, sort_keys=True, separators=(',', ':'),
+                                ensure_ascii=True, allow_nan=False)).encode('ascii')
+            (output / 'CLAIM.json').write_bytes(raw)
+            with mock.patch.object(M, 'OUTPUT', output):
+                self.assertEqual(M.claimed_inputs(), M.digest(raw))
+            (output / 'CLAIM.json').write_bytes(M.canonical(claim))
+            with mock.patch.object(M, 'OUTPUT', output):
+                with self.assertRaisesRegex(ValueError, 'claim identity'):
+                    M.claimed_inputs()
+
     def test_screen_stops_before_fresh_on_history_failure(self):
         pair = (M.companion((1,) + (0,) * 11),) * 2
         class FakeMapper:

@@ -3,7 +3,12 @@
 This is a finite, rank-only feasibility screen selected by the audited
 K12 recovery gap. It does not load a codec, measure speed, test a candidate
 payload, or change production defaults. The sole output namespace is
-`/var/tmp/wh2-k12-thue-morse-r0`; failed output is retained permanently.
+`/var/tmp/wh2-k12-thue-morse-r1`; failed output is retained permanently.
+
+The earlier r0 namespace is permanently retained as an INVALID harness-only
+attempt: its worker expected a newline-terminated claim while the generic
+controller correctly wrote compact canonical JSON. It selected no candidate
+and is not evidence. r1 fixes only that pre-worker encoding mismatch.
 
 The screen selects the first candidate in ascending parameter order from a
 fixed K12 companion-pair family. It checks all ten binary-factor words and all

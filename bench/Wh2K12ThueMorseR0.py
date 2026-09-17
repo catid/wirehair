@@ -13,7 +13,7 @@ import struct
 import sys
 import time
 
-PROTOCOL = 'wirehair.wh2.k12-thue-morse-r0'
+PROTOCOL = 'wirehair.wh2.k12-thue-morse-r1'
 POLYNOMIAL = 0x14d
 K = 12
 MAX_ID = (1 << 32) - 1
@@ -28,6 +28,7 @@ CANDIDATES = tuple(range(1, 256))
 OUTPUT_LIMIT = 4 * 1024 * 1024
 DEADLINE_SECONDS = 60
 INVENTORY = Path('/var/tmp/wh2-uncovered-band-inventory-r0')
+OUTPUT = Path('/var/tmp/wh2-k12-thue-morse-r1')
 INVENTORY_COMPLETE_SHA = '16fcf13214cd25362fe66ee35f62c1c9616ed082e343fa5e2009d81d61359ea0'
 
 
@@ -386,16 +387,19 @@ def fresh_roots(history):
 
 def claimed_inputs():
     """Authenticate the controller's immutable claim before candidate work."""
-    path = Path('/var/tmp/wh2-k12-thue-morse-r0') / 'CLAIM.json'
+    path = OUTPUT / 'CLAIM.json'
     raw = path.read_bytes()
     require(len(raw) <= 1024 * 1024, 'claim size')
     claim = json.loads(raw, object_pairs_hook=dict,
                        parse_constant=lambda value: (_ for _ in ()).throw(
                            ValueError('nonfinite claim')))
-    require(canonical(claim) == raw and
+    compact_json = lambda value: json.dumps(value, sort_keys=True, separators=(',', ':'),
+                                             ensure_ascii=True, allow_nan=False).encode('ascii')
+    compact = compact_json(claim)
+    require(compact == raw and
             set(claim) == {'protocol', 'receipt_sha256', 'receipt'} and
             claim['protocol'] == PROTOCOL and
-            claim['receipt_sha256'] == digest(canonical(claim['receipt'])),
+            claim['receipt_sha256'] == digest(compact_json(claim['receipt'])),
             'claim identity')
     return digest(raw)
 

@@ -9,8 +9,8 @@ SPEC = importlib.util.spec_from_file_location('k12_tm_controller',
     Path(__file__).with_name('Wh2NoncommutingRadixRunR0.py'))
 C = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(C)
-C.PROTOCOL = 'wirehair.wh2.k12-thue-morse-r0'
-C.OUTPUT = Path('/var/tmp/wh2-k12-thue-morse-r0')
+C.PROTOCOL = 'wirehair.wh2.k12-thue-morse-r1'
+C.OUTPUT = Path('/var/tmp/wh2-k12-thue-morse-r1')
 C.SOURCES = ('bench/Wh2K12ThueMorseR0.py', 'bench/Wh2K12ThueMorseRunR0.py',
              'bench/test_Wh2K12ThueMorseR0.py', 'bench/Wh2K12ThueMorseR0.md')
 C.INVENTORY = Path('/var/tmp/wh2-uncovered-band-inventory-r0')
